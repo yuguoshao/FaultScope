@@ -362,7 +362,11 @@ def write_rotated_surface_code_spatial_hotspot_map(
 
     output = Path(output_path)
     output.parent.mkdir(parents=True, exist_ok=True)
-    image = Image.new("RGB", (1350, 980), "#f7f8fa")
+    spacing = 112
+    grid_width = spacing * (distance - 1)
+    image_width = max(1350, 260 + grid_width + 520)
+    image_height = max(980, 300 + grid_width)
+    image = Image.new("RGB", (image_width, image_height), "#f7f8fa")
     draw = ImageDraw.Draw(image)
 
     draw.text(
@@ -389,8 +393,6 @@ def write_rotated_surface_code_spatial_hotspot_map(
 
     origin_x = 130
     origin_y = 170
-    spacing = 112
-
     def px(x_coord: float) -> int:
         return int(origin_x + x_coord * spacing)
 
@@ -455,7 +457,7 @@ def write_rotated_surface_code_spatial_hotspot_map(
                     width=5,
                 )
 
-    legend_x = 760
+    legend_x = origin_x + grid_width + 120
     legend_y = 168
     _draw_score_scale(
         draw,
@@ -502,12 +504,20 @@ def write_rotated_surface_code_spatial_hotspot_map(
         font=fonts["small"],
     )
 
-    _draw_top_hotspots(draw, result, x0=760, y0=405, width=330, fonts=fonts, top_k=10)
+    _draw_top_hotspots(
+        draw,
+        result,
+        x0=legend_x,
+        y0=405,
+        width=330,
+        fonts=fonts,
+        top_k=10,
+    )
     draw.text(
-        (42, 900),
+        (42, image_height - 80),
         (
             "Spatial view of location-level hotspot scores projected onto "
-            "a d=5 rotated surface-code layout."
+            f"a d={distance} rotated surface-code layout."
         ),
         fill="#34495e",
         font=fonts["small"],
