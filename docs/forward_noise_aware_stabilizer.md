@@ -135,9 +135,18 @@ edge = error(p_event) xor(D_ref, D_event) xor(L_ref, L_event)
 error(p) D0 D3 L0
 ```
 
-该 DEM 层不改变热点估计公式；它提供从 location-level hotspot 到 detector-graph
-edge 的投影方式。当前 DEM 生成也要求理想/单错误测量确定，不处理随机 tableau
-分支。
+该 DEM 层不改变热点估计公式；它提供从 location-level sensitivity 到 detector graph
+的投影方式：
+
+```text
+graph = dem.project_sensitivities_to_detector_graph(result.sensitivities)
+```
+
+如果一个 noise location 产生多条 DEM edge，`S_l` 会按 edge 概率占比分到
+edge-level sensitivity。返回值同时包含 edge-level hotspot、按
+`(detectors, observables)` 聚合的 detector-edge hotspot、按 detector node 聚合的
+node hotspot，以及按 logical observable 聚合的 hotspot。当前 DEM 生成也要求理想/单错误
+测量确定，不处理随机 tableau 分支。
 
 ## Stim import subset
 

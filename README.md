@@ -539,6 +539,58 @@ H_l
 
 这样可以把噪声敏感度从物理时空位置投影到 detector graph edge 上，用于分析哪些 syndrome graph 边对应的物理错误最影响 logical failure。
 
+实现中提供两个投影入口：
+
+```text
+dem.project_sensitivities_to_detector_graph(sensitivities)
+dem.project_result_to_detector_graph(simulation_result)
+```
+
+输出 `DetectorGraphHotspots`，包含：
+
+```text
+edge_hotspots              # 每条 DEM edge 的 signed sensitivity / hotspot
+by_detector_edge           # 按 (detectors, observables) 聚合的 hotspot
+signed_by_detector_edge    # 按 (detectors, observables) 聚合的 signed sensitivity
+by_detector                # 按 detector node 聚合的 hotspot
+signed_by_detector         # 按 detector node 聚合的 signed sensitivity
+by_observable              # 按 logical observable 聚合的 hotspot
+signed_by_observable       # 按 logical observable 聚合的 signed sensitivity
+by_location                # 按原始噪声位置聚合的 hotspot
+signed_by_location         # 按原始噪声位置聚合的 signed sensitivity
+```
+
+对一个 location `l`，若它产生多条 DEM edge，投影权重为：
+
+```math
+w_{l,e}
+=
+\frac{p_l(e)}{\sum_{e'}p_l(e')}.
+```
+
+于是 edge-level signed sensitivity 为：
+
+```math
+S_{l,e}^{edge}=w_{l,e}S_l,
+\qquad
+H_{l,e}^{edge}=|S_{l,e}^{edge}|.
+```
+
+按 detector graph edge 聚合时，key 是：
+
+```text
+(detector_tuple, observable_tuple)
+```
+
+例如：
+
+```text
+((3, 8), ())      # detector D3-D8 graph edge
+((5,), (0,))      # boundary/logical edge involving D5 and L0
+```
+
+按 detector node 聚合时，一条包含多个 detector 的 edge 会把 hotspot 平均分给这些 detector，避免多 detector edge 在 node heatmap 中被重复计数。
+
 `DETECTOR` 和 `OBSERVABLE_INCLUDE` 在电路中是一等 operation。逐 shot 模拟器执行到这些 operation 时会立即计算并记录：
 
 ```text

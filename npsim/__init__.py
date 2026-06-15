@@ -11,6 +11,8 @@ from npsim.dem import (
     DetectorErrorEdge,
     DetectorErrorModel,
     DetectorErrorModelGenerator,
+    DetectorGraphEdgeHotspot,
+    DetectorGraphHotspots,
     LogicalObservable,
     UnsupportedDemCircuitError,
 )
@@ -33,6 +35,8 @@ __all__ = [
     "DetectorErrorEdge",
     "DetectorErrorModel",
     "DetectorErrorModelGenerator",
+    "DetectorGraphEdgeHotspot",
+    "DetectorGraphHotspots",
     "ForwardNoiseAwareSimulator",
     "LogicalObservable",
     "MeasurementBitFlip",

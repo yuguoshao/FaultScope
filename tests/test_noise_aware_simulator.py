@@ -367,6 +367,62 @@ class DetectorErrorModelTests(unittest.TestCase):
                 detectors=(Detector(id=0, measurement_keys=("m",)),),
             ).generate()
 
+    def test_projects_location_sensitivities_to_detector_graph(self) -> None:
+        experiment = make_repetition_code_experiment(
+            distance=3,
+            rounds=1,
+            data_error_rate=0.1,
+            measurement_error_rate=0.01,
+        )
+        dem = DetectorErrorModelGenerator(
+            experiment.circuit,
+            detectors=experiment.detectors,
+            observables=experiment.observables,
+        ).generate()
+
+        graph = dem.project_sensitivities_to_detector_graph(
+            {
+                "data_r0_q0": 3.0,
+                "data_r0_q1": -2.0,
+                "meas_r0_c0": 1.0,
+            }
+        )
+
+        self.assertAlmostEqual(graph.by_detector_edge[((0,), (0,))], 3.0)
+        self.assertAlmostEqual(graph.signed_by_detector_edge[((0,), (0,))], 3.0)
+        self.assertAlmostEqual(graph.by_detector_edge[((0, 1), ())], 2.0)
+        self.assertAlmostEqual(graph.signed_by_detector_edge[((0, 1), ())], -2.0)
+        self.assertAlmostEqual(graph.by_detector_edge[((0,), ())], 1.0)
+        self.assertAlmostEqual(graph.by_detector[0], 5.0)
+        self.assertAlmostEqual(graph.signed_by_detector[0], 3.0)
+        self.assertAlmostEqual(graph.by_detector[1], 1.0)
+        self.assertAlmostEqual(graph.signed_by_detector[1], -1.0)
+        self.assertAlmostEqual(graph.by_observable[0], 3.0)
+        self.assertEqual(graph.top_edges(1)[0].location_id, "data_r0_q0")
+
+    def test_splits_location_sensitivity_across_pauli_channel_edges(self) -> None:
+        location = NoiseLocation(
+            id="pc",
+            model=PauliChannel({"X": 1.0, "Y": 3.0}),
+            rate=0.4,
+            qubits=(0,),
+        )
+        circuit = Circuit(
+            n_qubits=1,
+            operations=[
+                Operation.noise(location),
+                Operation.measure(0, key="m", basis="Z"),
+                Operation.detector(("m",), detector_id=0),
+            ],
+        )
+        dem = DetectorErrorModelGenerator(circuit).generate()
+        graph = dem.project_sensitivities_to_detector_graph({"pc": 8.0})
+        by_event = {edge.event: edge for edge in graph.edge_hotspots}
+
+        self.assertAlmostEqual(by_event["X"].sensitivity, 2.0)
+        self.assertAlmostEqual(by_event["Y"].sensitivity, 6.0)
+        self.assertAlmostEqual(graph.by_detector_edge[((0,), ())], 8.0)
+
 
 class StimImportTests(unittest.TestCase):
     def test_imports_stim_subset_and_generates_dem(self) -> None:
