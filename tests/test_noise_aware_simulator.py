@@ -13,6 +13,7 @@ from npsim.dem import (
     LogicalObservable,
     UnsupportedDemCircuitError,
 )
+from npsim.dem_sampler import DemBatchHotspotSimulator
 from npsim.noise import BernoulliPauliNoise, MeasurementBitFlip, PauliChannel
 from npsim.pymatching_decoder import (
     PyMatchingBatchDecoder,
@@ -572,6 +573,103 @@ class DetectorErrorModelTests(unittest.TestCase):
         self.assertEqual(edge.detectors, (5,))
         self.assertEqual(edge.observables, (2,))
         self.assertIn("detector(1, 2) D5", dem.to_dem_text())
+
+
+class DemBatchHotspotSimulatorTests(unittest.TestCase):
+    def test_dem_edge_hotspot_estimates_logical_edge_gradient(self) -> None:
+        dem = DetectorErrorModel(
+            detectors=(),
+            observables=(LogicalObservable(id=0),),
+            edges=(
+                DetectorErrorEdge(
+                    probability=0.2,
+                    detectors=(),
+                    observables=(0,),
+                    location_id="logical_edge",
+                    event="L",
+                    tags={"round": 1, "operation": "dem_error"},
+                ),
+            ),
+        )
+
+        result = DemBatchHotspotSimulator(dem).estimate(shots=40_000, seed=51)
+
+        self.assertAlmostEqual(result.mean_loss, 0.2, delta=0.02)
+        self.assertAlmostEqual(result.edge_sensitivities[0], 1.0, delta=0.08)
+        self.assertAlmostEqual(result.sensitivities["logical_edge"], 1.0, delta=0.08)
+        self.assertAlmostEqual(result.hotspots["logical_edge"], 1.0, delta=0.08)
+        self.assertEqual(result.by_round[1], result.hotspots["logical_edge"])
+        self.assertEqual(result.by_operation["dem_error"], result.hotspots["logical_edge"])
+        self.assertEqual(result.top_edges(1)[0].location_id, "logical_edge")
+
+    def test_dem_decoder_correction_can_remove_logical_failure(self) -> None:
+        class CopyDetectorDecoder:
+            @staticmethod
+            def decode_batch_masks(batch):
+                return {0: batch.detectors[0]}
+
+        dem = DetectorErrorModel(
+            detectors=(Detector(id=0, measurement_keys=()),),
+            observables=(LogicalObservable(id=0),),
+            edges=(
+                DetectorErrorEdge(
+                    probability=0.35,
+                    detectors=(0,),
+                    observables=(0,),
+                    location_id="correctable_edge",
+                    event="X",
+                ),
+            ),
+        )
+
+        result = DemBatchHotspotSimulator(dem).estimate(
+            shots=10_000,
+            seed=52,
+            decoder=CopyDetectorDecoder(),
+        )
+
+        self.assertEqual(result.mean_loss, 0.0)
+        self.assertEqual(result.edge_sensitivities[0], 0.0)
+        self.assertEqual(result.hotspots["correctable_edge"], 0.0)
+
+    def test_dem_location_sensitivity_uses_edge_probability_weights(self) -> None:
+        dem = DetectorErrorModel(
+            detectors=(Detector(id=0, measurement_keys=()),),
+            observables=(LogicalObservable(id=0),),
+            edges=(
+                DetectorErrorEdge(
+                    probability=0.2,
+                    detectors=(),
+                    observables=(0,),
+                    location_id="multi_event_location",
+                    event="logical",
+                    tags={"gate": "idle"},
+                ),
+                DetectorErrorEdge(
+                    probability=0.2,
+                    detectors=(0,),
+                    observables=(),
+                    location_id="multi_event_location",
+                    event="detector_only",
+                    tags={"gate": "idle"},
+                ),
+            ),
+        )
+
+        result = DemBatchHotspotSimulator(dem).estimate(shots=40_000, seed=53)
+
+        self.assertAlmostEqual(result.edge_sensitivities[0], 1.0, delta=0.08)
+        self.assertAlmostEqual(result.edge_sensitivities[1], 0.0, delta=0.08)
+        self.assertAlmostEqual(
+            result.sensitivities["multi_event_location"],
+            0.5,
+            delta=0.08,
+        )
+        self.assertAlmostEqual(
+            result.detector_graph_hotspots.by_observable[0],
+            abs(result.edge_sensitivities[0]),
+        )
+        self.assertAlmostEqual(result.by_gate["idle"], result.hotspots["multi_event_location"])
 
 
 class _FakeMatrix:

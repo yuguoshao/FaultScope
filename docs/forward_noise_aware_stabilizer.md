@@ -90,6 +90,7 @@ H_l = |S_l|
 - bit-packed batch sampler for stabilizer-compatible QEC fast paths
 - detector error model generation by single-error propagation
 - optional PyMatching batch decoder interface from graphlike DEMs
+- DEM-level hotspot simulation by sampling detector error instructions
 - Stim text subset import into `Circuit`, `Detector`, and `LogicalObservable`
 - repetition-code reference decoder and experiment builder
 
@@ -207,6 +208,45 @@ failure_mask = batch.observables[0] xor observable_correction_masks[0]
 当前接口要求 DEM 是 graphlike：每条 edge 至多连接两个 detector，并且不接受没有
 detector 的纯 logical edge。后者表示 undetectable logical fault，不能由 matching
 decoder 从 syndrome 中恢复。
+
+## DEM hotspot mode
+
+`DemBatchHotspotSimulator` 直接在 detector error model 上模拟 hotspot。它不执行
+stabilizer 电路，而是把每条 DEM edge 当成独立 Bernoulli error instruction：
+
+```text
+f_e ~ Bernoulli(p_e)
+D_i = xor_{e flips D_i} f_e
+L_a = xor_{e flips L_a} f_e
+```
+
+decoder 从 `D` 预测 logical correction `C`，默认 loss 为：
+
+```text
+failure = any_a(L_a xor C_a)
+```
+
+edge-level sensitivity 为：
+
+```text
+d J_DEM / d p_e
+  = E[(loss - baseline) * (f_e / p_e - (1 - f_e) / (1 - p_e))]
+```
+
+batch 实现把 `f_e`、detector record、logical flips 和 loss 都存成 bit masks；
+梯度累计只需要 `popcount(loss & edge_event_mask)` 等计数。
+
+如果 DEM edge 保留了物理 `location_id`，则 location-level sensitivity 用线性化
+链式法则聚合：
+
+```text
+S_location = sum_e (p_e / sum_same_location p_e) * S_edge.
+```
+
+输出同时包含 `edge_sensitivities`、`edge_hotspots`、按 location 聚合的
+`sensitivities` / `hotspots`，以及 `detector_graph_hotspots`。这个模式适合高速
+detector-graph / decoder-level hotspot 扫描；它采用普通 DEM 的独立 edge sampling
+语义，不保留 forward trajectory 中同一物理位置多个 Pauli event 的互斥性。
 
 ## Stim import subset
 

@@ -687,6 +687,116 @@ failure_mask = batch.observables[0] xor correction_masks[0]
 detector 的纯 logical edge 表示 syndrome 不可见的 logical fault，当前接口会拒绝它，
 因为 matching decoder 无法从 detector record 中恢复这种错误。
 
+### DEM mode hotspot 模拟
+
+DEM mode 不执行 stabilizer 电路，而是直接在 detector error model 上采样。每条
+DEM edge `e` 被视为一个独立 Bernoulli error instruction：
+
+```math
+f_e \sim \mathrm{Bernoulli}(p_e).
+```
+
+一次 DEM shot 的 detector record 和真实 logical observable flip 为：
+
+```math
+D_i
+=
+\bigoplus_{e: D_i\in \Delta D_e} f_e,
+\qquad
+L_a
+=
+\bigoplus_{e: L_a\in \Delta L_e} f_e.
+```
+
+decoder 只看 detector record：
+
+```math
+\hat L = \mathrm{Dec}(D),
+```
+
+默认 loss 是任一 logical observable correction 后仍翻转：
+
+```math
+L_{\mathrm{shot}}
+=
+\mathbf 1
+\left[
+\exists a:\; L_a\oplus \hat L_a = 1
+\right].
+```
+
+DEM-level 目标函数为：
+
+```math
+J_{\mathrm{DEM}}(p)
+=
+\mathbb E_{f\sim \prod_e \mathrm{Bernoulli}(p_e)}
+\left[L_{\mathrm{shot}}(f)\right].
+```
+
+对每条 DEM edge 的 hotspot 定义为：
+
+```math
+S_e
+=
+\frac{\partial J_{\mathrm{DEM}}}{\partial p_e}.
+```
+
+仍使用 score-function estimator：
+
+```math
+\hat S_e
+=
+\frac1N
+\sum_{k=1}^N
+\left(L_k-\bar L\right)
+\left(
+\frac{f_e^{(k)}}{p_e}
+-
+\frac{1-f_e^{(k)}}{1-p_e}
+\right).
+```
+
+在 bit-packed 实现中，每条 edge 的 event mask `E_e` 与 loss mask `F` 只需要
+`popcount(F & E_e)`、`popcount(E_e)` 和 `popcount(F)` 就能累计梯度。
+
+如果需要回到物理 noise location `l`，并且 DEM edge 保留了 `location_id`，使用
+线性化链式聚合：
+
+```math
+S_l^{\mathrm{DEM}}
+=
+\sum_{e:\mathrm{loc}(e)=l}
+\frac{p_e}{\sum_{e':\mathrm{loc}(e')=l}p_{e'}}
+S_e.
+```
+
+实现入口：
+
+```text
+result = DemBatchHotspotSimulator(dem).estimate(
+    shots=100_000,
+    seed=1,
+    decoder=pymatching_decoder,
+)
+```
+
+其中 `decoder` 可以是 `PyMatchingBatchDecoder`，也可以是任何提供
+`decode_batch_masks(batch)` 的对象。输出同时包含：
+
+```text
+edge_sensitivities          # dJ_DEM / dp_e
+edge_hotspots               # |dJ_DEM / dp_e|
+sensitivities               # 按 location_id 聚合后的 signed sensitivity
+hotspots                    # 按 location_id 聚合后的 hotspot
+detector_graph_hotspots     # 按 detector edge / node / observable 聚合
+```
+
+这个模式非常适合做 detector graph / decoder-level 的高速热点扫描。它的限制是：
+同一物理 noise location 产生的多个 DEM edge 在这里按独立 error instruction 采样；
+这符合普通 DEM sampling 语义，但不完全等同于原始 forward trajectory 中的互斥
+categorical Pauli event。高噪声率或强相关噪声下，应回到 forward mode 校验。
+
 ## 9. Repetition Code 热点示例
 
 对于 bit-flip repetition code，data qubit 上的 `X` 错误会改变相邻 parity-check syndrome。一次 syndrome extraction 中，第 `i` 个 check 测量：
@@ -821,6 +931,7 @@ dem = DetectorErrorModelGenerator(
 - 高性能 batch sampler：支持确定和随机 Pauli measurement 的 bit-packed 快速路径；遇到按 shot 测量结果选择不同后续电路的 adaptive branching 时，需要使用逐 shot 通用模拟器。
 - Detector error model：支持结构化 detector / logical observable 声明，并通过单错误传播生成 Stim-like `error(p) D... L...` edge；当前不支持需要随机 tableau 分支的 DEM 构造。
 - PyMatching batch decoder：可从 graphlike DEM 构造 matching decoder，并批量解码 detector record / bit-packed detector masks；需要可选依赖 `pymatching`、`numpy`、`scipy`，且不接受 hyperedge 或 syndrome 不可见的纯 logical edge。
+- DEM hotspot mode：支持独立 DEM edge sampling、edge-level sensitivity、按 `location_id` 链式聚合的 physical-location hotspot，以及 detector-graph hotspot；不保留同一原始 noise location 下多个 Pauli event 的互斥采样语义。
 - Stim import：支持常见 Clifford、reset、measurement、Pauli/depolarizing noise、`DETECTOR rec[-k]` 和 `OBSERVABLE_INCLUDE(k) rec[-k]` 子集；不支持 `REPEAT` 和 Stim 完整语义。
 
 非 Clifford 门、非 Pauli 噪声、amplitude damping 等非 stabilizer-preserving channel 不直接进入初版算法；需要先做 Pauli twirling、离散化近似，或替换为可由 stabilizer trajectory 采样的等效噪声模型。

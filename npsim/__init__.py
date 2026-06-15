@@ -16,6 +16,14 @@ from npsim.dem import (
     LogicalObservable,
     UnsupportedDemCircuitError,
 )
+from npsim.dem_sampler import (
+    DemBatchHotspotSimulator,
+    DemBatchTrajectory,
+    DemEdgeHotspotRow,
+    DemHotspotResult,
+    DemLocationHotspotRow,
+    DemLocationMetadata,
+)
 from npsim.noise import (
     BernoulliPauliNoise,
     MeasurementBitFlip,
@@ -42,6 +50,12 @@ __all__ = [
     "BatchForwardNoiseAwareSimulator",
     "BatchTrajectory",
     "Circuit",
+    "DemBatchHotspotSimulator",
+    "DemBatchTrajectory",
+    "DemEdgeHotspotRow",
+    "DemHotspotResult",
+    "DemLocationHotspotRow",
+    "DemLocationMetadata",
     "Detector",
     "DetectorErrorEdge",
     "DetectorErrorModel",
