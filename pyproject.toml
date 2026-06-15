@@ -9,5 +9,12 @@ description = "Forward noise-aware stabilizer trajectory simulator for QEC hotsp
 requires-python = ">=3.10"
 readme = "README.md"
 
+[project.optional-dependencies]
+pymatching = [
+    "numpy",
+    "scipy",
+    "pymatching",
+]
+
 [tool.setuptools.packages.find]
 include = ["npsim*"]

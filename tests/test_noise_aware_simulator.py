@@ -1,4 +1,6 @@
+import os
 import random
+import tempfile
 import unittest
 
 from npsim.batch import BatchForwardNoiseAwareSimulator, UnsupportedBatchCircuitError
@@ -569,6 +571,40 @@ class PyMatchingBatchDecoderTests(unittest.TestCase):
                 numpy_module=_FakeNumpy,
                 scipy_sparse_module=_FakeSparse,
             )
+
+    def test_real_pymatching_decodes_boundary_logical_edge_when_installed(self) -> None:
+        os.environ.setdefault(
+            "MPLCONFIGDIR",
+            os.path.join(tempfile.gettempdir(), "npsim-matplotlib-cache"),
+        )
+        try:
+            import pymatching  # noqa: F401
+            import numpy  # noqa: F401
+            from scipy import sparse  # noqa: F401
+        except ImportError as exc:
+            self.skipTest(f"optional PyMatching dependencies are not installed: {exc}")
+
+        dem = DetectorErrorModel(
+            detectors=(Detector(id=0, measurement_keys=()),),
+            observables=(LogicalObservable(id=0),),
+            edges=(
+                DetectorErrorEdge(
+                    probability=0.1,
+                    detectors=(0,),
+                    observables=(0,),
+                    location_id="x0",
+                    event="X",
+                ),
+            ),
+        )
+
+        decoder = PyMatchingBatchDecoder.from_dem(dem)
+        self.assertEqual(decoder.decode_detector_record({0: 1}), {0: 1})
+        self.assertEqual(
+            decoder.decode_batch_detector_records([{0: 0}, {0: 1}]),
+            [{0: 0}, {0: 1}],
+        )
+        self.assertEqual(decoder.decode_batch_masks({0: 0b1010}, shots=4), {0: 0b1010})
 
 
 class StimImportTests(unittest.TestCase):
