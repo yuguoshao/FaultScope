@@ -32,6 +32,7 @@ from npsim.simulator import ForwardNoiseAwareSimulator, SimulationResult, Trajec
 from npsim.stim_import import StimImportError, StimImportResult, load_stim_file, parse_stim_circuit
 from npsim.visualization import (
     VisualizationUnavailableError,
+    write_rotated_surface_code_spatial_hotspot_map,
     write_repetition_gate_structure_hotspot_map,
     write_repetition_hotspot_heatmap,
 )
@@ -67,6 +68,7 @@ __all__ = [
     "VisualizationUnavailableError",
     "load_stim_file",
     "parse_stim_circuit",
+    "write_rotated_surface_code_spatial_hotspot_map",
     "write_repetition_gate_structure_hotspot_map",
     "write_repetition_hotspot_heatmap",
 ]

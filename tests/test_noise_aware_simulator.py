@@ -19,11 +19,12 @@ from npsim.pymatching_decoder import (
     UnsupportedPyMatchingDemError,
 )
 from npsim.repetition import make_repetition_code_experiment
-from npsim.simulator import ForwardNoiseAwareSimulator
+from npsim.simulator import ForwardNoiseAwareSimulator, SimulationResult
 from npsim.stabilizer import StabilizerState
 from npsim.stim_import import StimImportError, parse_stim_circuit
 from npsim.visualization import (
     VisualizationUnavailableError,
+    write_rotated_surface_code_spatial_hotspot_map,
     write_repetition_gate_structure_hotspot_map,
     write_repetition_hotspot_heatmap,
 )
@@ -777,6 +778,112 @@ class HotspotVisualizationTests(unittest.TestCase):
             self.assertEqual(str(written), path)
             self._assert_png_nonblank(path)
         self.assertIn("cx_right_r1_c0", result.hotspots)
+
+    def test_generates_d5_rotated_surface_code_spatial_hotspot_map_png(self) -> None:
+        distance = 5
+        result = self._make_synthetic_rotated_surface_code_result(distance)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = os.path.join(temp_dir, "rotated_surface_code_d5_hotspots.png")
+            try:
+                written = write_rotated_surface_code_spatial_hotspot_map(
+                    result,
+                    path,
+                    distance=distance,
+                    highlighted_data=(2, 2),
+                    highlighted_check_ids=("x_check_2_2",),
+                )
+            except VisualizationUnavailableError as exc:
+                self.skipTest(str(exc))
+            self.assertEqual(str(written), path)
+            self._assert_png_nonblank(path)
+        self.assertEqual(len(result.locations), 49)
+        self.assertIn("data_2_2", result.hotspots)
+        self.assertIn("x_check_2_2", result.hotspots)
+
+    def _make_synthetic_rotated_surface_code_result(
+        self,
+        distance: int,
+    ) -> SimulationResult:
+        locations: dict[str, NoiseLocation] = {}
+        hotspots: dict[str, float] = {}
+        sensitivities: dict[str, float] = {}
+        qubit_index = 0
+
+        for row in range(distance):
+            for col in range(distance):
+                location_id = f"data_{row}_{col}"
+                hotspot = 0.02 + 0.01 * ((row + 2 * col) % 5)
+                if (row, col) == (2, 2):
+                    hotspot = 0.42
+                locations[location_id] = NoiseLocation(
+                    id=location_id,
+                    model=BernoulliPauliNoise("X"),
+                    rate=0.04,
+                    qubits=(qubit_index,),
+                    tags={
+                        "layout": "rotated_surface_code",
+                        "role": "data",
+                        "row": row,
+                        "col": col,
+                        "operation": "data_noise",
+                    },
+                )
+                hotspots[location_id] = hotspot
+                sensitivities[location_id] = hotspot
+                qubit_index += 1
+
+        check_specs: list[tuple[str, str, float, float]] = []
+        for row in range(distance - 1):
+            for col in range(distance - 1):
+                basis = "x" if (row + col) % 2 == 0 else "z"
+                check_specs.append((basis, f"{row}_{col}", col + 0.5, row + 0.5))
+        check_specs.extend(
+            (
+                ("x", "top_0", 0.5, -0.35),
+                ("z", "top_1", 2.5, -0.35),
+                ("x", "bottom_0", 1.5, distance - 0.65),
+                ("z", "bottom_1", 3.5, distance - 0.65),
+                ("z", "left_0", -0.35, 0.5),
+                ("x", "left_1", -0.35, 2.5),
+                ("z", "right_0", distance - 0.65, 1.5),
+                ("x", "right_1", distance - 0.65, 3.5),
+            )
+        )
+        for basis, suffix, x_coord, y_coord in check_specs:
+            location_id = f"{basis}_check_{suffix}"
+            hotspot = 0.015 + 0.012 * ((len(suffix) + int(10 * x_coord)) % 4)
+            if location_id == "x_check_2_2":
+                hotspot = 0.36
+            locations[location_id] = NoiseLocation(
+                id=location_id,
+                model=BernoulliPauliNoise("X"),
+                rate=0.03,
+                qubits=(),
+                tags={
+                    "layout": "rotated_surface_code",
+                    "role": f"{basis}_check",
+                    "x": x_coord,
+                    "y": y_coord,
+                    "operation": "check_noise",
+                },
+            )
+            hotspots[location_id] = hotspot
+            sensitivities[location_id] = hotspot
+
+        return SimulationResult(
+            shots=12_000,
+            mean_loss=0.071,
+            baseline=0.071,
+            sensitivities=sensitivities,
+            hotspots=hotspots,
+            by_qubit={},
+            by_round={},
+            by_gate={},
+            by_operation={},
+            locations=locations,
+            losses=[],
+        )
 
     def _add_cx_noise_to_repetition_circuit(
         self,
