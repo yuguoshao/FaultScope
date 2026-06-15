@@ -13,7 +13,7 @@ from npsim.dem import (
     LogicalObservable,
     UnsupportedDemCircuitError,
 )
-from npsim.noise import BernoulliPauliNoise, PauliChannel
+from npsim.noise import BernoulliPauliNoise, MeasurementBitFlip, PauliChannel
 from npsim.pymatching_decoder import (
     PyMatchingBatchDecoder,
     UnsupportedPyMatchingDemError,
@@ -189,6 +189,30 @@ class NoiseAwareSimulatorTests(unittest.TestCase):
         self.assertEqual(result.mean_loss, 0.0)
         self.assertEqual(result.hotspots["irrelevant"], 0.0)
 
+    def test_measurement_bit_flip_estimates_gradient(self) -> None:
+        location = NoiseLocation(
+            id="mflip",
+            model=MeasurementBitFlip(),
+            rate=0.3,
+            qubits=(0,),
+            tags={"qubit": 0, "round": 0, "gate": "measure"},
+        )
+        circuit = Circuit(
+            n_qubits=1,
+            operations=[
+                Operation.measure(0, key="m", basis="Z", noise=location),
+            ],
+        )
+        result = ForwardNoiseAwareSimulator(circuit).estimate(
+            shots=30_000,
+            seed=18,
+            loss_fn=lambda trajectory, decoded: trajectory.measurement_by_key["m"].bit,
+        )
+
+        self.assertAlmostEqual(result.mean_loss, 0.3, delta=0.025)
+        self.assertAlmostEqual(result.sensitivities["mflip"], 1.0, delta=0.1)
+        self.assertIn("measure", result.by_gate)
+
     def test_detector_and_observable_operations_are_recorded(self) -> None:
         circuit = Circuit(
             n_qubits=1,
@@ -306,6 +330,28 @@ class BatchNoiseAwareSimulatorTests(unittest.TestCase):
         self.assertEqual(batch.observables[1], batch.all_mask)
         self.assertEqual(batch.detector_bit(4, 3), 1)
         self.assertEqual(batch.observable_bit(1, 5), 1)
+
+    def test_batch_measurement_bit_flip_masks_are_recorded(self) -> None:
+        location = NoiseLocation(
+            id="mflip",
+            model=MeasurementBitFlip(),
+            rate=1.0,
+            qubits=(0,),
+            tags={"gate": "measure"},
+        )
+        circuit = Circuit(
+            n_qubits=1,
+            operations=[
+                Operation.measure(0, key="m", basis="Z", noise=location),
+            ],
+        )
+        batch = BatchForwardNoiseAwareSimulator(circuit).run_batch(
+            shots=7,
+            rng=random.Random(19),
+        )
+
+        self.assertEqual(batch.measurements["m"], batch.all_mask)
+        self.assertEqual(batch.noise_event_masks["mflip"], batch.all_mask)
 
 
 class DetectorErrorModelTests(unittest.TestCase):
@@ -430,6 +476,38 @@ class DetectorErrorModelTests(unittest.TestCase):
         self.assertAlmostEqual(by_event["X"].sensitivity, 2.0)
         self.assertAlmostEqual(by_event["Y"].sensitivity, 6.0)
         self.assertAlmostEqual(graph.by_detector_edge[((0,), ())], 8.0)
+
+    def test_circuit_detector_operations_generate_measurement_noise_dem(self) -> None:
+        location = NoiseLocation(
+            id="mflip",
+            model=MeasurementBitFlip(),
+            rate=0.2,
+            qubits=(0,),
+            tags={"gate": "measure"},
+        )
+        circuit = Circuit(
+            n_qubits=1,
+            operations=[
+                Operation.measure(0, key="m", basis="Z", noise=location),
+                Operation.detector(("m",), detector_id=5, coords=(1.0, 2.0)),
+                Operation.observable_include(2, ("m",)),
+            ],
+        )
+        dem = DetectorErrorModelGenerator(circuit).generate()
+
+        self.assertEqual(len(dem.detectors), 1)
+        self.assertEqual(dem.detectors[0].id, 5)
+        self.assertEqual(dem.detectors[0].coords, (1.0, 2.0))
+        self.assertEqual(len(dem.observables), 1)
+        self.assertEqual(dem.observables[0].id, 2)
+        self.assertEqual(len(dem.edges), 1)
+        edge = dem.edges[0]
+        self.assertEqual(edge.location_id, "mflip")
+        self.assertEqual(edge.event, True)
+        self.assertAlmostEqual(edge.probability, 0.2)
+        self.assertEqual(edge.detectors, (5,))
+        self.assertEqual(edge.observables, (2,))
+        self.assertIn("detector(1, 2) D5", dem.to_dem_text())
 
 
 class _FakeMatrix:
@@ -660,6 +738,21 @@ class StimImportTests(unittest.TestCase):
         self.assertEqual(imported.measurement_keys, ("m0",))
         self.assertEqual(len(imported.circuit.noise_locations()), 2)
         self.assertEqual(imported.detectors[0].measurement_keys, ("m0",))
+
+    def test_imports_relative_measurement_record_references(self) -> None:
+        imported = parse_stim_circuit(
+            """
+            M 0
+            M 1
+            DETECTOR rec[-1] rec[-2]
+            OBSERVABLE_INCLUDE(3) rec[-2]
+            """
+        )
+
+        self.assertEqual(imported.measurement_keys, ("m0", "m1"))
+        self.assertEqual(imported.detectors[0].measurement_keys, ("m1", "m0"))
+        self.assertEqual(imported.observables[0].id, 3)
+        self.assertEqual(imported.observables[0].measurement_keys, ("m0",))
 
     def test_rejects_repeat_blocks(self) -> None:
         with self.assertRaises(StimImportError):
