@@ -1,0 +1,13 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "npsim"
+version = "0.1.0"
+description = "Forward noise-aware stabilizer trajectory simulator for QEC hotspot studies"
+requires-python = ">=3.10"
+readme = "README.md"
+
+[tool.setuptools.packages.find]
+include = ["npsim*"]

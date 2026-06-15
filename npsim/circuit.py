@@ -1,0 +1,112 @@
+"""Circuit data structures for forward noise-aware stabilizer simulation."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from typing import Any, Mapping, Sequence
+
+from npsim.noise import StochasticNoise
+
+
+@dataclass(frozen=True)
+class NoiseLocation:
+    """A differentiable local noise-rate parameter."""
+
+    id: str
+    model: StochasticNoise
+    rate: float
+    qubits: tuple[int, ...]
+    tags: Mapping[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class Operation:
+    """One forward circuit operation."""
+
+    kind: str
+    qubits: tuple[int, ...] = ()
+    key: str | None = None
+    basis: str = "Z"
+    pauli: str | None = None
+    noise: NoiseLocation | None = None
+    metadata: Mapping[str, Any] = field(default_factory=dict)
+
+    @staticmethod
+    def h(qubit: int, **metadata: Any) -> "Operation":
+        return Operation("h", (qubit,), metadata=metadata)
+
+    @staticmethod
+    def s(qubit: int, **metadata: Any) -> "Operation":
+        return Operation("s", (qubit,), metadata=metadata)
+
+    @staticmethod
+    def cx(control: int, target: int, **metadata: Any) -> "Operation":
+        return Operation("cx", (control, target), metadata=metadata)
+
+    @staticmethod
+    def pauli_gate(qubits: Sequence[int], pauli: str, **metadata: Any) -> "Operation":
+        return Operation("pauli", tuple(qubits), pauli=pauli, metadata=metadata)
+
+    @staticmethod
+    def noise(location: NoiseLocation, **metadata: Any) -> "Operation":
+        return Operation(
+            "noise",
+            tuple(location.qubits),
+            noise=location,
+            metadata=metadata,
+        )
+
+    @staticmethod
+    def measure(
+        qubit: int,
+        *,
+        key: str | None = None,
+        basis: str = "Z",
+        noise: NoiseLocation | None = None,
+        **metadata: Any,
+    ) -> "Operation":
+        return Operation(
+            "measure",
+            (qubit,),
+            key=key,
+            basis=basis,
+            noise=noise,
+            metadata=metadata,
+        )
+
+    @staticmethod
+    def measure_pauli(
+        qubits: Sequence[int],
+        pauli: str,
+        *,
+        key: str | None = None,
+        noise: NoiseLocation | None = None,
+        **metadata: Any,
+    ) -> "Operation":
+        return Operation(
+            "measure_pauli",
+            tuple(qubits),
+            key=key,
+            pauli=pauli,
+            noise=noise,
+            metadata=metadata,
+        )
+
+    @staticmethod
+    def reset(qubit: int, *, key: str | None = None, **metadata: Any) -> "Operation":
+        return Operation("reset", (qubit,), key=key, metadata=metadata)
+
+
+@dataclass(frozen=True)
+class Circuit:
+    n_qubits: int
+    operations: tuple[Operation, ...] | list[Operation]
+
+    def noise_locations(self) -> dict[str, NoiseLocation]:
+        locations: dict[str, NoiseLocation] = {}
+        for operation in self.operations:
+            if operation.kind == "noise" and operation.noise is not None:
+                locations[operation.noise.id] = operation.noise
+            elif operation.kind in {"measure", "measure_pauli"} and operation.noise is not None:
+                locations[operation.noise.id] = operation.noise
+        return locations
