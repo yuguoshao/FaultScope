@@ -277,9 +277,9 @@ class ForwardNoiseAwareSimulator:
             state.apply_pauli_string(x, z)
             return
         if kind == "noise":
-            if operation.noise is None:
+            if operation.noise_location is None:
                 raise ValueError("noise operation requires a noise location")
-            self._sample_noise(operation.noise, state, frame, noise_events, scores, rng)
+            self._sample_noise(operation.noise_location, state, frame, noise_events, scores, rng)
             return
         if kind == "measure":
             self._measure(
@@ -373,7 +373,7 @@ class ForwardNoiseAwareSimulator:
 
         bit, flipped = self._apply_measurement_noise(
             raw_bit,
-            operation.noise,
+            operation.noise_location,
             state,
             frame,
             noise_events,
@@ -412,7 +412,7 @@ class ForwardNoiseAwareSimulator:
         raw_bit = state.measure_pauli(x, z, rng)
         bit, flipped = self._apply_measurement_noise(
             raw_bit,
-            operation.noise,
+            operation.noise_location,
             state,
             frame,
             noise_events,

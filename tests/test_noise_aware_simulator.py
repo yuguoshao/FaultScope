@@ -1,6 +1,7 @@
 import random
 import unittest
 
+from npsim.batch import BatchForwardNoiseAwareSimulator, UnsupportedBatchCircuitError
 from npsim.circuit import Circuit, NoiseLocation, Operation
 from npsim.noise import BernoulliPauliNoise, PauliChannel
 from npsim.repetition import make_repetition_code_experiment
@@ -194,6 +195,68 @@ class NoiseAwareSimulatorTests(unittest.TestCase):
         self.assertIn(0, result.by_round)
         self.assertIn("idle", result.by_gate)
         self.assertIn("measure", result.by_gate)
+
+
+class BatchNoiseAwareSimulatorTests(unittest.TestCase):
+    def test_batch_score_function_estimates_single_x_noise_gradient(self) -> None:
+        location = NoiseLocation(
+            id="x0",
+            model=BernoulliPauliNoise("X"),
+            rate=0.2,
+            qubits=(0,),
+            tags={"qubit": 0, "round": 0, "gate": "idle"},
+        )
+        circuit = Circuit(
+            n_qubits=1,
+            operations=[
+                Operation.noise(location),
+                Operation.measure(0, key="m", basis="Z"),
+            ],
+        )
+        result = BatchForwardNoiseAwareSimulator(circuit).estimate(
+            shots=30_000,
+            seed=13,
+            loss_mask_fn=lambda batch: batch.measurements["m"],
+        )
+
+        self.assertAlmostEqual(result.mean_loss, 0.2, delta=0.02)
+        self.assertAlmostEqual(result.sensitivities["x0"], 1.0, delta=0.08)
+        self.assertEqual(result.losses, [])
+
+    def test_batch_repetition_code_experiment_runs(self) -> None:
+        experiment = make_repetition_code_experiment(
+            distance=3,
+            rounds=1,
+            data_error_rate={(0, 0): 0.15, (0, 1): 0.15, (0, 2): 0.01},
+            measurement_error_rate=0.02,
+        )
+        result = BatchForwardNoiseAwareSimulator(experiment.circuit).estimate(
+            shots=10_000,
+            seed=14,
+            loss_mask_fn=experiment.batch_loss_mask_fn,
+        )
+
+        self.assertGreaterEqual(result.mean_loss, 0.0)
+        self.assertLessEqual(result.mean_loss, 1.0)
+        self.assertTrue(result.top_hotspots(top_k=3))
+        self.assertIn(0, result.by_round)
+        self.assertIn("idle", result.by_gate)
+        self.assertIn("measure", result.by_gate)
+
+    def test_batch_rejects_random_ideal_measurements(self) -> None:
+        circuit = Circuit(
+            n_qubits=1,
+            operations=[
+                Operation.h(0),
+                Operation.measure(0, key="m", basis="Z"),
+            ],
+        )
+        with self.assertRaises(UnsupportedBatchCircuitError):
+            BatchForwardNoiseAwareSimulator(circuit).estimate(
+                shots=100,
+                seed=15,
+                loss_mask_fn=lambda batch: batch.measurements["m"],
+            )
 
 
 if __name__ == "__main__":

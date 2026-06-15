@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Callable, Mapping
 
+from npsim.batch import BatchTrajectory
 from npsim.circuit import Circuit, NoiseLocation, Operation
 from npsim.decoders import RepetitionCodeDecoder
 from npsim.noise import BernoulliPauliNoise, MeasurementBitFlip
@@ -22,6 +23,7 @@ class RepetitionCodeExperiment:
     detector_fn: Callable[[Trajectory], list[int]]
     decoder: RepetitionCodeDecoder
     loss_fn: Callable[[Trajectory, list[int]], float]
+    batch_loss_mask_fn: Callable[[BatchTrajectory], int]
 
 
 def make_repetition_code_experiment(
@@ -110,6 +112,22 @@ def make_repetition_code_experiment(
         ]
         return float(sum(residual) > distance // 2)
 
+    def batch_loss_mask_fn(batch: BatchTrajectory) -> int:
+        loss_mask = 0
+        final_round = rounds - 1
+        for shot in range(batch.shots):
+            syndrome = [
+                batch.measurement_bit(f"r{final_round}_c{check_idx}", shot)
+                for check_idx in range(distance - 1)
+            ]
+            correction = _decode_repetition_shot(syndrome)
+            residual_weight = 0
+            for data_idx, qubit in enumerate(data):
+                residual_weight += batch.x_bit(qubit, shot) ^ correction[data_idx]
+            if residual_weight > distance // 2:
+                loss_mask |= 1 << shot
+        return loss_mask
+
     return RepetitionCodeExperiment(
         circuit=circuit,
         data_qubits=data,
@@ -117,6 +135,7 @@ def make_repetition_code_experiment(
         detector_fn=detector_fn,
         decoder=decoder,
         loss_fn=loss_fn,
+        batch_loss_mask_fn=batch_loss_mask_fn,
     )
 
 
@@ -124,3 +143,11 @@ def _lookup_rate(rate_spec: RateSpec, round_idx: int, index: int) -> float:
     if isinstance(rate_spec, Mapping):
         return float(rate_spec.get((round_idx, index), 0.0))
     return float(rate_spec)
+
+
+def _decode_repetition_shot(syndrome: list[int]) -> list[int]:
+    candidate = [0] * (len(syndrome) + 1)
+    for idx, bit in enumerate(syndrome):
+        candidate[idx + 1] = candidate[idx] ^ int(bit)
+    complement = [bit ^ 1 for bit in candidate]
+    return candidate if sum(candidate) <= sum(complement) else complement

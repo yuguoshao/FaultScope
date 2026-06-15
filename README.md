@@ -296,7 +296,113 @@ s_l(\tau_k).
 17. Return J_hat, S_hat, H_hat, and aggregated hotspot maps.
 ```
 
-## 6. Stabilizer 更新规则
+## 6. 高性能 bit-packed batch sampler
+
+高性能 batch sampler 不改变第 3 节的数学估计器。它仍然估计：
+
+```math
+\hat S_l
+=
+\frac{1}{N}
+\sum_{k=1}^N
+\left(L(\tau_k)-\bar L\right)
+s_l(\tau_k).
+```
+
+区别只在执行方式：逐 shot 引擎为每条 trajectory 创建独立 tableau、Pauli frame 和 measurement record；batch 引擎把许多 shot 的 Pauli frame 压进整数 bit mask 中，并一次性执行相同的电路操作。
+
+对 `N` 个 shot，batch sampler 用一个整数的第 `k` 位表示第 `k` 条 trajectory：
+
+```text
+X_frame[q]: bit k = shot k has X component on qubit q.
+Z_frame[q]: bit k = shot k has Z component on qubit q.
+M[key]:     bit k = shot k measured 1 for measurement key.
+E[l]:       bit k = shot k sampled an error event at noise location l.
+```
+
+Clifford gate 对全部 shot 同时更新：
+
+```text
+H(q):       swap X_frame[q], Z_frame[q]
+S(q):       Z_frame[q] ^= X_frame[q]
+CX(c,t):    X_frame[t] ^= X_frame[c]
+            Z_frame[c] ^= Z_frame[t]
+CZ(a,b):    Z_frame[a] ^= X_frame[b]
+            Z_frame[b] ^= X_frame[a]
+SWAP(a,b):  swap X_frame[a], X_frame[b]
+            swap Z_frame[a], Z_frame[b]
+```
+
+测量时，batch sampler 维护一个无噪声理想 tableau `\mathcal S_t^{ideal}`，并用 Pauli frame 决定每个 shot 的翻转：
+
+```math
+m_k
+=
+m^{ideal}
+\oplus
+\langle F_k, P_{meas}\rangle
+\oplus
+f_k,
+```
+
+其中 `f_k` 是 measurement bit-flip noise。只有当理想测量在单个理想 tableau 上是确定的时，batch sampler 才适用；如果理想测量本身会产生不同的 tableau 分支，应使用逐 shot 的通用 `ForwardNoiseAwareSimulator`。
+
+**Algorithm 3: Bit-Packed Batch Hotspot Estimation**
+
+输入：
+
+- 电路 `C`。
+- shot 数 `N`。
+- batch loss mask function `B`，返回 logical failure mask。
+- 局部噪声位置集合 `\mathcal L`。
+
+输出：
+
+- logical failure rate `\hat J`。
+- signed sensitivity `\hat S_l`。
+- hotspot score `\hat H_l`。
+
+过程：
+
+```text
+1.  Initialize ideal stabilizer tableau S_ideal <- S_0.
+2.  Initialize bit-packed frames:
+        X_frame[q] <- 0 for all q
+        Z_frame[q] <- 0 for all q
+3.  Initialize measurement masks M and event masks E.
+
+4.  For each operation O_t in time order:
+
+5.      If O_t is a Clifford gate:
+6.          Update S_ideal once.
+7.          Update all shot frames by bit operations.
+
+8.      If O_t is noise location l:
+9.          Sample event mask E[l].
+10.         Apply the masked Pauli event to X_frame / Z_frame.
+
+11.     If O_t is measurement of Pauli P:
+12.         Compute deterministic ideal bit m_ideal from S_ideal.
+13.         Compute frame flip mask using symplectic product <F, P>.
+14.         Apply measurement-noise flip mask if present.
+15.         Store M[key].
+
+16. Compute loss mask Loss <- B(M, X_frame, Z_frame).
+17. J_hat <- popcount(Loss) / N.
+
+18. For each noise location l:
+19.     Use E[l] and Loss to count:
+            error-and-loss shots,
+            error-and-no-loss shots,
+            no-error-and-loss shots,
+            no-error-and-no-loss shots.
+20.     Compute S_hat[l] from the same score-function formula.
+21.     H_hat[l] <- abs(S_hat[l]).
+```
+
+这个 batch sampler 当前是快速路径，而不是通用 tableau 分支引擎。它适合 repetition code、surface-code syndrome extraction 这类理想 syndrome 测量确定、差异主要由 Pauli frame 表示的 QEC 电路。
+
+## 7. Stabilizer 更新规则
 
 模拟器内部使用二进制 symplectic 表示。一个 `n` 比特 Pauli 写成：
 
@@ -344,7 +450,7 @@ Pauli measurement 的规则：
 - 若被测 Pauli 与所有 stabilizer generator 对易，则结果确定，由 stabilizer span 中的符号决定。
 - 若它与某些 generator 反对易，则结果随机；选择一个反对易 generator 替换为被测 Pauli，并用它消去其他 generator 的反对易关系。
 
-## 7. Repetition Code 热点示例
+## 8. Repetition Code 热点示例
 
 对于 bit-flip repetition code，data qubit 上的 `X` 错误会改变相邻 parity-check syndrome。一次 syndrome extraction 中，第 `i` 个 check 测量：
 
@@ -371,7 +477,7 @@ L(\tau)
 
 对每个 data-noise location 和 measurement-noise location 分别估计 `S_l`。如果某一轮 measurement error 或某个 data qubit error 被人为提高，其对应位置应在 `H_l` 排序中显著上升。
 
-## 8. 验证标准
+## 9. 验证标准
 
 实现应满足以下校验：
 
@@ -388,7 +494,7 @@ L(\tau)
 - 对称纠错电路中，几何等价的噪声位置应在统计误差内给出相近 hotspot score。
 - 人为提高某个时空位置的噪声率后，该位置或相邻 detector 区域应在 top-k hotspot 中出现。
 
-## 9. 当前算法边界
+## 10. 当前算法边界
 
 当前模型限制在 stabilizer-compatible stochastic noise：
 
@@ -399,5 +505,6 @@ L(\tau)
 - Pauli noise：固定 Pauli 事件、通用 Pauli mixture、single-qubit depolarizing、two-qubit depolarizing。
 - Classical noise：measurement bit-flip noise。
 - Idle / reset / gate-local 错误：只要能表示为 stabilizer-compatible stochastic Pauli channel，就可以作为带 score 的噪声位置。
+- 高性能 batch sampler：支持理想测量确定的 QEC 快速路径；遇到理想测量随机并导致 tableau 分支时，需要使用逐 shot 通用模拟器。
 
 非 Clifford 门、非 Pauli 噪声、amplitude damping 等非 stabilizer-preserving channel 不直接进入初版算法；需要先做 Pauli twirling、离散化近似，或替换为可由 stabilizer trajectory 采样的等效噪声模型。

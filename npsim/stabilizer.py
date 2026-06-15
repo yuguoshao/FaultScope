@@ -189,6 +189,17 @@ class StabilizerState:
         self.sign[pivot] = outcome
         return outcome
 
+    def is_deterministic_pauli(self, x: Sequence[int], z: Sequence[int]) -> bool:
+        return all(
+            not symplectic_product(self.x[row], self.z[row], x, z)
+            for row in range(self.n_qubits)
+        )
+
+    def deterministic_measurement_bit(self, x: Sequence[int], z: Sequence[int]) -> int:
+        if not self.is_deterministic_pauli(x, z):
+            raise ValueError("Pauli measurement is random for this stabilizer state")
+        return self._deterministic_measurement_bit(x, z)
+
     def reset_z(self, qubit: int, rng: random.Random) -> int:
         outcome = self.measure_z(qubit, rng)
         if outcome:

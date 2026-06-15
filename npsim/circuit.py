@@ -28,7 +28,7 @@ class Operation:
     key: str | None = None
     basis: str = "Z"
     pauli: str | None = None
-    noise: NoiseLocation | None = None
+    noise_location: NoiseLocation | None = None
     metadata: Mapping[str, Any] = field(default_factory=dict)
 
     @staticmethod
@@ -76,7 +76,7 @@ class Operation:
         return Operation(
             "noise",
             tuple(location.qubits),
-            noise=location,
+            noise_location=location,
             metadata=metadata,
         )
 
@@ -94,7 +94,7 @@ class Operation:
             (qubit,),
             key=key,
             basis=basis,
-            noise=noise,
+            noise_location=noise,
             metadata=metadata,
         )
 
@@ -112,7 +112,7 @@ class Operation:
             tuple(qubits),
             key=key,
             pauli=pauli,
-            noise=noise,
+            noise_location=noise,
             metadata=metadata,
         )
 
@@ -135,8 +135,11 @@ class Circuit:
     def noise_locations(self) -> dict[str, NoiseLocation]:
         locations: dict[str, NoiseLocation] = {}
         for operation in self.operations:
-            if operation.kind == "noise" and operation.noise is not None:
-                locations[operation.noise.id] = operation.noise
-            elif operation.kind in {"measure", "measure_pauli"} and operation.noise is not None:
-                locations[operation.noise.id] = operation.noise
+            if operation.kind == "noise" and operation.noise_location is not None:
+                locations[operation.noise_location.id] = operation.noise_location
+            elif (
+                operation.kind in {"measure", "measure_pauli"}
+                and operation.noise_location is not None
+            ):
+                locations[operation.noise_location.id] = operation.noise_location
         return locations

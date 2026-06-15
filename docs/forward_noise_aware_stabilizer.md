@@ -87,7 +87,22 @@ H_l = |S_l|
 - single-qubit depolarizing noise
 - two-qubit depolarizing noise
 - measurement bit-flip noise
+- bit-packed batch sampler for deterministic-syndrome QEC fast paths
 - repetition-code reference decoder and experiment builder
 
 非 Pauli、非 Clifford 噪声不直接进入 stabilizer simulator；初版应先做
 Pauli twirling 或替换为 stabilizer-compatible stochastic channel。
+
+## Batch sampler 快速路径
+
+`BatchForwardNoiseAwareSimulator` 使用一个理想 stabilizer tableau 加上 bit-packed
+Pauli frames 执行多条 trajectory。第 `k` 个 shot 存在整数 mask 的第 `k` 位中：
+
+- `X_frame[q]`: qubit `q` 上是否有 X 分量。
+- `Z_frame[q]`: qubit `q` 上是否有 Z 分量。
+- `M[key]`: measurement key 的测量结果。
+- `E[l]`: 噪声位置 `l` 是否采样到 error / flip event。
+
+它使用与逐 shot 模拟器相同的 score-function estimator，只是用 `popcount`
+在 bit mask 上一次性归约 loss 和 score。该快速路径适合理想 syndrome 测量确定的
+QEC 电路；如果理想测量本身会产生不同 tableau 分支，应使用逐 shot 引擎。
