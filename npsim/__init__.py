@@ -30,6 +30,11 @@ from npsim.pymatching_decoder import (
 )
 from npsim.simulator import ForwardNoiseAwareSimulator, SimulationResult, Trajectory
 from npsim.stim_import import StimImportError, StimImportResult, load_stim_file, parse_stim_circuit
+from npsim.visualization import (
+    VisualizationUnavailableError,
+    write_repetition_gate_structure_hotspot_map,
+    write_repetition_hotspot_heatmap,
+)
 
 __all__ = [
     "BernoulliPauliNoise",
@@ -59,6 +64,9 @@ __all__ = [
     "UnsupportedBatchCircuitError",
     "UnsupportedDemCircuitError",
     "UnsupportedPyMatchingDemError",
+    "VisualizationUnavailableError",
     "load_stim_file",
     "parse_stim_circuit",
+    "write_repetition_gate_structure_hotspot_map",
+    "write_repetition_hotspot_heatmap",
 ]

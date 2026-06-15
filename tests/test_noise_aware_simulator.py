@@ -22,6 +22,11 @@ from npsim.repetition import make_repetition_code_experiment
 from npsim.simulator import ForwardNoiseAwareSimulator
 from npsim.stabilizer import StabilizerState
 from npsim.stim_import import StimImportError, parse_stim_circuit
+from npsim.visualization import (
+    VisualizationUnavailableError,
+    write_repetition_gate_structure_hotspot_map,
+    write_repetition_hotspot_heatmap,
+)
 
 
 class StabilizerStateTests(unittest.TestCase):
@@ -683,6 +688,148 @@ class PyMatchingBatchDecoderTests(unittest.TestCase):
             [{0: 0}, {0: 1}],
         )
         self.assertEqual(decoder.decode_batch_masks({0: 0b1010}, shots=4), {0: 0b1010})
+
+
+class HotspotVisualizationTests(unittest.TestCase):
+    def test_generates_repetition_hotspot_heatmap_png(self) -> None:
+        distance = 3
+        rounds = 3
+        hot_data = (1, 1)
+        hot_measurement = (2, 0)
+        data_rates = {
+            (round_idx, data_idx): (
+                0.18 if (round_idx, data_idx) == hot_data else 0.04
+            )
+            for round_idx in range(rounds)
+            for data_idx in range(distance)
+        }
+        measurement_rates = {
+            (round_idx, check_idx): (
+                0.16 if (round_idx, check_idx) == hot_measurement else 0.03
+            )
+            for round_idx in range(rounds)
+            for check_idx in range(distance - 1)
+        }
+        experiment = make_repetition_code_experiment(
+            distance=distance,
+            rounds=rounds,
+            data_error_rate=data_rates,
+            measurement_error_rate=measurement_rates,
+        )
+        result = BatchForwardNoiseAwareSimulator(experiment.circuit).estimate(
+            shots=5_000,
+            seed=31,
+            loss_mask_fn=experiment.batch_loss_mask_fn,
+        )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = os.path.join(temp_dir, "hotspot_heatmap.png")
+            try:
+                written = write_repetition_hotspot_heatmap(
+                    result,
+                    path,
+                    distance=distance,
+                    rounds=rounds,
+                    highlighted_data=hot_data,
+                    highlighted_measurement=hot_measurement,
+                )
+            except VisualizationUnavailableError as exc:
+                self.skipTest(str(exc))
+            self.assertEqual(str(written), path)
+            self._assert_png_nonblank(path)
+        self.assertGreater(max(result.hotspots.values()), 0.0)
+
+    def test_generates_gate_structure_hotspot_map_png(self) -> None:
+        distance = 3
+        rounds = 2
+        hot_cx = (1, 0, "right")
+        experiment = make_repetition_code_experiment(
+            distance=distance,
+            rounds=rounds,
+            data_error_rate=0.03,
+            measurement_error_rate=0.03,
+        )
+        circuit = self._add_cx_noise_to_repetition_circuit(
+            experiment.circuit,
+            distance=distance,
+            hot_cx=hot_cx,
+        )
+        result = BatchForwardNoiseAwareSimulator(circuit).estimate(
+            shots=5_000,
+            seed=32,
+            loss_mask_fn=experiment.batch_loss_mask_fn,
+        )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = os.path.join(temp_dir, "gate_structure_hotspots.png")
+            try:
+                written = write_repetition_gate_structure_hotspot_map(
+                    result,
+                    path,
+                    distance=distance,
+                    rounds=rounds,
+                    highlighted_data=(0, 1),
+                    highlighted_measurement=(1, 0),
+                    highlighted_cx=hot_cx,
+                )
+            except VisualizationUnavailableError as exc:
+                self.skipTest(str(exc))
+            self.assertEqual(str(written), path)
+            self._assert_png_nonblank(path)
+        self.assertIn("cx_right_r1_c0", result.hotspots)
+
+    def _add_cx_noise_to_repetition_circuit(
+        self,
+        circuit: Circuit,
+        *,
+        distance: int,
+        hot_cx: tuple[int, int, str],
+    ) -> Circuit:
+        operations = []
+        cx_seen = 0
+        local_cx_per_round = 2 * (distance - 1)
+        for operation in circuit.operations:
+            operations.append(operation)
+            if operation.kind != "cx":
+                continue
+            round_idx = cx_seen // local_cx_per_round
+            local_idx = cx_seen % local_cx_per_round
+            check_idx = local_idx // 2
+            side = "left" if local_idx % 2 == 0 else "right"
+            rate = 0.14 if (round_idx, check_idx, side) == hot_cx else 0.025
+            control, target = operation.qubits
+            location = NoiseLocation(
+                id=f"cx_{side}_r{round_idx}_c{check_idx}",
+                model=BernoulliPauliNoise("XI"),
+                rate=rate,
+                qubits=(control, target),
+                tags={
+                    "round": round_idx,
+                    "qubit": control,
+                    "check": check_idx,
+                    "gate": "cx",
+                    "operation": "cx_noise",
+                    "side": side,
+                    "control": control,
+                    "target": target,
+                },
+            )
+            operations.append(Operation.noise(location))
+            cx_seen += 1
+        return Circuit(n_qubits=circuit.n_qubits, operations=operations)
+
+    def _assert_png_nonblank(self, path: str) -> None:
+        try:
+            from PIL import Image
+        except ImportError as exc:
+            self.skipTest(f"Pillow is not installed: {exc}")
+        self.assertGreater(os.path.getsize(path), 1_000)
+        with Image.open(path) as image:
+            self.assertGreaterEqual(image.size[0], 500)
+            self.assertGreaterEqual(image.size[1], 300)
+            colors = image.convert("RGB").resize((32, 32)).getcolors(maxcolors=1024)
+        self.assertIsNotNone(colors)
+        self.assertGreater(len(colors), 8)
 
 
 class StimImportTests(unittest.TestCase):

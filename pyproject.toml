@@ -15,6 +15,9 @@ pymatching = [
     "scipy",
     "pymatching",
 ]
+visualization = [
+    "pillow",
+]
 
 [tool.setuptools.packages.find]
 include = ["npsim*"]
