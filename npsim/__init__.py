@@ -23,6 +23,11 @@ from npsim.noise import (
     SingleQubitDepolarizing,
     TwoQubitDepolarizing,
 )
+from npsim.pymatching_decoder import (
+    PyMatchingBatchDecoder,
+    PyMatchingUnavailableError,
+    UnsupportedPyMatchingDemError,
+)
 from npsim.simulator import ForwardNoiseAwareSimulator, SimulationResult, Trajectory
 from npsim.stim_import import StimImportError, StimImportResult, load_stim_file, parse_stim_circuit
 
@@ -43,6 +48,8 @@ __all__ = [
     "NoiseLocation",
     "Operation",
     "PauliChannel",
+    "PyMatchingBatchDecoder",
+    "PyMatchingUnavailableError",
     "SimulationResult",
     "SingleQubitDepolarizing",
     "StimImportError",
@@ -51,6 +58,7 @@ __all__ = [
     "TwoQubitDepolarizing",
     "UnsupportedBatchCircuitError",
     "UnsupportedDemCircuitError",
+    "UnsupportedPyMatchingDemError",
     "load_stim_file",
     "parse_stim_circuit",
 ]

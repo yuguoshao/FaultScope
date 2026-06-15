@@ -608,6 +608,82 @@ batch.observables[id]
 
 DEM 生成器既可以接受显式传入的 `Detector` / `LogicalObservable` 声明，也可以直接从 circuit 内的 detector / observable operations 自动读取声明。
 
+### PyMatching batch decoder 接口
+
+PyMatching 接口位于 DEM 和 loss 计算之间，不改变前向 trajectory 或 score-function
+梯度估计。它的作用是把 detector record 解码成 predicted logical correction：
+
+```math
+\text{forward batch}
+\longrightarrow
+s^{(k)}
+\longrightarrow
+\hat{\ell}^{(k)}
+\longrightarrow
+L^{(k)}.
+```
+
+给定 DEM edge 集合 `E`，构造二元校验矩阵：
+
+```math
+H_{i,e}
+=
+\mathbf 1[D_i\in \Delta D_e],
+```
+
+以及 logical fault 矩阵：
+
+```math
+F_{a,e}
+=
+\mathbf 1[L_a\in \Delta L_e].
+```
+
+其中 `H` 的行是 detector，列是 DEM edge；`F` 的行是 logical observable，
+列也是 DEM edge。每条 edge 的 matching 权重为：
+
+```math
+w_e
+=
+\log\frac{1-p_e}{p_e}.
+```
+
+**Algorithm 5: PyMatching Batch Decoding from DEM**
+
+输入：
+
+- graphlike detector error model。
+- batch detector masks `B_i`，其中第 `k` 位是 shot `k` 的 detector `D_i`。
+- shot 数 `N`。
+
+输出：
+
+- logical correction masks `C_a`。
+
+过程：
+
+```text
+1.  Enumerate detector ids D_i and logical observable ids L_a.
+2.  Build H[i,e] from the detector set of each DEM edge e.
+3.  Build F[a,e] from the logical observable set of each DEM edge e.
+4.  Set edge weight w_e <- log((1-p_e)/p_e).
+5.  Construct PyMatching from H, F, and w.
+6.  For each shot k and detector i:
+7.      S[k,i] <- bit_k(B_i).
+8.  Decode all rows of S with PyMatching.decode_batch.
+9.  Pack predicted logical correction bits back into C_a masks.
+```
+
+随后 loss 可以继续保持 bit mask 形式。例如单 logical observable 时：
+
+```text
+failure_mask = batch.observables[0] xor correction_masks[0]
+```
+
+这个 decoder 接口要求 DEM 是 graphlike：每条 edge 最多连接两个 detector。没有
+detector 的纯 logical edge 表示 syndrome 不可见的 logical fault，当前接口会拒绝它，
+因为 matching decoder 无法从 detector record 中恢复这种错误。
+
 ## 9. Repetition Code 热点示例
 
 对于 bit-flip repetition code，data qubit 上的 `X` 错误会改变相邻 parity-check syndrome。一次 syndrome extraction 中，第 `i` 个 check 测量：
@@ -741,6 +817,7 @@ dem = DetectorErrorModelGenerator(
 - Idle / reset / gate-local 错误：只要能表示为 stabilizer-compatible stochastic Pauli channel，就可以作为带 score 的噪声位置。
 - 高性能 batch sampler：支持理想测量确定的 QEC 快速路径；遇到理想测量随机并导致 tableau 分支时，需要使用逐 shot 通用模拟器。
 - Detector error model：支持结构化 detector / logical observable 声明，并通过单错误传播生成 Stim-like `error(p) D... L...` edge；当前不支持需要随机 tableau 分支的 DEM 构造。
+- PyMatching batch decoder：可从 graphlike DEM 构造 matching decoder，并批量解码 detector record / bit-packed detector masks；需要可选依赖 `pymatching`、`numpy`、`scipy`，且不接受 hyperedge 或 syndrome 不可见的纯 logical edge。
 - Stim import：支持常见 Clifford、reset、measurement、Pauli/depolarizing noise、`DETECTOR rec[-k]` 和 `OBSERVABLE_INCLUDE(k) rec[-k]` 子集；不支持 `REPEAT` 和 Stim 完整语义。
 
 非 Clifford 门、非 Pauli 噪声、amplitude damping 等非 stabilizer-preserving channel 不直接进入初版算法；需要先做 Pauli twirling、离散化近似，或替换为可由 stabilizer trajectory 采样的等效噪声模型。

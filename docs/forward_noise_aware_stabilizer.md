@@ -89,6 +89,7 @@ H_l = |S_l|
 - measurement bit-flip noise
 - bit-packed batch sampler for deterministic-syndrome QEC fast paths
 - detector error model generation by single-error propagation
+- optional PyMatching batch decoder interface from graphlike DEMs
 - Stim text subset import into `Circuit`, `Detector`, and `LogicalObservable`
 - repetition-code reference decoder and experiment builder
 
@@ -147,6 +148,61 @@ edge-level sensitivity。返回值同时包含 edge-level hotspot、按
 `(detectors, observables)` 聚合的 detector-edge hotspot、按 detector node 聚合的
 node hotspot，以及按 logical observable 聚合的 hotspot。当前 DEM 生成也要求理想/单错误
 测量确定，不处理随机 tableau 分支。
+
+## PyMatching batch decoder
+
+PyMatching 接口不改变噪声率求导公式。它只把前向模拟得到的 detector record
+交给一个由 DEM 构造的 matching decoder：
+
+```text
+trajectory/batch -> detector record -> PyMatching correction -> loss
+```
+
+给定 DEM edge 集合 `E`，构造二元校验矩阵
+
+```text
+H[i,e] = 1  iff  edge e flips detector D_i
+```
+
+以及 logical fault 矩阵
+
+```text
+F[a,e] = 1  iff  edge e flips logical observable L_a.
+```
+
+边权使用对数似然比
+
+```text
+w_e = log((1 - p_e) / p_e).
+```
+
+对 batch sampler，detector masks 被展开为 syndrome matrix
+
+```text
+S[k,i] = bit_k(batch.detectors[D_i]),
+```
+
+然后调用 PyMatching 的 batch decoder 得到
+
+```text
+C[k,a] = predicted logical correction for shot k and observable L_a.
+```
+
+也提供 bit-packed 输出形式：
+
+```text
+observable_correction_masks = decoder.decode_batch_masks(batch)
+```
+
+这样可以把 loss 写成 batch mask 运算，例如对单个 logical observable：
+
+```text
+failure_mask = batch.observables[0] xor observable_correction_masks[0]
+```
+
+当前接口要求 DEM 是 graphlike：每条 edge 至多连接两个 detector，并且不接受没有
+detector 的纯 logical edge。后者表示 undetectable logical fault，不能由 matching
+decoder 从 syndrome 中恢复。
 
 ## Stim import subset
 

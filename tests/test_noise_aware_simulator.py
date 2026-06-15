@@ -5,11 +5,17 @@ from npsim.batch import BatchForwardNoiseAwareSimulator, UnsupportedBatchCircuit
 from npsim.circuit import Circuit, NoiseLocation, Operation
 from npsim.dem import (
     Detector,
+    DetectorErrorEdge,
+    DetectorErrorModel,
     DetectorErrorModelGenerator,
     LogicalObservable,
     UnsupportedDemCircuitError,
 )
 from npsim.noise import BernoulliPauliNoise, PauliChannel
+from npsim.pymatching_decoder import (
+    PyMatchingBatchDecoder,
+    UnsupportedPyMatchingDemError,
+)
 from npsim.repetition import make_repetition_code_experiment
 from npsim.simulator import ForwardNoiseAwareSimulator
 from npsim.stabilizer import StabilizerState
@@ -422,6 +428,147 @@ class DetectorErrorModelTests(unittest.TestCase):
         self.assertAlmostEqual(by_event["X"].sensitivity, 2.0)
         self.assertAlmostEqual(by_event["Y"].sensitivity, 6.0)
         self.assertAlmostEqual(graph.by_detector_edge[((0,), ())], 8.0)
+
+
+class _FakeMatrix:
+    def __init__(self, args, shape=None, dtype=None) -> None:
+        self.args = args
+        self.shape = shape
+        self.dtype = dtype
+
+
+class _FakeSparse:
+    @staticmethod
+    def csc_matrix(args, shape=None, dtype=None) -> _FakeMatrix:
+        return _FakeMatrix(args, shape=shape, dtype=dtype)
+
+
+class _FakeNumpy:
+    uint8 = int
+
+    @staticmethod
+    def array(values, dtype=None):
+        return tuple(values)
+
+
+class _FakeMatching:
+    def decode(self, syndrome):
+        return [int(syndrome[0]) if syndrome else 0]
+
+    def decode_batch(self, syndromes):
+        return [[int(row[0]) if row else 0] for row in syndromes]
+
+
+class _FakePyMatching:
+    calls = []
+
+    class Matching:
+        @staticmethod
+        def from_check_matrix(h, **kwargs):
+            _FakePyMatching.calls.append((h, kwargs))
+            return _FakeMatching()
+
+
+class PyMatchingBatchDecoderTests(unittest.TestCase):
+    def setUp(self) -> None:
+        _FakePyMatching.calls.clear()
+
+    def _build_dem(self) -> DetectorErrorModel:
+        return DetectorErrorModel(
+            detectors=(
+                Detector(id=0, measurement_keys=()),
+                Detector(id=1, measurement_keys=()),
+            ),
+            observables=(LogicalObservable(id=0),),
+            edges=(
+                DetectorErrorEdge(
+                    probability=0.1,
+                    detectors=(0,),
+                    observables=(0,),
+                    location_id="x0",
+                    event="X",
+                ),
+                DetectorErrorEdge(
+                    probability=0.2,
+                    detectors=(0, 1),
+                    observables=(),
+                    location_id="x1",
+                    event="X",
+                ),
+            ),
+        )
+
+    def test_builds_pymatching_decoder_from_graphlike_dem(self) -> None:
+        decoder = PyMatchingBatchDecoder.from_dem(
+            self._build_dem(),
+            pymatching_module=_FakePyMatching,
+            numpy_module=_FakeNumpy,
+            scipy_sparse_module=_FakeSparse,
+        )
+
+        self.assertEqual(decoder.detector_ids, (0, 1))
+        self.assertEqual(decoder.observable_ids, (0,))
+        self.assertEqual(decoder.edge_count, 2)
+        self.assertEqual(len(_FakePyMatching.calls), 1)
+
+        h, kwargs = _FakePyMatching.calls[0]
+        self.assertEqual(h.shape, (2, 2))
+        self.assertEqual(h.args, ([1, 1, 1], ([0, 0, 1], [0, 1, 1])))
+        self.assertEqual(kwargs["faults_matrix"].shape, (1, 2))
+        self.assertEqual(kwargs["faults_matrix"].args, ([1], ([0], [0])))
+        self.assertEqual(kwargs["weights"], (2.1972245773362196, 1.3862943611198906))
+        self.assertEqual(kwargs["error_probabilities"], (0.1, 0.2))
+
+    def test_decodes_single_and_batch_records(self) -> None:
+        decoder = PyMatchingBatchDecoder.from_dem(
+            self._build_dem(),
+            pymatching_module=_FakePyMatching,
+            numpy_module=_FakeNumpy,
+            scipy_sparse_module=_FakeSparse,
+        )
+
+        self.assertEqual(decoder.decode_detector_record({0: 1, 1: 0}), {0: 1})
+        self.assertEqual(
+            decoder.decode_batch_detector_records([{0: 0, 1: 1}, {0: 1, 1: 1}]),
+            [{0: 0}, {0: 1}],
+        )
+
+    def test_decodes_bit_packed_detector_masks(self) -> None:
+        decoder = PyMatchingBatchDecoder.from_dem(
+            self._build_dem(),
+            pymatching_module=_FakePyMatching,
+            numpy_module=_FakeNumpy,
+            scipy_sparse_module=_FakeSparse,
+        )
+
+        self.assertEqual(decoder.decode_batch_masks({0: 0b1010, 1: 0}, shots=4), {0: 0b1010})
+
+    def test_rejects_dem_hyperedge(self) -> None:
+        dem = DetectorErrorModel(
+            detectors=(
+                Detector(id=0, measurement_keys=()),
+                Detector(id=1, measurement_keys=()),
+                Detector(id=2, measurement_keys=()),
+            ),
+            observables=(),
+            edges=(
+                DetectorErrorEdge(
+                    probability=0.1,
+                    detectors=(0, 1, 2),
+                    observables=(),
+                    location_id="bad",
+                    event="X",
+                ),
+            ),
+        )
+
+        with self.assertRaises(UnsupportedPyMatchingDemError):
+            PyMatchingBatchDecoder.from_dem(
+                dem,
+                pymatching_module=_FakePyMatching,
+                numpy_module=_FakeNumpy,
+                scipy_sparse_module=_FakeSparse,
+            )
 
 
 class StimImportTests(unittest.TestCase):
