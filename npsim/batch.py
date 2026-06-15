@@ -41,6 +41,8 @@ class BatchTrajectory:
     x_frame: tuple[int, ...]
     z_frame: tuple[int, ...]
     measurements: Mapping[str, int]
+    detectors: Mapping[int, int]
+    observables: Mapping[int, int]
     noise_event_masks: Mapping[str, int]
 
     def bit(self, mask: int, shot: int) -> int:
@@ -48,6 +50,12 @@ class BatchTrajectory:
 
     def measurement_bit(self, key: str, shot: int) -> int:
         return self.bit(self.measurements[key], shot)
+
+    def detector_bit(self, detector_id: int, shot: int) -> int:
+        return self.bit(self.detectors[detector_id], shot)
+
+    def observable_bit(self, observable_id: int, shot: int) -> int:
+        return self.bit(self.observables[observable_id], shot)
 
     def x_bit(self, qubit: int, shot: int) -> int:
         return self.bit(self.x_frame[qubit], shot)
@@ -62,6 +70,8 @@ class _BatchState:
     x_frame: list[int]
     z_frame: list[int]
     measurements: dict[str, int]
+    detectors: dict[int, int]
+    observables: dict[int, int]
     event_masks: dict[str, int]
 
 
@@ -149,6 +159,8 @@ class BatchForwardNoiseAwareSimulator:
             x_frame=[0] * self.circuit.n_qubits,
             z_frame=[0] * self.circuit.n_qubits,
             measurements={},
+            detectors={},
+            observables={},
             event_masks={location_id: 0 for location_id in self.locations},
         )
 
@@ -161,6 +173,8 @@ class BatchForwardNoiseAwareSimulator:
             x_frame=tuple(mask & all_mask for mask in state.x_frame),
             z_frame=tuple(mask & all_mask for mask in state.z_frame),
             measurements=state.measurements,
+            detectors=state.detectors,
+            observables=state.observables,
             noise_event_masks=state.event_masks,
         )
 
@@ -238,6 +252,26 @@ class BatchForwardNoiseAwareSimulator:
             return
         if kind == "reset":
             self._reset(operation, state, shots, all_mask, rng)
+            return
+        if kind == "detector":
+            detector_id = operation.metadata.get("detector_id")
+            if detector_id is None:
+                detector_id = len(state.detectors)
+            state.detectors[int(detector_id)] = _measurement_mask_parity(
+                state.measurements,
+                operation.measurement_keys,
+            ) & all_mask
+            return
+        if kind == "observable_include":
+            if operation.observable_id is None:
+                raise ValueError("observable_include operation requires observable_id")
+            value = _measurement_mask_parity(
+                state.measurements,
+                operation.measurement_keys,
+            )
+            state.observables[operation.observable_id] = (
+                state.observables.get(operation.observable_id, 0) ^ value
+            ) & all_mask
             return
         raise ValueError(f"unsupported operation kind {kind!r}")
 
@@ -545,3 +579,16 @@ def _score_pair(location: NoiseLocation) -> tuple[float, float]:
     raise UnsupportedBatchCircuitError(
         f"unsupported batch noise model {type(model).__name__}"
     )
+
+
+def _measurement_mask_parity(
+    measurements: Mapping[str, int],
+    keys: tuple[str, ...],
+) -> int:
+    parity = 0
+    for key in keys:
+        try:
+            parity ^= measurements[key]
+        except KeyError as exc:
+            raise ValueError(f"unknown measurement key {key!r}") from exc
+    return parity

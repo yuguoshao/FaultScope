@@ -136,12 +136,20 @@ class DetectorErrorModelGenerator:
         self,
         circuit: Circuit,
         *,
-        detectors: Sequence[Detector],
-        observables: Sequence[LogicalObservable] = (),
+        detectors: Sequence[Detector] | None = None,
+        observables: Sequence[LogicalObservable] | None = None,
     ):
         self.circuit = circuit
-        self.detectors = tuple(detectors)
-        self.observables = tuple(observables)
+        self.detectors = (
+            tuple(detectors)
+            if detectors is not None
+            else _detectors_from_circuit(circuit)
+        )
+        self.observables = (
+            tuple(observables)
+            if observables is not None
+            else _observables_from_circuit(circuit)
+        )
         self._validate_declarations()
         self._occurrences = self._collect_noise_occurrences()
 
@@ -283,6 +291,8 @@ class DetectorErrorModelGenerator:
             return
         if kind == "reset":
             self._reset(operation, state, frame, measurements, rng)
+            return
+        if kind in {"detector", "observable_include"}:
             return
         raise ValueError(f"unsupported operation kind {kind!r}")
 
@@ -474,4 +484,36 @@ def _flipped_ids(
         item_id
         for item_id in sorted(reference)
         if int(reference[item_id]) ^ int(injected[item_id])
+    )
+
+
+def _detectors_from_circuit(circuit: Circuit) -> tuple[Detector, ...]:
+    detectors: list[Detector] = []
+    for operation in circuit.operations:
+        if operation.kind != "detector":
+            continue
+        detector_id = operation.metadata.get("detector_id")
+        if detector_id is None:
+            detector_id = len(detectors)
+        detectors.append(
+            Detector(
+                id=int(detector_id),
+                measurement_keys=operation.measurement_keys,
+                coords=tuple(operation.metadata.get("coords", ())),
+            )
+        )
+    return tuple(detectors)
+
+
+def _observables_from_circuit(circuit: Circuit) -> tuple[LogicalObservable, ...]:
+    keys_by_id: dict[int, list[str]] = {}
+    for operation in circuit.operations:
+        if operation.kind != "observable_include":
+            continue
+        if operation.observable_id is None:
+            raise ValueError("observable_include operation requires observable_id")
+        keys_by_id.setdefault(operation.observable_id, []).extend(operation.measurement_keys)
+    return tuple(
+        LogicalObservable(id=observable_id, measurement_keys=tuple(keys))
+        for observable_id, keys in sorted(keys_by_id.items())
     )

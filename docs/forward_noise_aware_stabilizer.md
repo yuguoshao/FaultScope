@@ -116,6 +116,11 @@ QEC 电路；如果理想测量本身会产生不同 tableau 分支，应使用�
 logical observable 可以是 measurement parity，也可以是最终 Pauli frame 上某个
 Pauli observable 的翻转。
 
+`DETECTOR` / `OBSERVABLE_INCLUDE` 也可以作为 circuit operations 存在。逐 shot
+simulator 会写入 `trajectory.detectors` 和 `trajectory.observables`；batch sampler
+会写入 `batch.detectors` 和 `batch.observables`。DEM 生成器在未显式传入声明时会从
+circuit operations 中自动读取这些语义。
+
 生成器对每个噪声位置和每个非 identity 事件做单错误传播：
 
 ```text
@@ -142,6 +147,8 @@ edge 的投影方式。当前 DEM 生成也要求理想/单错误测量确定，
 - `detectors`: 从 `DETECTOR rec[-k] ...` 生成的结构化 detector parity
 - `observables`: 从 `OBSERVABLE_INCLUDE(id) rec[-k] ...` 生成的 logical observable parity
 - `measurement_keys`: Stim measurement record 到内部 measurement key 的顺序映射
+
+导入后的 `circuit` 内也包含 `detector` / `observable_include` operations，因此可以直接用于 trajectory、batch 和 DEM 工作流。
 
 当前支持 Clifford gate、reset、measurement、MPP、Pauli/depolarizing noise、
 Pauli channel noise、`DETECTOR` 和 `OBSERVABLE_INCLUDE` 的常见形式。导入器不展开

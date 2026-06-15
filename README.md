@@ -539,6 +539,23 @@ H_l
 
 这样可以把噪声敏感度从物理时空位置投影到 detector graph edge 上，用于分析哪些 syndrome graph 边对应的物理错误最影响 logical failure。
 
+`DETECTOR` 和 `OBSERVABLE_INCLUDE` 在电路中是一等 operation。逐 shot 模拟器执行到这些 operation 时会立即计算并记录：
+
+```text
+trajectory.detectors[id]
+trajectory.observables[id]
+trajectory.detector_record
+```
+
+batch sampler 也会生成对应 bit mask：
+
+```text
+batch.detectors[id]
+batch.observables[id]
+```
+
+DEM 生成器既可以接受显式传入的 `Detector` / `LogicalObservable` 声明，也可以直接从 circuit 内的 detector / observable operations 自动读取声明。
+
 ## 9. Repetition Code 热点示例
 
 对于 bit-flip repetition code，data qubit 上的 `X` 错误会改变相邻 parity-check syndrome。一次 syndrome extraction 中，第 `i` 个 check 测量：
@@ -585,6 +602,8 @@ StimImportResult(
 - `detectors` 是结构化 `Detector` 声明。
 - `observables` 是结构化 `LogicalObservable` 声明。
 - `measurement_keys` 是 Stim measurement record 到内部 key 的顺序映射。
+
+导入器会把 `DETECTOR` 和 `OBSERVABLE_INCLUDE` 同时保留为 circuit operation，因此导入后的电路本身已经包含 detector / observable 语义；额外返回的 `detectors` / `observables` 主要用于显式检查或兼容旧接口。
 
 支持的 Stim 指令子集：
 

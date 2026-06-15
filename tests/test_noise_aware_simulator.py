@@ -181,6 +181,21 @@ class NoiseAwareSimulatorTests(unittest.TestCase):
         self.assertEqual(result.mean_loss, 0.0)
         self.assertEqual(result.hotspots["irrelevant"], 0.0)
 
+    def test_detector_and_observable_operations_are_recorded(self) -> None:
+        circuit = Circuit(
+            n_qubits=1,
+            operations=[
+                Operation.x(0),
+                Operation.measure(0, key="m", basis="Z"),
+                Operation.detector(("m",), detector_id=2, coords=(1.5, 2.0)),
+                Operation.observable_include(0, ("m",)),
+            ],
+        )
+        trajectory = ForwardNoiseAwareSimulator(circuit).run_shot(rng=random.Random(16))
+        self.assertEqual(trajectory.detectors, {2: 1})
+        self.assertEqual(trajectory.observables, {0: 1})
+        self.assertEqual(trajectory.detector_record, {2: 1})
+
     def test_repetition_code_experiment_runs_and_aggregates(self) -> None:
         experiment = make_repetition_code_experiment(
             distance=3,
@@ -264,6 +279,25 @@ class BatchNoiseAwareSimulatorTests(unittest.TestCase):
                 seed=15,
                 loss_mask_fn=lambda batch: batch.measurements["m"],
             )
+
+    def test_batch_detector_and_observable_masks_are_recorded(self) -> None:
+        circuit = Circuit(
+            n_qubits=1,
+            operations=[
+                Operation.x(0),
+                Operation.measure(0, key="m", basis="Z"),
+                Operation.detector(("m",), detector_id=4),
+                Operation.observable_include(1, ("m",)),
+            ],
+        )
+        batch = BatchForwardNoiseAwareSimulator(circuit).run_batch(
+            shots=8,
+            rng=random.Random(17),
+        )
+        self.assertEqual(batch.detectors[4], batch.all_mask)
+        self.assertEqual(batch.observables[1], batch.all_mask)
+        self.assertEqual(batch.detector_bit(4, 3), 1)
+        self.assertEqual(batch.observable_bit(1, 5), 1)
 
 
 class DetectorErrorModelTests(unittest.TestCase):
@@ -362,9 +396,16 @@ class StimImportTests(unittest.TestCase):
             detectors=imported.detectors,
             observables=imported.observables,
         ).generate()
+        dem_from_circuit = DetectorErrorModelGenerator(imported.circuit).generate()
         dem_text = dem.to_dem_text()
         self.assertIn("detector(0.5, 0) D0", dem_text)
         self.assertIn("D0 L0", dem_text)
+        self.assertEqual(dem.to_dem_text(), dem_from_circuit.to_dem_text())
+        self.assertIn("detector", [operation.kind for operation in imported.circuit.operations])
+        self.assertIn(
+            "observable_include",
+            [operation.kind for operation in imported.circuit.operations],
+        )
 
     def test_imports_pauli_channels_and_mpp(self) -> None:
         imported = parse_stim_circuit(

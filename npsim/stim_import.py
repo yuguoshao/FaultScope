@@ -387,6 +387,13 @@ class _StimImporter:
             coords=tuple(args),
         )
         self.detectors.append(detector)
+        self.operations.append(
+            Operation.detector(
+                keys,
+                detector_id=detector.id,
+                coords=detector.coords,
+            )
+        )
 
     def _parse_observable(
         self,
@@ -401,6 +408,7 @@ class _StimImporter:
         observable_id = int(args[0])
         keys = self._parse_rec_targets(targets, line_no)
         self.observables_by_id.setdefault(observable_id, []).extend(keys)
+        self.operations.append(Operation.observable_include(observable_id, keys))
 
     def _parse_rec_targets(self, targets: Sequence[str], line_no: int) -> list[str]:
         keys: list[str] = []

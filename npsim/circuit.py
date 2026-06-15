@@ -28,6 +28,8 @@ class Operation:
     key: str | None = None
     basis: str = "Z"
     pauli: str | None = None
+    measurement_keys: tuple[str, ...] = ()
+    observable_id: int | None = None
     noise_location: NoiseLocation | None = None
     metadata: Mapping[str, Any] = field(default_factory=dict)
 
@@ -125,6 +127,38 @@ class Operation:
         **metadata: Any,
     ) -> "Operation":
         return Operation("reset", (qubit,), key=key, basis=basis, metadata=metadata)
+
+    @staticmethod
+    def detector(
+        measurement_keys: Sequence[str],
+        *,
+        detector_id: int | None = None,
+        coords: Sequence[float] = (),
+        **metadata: Any,
+    ) -> "Operation":
+        metadata = {
+            **metadata,
+            "detector_id": detector_id,
+            "coords": tuple(float(coord) for coord in coords),
+        }
+        return Operation(
+            "detector",
+            measurement_keys=tuple(measurement_keys),
+            metadata=metadata,
+        )
+
+    @staticmethod
+    def observable_include(
+        observable_id: int,
+        measurement_keys: Sequence[str],
+        **metadata: Any,
+    ) -> "Operation":
+        return Operation(
+            "observable_include",
+            observable_id=observable_id,
+            measurement_keys=tuple(measurement_keys),
+            metadata=metadata,
+        )
 
 
 @dataclass(frozen=True)

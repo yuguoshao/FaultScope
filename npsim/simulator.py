@@ -51,6 +51,8 @@ class Trajectory:
     frame: PauliFrame
     measurements: list[MeasurementRecord]
     measurement_by_key: dict[str, MeasurementRecord]
+    detectors: dict[int, int]
+    observables: dict[int, int]
     noise_events: list[NoiseEvent]
     scores: dict[str, float]
     detector_record: Any = None
@@ -128,6 +130,8 @@ class ForwardNoiseAwareSimulator:
         frame = PauliFrame.zero(self.circuit.n_qubits)
         measurements: list[MeasurementRecord] = []
         measurement_by_key: dict[str, MeasurementRecord] = {}
+        detectors: dict[int, int] = {}
+        observables: dict[int, int] = {}
         noise_events: list[NoiseEvent] = []
         scores: dict[str, float] = defaultdict(float)
 
@@ -138,6 +142,8 @@ class ForwardNoiseAwareSimulator:
                 frame,
                 measurements,
                 measurement_by_key,
+                detectors,
+                observables,
                 noise_events,
                 scores,
                 rng,
@@ -148,11 +154,15 @@ class ForwardNoiseAwareSimulator:
             frame=frame,
             measurements=measurements,
             measurement_by_key=measurement_by_key,
+            detectors=detectors,
+            observables=observables,
             noise_events=noise_events,
             scores=dict(scores),
         )
         if detector_fn is not None:
             trajectory.detector_record = detector_fn(trajectory)
+        elif detectors:
+            trajectory.detector_record = dict(detectors)
         if decoder is not None:
             trajectory.decoded = decoder.decode(
                 trajectory.detector_record,
@@ -231,6 +241,8 @@ class ForwardNoiseAwareSimulator:
         frame: PauliFrame,
         measurements: list[MeasurementRecord],
         measurement_by_key: dict[str, MeasurementRecord],
+        detectors: dict[int, int],
+        observables: dict[int, int],
         noise_events: list[NoiseEvent],
         scores: dict[str, float],
         rng: random.Random,
@@ -279,7 +291,14 @@ class ForwardNoiseAwareSimulator:
         if kind == "noise":
             if operation.noise_location is None:
                 raise ValueError("noise operation requires a noise location")
-            self._sample_noise(operation.noise_location, state, frame, noise_events, scores, rng)
+            self._sample_noise(
+                operation.noise_location,
+                state,
+                frame,
+                noise_events,
+                scores,
+                rng,
+            )
             return
         if kind == "measure":
             self._measure(
@@ -329,7 +348,27 @@ class ForwardNoiseAwareSimulator:
                         basis=f"reset_{basis.lower()}",
                         metadata=operation.metadata,
                     ),
+            )
+            return
+        if kind == "detector":
+            detector_id = operation.metadata.get("detector_id")
+            if detector_id is None:
+                detector_id = len(detectors)
+            detectors[int(detector_id)] = _measurement_parity(
+                measurement_by_key,
+                operation.measurement_keys,
+            )
+            return
+        if kind == "observable_include":
+            if operation.observable_id is None:
+                raise ValueError("observable_include operation requires observable_id")
+            observables[operation.observable_id] = (
+                observables.get(operation.observable_id, 0)
+                ^ _measurement_parity(
+                    measurement_by_key,
+                    operation.measurement_keys,
                 )
+            )
             return
         raise ValueError(f"unsupported operation kind {kind!r}")
 
@@ -484,3 +523,16 @@ class ForwardNoiseAwareSimulator:
             if value is not None:
                 out[value] += hotspot
         return dict(out)
+
+
+def _measurement_parity(
+    measurement_by_key: Mapping[str, MeasurementRecord],
+    keys: Sequence[str],
+) -> int:
+    parity = 0
+    for key in keys:
+        try:
+            parity ^= int(measurement_by_key[key].bit)
+        except KeyError as exc:
+            raise ValueError(f"unknown measurement key {key!r}") from exc
+    return parity
