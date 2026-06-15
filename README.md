@@ -566,7 +566,81 @@ L(\tau)
 
 对每个 data-noise location 和 measurement-noise location 分别估计 `S_l`。如果某一轮 measurement error 或某个 data qubit error 被人为提高，其对应位置应在 `H_l` 排序中显著上升。
 
-## 10. 验证标准
+## 10. Stim 子集导入
+
+为了和 Stim 工作流衔接，项目提供 `.stim` 文本子集导入器。导入器输出：
+
+```text
+StimImportResult(
+    circuit,
+    detectors,
+    observables,
+    measurement_keys,
+)
+```
+
+其中：
+
+- `circuit` 是本项目的前向 `Circuit`。
+- `detectors` 是结构化 `Detector` 声明。
+- `observables` 是结构化 `LogicalObservable` 声明。
+- `measurement_keys` 是 Stim measurement record 到内部 key 的顺序映射。
+
+支持的 Stim 指令子集：
+
+```text
+H, S, S_DAG, SQRT_Z_DAG
+X, Y, Z
+CX, CNOT, CZ, SWAP
+R, RX, RY
+M, MX, MY
+MPP
+X_ERROR, Y_ERROR, Z_ERROR
+DEPOLARIZE1, DEPOLARIZE2
+PAULI_CHANNEL_1, PAULI_CHANNEL_2
+DETECTOR
+OBSERVABLE_INCLUDE
+TICK, QUBIT_COORDS, SHIFT_COORDS  # accepted as metadata/no-op subset
+```
+
+measurement record 引用支持 `rec[-k]`。导入器将其解析为内部 measurement key：
+
+```text
+M 0
+M 1
+DETECTOR rec[-1] rec[-2]
+```
+
+对应：
+
+```text
+Detector(measurement_keys=("m1", "m0"))
+```
+
+噪声指令映射为带唯一 id 的 `NoiseLocation`：
+
+```text
+X_ERROR(p) q          -> BernoulliPauliNoise("X")
+DEPOLARIZE1(p) q      -> SingleQubitDepolarizing()
+DEPOLARIZE2(p) a b    -> TwoQubitDepolarizing()
+PAULI_CHANNEL_1(...)  -> PauliChannel(...)
+M(p) q                -> MeasurementBitFlip() attached to measurement
+```
+
+导入后的电路可以直接用于 trajectory 模拟、batch sampler 或 DEM 生成：
+
+```text
+imported = parse_stim_circuit(stim_text)
+dem = DetectorErrorModelGenerator(
+    imported.circuit,
+    detectors=imported.detectors,
+    observables=imported.observables,
+).generate()
+```
+
+当前不支持 `REPEAT` block、复杂 target modifier、坐标平移语义的完整累积、非整数 qubit target、复杂 feedback target、`CORRELATED_ERROR` / `ELSE_CORRELATED_ERROR` 等 Stim 高级语义。遇到这些语法会抛出 `StimImportError`，避免静默生成错误电路。
+
+## 11. 验证标准
 
 实现应满足以下校验：
 
@@ -583,7 +657,7 @@ L(\tau)
 - 对称纠错电路中，几何等价的噪声位置应在统计误差内给出相近 hotspot score。
 - 人为提高某个时空位置的噪声率后，该位置或相邻 detector 区域应在 top-k hotspot 中出现。
 
-## 11. 当前算法边界
+## 12. 当前算法边界
 
 当前模型限制在 stabilizer-compatible stochastic noise：
 
@@ -596,5 +670,6 @@ L(\tau)
 - Idle / reset / gate-local 错误：只要能表示为 stabilizer-compatible stochastic Pauli channel，就可以作为带 score 的噪声位置。
 - 高性能 batch sampler：支持理想测量确定的 QEC 快速路径；遇到理想测量随机并导致 tableau 分支时，需要使用逐 shot 通用模拟器。
 - Detector error model：支持结构化 detector / logical observable 声明，并通过单错误传播生成 Stim-like `error(p) D... L...` edge；当前不支持需要随机 tableau 分支的 DEM 构造。
+- Stim import：支持常见 Clifford、reset、measurement、Pauli/depolarizing noise、`DETECTOR rec[-k]` 和 `OBSERVABLE_INCLUDE(k) rec[-k]` 子集；不支持 `REPEAT` 和 Stim 完整语义。
 
 非 Clifford 门、非 Pauli 噪声、amplitude damping 等非 stabilizer-preserving channel 不直接进入初版算法；需要先做 Pauli twirling、离散化近似，或替换为可由 stabilizer trajectory 采样的等效噪声模型。

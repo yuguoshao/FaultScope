@@ -89,6 +89,7 @@ H_l = |S_l|
 - measurement bit-flip noise
 - bit-packed batch sampler for deterministic-syndrome QEC fast paths
 - detector error model generation by single-error propagation
+- Stim text subset import into `Circuit`, `Detector`, and `LogicalObservable`
 - repetition-code reference decoder and experiment builder
 
 非 Pauli、非 Clifford 噪声不直接进入 stabilizer simulator；初版应先做
@@ -132,3 +133,17 @@ error(p) D0 D3 L0
 该 DEM 层不改变热点估计公式；它提供从 location-level hotspot 到 detector-graph
 edge 的投影方式。当前 DEM 生成也要求理想/单错误测量确定，不处理随机 tableau
 分支。
+
+## Stim import subset
+
+`parse_stim_circuit` / `load_stim_file` 支持常见 `.stim` 文本子集导入。导入结果包含：
+
+- `circuit`: 本项目的前向 `Circuit`
+- `detectors`: 从 `DETECTOR rec[-k] ...` 生成的结构化 detector parity
+- `observables`: 从 `OBSERVABLE_INCLUDE(id) rec[-k] ...` 生成的 logical observable parity
+- `measurement_keys`: Stim measurement record 到内部 measurement key 的顺序映射
+
+当前支持 Clifford gate、reset、measurement、MPP、Pauli/depolarizing noise、
+Pauli channel noise、`DETECTOR` 和 `OBSERVABLE_INCLUDE` 的常见形式。导入器不展开
+`REPEAT` block，也不尝试兼容 Stim 的完整 target/feedback/correlated-error 语义；
+遇到未支持语法会抛出 `StimImportError`。

@@ -22,6 +22,7 @@ from npsim.noise import (
     TwoQubitDepolarizing,
 )
 from npsim.simulator import ForwardNoiseAwareSimulator, SimulationResult, Trajectory
+from npsim.stim_import import StimImportError, StimImportResult, load_stim_file, parse_stim_circuit
 
 __all__ = [
     "BernoulliPauliNoise",
@@ -40,8 +41,12 @@ __all__ = [
     "PauliChannel",
     "SimulationResult",
     "SingleQubitDepolarizing",
+    "StimImportError",
+    "StimImportResult",
     "Trajectory",
     "TwoQubitDepolarizing",
     "UnsupportedBatchCircuitError",
     "UnsupportedDemCircuitError",
+    "load_stim_file",
+    "parse_stim_circuit",
 ]

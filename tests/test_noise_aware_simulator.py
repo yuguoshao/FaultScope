@@ -13,6 +13,7 @@ from npsim.noise import BernoulliPauliNoise, PauliChannel
 from npsim.repetition import make_repetition_code_experiment
 from npsim.simulator import ForwardNoiseAwareSimulator
 from npsim.stabilizer import StabilizerState
+from npsim.stim_import import StimImportError, parse_stim_circuit
 
 
 class StabilizerStateTests(unittest.TestCase):
@@ -331,6 +332,64 @@ class DetectorErrorModelTests(unittest.TestCase):
                 circuit,
                 detectors=(Detector(id=0, measurement_keys=("m",)),),
             ).generate()
+
+
+class StimImportTests(unittest.TestCase):
+    def test_imports_stim_subset_and_generates_dem(self) -> None:
+        imported = parse_stim_circuit(
+            """
+            R 0 1 2
+            X_ERROR(0.1) 0
+            CX 0 1 2 1
+            M(0.01) 1
+            DETECTOR(0.5, 0) rec[-1]
+            OBSERVABLE_INCLUDE(0) rec[-1]
+            """
+        )
+
+        self.assertEqual(imported.circuit.n_qubits, 3)
+        self.assertEqual(imported.measurement_keys, ("m0",))
+        self.assertEqual(len(imported.detectors), 1)
+        self.assertEqual(imported.detectors[0].measurement_keys, ("m0",))
+        self.assertEqual(imported.detectors[0].coords, (0.5, 0.0))
+        self.assertEqual(len(imported.observables), 1)
+        self.assertEqual(imported.observables[0].measurement_keys, ("m0",))
+
+        locations = imported.circuit.noise_locations()
+        self.assertEqual(len(locations), 2)
+        dem = DetectorErrorModelGenerator(
+            imported.circuit,
+            detectors=imported.detectors,
+            observables=imported.observables,
+        ).generate()
+        dem_text = dem.to_dem_text()
+        self.assertIn("detector(0.5, 0) D0", dem_text)
+        self.assertIn("D0 L0", dem_text)
+
+    def test_imports_pauli_channels_and_mpp(self) -> None:
+        imported = parse_stim_circuit(
+            """
+            R 0 1
+            PAULI_CHANNEL_1(0.01, 0.02, 0.03) 0
+            PAULI_CHANNEL_2(0.001,0,0,0,0,0,0,0,0,0,0,0,0,0,0.002) 0 1
+            MPP X0*X1
+            DETECTOR rec[-1]
+            """
+        )
+        self.assertEqual(imported.circuit.n_qubits, 2)
+        self.assertEqual(imported.measurement_keys, ("m0",))
+        self.assertEqual(len(imported.circuit.noise_locations()), 2)
+        self.assertEqual(imported.detectors[0].measurement_keys, ("m0",))
+
+    def test_rejects_repeat_blocks(self) -> None:
+        with self.assertRaises(StimImportError):
+            parse_stim_circuit(
+                """
+                REPEAT 3 {
+                    M 0
+                }
+                """
+            )
 
 
 if __name__ == "__main__":
