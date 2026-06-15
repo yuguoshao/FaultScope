@@ -801,6 +801,69 @@ class HotspotVisualizationTests(unittest.TestCase):
         self.assertIn("data_2_2", result.hotspots)
         self.assertIn("x_check_2_2", result.hotspots)
 
+    def test_d5_rotated_surface_code_integration_generates_spatial_hotspot_map(
+        self,
+    ) -> None:
+        os.environ.setdefault(
+            "MPLCONFIGDIR",
+            os.path.join(tempfile.gettempdir(), "npsim-matplotlib-cache"),
+        )
+        try:
+            import numpy as np
+            import pymatching
+            from scipy import sparse
+        except ImportError as exc:
+            self.skipTest(f"optional PyMatching dependencies are not installed: {exc}")
+
+        distance = 5
+        rounds = 3
+        z_checks = self._rotated_surface_code_z_checks(distance)
+        circuit = self._make_rotated_surface_code_bitflip_circuit(
+            distance=distance,
+            rounds=rounds,
+            z_checks=z_checks,
+            hot_data=(2, 2),
+            hot_check_id="z_check_2_2",
+        )
+        matching = self._make_surface_code_matching(
+            distance=distance,
+            z_checks=z_checks,
+            np=np,
+            pymatching=pymatching,
+            sparse=sparse,
+        )
+        loss_mask_fn = self._make_surface_code_loss_mask_fn(
+            distance=distance,
+            rounds=rounds,
+            z_checks=z_checks,
+            matching=matching,
+        )
+        result = BatchForwardNoiseAwareSimulator(circuit).estimate(
+            shots=7_000,
+            seed=33,
+            loss_mask_fn=loss_mask_fn,
+        )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = os.path.join(temp_dir, "d5_surface_code_integration_hotspots.png")
+            try:
+                written = write_rotated_surface_code_spatial_hotspot_map(
+                    result,
+                    path,
+                    distance=distance,
+                    highlighted_data=(2, 2),
+                    highlighted_check_ids=("meas_r2_z_check_2_2",),
+                )
+            except VisualizationUnavailableError as exc:
+                self.skipTest(str(exc))
+            self.assertEqual(str(written), path)
+            self._assert_png_nonblank(path)
+
+        self.assertGreater(result.logical_failure_rate, 0.0)
+        self.assertIn("data_r1_2_2", result.hotspots)
+        self.assertIn("meas_r2_z_check_2_2", result.hotspots)
+        self.assertGreater(max(result.hotspots.values()), 0.0)
+
     def _make_synthetic_rotated_surface_code_result(
         self,
         distance: int,
@@ -885,6 +948,174 @@ class HotspotVisualizationTests(unittest.TestCase):
             losses=[],
         )
 
+    def _rotated_surface_code_z_checks(
+        self,
+        distance: int,
+    ) -> list[dict[str, object]]:
+        checks: list[dict[str, object]] = []
+        for row in range(distance - 1):
+            for col in range(distance - 1):
+                if (row + col) % 2:
+                    continue
+                checks.append(
+                    {
+                        "id": f"z_check_{row}_{col}",
+                        "data": (
+                            (row, col),
+                            (row + 1, col),
+                            (row, col + 1),
+                            (row + 1, col + 1),
+                        ),
+                        "x": col + 0.5,
+                        "y": row + 0.5,
+                    }
+                )
+        checks.extend(
+            (
+                {
+                    "id": "z_check_top_right",
+                    "data": ((0, distance - 2), (0, distance - 1)),
+                    "x": distance - 1.5,
+                    "y": -0.35,
+                },
+                {
+                    "id": "z_check_bottom_left",
+                    "data": ((distance - 1, 0), (distance - 1, 1)),
+                    "x": 0.5,
+                    "y": distance - 0.65,
+                },
+            )
+        )
+        return checks
+
+    def _make_rotated_surface_code_bitflip_circuit(
+        self,
+        *,
+        distance: int,
+        rounds: int,
+        z_checks: list[dict[str, object]],
+        hot_data: tuple[int, int],
+        hot_check_id: str,
+    ) -> Circuit:
+        operations = []
+        for round_idx in range(rounds):
+            for row in range(distance):
+                for col in range(distance):
+                    location = NoiseLocation(
+                        id=f"data_r{round_idx}_{row}_{col}",
+                        model=BernoulliPauliNoise("X"),
+                        rate=0.13 if (row, col) == hot_data else 0.035,
+                        qubits=(_surface_data_index(distance, row, col),),
+                        tags={
+                            "layout": "rotated_surface_code",
+                            "role": "data",
+                            "row": row,
+                            "col": col,
+                            "round": round_idx,
+                            "operation": "data_noise",
+                        },
+                    )
+                    operations.append(Operation.noise(location))
+
+            for check in z_checks:
+                check_id = str(check["id"])
+                data = tuple(check["data"])
+                qubits = tuple(
+                    _surface_data_index(distance, row, col)
+                    for row, col in data
+                )
+                location = NoiseLocation(
+                    id=f"meas_r{round_idx}_{check_id}",
+                    model=MeasurementBitFlip(),
+                    rate=0.11 if check_id == hot_check_id else 0.02,
+                    qubits=qubits[:1],
+                    tags={
+                        "layout": "rotated_surface_code",
+                        "role": "z_check",
+                        "x": float(check["x"]),
+                        "y": float(check["y"]),
+                        "round": round_idx,
+                        "check": check_id,
+                        "operation": "measurement_noise",
+                    },
+                )
+                operations.append(
+                    Operation.measure_pauli(
+                        qubits,
+                        "Z" * len(qubits),
+                        key=f"r{round_idx}_{check_id}",
+                        noise=location,
+                    )
+                )
+        return Circuit(n_qubits=distance * distance, operations=operations)
+
+    def _make_surface_code_matching(
+        self,
+        *,
+        distance: int,
+        z_checks: list[dict[str, object]],
+        np,
+        pymatching,
+        sparse,
+    ):
+        rows = []
+        cols = []
+        data = []
+        for check_index, check in enumerate(z_checks):
+            for row, col in check["data"]:
+                rows.append(check_index)
+                cols.append(_surface_data_index(distance, row, col))
+                data.append(1)
+        h = sparse.csc_matrix(
+            (data, (rows, cols)),
+            shape=(len(z_checks), distance * distance),
+            dtype=np.uint8,
+        )
+        faults_matrix = sparse.eye(distance * distance, format="csc", dtype=np.uint8)
+        return pymatching.Matching.from_check_matrix(
+            h,
+            faults_matrix=faults_matrix,
+            weights=np.ones(distance * distance),
+            merge_strategy="independent",
+            use_virtual_boundary_node=True,
+        )
+
+    def _make_surface_code_loss_mask_fn(
+        self,
+        *,
+        distance: int,
+        rounds: int,
+        z_checks: list[dict[str, object]],
+        matching,
+    ):
+        logical_path = tuple(
+            _surface_data_index(distance, row, 0)
+            for row in range(distance)
+        )
+
+        def loss_mask_fn(batch):
+            final_round = rounds - 1
+            syndromes = [
+                [
+                    batch.measurement_bit(f"r{final_round}_{check['id']}", shot)
+                    for check in z_checks
+                ]
+                for shot in range(batch.shots)
+            ]
+            predictions = matching.decode_batch(syndromes)
+            if hasattr(predictions, "tolist"):
+                predictions = predictions.tolist()
+            loss_mask = 0
+            for shot, correction in enumerate(predictions):
+                residual_logical = 0
+                for qubit in logical_path:
+                    residual_logical ^= batch.x_bit(qubit, shot) ^ int(correction[qubit])
+                if residual_logical:
+                    loss_mask |= 1 << shot
+            return loss_mask
+
+        return loss_mask_fn
+
     def _add_cx_noise_to_repetition_circuit(
         self,
         circuit: Circuit,
@@ -937,6 +1168,10 @@ class HotspotVisualizationTests(unittest.TestCase):
             colors = image.convert("RGB").resize((32, 32)).getcolors(maxcolors=1024)
         self.assertIsNotNone(colors)
         self.assertGreater(len(colors), 8)
+
+
+def _surface_data_index(distance: int, row: int, col: int) -> int:
+    return row * distance + col
 
 
 class StimImportTests(unittest.TestCase):
