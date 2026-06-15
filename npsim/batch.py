@@ -17,7 +17,7 @@ from npsim.noise import (
 )
 from npsim.pauli import pauli_to_xz, sparse_pauli_to_xz
 from npsim.simulator import SimulationResult
-from npsim.stabilizer import StabilizerState
+from npsim.stabilizer import BatchStabilizerState
 
 
 class UnsupportedBatchCircuitError(ValueError):
@@ -66,7 +66,7 @@ class BatchTrajectory:
 
 @dataclass
 class _BatchState:
-    ideal_state: StabilizerState
+    ideal_state: BatchStabilizerState
     x_frame: list[int]
     z_frame: list[int]
     measurements: dict[str, int]
@@ -76,13 +76,12 @@ class _BatchState:
 
 
 class BatchForwardNoiseAwareSimulator:
-    """Fast bit-packed sampler for deterministic-stabilizer QEC circuits.
+    """Fast bit-packed sampler for stabilizer-compatible QEC circuits.
 
     This engine keeps one ideal stabilizer tableau and tracks all noisy shots in
-    bit-packed Pauli frames. It is appropriate for standard syndrome-extraction
-    circuits whose ideal measurements are deterministic. Circuits requiring
-    measurement-dependent per-shot tableau branching should use
-    ``ForwardNoiseAwareSimulator`` instead.
+    bit-packed stabilizer signs and Pauli frames. It supports random Pauli
+    measurements as long as all shots share the same Clifford/stabilizer support
+    evolution.
     """
 
     def __init__(self, circuit: Circuit):
@@ -155,7 +154,11 @@ class BatchForwardNoiseAwareSimulator:
             raise ValueError("shots must be positive")
         all_mask = (1 << shots) - 1
         state = _BatchState(
-            ideal_state=StabilizerState.zero(self.circuit.n_qubits),
+            ideal_state=BatchStabilizerState.zero(
+                self.circuit.n_qubits,
+                shots,
+                all_mask,
+            ),
             x_frame=[0] * self.circuit.n_qubits,
             z_frame=[0] * self.circuit.n_qubits,
             measurements={},
@@ -251,7 +254,7 @@ class BatchForwardNoiseAwareSimulator:
             self._measure_pauli(operation, state, shots, all_mask, rng)
             return
         if kind == "reset":
-            self._reset(operation, state, shots, all_mask, rng)
+            self._reset(operation, state, all_mask, rng)
             return
         if kind == "detector":
             detector_id = operation.metadata.get("detector_id")
@@ -301,13 +304,7 @@ class BatchForwardNoiseAwareSimulator:
     ) -> None:
         basis = operation.basis.upper()
         x, z = sparse_pauli_to_xz(self.circuit.n_qubits, operation.qubits, basis)
-        bit_mask = self._deterministic_measurement_mask(
-            operation,
-            state,
-            x,
-            z,
-            all_mask,
-        )
+        bit_mask = state.ideal_state.measure_pauli_mask(x, z, rng)
         bit_mask ^= _frame_measurement_flip(state, operation.qubits, basis)
         if operation.noise_location is not None:
             bit_mask ^= self._sample_measurement_noise(operation.noise_location, state, shots, all_mask, rng)
@@ -325,13 +322,7 @@ class BatchForwardNoiseAwareSimulator:
         if operation.pauli is None:
             raise ValueError("measure_pauli operation requires a Pauli string")
         x, z = sparse_pauli_to_xz(self.circuit.n_qubits, operation.qubits, operation.pauli)
-        bit_mask = self._deterministic_measurement_mask(
-            operation,
-            state,
-            x,
-            z,
-            all_mask,
-        )
+        bit_mask = state.ideal_state.measure_pauli_mask(x, z, rng)
         bit_mask ^= _frame_measurement_flip(state, operation.qubits, operation.pauli)
         if operation.noise_location is not None:
             bit_mask ^= self._sample_measurement_noise(operation.noise_location, state, shots, all_mask, rng)
@@ -342,33 +333,40 @@ class BatchForwardNoiseAwareSimulator:
         self,
         operation: Operation,
         state: _BatchState,
-        shots: int,
         all_mask: int,
         rng: random.Random,
     ) -> None:
         (qubit,) = operation.qubits
         basis = operation.basis.upper()
         x, z = sparse_pauli_to_xz(self.circuit.n_qubits, operation.qubits, basis)
+        outcome_mask = state.ideal_state.measure_pauli_mask(x, z, rng)
         if operation.key is not None:
-            if state.ideal_state.is_deterministic_pauli(x, z):
-                bit_mask = (
-                    all_mask
-                    if state.ideal_state.deterministic_measurement_bit(x, z)
-                    else 0
-                )
-            else:
-                bit_mask = _bernoulli_mask(rng, shots, 0.5)
-            bit_mask ^= _frame_measurement_flip(state, operation.qubits, basis)
+            bit_mask = outcome_mask ^ _frame_measurement_flip(
+                state,
+                operation.qubits,
+                basis,
+            )
             self._record_measurement(state.measurements, operation.key, bit_mask & all_mask)
 
         if basis == "Z":
-            state.ideal_state.reset_z(qubit, rng)
+            correction = "X"
         elif basis == "X":
-            state.ideal_state.reset_x(qubit, rng)
+            correction = "Z"
         elif basis == "Y":
-            state.ideal_state.reset_y(qubit, rng)
+            correction = "X"
         else:
             raise ValueError(f"unsupported reset basis {operation.basis!r}")
+        if outcome_mask:
+            x_correction, z_correction = sparse_pauli_to_xz(
+                self.circuit.n_qubits,
+                operation.qubits,
+                correction,
+            )
+            state.ideal_state.apply_pauli_string_masked(
+                x_correction,
+                z_correction,
+                outcome_mask,
+            )
         state.x_frame[qubit] = 0
         state.z_frame[qubit] = 0
 
@@ -387,22 +385,6 @@ class BatchForwardNoiseAwareSimulator:
         flip_mask = _bernoulli_mask(rng, shots, location.rate) & all_mask
         state.event_masks[location.id] ^= flip_mask
         return flip_mask
-
-    def _deterministic_measurement_mask(
-        self,
-        operation: Operation,
-        state: _BatchState,
-        x: list[int],
-        z: list[int],
-        all_mask: int,
-    ) -> int:
-        if not state.ideal_state.is_deterministic_pauli(x, z):
-            raise UnsupportedBatchCircuitError(
-                f"measurement {operation.key or operation.kind!r} is random in "
-                "the ideal circuit; use ForwardNoiseAwareSimulator"
-            )
-        bit = state.ideal_state.deterministic_measurement_bit(x, z)
-        return all_mask if bit else 0
 
     @staticmethod
     def _record_measurement(measurements: dict[str, int], key: str, bit_mask: int) -> None:

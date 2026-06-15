@@ -3,8 +3,8 @@ import tempfile
 import unittest
 
 from npsim.circuit import Circuit, NoiseLocation, Operation
+from npsim.batch import BatchForwardNoiseAwareSimulator
 from npsim.noise import BernoulliPauliNoise, MeasurementBitFlip
-from npsim.simulator import ForwardNoiseAwareSimulator
 from npsim.visualization import (
     VisualizationUnavailableError,
     write_rotated_surface_code_spatial_hotspot_map,
@@ -46,12 +46,10 @@ class RotatedSurfaceCodeXZIntegrationTests(unittest.TestCase):
             rounds=rounds,
         )
 
-        result = ForwardNoiseAwareSimulator(circuit).estimate(
-            shots=220,
+        result = BatchForwardNoiseAwareSimulator(circuit).estimate(
+            shots=1_000,
             seed=41,
-            detector_fn=decoder.detector_record,
-            decoder=decoder,
-            loss_fn=decoder.loss,
+            loss_mask_fn=decoder.loss_mask,
         )
 
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -147,6 +145,46 @@ class _SurfaceCodeXZDecoder:
             qubit = _data_index(self.distance, 0, col)
             z_logical ^= trajectory.frame.z[qubit] ^ correction["z_correction"][qubit]
         return float(bool(x_logical or z_logical))
+
+    def loss_mask(self, batch) -> int:
+        x_syndromes = [
+            [
+                batch.measurement_bit(f"r{self.rounds}_{check['id']}", shot)
+                ^ batch.measurement_bit(f"r0_{check['id']}", shot)
+                for check in self.x_checks
+            ]
+            for shot in range(batch.shots)
+        ]
+        z_syndromes = [
+            [
+                batch.measurement_bit(f"r{self.rounds}_{check['id']}", shot)
+                ^ batch.measurement_bit(f"r0_{check['id']}", shot)
+                for check in self.z_checks
+            ]
+            for shot in range(batch.shots)
+        ]
+        z_corrections = self.matching_x.decode_batch(x_syndromes)
+        x_corrections = self.matching_z.decode_batch(z_syndromes)
+        if hasattr(z_corrections, "tolist"):
+            z_corrections = z_corrections.tolist()
+        if hasattr(x_corrections, "tolist"):
+            x_corrections = x_corrections.tolist()
+
+        loss_mask = 0
+        for shot, (x_correction, z_correction) in enumerate(
+            zip(x_corrections, z_corrections)
+        ):
+            x_logical = 0
+            z_logical = 0
+            for row in range(self.distance):
+                qubit = _data_index(self.distance, row, 0)
+                x_logical ^= batch.x_bit(qubit, shot) ^ int(x_correction[qubit])
+            for col in range(self.distance):
+                qubit = _data_index(self.distance, 0, col)
+                z_logical ^= batch.z_bit(qubit, shot) ^ int(z_correction[qubit])
+            if x_logical or z_logical:
+                loss_mask |= 1 << shot
+        return loss_mask
 
 
 def _make_full_xz_memory_circuit(

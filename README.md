@@ -309,13 +309,14 @@ s_l(\tau_k).
 s_l(\tau_k).
 ```
 
-区别只在执行方式：逐 shot 引擎为每条 trajectory 创建独立 tableau、Pauli frame 和 measurement record；batch 引擎把许多 shot 的 Pauli frame 压进整数 bit mask 中，并一次性执行相同的电路操作。
+区别只在执行方式：逐 shot 引擎为每条 trajectory 创建独立 tableau、Pauli frame 和 measurement record；batch 引擎共享 stabilizer generator 的 Pauli 支撑，把 generator sign、Pauli frame、measurement record 和 noise event 压进整数 bit mask 中，并一次性执行相同的电路操作。
 
 对 `N` 个 shot，batch sampler 用一个整数的第 `k` 位表示第 `k` 条 trajectory：
 
 ```text
 X_frame[q]: bit k = shot k has X component on qubit q.
 Z_frame[q]: bit k = shot k has Z component on qubit q.
+Sign[i]:    bit k = shot k has negative sign on stabilizer generator i.
 M[key]:     bit k = shot k measured 1 for measurement key.
 E[l]:       bit k = shot k sampled an error event at noise location l.
 ```
@@ -333,19 +334,19 @@ SWAP(a,b):  swap X_frame[a], X_frame[b]
             swap Z_frame[a], Z_frame[b]
 ```
 
-测量时，batch sampler 维护一个无噪声理想 tableau `\mathcal S_t^{ideal}`，并用 Pauli frame 决定每个 shot 的翻转：
+测量时，batch sampler 维护一个无噪声理想 tableau `\mathcal S_t^{ideal}`。如果被测 Pauli 在当前 stabilizer span 中，理想测量 mask 由已打包的 generator signs 决定；如果它与某些 generator 反对易，则采样一个 50/50 outcome mask，并用该 mask 更新被替换 generator 的 sign。随后用 Pauli frame 决定每个 shot 的翻转：
 
 ```math
 m_k
 =
-m^{ideal}
+m^{ideal}_k
 \oplus
 \langle F_k, P_{meas}\rangle
 \oplus
 f_k,
 ```
 
-其中 `f_k` 是 measurement bit-flip noise。只有当理想测量在单个理想 tableau 上是确定的时，batch sampler 才适用；如果理想测量本身会产生不同的 tableau 分支，应使用逐 shot 的通用 `ForwardNoiseAwareSimulator`。
+其中 `f_k` 是 measurement bit-flip noise。该 batch sampler 支持随机 Pauli measurement，只要所有 shot 共享同一个 Clifford/stabilizer 支撑演化；也就是说，不支持基于单个 shot 测量结果选择不同后续电路的 adaptive branching。
 
 **Algorithm 3: Bit-Packed Batch Hotspot Estimation**
 
@@ -366,7 +367,8 @@ f_k,
 
 ```text
 1.  Initialize ideal stabilizer tableau S_ideal <- S_0.
-2.  Initialize bit-packed frames:
+2.  Initialize bit-packed stabilizer signs and frames:
+        Sign[i] <- 0 for all stabilizer generators
         X_frame[q] <- 0 for all q
         Z_frame[q] <- 0 for all q
 3.  Initialize measurement masks M and event masks E.
@@ -382,25 +384,26 @@ f_k,
 10.         Apply the masked Pauli event to X_frame / Z_frame.
 
 11.     If O_t is measurement of Pauli P:
-12.         Compute deterministic ideal bit m_ideal from S_ideal.
-13.         Compute frame flip mask using symplectic product <F, P>.
-14.         Apply measurement-noise flip mask if present.
-15.         Store M[key].
+12.         If P is deterministic, compute ideal mask from stabilizer span signs.
+13.         Else sample a random ideal outcome mask and update S_ideal signs.
+14.         Compute frame flip mask using symplectic product <F, P>.
+15.         Apply measurement-noise flip mask if present.
+16.         Store M[key].
 
-16. Compute loss mask Loss <- B(M, X_frame, Z_frame).
-17. J_hat <- popcount(Loss) / N.
+17. Compute loss mask Loss <- B(M, X_frame, Z_frame).
+18. J_hat <- popcount(Loss) / N.
 
-18. For each noise location l:
-19.     Use E[l] and Loss to count:
+19. For each noise location l:
+20.     Use E[l] and Loss to count:
             error-and-loss shots,
             error-and-no-loss shots,
             no-error-and-loss shots,
             no-error-and-no-loss shots.
-20.     Compute S_hat[l] from the same score-function formula.
-21.     H_hat[l] <- abs(S_hat[l]).
+21.     Compute S_hat[l] from the same score-function formula.
+22.     H_hat[l] <- abs(S_hat[l]).
 ```
 
-这个 batch sampler 当前是快速路径，而不是通用 tableau 分支引擎。它适合 repetition code、surface-code syndrome extraction 这类理想 syndrome 测量确定、差异主要由 Pauli frame 表示的 QEC 电路。
+这个 batch sampler 当前是快速路径，而不是通用 adaptive tableau 分支引擎。它适合 repetition code、surface-code syndrome extraction 这类所有 shot 共享同一 stabilizer 支撑演化、差异由 generator sign mask 和 Pauli frame mask 表示的 QEC 电路。
 
 ## 7. Stabilizer 更新规则
 
@@ -815,7 +818,7 @@ dem = DetectorErrorModelGenerator(
 - Pauli noise：固定 Pauli 事件、通用 Pauli mixture、single-qubit depolarizing、two-qubit depolarizing。
 - Classical noise：measurement bit-flip noise。
 - Idle / reset / gate-local 错误：只要能表示为 stabilizer-compatible stochastic Pauli channel，就可以作为带 score 的噪声位置。
-- 高性能 batch sampler：支持理想测量确定的 QEC 快速路径；遇到理想测量随机并导致 tableau 分支时，需要使用逐 shot 通用模拟器。
+- 高性能 batch sampler：支持确定和随机 Pauli measurement 的 bit-packed 快速路径；遇到按 shot 测量结果选择不同后续电路的 adaptive branching 时，需要使用逐 shot 通用模拟器。
 - Detector error model：支持结构化 detector / logical observable 声明，并通过单错误传播生成 Stim-like `error(p) D... L...` edge；当前不支持需要随机 tableau 分支的 DEM 构造。
 - PyMatching batch decoder：可从 graphlike DEM 构造 matching decoder，并批量解码 detector record / bit-packed detector masks；需要可选依赖 `pymatching`、`numpy`、`scipy`，且不接受 hyperedge 或 syndrome 不可见的纯 logical edge。
 - Stim import：支持常见 Clifford、reset、measurement、Pauli/depolarizing noise、`DETECTOR rec[-k]` 和 `OBSERVABLE_INCLUDE(k) rec[-k]` 子集；不支持 `REPEAT` 和 Stim 完整语义。

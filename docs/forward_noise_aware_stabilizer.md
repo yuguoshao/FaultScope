@@ -87,7 +87,7 @@ H_l = |S_l|
 - single-qubit depolarizing noise
 - two-qubit depolarizing noise
 - measurement bit-flip noise
-- bit-packed batch sampler for deterministic-syndrome QEC fast paths
+- bit-packed batch sampler for stabilizer-compatible QEC fast paths
 - detector error model generation by single-error propagation
 - optional PyMatching batch decoder interface from graphlike DEMs
 - Stim text subset import into `Circuit`, `Detector`, and `LogicalObservable`
@@ -98,17 +98,21 @@ Pauli twirling 或替换为 stabilizer-compatible stochastic channel。
 
 ## Batch sampler 快速路径
 
-`BatchForwardNoiseAwareSimulator` 使用一个理想 stabilizer tableau 加上 bit-packed
-Pauli frames 执行多条 trajectory。第 `k` 个 shot 存在整数 mask 的第 `k` 位中：
+`BatchForwardNoiseAwareSimulator` 使用一个共享 Pauli 支撑的理想 stabilizer tableau，
+并把 stabilizer generator sign、Pauli frame、measurement record 和 noise event
+都压进 bit mask 中执行多条 trajectory。第 `k` 个 shot 存在整数 mask 的第 `k` 位中：
 
+- `Sign[i]`: stabilizer generator `i` 在 shot `k` 中是否带负号。
 - `X_frame[q]`: qubit `q` 上是否有 X 分量。
 - `Z_frame[q]`: qubit `q` 上是否有 Z 分量。
 - `M[key]`: measurement key 的测量结果。
 - `E[l]`: 噪声位置 `l` 是否采样到 error / flip event。
 
 它使用与逐 shot 模拟器相同的 score-function estimator，只是用 `popcount`
-在 bit mask 上一次性归约 loss 和 score。该快速路径适合理想 syndrome 测量确定的
-QEC 电路；如果理想测量本身会产生不同 tableau 分支，应使用逐 shot 引擎。
+在 bit mask 上一次性归约 loss 和 score。该快速路径支持确定和随机 Pauli
+measurement；随机测量会采样一个 50/50 outcome mask，并更新被替换 stabilizer
+generator 的 sign mask。它仍然不是 adaptive branching 引擎；如果后续电路要按单个
+shot 的测量结果选择不同操作，应使用逐 shot 引擎。
 
 ## Detector error model
 
@@ -146,8 +150,8 @@ graph = dem.project_sensitivities_to_detector_graph(result.sensitivities)
 如果一个 noise location 产生多条 DEM edge，`S_l` 会按 edge 概率占比分到
 edge-level sensitivity。返回值同时包含 edge-level hotspot、按
 `(detectors, observables)` 聚合的 detector-edge hotspot、按 detector node 聚合的
-node hotspot，以及按 logical observable 聚合的 hotspot。当前 DEM 生成也要求理想/单错误
-测量确定，不处理随机 tableau 分支。
+node hotspot，以及按 logical observable 聚合的 hotspot。当前 DEM 生成也要求 detector
+parity 在 reference / 单错误传播中可确定，不处理随机裸测量直接作为 detector 的情况。
 
 ## PyMatching batch decoder
 

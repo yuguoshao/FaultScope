@@ -3,7 +3,7 @@ import random
 import tempfile
 import unittest
 
-from npsim.batch import BatchForwardNoiseAwareSimulator, UnsupportedBatchCircuitError
+from npsim.batch import BatchForwardNoiseAwareSimulator
 from npsim.circuit import Circuit, NoiseLocation, Operation
 from npsim.dem import (
     Detector,
@@ -303,7 +303,7 @@ class BatchNoiseAwareSimulatorTests(unittest.TestCase):
         self.assertIn("idle", result.by_gate)
         self.assertIn("measure", result.by_gate)
 
-    def test_batch_rejects_random_ideal_measurements(self) -> None:
+    def test_batch_samples_random_ideal_measurements(self) -> None:
         circuit = Circuit(
             n_qubits=1,
             operations=[
@@ -311,12 +311,70 @@ class BatchNoiseAwareSimulatorTests(unittest.TestCase):
                 Operation.measure(0, key="m", basis="Z"),
             ],
         )
-        with self.assertRaises(UnsupportedBatchCircuitError):
-            BatchForwardNoiseAwareSimulator(circuit).estimate(
-                shots=100,
-                seed=15,
-                loss_mask_fn=lambda batch: batch.measurements["m"],
-            )
+        batch = BatchForwardNoiseAwareSimulator(circuit).run_batch(
+            shots=128,
+            rng=random.Random(15),
+        )
+        self.assertGreater(batch.measurements["m"].bit_count(), 0)
+        self.assertLess(batch.measurements["m"].bit_count(), batch.shots)
+
+    def test_batch_preserves_random_measurement_correlations(self) -> None:
+        circuit = Circuit(
+            n_qubits=1,
+            operations=[
+                Operation.h(0),
+                Operation.measure(0, key="m0", basis="Z"),
+                Operation.measure(0, key="m1", basis="Z"),
+                Operation.detector(("m0", "m1"), detector_id=0),
+            ],
+        )
+        batch = BatchForwardNoiseAwareSimulator(circuit).run_batch(
+            shots=128,
+            rng=random.Random(20),
+        )
+        self.assertEqual(batch.measurements["m0"], batch.measurements["m1"])
+        self.assertEqual(batch.detectors[0], 0)
+
+    def test_batch_random_measurement_detector_responds_to_noise(self) -> None:
+        location = NoiseLocation(
+            id="x_between",
+            model=BernoulliPauliNoise("X"),
+            rate=1.0,
+            qubits=(0,),
+        )
+        circuit = Circuit(
+            n_qubits=1,
+            operations=[
+                Operation.h(0),
+                Operation.measure(0, key="m0", basis="Z"),
+                Operation.noise(location),
+                Operation.measure(0, key="m1", basis="Z"),
+                Operation.detector(("m0", "m1"), detector_id=0),
+            ],
+        )
+        batch = BatchForwardNoiseAwareSimulator(circuit).run_batch(
+            shots=64,
+            rng=random.Random(21),
+        )
+        self.assertEqual(batch.detectors[0], batch.all_mask)
+        self.assertEqual(batch.noise_event_masks["x_between"], batch.all_mask)
+
+    def test_batch_random_reset_prepares_requested_state(self) -> None:
+        circuit = Circuit(
+            n_qubits=1,
+            operations=[
+                Operation.h(0),
+                Operation.reset(0, key="r", basis="Z"),
+                Operation.measure(0, key="m", basis="Z"),
+            ],
+        )
+        batch = BatchForwardNoiseAwareSimulator(circuit).run_batch(
+            shots=128,
+            rng=random.Random(22),
+        )
+        self.assertGreater(batch.measurements["r"].bit_count(), 0)
+        self.assertLess(batch.measurements["r"].bit_count(), batch.shots)
+        self.assertEqual(batch.measurements["m"], 0)
 
     def test_batch_detector_and_observable_masks_are_recorded(self) -> None:
         circuit = Circuit(
