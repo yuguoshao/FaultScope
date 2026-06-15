@@ -246,10 +246,25 @@ class ForwardNoiseAwareSimulator:
             state.apply_s(qubit)
             frame.apply_s(qubit)
             return
+        if kind == "s_dag":
+            (qubit,) = operation.qubits
+            state.apply_s_dag(qubit)
+            frame.apply_s_dag(qubit)
+            return
         if kind == "cx":
             control, target = operation.qubits
             state.apply_cx(control, target)
             frame.apply_cx(control, target)
+            return
+        if kind == "cz":
+            left, right = operation.qubits
+            state.apply_cz(left, right)
+            frame.apply_cz(left, right)
+            return
+        if kind == "swap":
+            left, right = operation.qubits
+            state.apply_swap(left, right)
+            frame.apply_swap(left, right)
             return
         if kind == "pauli":
             if operation.pauli is None:
@@ -260,7 +275,6 @@ class ForwardNoiseAwareSimulator:
                 operation.pauli,
             )
             state.apply_pauli_string(x, z)
-            frame.apply_pauli_string(operation.qubits, operation.pauli)
             return
         if kind == "noise":
             if operation.noise is None:
@@ -293,7 +307,15 @@ class ForwardNoiseAwareSimulator:
             return
         if kind == "reset":
             (qubit,) = operation.qubits
-            bit = state.reset_z(qubit, rng)
+            basis = operation.basis.upper()
+            if basis == "Z":
+                bit = state.reset_z(qubit, rng)
+            elif basis == "X":
+                bit = state.reset_x(qubit, rng)
+            elif basis == "Y":
+                bit = state.reset_y(qubit, rng)
+            else:
+                raise ValueError(f"unsupported reset basis {operation.basis!r}")
             frame.reset(qubit)
             if operation.key is not None:
                 self._record_measurement(
@@ -304,7 +326,7 @@ class ForwardNoiseAwareSimulator:
                         bit=bit,
                         raw_bit=bit,
                         qubits=operation.qubits,
-                        basis="reset_z",
+                        basis=f"reset_{basis.lower()}",
                         metadata=operation.metadata,
                     ),
                 )

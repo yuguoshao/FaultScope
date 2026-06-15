@@ -4,6 +4,7 @@ from npsim.circuit import Circuit, NoiseLocation, Operation
 from npsim.noise import (
     BernoulliPauliNoise,
     MeasurementBitFlip,
+    PauliChannel,
     SingleQubitDepolarizing,
     TwoQubitDepolarizing,
 )
@@ -16,6 +17,7 @@ __all__ = [
     "MeasurementBitFlip",
     "NoiseLocation",
     "Operation",
+    "PauliChannel",
     "SimulationResult",
     "SingleQubitDepolarizing",
     "Trajectory",

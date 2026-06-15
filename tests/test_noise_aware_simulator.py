@@ -2,7 +2,7 @@ import random
 import unittest
 
 from npsim.circuit import Circuit, NoiseLocation, Operation
-from npsim.noise import BernoulliPauliNoise
+from npsim.noise import BernoulliPauliNoise, PauliChannel
 from npsim.repetition import make_repetition_code_experiment
 from npsim.simulator import ForwardNoiseAwareSimulator
 from npsim.stabilizer import StabilizerState
@@ -27,8 +27,101 @@ class StabilizerStateTests(unittest.TestCase):
         self.assertEqual(state.measure_pauli([1, 1], [0, 0], rng), 0)
         self.assertEqual(state.measure_pauli([0, 0], [1, 1], rng), 0)
 
+    def test_s_dag_undoes_s(self) -> None:
+        rng = random.Random(3)
+        state = StabilizerState.zero(1)
+        state.apply_h(0)
+        state.apply_s(0)
+        state.apply_s_dag(0)
+        self.assertEqual(state.measure_x(0, rng), 0)
+
+    def test_cz_cluster_stabilizers(self) -> None:
+        rng = random.Random(4)
+        state = StabilizerState.zero(2)
+        state.apply_h(0)
+        state.apply_h(1)
+        state.apply_cz(0, 1)
+        self.assertEqual(state.measure_pauli([1, 0], [0, 1], rng), 0)
+        self.assertEqual(state.measure_pauli([0, 1], [1, 0], rng), 0)
+
+    def test_swap_moves_state(self) -> None:
+        rng = random.Random(5)
+        state = StabilizerState.zero(2)
+        state.apply_pauli(0, "X")
+        state.apply_swap(0, 1)
+        self.assertEqual(state.measure_z(0, rng), 0)
+        self.assertEqual(state.measure_z(1, rng), 1)
+
 
 class NoiseAwareSimulatorTests(unittest.TestCase):
+    def test_ideal_pauli_gate_does_not_create_frame_error(self) -> None:
+        circuit = Circuit(
+            n_qubits=1,
+            operations=[
+                Operation.x(0),
+                Operation.measure(0, key="m", basis="Z"),
+            ],
+        )
+        trajectory = ForwardNoiseAwareSimulator(circuit).run_shot(rng=random.Random(8))
+        self.assertEqual(trajectory.measurement_by_key["m"].bit, 1)
+        self.assertEqual(trajectory.frame.pauli_on((0,)), "I")
+
+    def test_basis_resets_prepare_requested_eigenstates(self) -> None:
+        circuit = Circuit(
+            n_qubits=2,
+            operations=[
+                Operation.x(0),
+                Operation.reset(0, basis="X"),
+                Operation.measure(0, key="mx", basis="X"),
+                Operation.reset(1, basis="Y"),
+                Operation.measure(1, key="my", basis="Y"),
+            ],
+        )
+        trajectory = ForwardNoiseAwareSimulator(circuit).run_shot(rng=random.Random(9))
+        self.assertEqual(trajectory.measurement_by_key["mx"].bit, 0)
+        self.assertEqual(trajectory.measurement_by_key["my"].bit, 0)
+
+    def test_common_clifford_gates_run_through_circuit_api(self) -> None:
+        circuit = Circuit(
+            n_qubits=2,
+            operations=[
+                Operation.h(0),
+                Operation.h(1),
+                Operation.cz(0, 1),
+                Operation.measure_pauli((0, 1), "XZ", key="k0"),
+                Operation.measure_pauli((0, 1), "ZX", key="k1"),
+                Operation.swap(0, 1),
+                Operation.s(0),
+                Operation.s_dag(0),
+            ],
+        )
+        trajectory = ForwardNoiseAwareSimulator(circuit).run_shot(rng=random.Random(10))
+        self.assertEqual(trajectory.measurement_by_key["k0"].bit, 0)
+        self.assertEqual(trajectory.measurement_by_key["k1"].bit, 0)
+
+    def test_pauli_channel_estimates_total_error_rate_gradient(self) -> None:
+        location = NoiseLocation(
+            id="pc",
+            model=PauliChannel({"X": 0.7, "Y": 0.3}),
+            rate=0.25,
+            qubits=(0,),
+            tags={"qubit": 0, "round": 0, "gate": "idle"},
+        )
+        circuit = Circuit(
+            n_qubits=1,
+            operations=[
+                Operation.noise(location),
+                Operation.measure(0, key="m", basis="Z"),
+            ],
+        )
+        result = ForwardNoiseAwareSimulator(circuit).estimate(
+            shots=30_000,
+            seed=12,
+            loss_fn=lambda trajectory, decoded: trajectory.measurement_by_key["m"].bit,
+        )
+        self.assertAlmostEqual(result.mean_loss, 0.25, delta=0.025)
+        self.assertAlmostEqual(result.sensitivities["pc"], 1.0, delta=0.1)
+
     def test_score_function_estimates_single_x_noise_gradient(self) -> None:
         location = NoiseLocation(
             id="x0",

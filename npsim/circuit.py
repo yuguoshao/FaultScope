@@ -40,8 +40,32 @@ class Operation:
         return Operation("s", (qubit,), metadata=metadata)
 
     @staticmethod
+    def s_dag(qubit: int, **metadata: Any) -> "Operation":
+        return Operation("s_dag", (qubit,), metadata=metadata)
+
+    @staticmethod
+    def x(qubit: int, **metadata: Any) -> "Operation":
+        return Operation.pauli_gate((qubit,), "X", **metadata)
+
+    @staticmethod
+    def y(qubit: int, **metadata: Any) -> "Operation":
+        return Operation.pauli_gate((qubit,), "Y", **metadata)
+
+    @staticmethod
+    def z(qubit: int, **metadata: Any) -> "Operation":
+        return Operation.pauli_gate((qubit,), "Z", **metadata)
+
+    @staticmethod
     def cx(control: int, target: int, **metadata: Any) -> "Operation":
         return Operation("cx", (control, target), metadata=metadata)
+
+    @staticmethod
+    def cz(left: int, right: int, **metadata: Any) -> "Operation":
+        return Operation("cz", (left, right), metadata=metadata)
+
+    @staticmethod
+    def swap(left: int, right: int, **metadata: Any) -> "Operation":
+        return Operation("swap", (left, right), metadata=metadata)
 
     @staticmethod
     def pauli_gate(qubits: Sequence[int], pauli: str, **metadata: Any) -> "Operation":
@@ -93,8 +117,14 @@ class Operation:
         )
 
     @staticmethod
-    def reset(qubit: int, *, key: str | None = None, **metadata: Any) -> "Operation":
-        return Operation("reset", (qubit,), key=key, metadata=metadata)
+    def reset(
+        qubit: int,
+        *,
+        key: str | None = None,
+        basis: str = "Z",
+        **metadata: Any,
+    ) -> "Operation":
+        return Operation("reset", (qubit,), key=key, basis=basis, metadata=metadata)
 
 
 @dataclass(frozen=True)

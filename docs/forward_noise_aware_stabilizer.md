@@ -77,12 +77,13 @@ H_l = |S_l|
 
 ## 当前支持范围
 
-- Clifford gate: `H`, `S`, `CX`
-- Pauli gate / Pauli noise
+- Clifford gate: `H`, `S`, `S†`, `CX`, `CZ`, `SWAP`
+- ideal Pauli gate: `X`, `Y`, `Z`, sparse Pauli strings
 - Z/X/Y single-qubit measurement
 - arbitrary Pauli-string measurement
-- reset to `|0>`
+- reset to Z/X/Y basis eigenstates
 - Bernoulli Pauli noise
+- weighted Pauli-channel noise
 - single-qubit depolarizing noise
 - two-qubit depolarizing noise
 - measurement bit-flip noise

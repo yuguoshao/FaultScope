@@ -172,9 +172,24 @@ class PauliFrame:
     def apply_s(self, qubit: int) -> None:
         self.z[qubit] ^= self.x[qubit]
 
+    def apply_s_dag(self, qubit: int) -> None:
+        self.apply_s(qubit)
+
     def apply_cx(self, control: int, target: int) -> None:
         self.x[target] ^= self.x[control]
         self.z[control] ^= self.z[target]
+
+    def apply_cz(self, left: int, right: int) -> None:
+        self.apply_h(right)
+        self.apply_cx(left, right)
+        self.apply_h(right)
+
+    def apply_swap(self, left: int, right: int) -> None:
+        if left == right:
+            return
+        self.apply_cx(left, right)
+        self.apply_cx(right, left)
+        self.apply_cx(left, right)
 
     def reset(self, qubit: int) -> None:
         self.x[qubit] = 0

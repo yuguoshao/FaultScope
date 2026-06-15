@@ -318,10 +318,23 @@ x\cdot z' + z\cdot x'
 Clifford gate 对 `(x,z)` 的前向更新为：
 
 ```text
-H(q):     x_q <-> z_q
-S(q):     z_q <- z_q xor x_q
-CX(c,t):  x_t <- x_t xor x_c
-          z_c <- z_c xor z_t
+H(q):       x_q <-> z_q
+
+S(q):       z_q <- z_q xor x_q
+
+S†(q):      z_q <- z_q xor x_q
+            phase/sign differs from S on tableau rows, but the x/z frame map is identical.
+
+CX(c,t):    x_t <- x_t xor x_c
+            z_c <- z_c xor z_t
+
+CZ(a,b):    implemented as H(b), CX(a,b), H(b)
+            equivalently:
+            z_a <- z_a xor x_b
+            z_b <- z_b xor x_a
+
+SWAP(a,b):  implemented as CX(a,b), CX(b,a), CX(a,b)
+            equivalently swaps x_a <-> x_b and z_a <-> z_b.
 ```
 
 对 stabilizer tableau，以上规则作用到每个 stabilizer generator。对 Pauli frame，同样规则作用到已累计的物理错误 frame。
@@ -379,10 +392,12 @@ L(\tau)
 
 当前模型限制在 stabilizer-compatible stochastic noise：
 
-- Pauli noise。
-- single-qubit depolarizing noise。
-- two-qubit depolarizing noise。
-- measurement bit-flip noise。
-- reset / idle 等可等价为 Pauli-compatible channel 的错误。
+- Clifford gate：`H`、`S`、`S†`、`CX`、`CZ`、`SWAP`。
+- 理想 Pauli gate：`X`、`Y`、`Z` 以及任意 sparse Pauli string。
+- Measurement：`X`、`Y`、`Z` basis 单比特测量，以及任意 Pauli-string measurement。
+- Reset：`X`、`Y`、`Z` basis reset。
+- Pauli noise：固定 Pauli 事件、通用 Pauli mixture、single-qubit depolarizing、two-qubit depolarizing。
+- Classical noise：measurement bit-flip noise。
+- Idle / reset / gate-local 错误：只要能表示为 stabilizer-compatible stochastic Pauli channel，就可以作为带 score 的噪声位置。
 
 非 Clifford 门、非 Pauli 噪声、amplitude damping 等非 stabilizer-preserving channel 不直接进入初版算法；需要先做 Pauli twirling、离散化近似，或替换为可由 stabilizer trajectory 采样的等效噪声模型。

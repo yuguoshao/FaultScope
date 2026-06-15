@@ -94,6 +94,14 @@ class StabilizerState:
                 self.sign[row] ^= 1
             self.z[row][qubit] = old_z ^ old_x
 
+    def apply_s_dag(self, qubit: int) -> None:
+        for row in range(self.n_qubits):
+            old_x = self.x[row][qubit]
+            old_z = self.z[row][qubit]
+            if old_x and not old_z:
+                self.sign[row] ^= 1
+            self.z[row][qubit] = old_z ^ old_x
+
     def apply_cx(self, control: int, target: int) -> None:
         for row in range(self.n_qubits):
             x_c = self.x[row][control]
@@ -104,13 +112,25 @@ class StabilizerState:
             self.x[row][target] ^= x_c
             self.z[row][control] ^= z_t
 
+    def apply_cz(self, left: int, right: int) -> None:
+        self.apply_h(right)
+        self.apply_cx(left, right)
+        self.apply_h(right)
+
+    def apply_swap(self, left: int, right: int) -> None:
+        if left == right:
+            return
+        self.apply_cx(left, right)
+        self.apply_cx(right, left)
+        self.apply_cx(left, right)
+
     def apply_pauli(self, qubit: int, pauli: str) -> None:
         px, pz = sparse_pauli_to_xz(self.n_qubits, (qubit,), pauli)
         self.apply_pauli_string(px, pz)
 
     def apply_pauli_string(
         self,
-        x: Sequence[int] | Sequence[int],
+        x: Sequence[int],
         z: Sequence[int] | None = None,
     ) -> None:
         if z is None:
@@ -171,6 +191,18 @@ class StabilizerState:
 
     def reset_z(self, qubit: int, rng: random.Random) -> int:
         outcome = self.measure_z(qubit, rng)
+        if outcome:
+            self.apply_pauli(qubit, "X")
+        return outcome
+
+    def reset_x(self, qubit: int, rng: random.Random) -> int:
+        outcome = self.measure_x(qubit, rng)
+        if outcome:
+            self.apply_pauli(qubit, "Z")
+        return outcome
+
+    def reset_y(self, qubit: int, rng: random.Random) -> int:
+        outcome = self.measure_y(qubit, rng)
         if outcome:
             self.apply_pauli(qubit, "X")
         return outcome
