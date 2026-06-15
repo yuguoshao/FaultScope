@@ -450,7 +450,96 @@ Pauli measurement 的规则：
 - 若被测 Pauli 与所有 stabilizer generator 对易，则结果确定，由 stabilizer span 中的符号决定。
 - 若它与某些 generator 反对易，则结果随机；选择一个反对易 generator 替换为被测 Pauli，并用它消去其他 generator 的反对易关系。
 
-## 8. Repetition Code 热点示例
+## 8. Detector Error Model 生成
+
+Detector error model 是把局部物理错误事件映射成 detector flips 和 logical observable flips 的稀疏图模型。它不替代 score-function 热点估计，而是新增一个中间表示：
+
+```math
+(l,e)
+\longmapsto
+\left(
+p_l(e),
+\Delta D(l,e),
+\Delta L(l,e)
+\right).
+```
+
+其中 `l` 是噪声位置，`e` 是该位置的非 identity 错误事件，`\Delta D` 是被翻转的 detector 集合，`\Delta L` 是被翻转的 logical observable 集合。
+
+Detector 被声明为若干 measurement key 的 parity：
+
+```math
+D_j(\tau)
+=
+\bigoplus_{r\in A_j} m_r.
+```
+
+Logical observable 也声明为 measurement parity 和/或最终 Pauli frame 上某个 Pauli observable 的翻转：
+
+```math
+L_a(\tau)
+=
+\left(\bigoplus_{r\in B_a}m_r\right)
+\oplus
+\langle F_\tau, P_a\rangle.
+```
+
+对每个单错误事件，生成 DEM edge：
+
+```text
+error(p_l(e)) D_i D_j ... L_a ...
+```
+
+**Algorithm 4: Single-Error DEM Construction**
+
+输入：
+
+- 电路 `C`。
+- 结构化 detector 声明 `{D_j}`。
+- 结构化 logical observable 声明 `{L_a}`。
+- 局部噪声位置集合 `\mathcal L`。
+
+输出：
+
+- detector error model edges。
+
+过程：
+
+```text
+1.  Run the circuit with all stochastic noise disabled.
+2.  Record reference detector values D_ref and logical values L_ref.
+
+3.  For each noise occurrence l:
+4.      For each non-identity event e in the noise model at l:
+5.          Run the circuit again with only event e injected at l.
+6.          Record D_injected and L_injected.
+7.          detector_flips <- {j | D_ref[j] xor D_injected[j] = 1}
+8.          logical_flips  <- {a | L_ref[a] xor L_injected[a] = 1}
+9.          p <- probability of event e under the noise model.
+10.         If detector_flips or logical_flips is non-empty:
+11.             Add DEM edge error(p) detector_flips logical_flips.
+```
+
+这个过程要求理想电路和单错误注入后的相关测量是确定的；如果测量本身会产生随机 tableau 分支，当前 DEM 生成器会报错并要求使用更通用的逐 shot 分析。
+
+DEM 和热点可以通过噪声位置 id 连接。已有 location-level 热点：
+
+```math
+H_l = \left|\frac{\partial J}{\partial \lambda_l}\right|
+```
+
+可按 DEM edge 的事件概率投影：
+
+```math
+H_{(l,e)}
+=
+H_l
+\frac{p_l(e)}{\sum_{e'}p_l(e')}.
+```
+
+这样可以把噪声敏感度从物理时空位置投影到 detector graph edge 上，用于分析哪些 syndrome graph 边对应的物理错误最影响 logical failure。
+
+## 9. Repetition Code 热点示例
 
 对于 bit-flip repetition code，data qubit 上的 `X` 错误会改变相邻 parity-check syndrome。一次 syndrome extraction 中，第 `i` 个 check 测量：
 
@@ -477,7 +566,7 @@ L(\tau)
 
 对每个 data-noise location 和 measurement-noise location 分别估计 `S_l`。如果某一轮 measurement error 或某个 data qubit error 被人为提高，其对应位置应在 `H_l` 排序中显著上升。
 
-## 9. 验证标准
+## 10. 验证标准
 
 实现应满足以下校验：
 
@@ -494,7 +583,7 @@ L(\tau)
 - 对称纠错电路中，几何等价的噪声位置应在统计误差内给出相近 hotspot score。
 - 人为提高某个时空位置的噪声率后，该位置或相邻 detector 区域应在 top-k hotspot 中出现。
 
-## 10. 当前算法边界
+## 11. 当前算法边界
 
 当前模型限制在 stabilizer-compatible stochastic noise：
 
@@ -506,5 +595,6 @@ L(\tau)
 - Classical noise：measurement bit-flip noise。
 - Idle / reset / gate-local 错误：只要能表示为 stabilizer-compatible stochastic Pauli channel，就可以作为带 score 的噪声位置。
 - 高性能 batch sampler：支持理想测量确定的 QEC 快速路径；遇到理想测量随机并导致 tableau 分支时，需要使用逐 shot 通用模拟器。
+- Detector error model：支持结构化 detector / logical observable 声明，并通过单错误传播生成 Stim-like `error(p) D... L...` edge；当前不支持需要随机 tableau 分支的 DEM 构造。
 
 非 Clifford 门、非 Pauli 噪声、amplitude damping 等非 stabilizer-preserving channel 不直接进入初版算法；需要先做 Pauli twirling、离散化近似，或替换为可由 stabilizer trajectory 采样的等效噪声模型。

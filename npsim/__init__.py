@@ -6,6 +6,14 @@ from npsim.batch import (
     UnsupportedBatchCircuitError,
 )
 from npsim.circuit import Circuit, NoiseLocation, Operation
+from npsim.dem import (
+    Detector,
+    DetectorErrorEdge,
+    DetectorErrorModel,
+    DetectorErrorModelGenerator,
+    LogicalObservable,
+    UnsupportedDemCircuitError,
+)
 from npsim.noise import (
     BernoulliPauliNoise,
     MeasurementBitFlip,
@@ -20,7 +28,12 @@ __all__ = [
     "BatchForwardNoiseAwareSimulator",
     "BatchTrajectory",
     "Circuit",
+    "Detector",
+    "DetectorErrorEdge",
+    "DetectorErrorModel",
+    "DetectorErrorModelGenerator",
     "ForwardNoiseAwareSimulator",
+    "LogicalObservable",
     "MeasurementBitFlip",
     "NoiseLocation",
     "Operation",
@@ -30,4 +43,5 @@ __all__ = [
     "Trajectory",
     "TwoQubitDepolarizing",
     "UnsupportedBatchCircuitError",
+    "UnsupportedDemCircuitError",
 ]

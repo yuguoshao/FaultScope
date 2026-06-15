@@ -8,6 +8,7 @@ from typing import Callable, Mapping
 from npsim.batch import BatchTrajectory
 from npsim.circuit import Circuit, NoiseLocation, Operation
 from npsim.decoders import RepetitionCodeDecoder
+from npsim.dem import Detector, LogicalObservable
 from npsim.noise import BernoulliPauliNoise, MeasurementBitFlip
 from npsim.simulator import Trajectory
 
@@ -24,6 +25,8 @@ class RepetitionCodeExperiment:
     decoder: RepetitionCodeDecoder
     loss_fn: Callable[[Trajectory, list[int]], float]
     batch_loss_mask_fn: Callable[[BatchTrajectory], int]
+    detectors: tuple[Detector, ...]
+    observables: tuple[LogicalObservable, ...]
 
 
 def make_repetition_code_experiment(
@@ -97,6 +100,29 @@ def make_repetition_code_experiment(
 
     circuit = Circuit(n_qubits=distance + distance - 1, operations=operations)
     decoder = RepetitionCodeDecoder(distance)
+    detectors = tuple(
+        Detector(
+            id=round_idx * (distance - 1) + check_idx,
+            measurement_keys=(
+                (f"r{round_idx}_c{check_idx}",)
+                if round_idx == 0
+                else (
+                    f"r{round_idx - 1}_c{check_idx}",
+                    f"r{round_idx}_c{check_idx}",
+                )
+            ),
+            coords=(check_idx + 0.5, round_idx),
+        )
+        for round_idx in range(rounds)
+        for check_idx in range(distance - 1)
+    )
+    observables = (
+        LogicalObservable(
+            id=0,
+            pauli_qubits=(data[0],),
+            pauli="Z",
+        ),
+    )
 
     def detector_fn(trajectory: Trajectory) -> list[int]:
         final_round = rounds - 1
@@ -136,6 +162,8 @@ def make_repetition_code_experiment(
         decoder=decoder,
         loss_fn=loss_fn,
         batch_loss_mask_fn=batch_loss_mask_fn,
+        detectors=detectors,
+        observables=observables,
     )
 
 

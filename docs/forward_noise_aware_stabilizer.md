@@ -88,6 +88,7 @@ H_l = |S_l|
 - two-qubit depolarizing noise
 - measurement bit-flip noise
 - bit-packed batch sampler for deterministic-syndrome QEC fast paths
+- detector error model generation by single-error propagation
 - repetition-code reference decoder and experiment builder
 
 非 Pauli、非 Clifford 噪声不直接进入 stabilizer simulator；初版应先做
@@ -106,3 +107,28 @@ Pauli frames 执行多条 trajectory。第 `k` 个 shot 存在整数 mask 的第
 它使用与逐 shot 模拟器相同的 score-function estimator，只是用 `popcount`
 在 bit mask 上一次性归约 loss 和 score。该快速路径适合理想 syndrome 测量确定的
 QEC 电路；如果理想测量本身会产生不同 tableau 分支，应使用逐 shot 引擎。
+
+## Detector error model
+
+`DetectorErrorModelGenerator` 使用结构化 `Detector` 和 `LogicalObservable`
+声明生成 detector error model。每个 detector 是 measurement keys 的 parity；
+logical observable 可以是 measurement parity，也可以是最终 Pauli frame 上某个
+Pauli observable 的翻转。
+
+生成器对每个噪声位置和每个非 identity 事件做单错误传播：
+
+```text
+reference run -> D_ref, L_ref
+single injected event -> D_event, L_event
+edge = error(p_event) xor(D_ref, D_event) xor(L_ref, L_event)
+```
+
+输出为 Stim-like 文本行：
+
+```text
+error(p) D0 D3 L0
+```
+
+该 DEM 层不改变热点估计公式；它提供从 location-level hotspot 到 detector-graph
+edge 的投影方式。当前 DEM 生成也要求理想/单错误测量确定，不处理随机 tableau
+分支。

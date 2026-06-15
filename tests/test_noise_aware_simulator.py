@@ -3,6 +3,12 @@ import unittest
 
 from npsim.batch import BatchForwardNoiseAwareSimulator, UnsupportedBatchCircuitError
 from npsim.circuit import Circuit, NoiseLocation, Operation
+from npsim.dem import (
+    Detector,
+    DetectorErrorModelGenerator,
+    LogicalObservable,
+    UnsupportedDemCircuitError,
+)
 from npsim.noise import BernoulliPauliNoise, PauliChannel
 from npsim.repetition import make_repetition_code_experiment
 from npsim.simulator import ForwardNoiseAwareSimulator
@@ -257,6 +263,74 @@ class BatchNoiseAwareSimulatorTests(unittest.TestCase):
                 seed=15,
                 loss_mask_fn=lambda batch: batch.measurements["m"],
             )
+
+
+class DetectorErrorModelTests(unittest.TestCase):
+    def test_single_x_error_generates_detector_and_logical_edge(self) -> None:
+        location = NoiseLocation(
+            id="x0",
+            model=BernoulliPauliNoise("X"),
+            rate=0.125,
+            qubits=(0,),
+            tags={"qubit": 0, "round": 0, "gate": "idle"},
+        )
+        circuit = Circuit(
+            n_qubits=1,
+            operations=[
+                Operation.noise(location),
+                Operation.measure(0, key="m", basis="Z"),
+            ],
+        )
+        dem = DetectorErrorModelGenerator(
+            circuit,
+            detectors=(Detector(id=0, measurement_keys=("m",), coords=(0.0,)),),
+            observables=(LogicalObservable(id=0, pauli_qubits=(0,), pauli="Z"),),
+        ).generate()
+
+        self.assertEqual(len(dem.edges), 1)
+        edge = dem.edges[0]
+        self.assertEqual(edge.location_id, "x0")
+        self.assertEqual(edge.event, "X")
+        self.assertAlmostEqual(edge.probability, 0.125)
+        self.assertEqual(edge.detectors, (0,))
+        self.assertEqual(edge.observables, (0,))
+        self.assertIn("error(0.125) D0 L0", dem.to_dem_text())
+
+    def test_repetition_code_generates_dem_edges(self) -> None:
+        experiment = make_repetition_code_experiment(
+            distance=3,
+            rounds=1,
+            data_error_rate=0.1,
+            measurement_error_rate=0.01,
+        )
+        dem = DetectorErrorModelGenerator(
+            experiment.circuit,
+            detectors=experiment.detectors,
+            observables=experiment.observables,
+        ).generate()
+
+        by_location = dem.edges_by_location()
+        self.assertIn("data_r0_q0", by_location)
+        self.assertIn("data_r0_q1", by_location)
+        self.assertIn("meas_r0_c0", by_location)
+        self.assertEqual(by_location["data_r0_q0"][0].detectors, (0,))
+        self.assertEqual(by_location["data_r0_q0"][0].observables, (0,))
+        self.assertEqual(by_location["data_r0_q1"][0].detectors, (0, 1))
+        self.assertEqual(by_location["meas_r0_c0"][0].detectors, (0,))
+
+    def test_dem_rejects_random_ideal_measurement(self) -> None:
+        circuit = Circuit(
+            n_qubits=1,
+            operations=[
+                Operation.h(0),
+                Operation.measure(0, key="m", basis="Z"),
+            ],
+        )
+        with self.assertRaises(UnsupportedDemCircuitError):
+            DetectorErrorModelGenerator(
+                circuit,
+                detectors=(Detector(id=0, measurement_keys=("m",)),),
+            ).generate()
 
 
 if __name__ == "__main__":
