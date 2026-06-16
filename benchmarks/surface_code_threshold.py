@@ -20,6 +20,7 @@ import math
 import os
 import sys
 import tempfile
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Mapping
@@ -78,7 +79,7 @@ def main() -> None:
 
     print(
         "basis\tdistance\trounds\tp\tshots\tpath\tlogical_failure\t"
-        "failures\tstderr\tstatus",
+        "failures\tstderr\telapsed_s\tstatus",
         flush=True,
     )
 
@@ -86,6 +87,7 @@ def main() -> None:
         path: {distance: {} for distance in distances}
         for path in PATHS
     }
+    elapsed_by_path: dict[str, list[float]] = {path: [] for path in PATHS}
     for distance in distances:
         rounds = args.rounds if args.rounds is not None else distance
         for rate_index, p in enumerate(rates):
@@ -143,21 +145,27 @@ def main() -> None:
             )
             for path_index, (path, fn) in enumerate(path_fns):
                 seed = args.seed + 1_000_000 * distance + 1_000 * rate_index + path_index
+                started = time.perf_counter()
                 try:
                     stats = fn(seed)
                 except (ImportError, UnsupportedNativeCircuitError, ValueError) as exc:
+                    elapsed_s = time.perf_counter() - started
                     print(
                         f"{args.basis}\t{distance}\t{rounds}\t{p:.17g}\t"
                         f"{args.shots}\t{path}\tNA\tNA\tNA\t"
+                        f"{elapsed_s:.6f}\t"
                         f"skip:{type(exc).__name__}",
                         flush=True,
                     )
                     continue
+                elapsed_s = time.perf_counter() - started
                 results[path][distance][p] = stats.rate
+                elapsed_by_path[path].append(elapsed_s)
                 print(
                     f"{args.basis}\t{distance}\t{rounds}\t{p:.17g}\t"
                     f"{args.shots}\t{path}\t{stats.rate:.17g}\t"
-                    f"{stats.failures}\t{stats.stderr:.17g}\tok",
+                    f"{stats.failures}\t{stats.stderr:.17g}\t"
+                    f"{elapsed_s:.6f}\tok",
                     flush=True,
                 )
 
@@ -175,6 +183,19 @@ def main() -> None:
                 f"{p_cell}\t{status}",
                 flush=True,
             )
+
+    for path in PATHS:
+        elapsed_values = elapsed_by_path[path]
+        if not elapsed_values:
+            print(f"timing\t{args.basis}\t{path}\t0\tNA\tNA", flush=True)
+            continue
+        total_elapsed = sum(elapsed_values)
+        average_elapsed = total_elapsed / len(elapsed_values)
+        print(
+            f"timing\t{args.basis}\t{path}\t{len(elapsed_values)}\t"
+            f"{total_elapsed:.6f}\t{average_elapsed:.6f}",
+            flush=True,
+        )
 
 
 def sample_stim_logical_failure(
@@ -336,10 +357,14 @@ def _masks_to_bool_matrix(
     _, _, np = _load_required_modules()
     ids = tuple(ids)
     matrix = np.zeros((shots, len(ids)), dtype=np.bool_)
+    byte_count = (shots + 7) // 8
     for col, item_id in enumerate(ids):
         mask = int(masks_by_id.get(item_id, 0))
-        for shot in range(shots):
-            matrix[shot, col] = bool((mask >> shot) & 1)
+        packed = np.frombuffer(mask.to_bytes(byte_count, "little"), dtype=np.uint8)
+        matrix[:, col] = np.unpackbits(
+            packed,
+            bitorder="little",
+        )[:shots]
     return matrix
 
 
