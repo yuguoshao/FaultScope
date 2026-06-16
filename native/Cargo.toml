@@ -1,0 +1,15 @@
+[package]
+name = "npsim-native"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "_npsim_native"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { version = "0.23", features = ["extension-module"] }
+
+[package.metadata.maturin]
+module-name = "npsim._npsim_native"
+python-source = ".."

@@ -405,6 +405,45 @@ f_k,
 
 这个 batch sampler 当前是快速路径，而不是通用 adaptive tableau 分支引擎。它适合 repetition code、surface-code syndrome extraction 这类所有 shot 共享同一 stabilizer 支撑演化、差异由 generator sign mask 和 Pauli frame mask 表示的 QEC 电路。
 
+### Optional native packed sampler
+
+`npsim.native.compile_native_sampler` 是面向原生 packed sampler 的稳定入口：
+
+```python
+from npsim.native import compile_native_sampler
+
+sampler = compile_native_sampler(circuit, backend="auto")
+batch = sampler.sample(shots=100_000, seed=1)
+```
+
+普通采样吞吐基准使用 measurement-only fast path，避免为 hotspot 额外生成
+`noise_event_masks` 和 final Pauli frame：
+
+```python
+measurement_masks = sampler.sample_measurements(shots=100_000, seed=1)
+```
+
+`backend="auto"` 会优先尝试导入 `npsim._npsim_native`，失败或原生编译拒绝该电路时回退到现有 Python `BatchForwardNoiseAwareSimulator`。如果需要强制要求原生扩展，可使用：
+
+```python
+sampler = compile_native_sampler(circuit, backend="native")
+```
+
+原生扩展源码位于 `native/`，使用 PyO3/maturin：
+
+```bash
+(cd native && ../.venv/bin/python -m maturin develop --release)
+```
+
+采样吞吐 benchmark 位于 `benchmarks/sampling_throughput.py`：
+
+```bash
+.venv/bin/python benchmarks/sampling_throughput.py --distances 15 21 31 --rounds 3
+.venv/bin/python benchmarks/sampling_throughput.py --family random-clifford --qubits 128 256 512 --depth 20
+```
+
+默认场景是 rotated surface-code memory；`--family random-clifford` 会生成固定种子的随机 Clifford layer circuit，最后测量所有 qubits。若安装了 `stim`，benchmark 会同时报告 Stim bit-packed sampler 吞吐和 NPSim/Stim 比值；未安装时只报告 NPSim 并标记 `stim-skip`。
+
 ## 7. Stabilizer 更新规则
 
 模拟器内部使用二进制 symplectic 表示。一个 `n` 比特 Pauli 写成：

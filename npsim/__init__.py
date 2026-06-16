@@ -31,6 +31,11 @@ from npsim.noise import (
     SingleQubitDepolarizing,
     TwoQubitDepolarizing,
 )
+from npsim.native import (
+    NativePackedSampler,
+    UnsupportedNativeCircuitError,
+    compile_native_sampler,
+)
 from npsim.pymatching_decoder import (
     PyMatchingBatchDecoder,
     PyMatchingUnavailableError,
@@ -65,6 +70,7 @@ __all__ = [
     "ForwardNoiseAwareSimulator",
     "LogicalObservable",
     "MeasurementBitFlip",
+    "NativePackedSampler",
     "NoiseLocation",
     "Operation",
     "PauliChannel",
@@ -78,8 +84,10 @@ __all__ = [
     "TwoQubitDepolarizing",
     "UnsupportedBatchCircuitError",
     "UnsupportedDemCircuitError",
+    "UnsupportedNativeCircuitError",
     "UnsupportedPyMatchingDemError",
     "VisualizationUnavailableError",
+    "compile_native_sampler",
     "load_stim_file",
     "parse_stim_circuit",
     "write_rotated_surface_code_spatial_hotspot_map",

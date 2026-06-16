@@ -18,6 +18,13 @@ pymatching = [
 visualization = [
     "pillow",
 ]
+benchmark = [
+    "numpy",
+    "stim",
+]
+native-build = [
+    "maturin>=1.7",
+]
 
 [tool.setuptools.packages.find]
 include = ["npsim*"]

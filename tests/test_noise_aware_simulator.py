@@ -15,6 +15,10 @@ from npsim.dem import (
 )
 from npsim.dem_sampler import DemBatchHotspotSimulator
 from npsim.noise import BernoulliPauliNoise, MeasurementBitFlip, PauliChannel
+from npsim.native import (
+    UnsupportedNativeCircuitError,
+    compile_native_sampler,
+)
 from npsim.pymatching_decoder import (
     PyMatchingBatchDecoder,
     UnsupportedPyMatchingDemError,
@@ -417,6 +421,155 @@ class BatchNoiseAwareSimulatorTests(unittest.TestCase):
 
         self.assertEqual(batch.measurements["m"], batch.all_mask)
         self.assertEqual(batch.noise_event_masks["mflip"], batch.all_mask)
+
+
+class NativePackedSamplerTests(unittest.TestCase):
+    def _native_sampler_or_skip(self, circuit: Circuit):
+        try:
+            return compile_native_sampler(circuit, backend="native")
+        except UnsupportedNativeCircuitError as exc:
+            self.skipTest(f"native extension unavailable: {exc}")
+
+    def test_python_backend_matches_batch_sampler_masks(self) -> None:
+        location = NoiseLocation(
+            id="x0",
+            model=BernoulliPauliNoise("X"),
+            rate=1.0,
+            qubits=(0,),
+        )
+        circuit = Circuit(
+            n_qubits=1,
+            operations=[
+                Operation.noise(location),
+                Operation.measure(0, key="m", basis="Z"),
+                Operation.detector(("m",), detector_id=0),
+                Operation.observable_include(0, ("m",)),
+            ],
+        )
+        sampler = compile_native_sampler(circuit, backend="python")
+        native_batch = sampler.sample(shots=9, seed=123)
+        reference = BatchForwardNoiseAwareSimulator(circuit).run_batch(
+            shots=9,
+            rng=random.Random(123),
+        )
+
+        self.assertEqual(sampler.backend_name, "python")
+        self.assertEqual(native_batch.measurements, reference.measurements)
+        self.assertEqual(native_batch.detectors, reference.detectors)
+        self.assertEqual(native_batch.observables, reference.observables)
+        self.assertEqual(native_batch.noise_event_masks, reference.noise_event_masks)
+
+    def test_auto_backend_falls_back_without_native_extension(self) -> None:
+        circuit = Circuit(
+            n_qubits=1,
+            operations=[Operation.measure(0, key="m", basis="Z")],
+        )
+        sampler = compile_native_sampler(circuit, backend="auto")
+        batch = sampler.sample(shots=4, seed=1)
+
+        self.assertIn(sampler.backend_name, {"native", "python"})
+        self.assertEqual(batch.shots, 4)
+        self.assertIn("m", batch.measurements)
+
+    def test_native_backend_reports_missing_or_unsupported_extension(self) -> None:
+        circuit = Circuit(
+            n_qubits=1,
+            operations=[Operation.measure(0, key="m", basis="Z")],
+        )
+        try:
+            __import__("npsim._npsim_native")
+        except ImportError:
+            with self.assertRaises(UnsupportedNativeCircuitError):
+                compile_native_sampler(circuit, backend="native")
+        else:
+            sampler = compile_native_sampler(circuit, backend="native")
+            self.assertTrue(sampler.is_native)
+
+    def test_rejects_unknown_backend(self) -> None:
+        with self.assertRaises(ValueError):
+            compile_native_sampler(Circuit(n_qubits=0, operations=[]), backend="gpu")
+
+    def test_native_backend_matches_deterministic_reference_masks(self) -> None:
+        x_location = NoiseLocation(
+            id="x0",
+            model=BernoulliPauliNoise("X"),
+            rate=1.0,
+            qubits=(0,),
+        )
+        m_location = NoiseLocation(
+            id="mflip",
+            model=MeasurementBitFlip(),
+            rate=1.0,
+            qubits=(0,),
+        )
+        circuit = Circuit(
+            n_qubits=1,
+            operations=[
+                Operation.x(0),
+                Operation.reset(0, key="r", basis="Z"),
+                Operation.noise(x_location),
+                Operation.measure(0, key="m", basis="Z", noise=m_location),
+                Operation.detector(("r", "m"), detector_id=3),
+                Operation.observable_include(0, ("m",)),
+            ],
+        )
+        sampler = self._native_sampler_or_skip(circuit)
+        native_batch = sampler.sample(shots=17, seed=11)
+        reference = BatchForwardNoiseAwareSimulator(circuit).run_batch(
+            shots=17,
+            rng=random.Random(11),
+        )
+
+        self.assertEqual(native_batch.x_frame, reference.x_frame)
+        self.assertEqual(native_batch.z_frame, reference.z_frame)
+        self.assertEqual(native_batch.measurements, reference.measurements)
+        self.assertEqual(native_batch.detectors, reference.detectors)
+        self.assertEqual(native_batch.observables, reference.observables)
+        self.assertEqual(native_batch.noise_event_masks, reference.noise_event_masks)
+
+    def test_native_backend_samples_random_measurement_masks(self) -> None:
+        circuit = Circuit(
+            n_qubits=1,
+            operations=[
+                Operation.h(0),
+                Operation.measure(0, key="m", basis="Z"),
+            ],
+        )
+        sampler = self._native_sampler_or_skip(circuit)
+        batch = sampler.sample(shots=1024, seed=12)
+        ones = batch.measurements["m"].bit_count()
+
+        self.assertGreater(ones, 350)
+        self.assertLess(ones, 674)
+
+    def test_native_backend_matches_auto_measurement_keys(self) -> None:
+        circuit = Circuit(
+            n_qubits=1,
+            operations=[
+                Operation.measure(0, basis="Z"),
+                Operation.measure(0, basis="Z"),
+            ],
+        )
+        sampler = self._native_sampler_or_skip(circuit)
+        batch = sampler.sample(shots=5, seed=13)
+
+        self.assertEqual(set(batch.measurements), {"m0", "m1"})
+        self.assertEqual(batch.measurements["m0"], 0)
+        self.assertEqual(batch.measurements["m1"], 0)
+
+    def test_measurement_only_sampling_matches_batch_measurements(self) -> None:
+        circuit = Circuit(
+            n_qubits=1,
+            operations=[
+                Operation.x(0),
+                Operation.measure(0, key="m", basis="Z"),
+            ],
+        )
+        sampler = compile_native_sampler(circuit, backend="auto")
+        measurements = sampler.sample_measurements(shots=6, seed=14)
+        batch = sampler.sample(shots=6, seed=14)
+
+        self.assertEqual(measurements, batch.measurements)
 
 
 class DetectorErrorModelTests(unittest.TestCase):

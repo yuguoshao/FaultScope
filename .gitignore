@@ -1,5 +1,6 @@
 __pycache__/
 *.py[cod]
+*.so
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
@@ -9,3 +10,4 @@ dist/
 build/
 *.egg-info/
 .idea
+native/target/
