@@ -642,6 +642,64 @@ class NativePackedSamplerTests(unittest.TestCase):
                     probability=rate,
                 )
 
+    def test_native_hotspot_estimate_returns_aggregates_and_top_cache(self) -> None:
+        location = NoiseLocation(
+            id="x0",
+            model=BernoulliPauliNoise("X"),
+            rate=0.2,
+            qubits=(0,),
+            tags={"round": 2, "gate": "idle", "operation": "noise"},
+        )
+        circuit = Circuit(
+            n_qubits=1,
+            operations=[
+                Operation.noise(location),
+                Operation.measure(0, key="m", basis="Z"),
+            ],
+        )
+        sampler = self._native_sampler_or_skip(circuit)
+        result = sampler.estimate(
+            shots=40_000,
+            seed=91,
+            loss_mask_fn=lambda batch: batch.measurements["m"],
+            top_k=1,
+        )
+
+        self.assertAlmostEqual(result.mean_loss, 0.2, delta=0.02)
+        self.assertAlmostEqual(result.sensitivities["x0"], 1.0, delta=0.08)
+        self.assertAlmostEqual(result.hotspots["x0"], 1.0, delta=0.08)
+        self.assertAlmostEqual(result.by_qubit[0], result.hotspots["x0"])
+        self.assertAlmostEqual(result.by_round[2], result.hotspots["x0"])
+        self.assertAlmostEqual(result.by_gate["idle"], result.hotspots["x0"])
+        self.assertAlmostEqual(result.by_operation["noise"], result.hotspots["x0"])
+        self.assertEqual(result.top_hotspots(1)[0].location_id, "x0")
+
+    def test_native_rejects_nonprimitive_tags_but_auto_batch_falls_back(self) -> None:
+        location = NoiseLocation(
+            id="x0",
+            model=BernoulliPauliNoise("X"),
+            rate=0.2,
+            qubits=(0,),
+            tags={"round": (1, 2)},
+        )
+        circuit = Circuit(
+            n_qubits=1,
+            operations=[
+                Operation.noise(location),
+                Operation.measure(0, key="m", basis="Z"),
+            ],
+        )
+
+        with self.assertRaises(UnsupportedNativeCircuitError):
+            compile_native_sampler(circuit, backend="native")
+
+        result = BatchForwardNoiseAwareSimulator(circuit).estimate(
+            shots=2_000,
+            seed=92,
+            loss_mask_fn=lambda batch: batch.measurements["m"],
+        )
+        self.assertIn("x0", result.hotspots)
+
 
 class NativeDetectorErrorModelTests(unittest.TestCase):
     def _require_native_dem(self) -> None:
@@ -809,6 +867,38 @@ class NativeDetectorErrorModelTests(unittest.TestCase):
         self.assertAlmostEqual(result.edge_sensitivities[0], 1.0, delta=0.08)
         self.assertAlmostEqual(result.sensitivities["logical_edge"], 1.0, delta=0.08)
         self.assertEqual(result.by_round[1], result.hotspots["logical_edge"])
+        self.assertEqual(result.top_edges(1)[0].edge_index, 0)
+        self.assertEqual(result.top_hotspots(1)[0].location_id, "logical_edge")
+
+    def test_native_dem_custom_loss_uses_rust_hotspot_aggregation(self) -> None:
+        self._require_native_dem()
+        dem = DetectorErrorModel(
+            detectors=(Detector(id=0, measurement_keys=()),),
+            observables=(LogicalObservable(id=0),),
+            edges=(
+                DetectorErrorEdge(
+                    probability=0.2,
+                    detectors=(0,),
+                    observables=(0,),
+                    location_id="edge0",
+                    event="X",
+                    tags={"gate": "idle"},
+                ),
+            ),
+        )
+        sampler = compile_native_dem_sampler(dem, backend="native")
+        result = sampler.estimate(
+            shots=40_000,
+            seed=58,
+            loss_mask_fn=lambda batch, corrections: batch.detectors[0],
+            top_k=1,
+        )
+
+        self.assertAlmostEqual(result.mean_loss, 0.2, delta=0.02)
+        self.assertAlmostEqual(result.edge_sensitivities[0], 1.0, delta=0.08)
+        self.assertAlmostEqual(result.sensitivities["edge0"], 1.0, delta=0.08)
+        self.assertAlmostEqual(result.by_gate["idle"], result.hotspots["edge0"])
+        self.assertEqual(result.top_edges(1)[0].edge_index, 0)
 
     def test_native_dem_generator_rejects_random_ideal_measurement(self) -> None:
         self._require_native_dem()

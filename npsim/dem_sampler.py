@@ -93,12 +93,16 @@ class DemHotspotResult:
     by_operation: Mapping[Any, float]
     locations: Mapping[str, DemLocationMetadata]
     detector_graph_hotspots: DetectorGraphHotspots
+    top_edges_cache: tuple[DemEdgeHotspotRow, ...] = ()
+    top_hotspots_cache: tuple[DemLocationHotspotRow, ...] = ()
 
     @property
     def logical_failure_rate(self) -> float:
         return self.mean_loss
 
     def top_edges(self, top_k: int = 10) -> list[DemEdgeHotspotRow]:
+        if self.top_edges_cache and top_k <= len(self.top_edges_cache):
+            return list(self.top_edges_cache[:top_k])
         rows = [
             DemEdgeHotspotRow(
                 edge_index=edge_index,
@@ -116,6 +120,8 @@ class DemHotspotResult:
         return rows[:top_k]
 
     def top_hotspots(self, top_k: int = 10) -> list[DemLocationHotspotRow]:
+        if self.top_hotspots_cache and top_k <= len(self.top_hotspots_cache):
+            return list(self.top_hotspots_cache[:top_k])
         rows = [
             DemLocationHotspotRow(
                 location_id=location_id,
@@ -205,22 +211,30 @@ class DemBatchHotspotSimulator:
         correction_mask_fn: DemCorrectionMaskFn | None = None,
         loss_mask_fn: DemLossMaskFn | None = None,
         baseline: str | float = "mean",
+        top_k: int = 10,
     ) -> DemHotspotResult:
         if decoder is not None and correction_mask_fn is not None:
             raise ValueError("supply either decoder or correction_mask_fn, not both")
-        if decoder is None and correction_mask_fn is None and loss_mask_fn is None:
-            try:
-                from npsim.native import (
-                    UnsupportedNativeCircuitError,
-                    compile_native_dem_sampler,
-                )
+        try:
+            from npsim.native import (
+                UnsupportedNativeCircuitError,
+                compile_native_dem_sampler,
+            )
 
-                return compile_native_dem_sampler(
-                    self.dem,
-                    backend="native",
-                ).estimate_default(shots=shots, seed=seed, baseline=baseline)
-            except (ImportError, UnsupportedNativeCircuitError):
-                pass
+            return compile_native_dem_sampler(
+                self.dem,
+                backend="native",
+            ).estimate(
+                shots=shots,
+                seed=seed,
+                decoder=decoder,
+                correction_mask_fn=correction_mask_fn,
+                loss_mask_fn=loss_mask_fn,
+                baseline=baseline,
+                top_k=top_k,
+            )
+        except (ImportError, UnsupportedNativeCircuitError):
+            pass
 
         return self._estimate_python(
             shots=shots,

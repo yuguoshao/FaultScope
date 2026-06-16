@@ -82,12 +82,15 @@ class SimulationResult:
     by_operation: dict[Any, float]
     locations: dict[str, NoiseLocation]
     losses: list[float]
+    top_hotspots_cache: tuple[HotspotRow, ...] = ()
 
     @property
     def logical_failure_rate(self) -> float:
         return self.mean_loss
 
     def top_hotspots(self, top_k: int = 10) -> list[HotspotRow]:
+        if self.top_hotspots_cache and top_k <= len(self.top_hotspots_cache):
+            return list(self.top_hotspots_cache[:top_k])
         rows = [
             HotspotRow(
                 location_id=location_id,

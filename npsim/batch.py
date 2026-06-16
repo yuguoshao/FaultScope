@@ -96,9 +96,29 @@ class BatchForwardNoiseAwareSimulator:
         loss_mask_fn: BatchLossMaskFn,
         seed: int | None = None,
         baseline: str | float = "mean",
+        top_k: int = 10,
     ) -> SimulationResult:
         if shots <= 0:
             raise ValueError("shots must be positive")
+
+        try:
+            from npsim.native import (
+                UnsupportedNativeCircuitError,
+                compile_native_sampler,
+            )
+
+            return compile_native_sampler(
+                self.circuit,
+                backend="native",
+            ).estimate(
+                shots=shots,
+                loss_mask_fn=loss_mask_fn,
+                seed=seed,
+                baseline=baseline,
+                top_k=top_k,
+            )
+        except (ImportError, UnsupportedNativeCircuitError):
+            pass
 
         rng = random.Random(seed)
         batch = self.run_batch(shots=shots, rng=rng)

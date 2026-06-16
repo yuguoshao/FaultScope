@@ -83,6 +83,35 @@ class NativePackedSampler:
             return {str(key): int(value) for key, value in payload.items()}
         return self.sample(shots=shots, seed=seed, rng=rng).measurements
 
+    def estimate(
+        self,
+        *,
+        shots: int,
+        loss_mask_fn: Any,
+        seed: int | None = None,
+        baseline: str | float = "mean",
+        top_k: int = 10,
+    ) -> Any:
+        if shots <= 0:
+            raise ValueError("shots must be positive")
+        if self.backend_name == "native":
+            native_baseline = _native_baseline_value(baseline)
+            batch = self._engine.run_native_batch(int(shots), seed)
+            loss_mask = int(loss_mask_fn(batch)) & int(batch.all_mask)
+            payload = self._engine.estimate_hotspots(
+                batch,
+                loss_mask,
+                native_baseline,
+                int(top_k),
+            )
+            return _payload_to_simulation_result(self.circuit, payload)
+        return self._engine.estimate(
+            shots=shots,
+            loss_mask_fn=loss_mask_fn,
+            seed=seed,
+            baseline=baseline,
+        )
+
 
 @dataclass(frozen=True)
 class NativeDemSampler:
@@ -122,17 +151,92 @@ class NativeDemSampler:
         shots: int,
         seed: int | None = None,
         baseline: str | float = "mean",
+        top_k: int = 10,
     ) -> Any:
         if shots <= 0:
             raise ValueError("shots must be positive")
         if self.backend_name == "native":
             native_baseline = _native_baseline_value(baseline)
-            payload = self._engine.estimate_default(int(shots), seed, native_baseline)
+            payload = self._engine.estimate_default(
+                int(shots),
+                seed,
+                native_baseline,
+                int(top_k),
+            )
             return _payload_to_dem_hotspot_result(self.dem, payload)
         estimate_python = getattr(self._engine, "_estimate_python", None)
         if estimate_python is not None:
             return estimate_python(shots=shots, seed=seed, baseline=baseline)
         return self._engine.estimate(shots=shots, seed=seed, baseline=baseline)
+
+    def estimate(
+        self,
+        *,
+        shots: int,
+        seed: int | None = None,
+        decoder: Any | None = None,
+        correction_mask_fn: Any | None = None,
+        loss_mask_fn: Any | None = None,
+        baseline: str | float = "mean",
+        top_k: int = 10,
+    ) -> Any:
+        if shots <= 0:
+            raise ValueError("shots must be positive")
+        if decoder is not None and correction_mask_fn is not None:
+            raise ValueError("supply either decoder or correction_mask_fn, not both")
+        if self.backend_name == "native":
+            native_baseline = _native_baseline_value(baseline)
+            if decoder is None and correction_mask_fn is None and loss_mask_fn is None:
+                payload = self._engine.estimate_default(
+                    int(shots),
+                    seed,
+                    native_baseline,
+                    int(top_k),
+                )
+                return _payload_to_dem_hotspot_result(self.dem, payload)
+
+            from npsim.dem_sampler import _default_loss_mask
+
+            batch = self._engine.run_native_batch(int(shots), seed)
+            if correction_mask_fn is not None:
+                corrections = dict(correction_mask_fn(batch))
+            elif decoder is not None:
+                if not hasattr(decoder, "decode_batch_masks"):
+                    raise TypeError("DEM decoder must provide decode_batch_masks(batch)")
+                corrections = dict(decoder.decode_batch_masks(batch))
+            else:
+                corrections = {}
+            if loss_mask_fn is None:
+                loss_mask = _default_loss_mask(batch, corrections, self.dem)
+            else:
+                loss_mask = loss_mask_fn(batch, corrections)
+            loss_mask = int(loss_mask) & int(batch.all_mask)
+            payload = self._engine.estimate_hotspots(
+                batch,
+                loss_mask,
+                native_baseline,
+                int(top_k),
+            )
+            return _payload_to_dem_hotspot_result(self.dem, payload)
+
+        estimate_python = getattr(self._engine, "_estimate_python", None)
+        if estimate_python is not None:
+            return estimate_python(
+                shots=shots,
+                seed=seed,
+                decoder=decoder,
+                correction_mask_fn=correction_mask_fn,
+                loss_mask_fn=loss_mask_fn,
+                baseline=baseline,
+            )
+        return self._engine.estimate(
+            shots=shots,
+            seed=seed,
+            decoder=decoder,
+            correction_mask_fn=correction_mask_fn,
+            loss_mask_fn=loss_mask_fn,
+            baseline=baseline,
+        )
 
 
 def compile_native_sampler(
@@ -379,6 +483,7 @@ def _serialize_dem(dem: Any) -> dict[str, Any]:
                     for observable_id in edge.observables
                 ),
                 "location_id": str(edge.location_id),
+                "tags": dict(edge.tags),
             }
             for edge in dem.edges
         ],
@@ -435,30 +540,63 @@ def _payload_to_dem_batch(payload: Mapping[str, Any]) -> Any:
 
 def _payload_to_dem_hotspot_result(dem: Any, payload: Mapping[str, Any]) -> Any:
     from npsim.dem_sampler import (
+        DemEdgeHotspotRow,
         DemHotspotResult,
+        DemLocationHotspotRow,
         DemLocationMetadata,
         _aggregate_by_tag,
         _aggregate_detector_hotspots,
         _edge_sensitivities_to_detector_graph,
     )
 
-    edge_sensitivities = {
-        int(key): float(value)
-        for key, value in payload["edge_sensitivities"].items()
-    }
-    edge_hotspots = {
-        edge_index: abs(sensitivity)
-        for edge_index, sensitivity in edge_sensitivities.items()
-    }
-    sensitivities = {
-        str(key): float(value)
-        for key, value in payload["sensitivities"].items()
-    }
-    hotspots = {
-        location_id: abs(sensitivity)
-        for location_id, sensitivity in sensitivities.items()
-    }
+    edge_sensitivities = payload["edge_sensitivities"]
+    edge_hotspots = payload.get("edge_hotspots", {})
+    if not edge_hotspots:
+        edge_hotspots = {
+            edge_index: abs(sensitivity)
+            for edge_index, sensitivity in edge_sensitivities.items()
+        }
+    sensitivities = payload["sensitivities"]
+    hotspots = payload.get("hotspots", {})
+    if not hotspots:
+        hotspots = {
+            location_id: abs(sensitivity)
+            for location_id, sensitivity in sensitivities.items()
+        }
     locations = _dem_location_metadata(dem)
+    by_detector = (
+        payload["by_detector"]
+        if "by_detector" in payload
+        else _aggregate_detector_hotspots(dem, edge_hotspots)
+    )
+    detector_graph_hotspots = (
+        _payload_to_detector_graph_hotspots(dem, payload["detector_graph_hotspots"])
+        if "detector_graph_hotspots" in payload
+        else _edge_sensitivities_to_detector_graph(dem, edge_sensitivities)
+    )
+    top_edges_cache = tuple(
+        DemEdgeHotspotRow(
+            edge_index=int(row["edge_index"]),
+            location_id=dem.edges[int(row["edge_index"])].location_id,
+            event=dem.edges[int(row["edge_index"])].event,
+            probability=dem.edges[int(row["edge_index"])].probability,
+            detectors=dem.edges[int(row["edge_index"])].detectors,
+            observables=dem.edges[int(row["edge_index"])].observables,
+            sensitivity=float(row["sensitivity"]),
+            hotspot=float(row["hotspot"]),
+        )
+        for row in payload.get("top_edges", ())
+    )
+    top_hotspots_cache = tuple(
+        DemLocationHotspotRow(
+            location_id=str(row["location_id"]),
+            sensitivity=float(row["sensitivity"]),
+            hotspot=float(row["hotspot"]),
+            qubits=locations[str(row["location_id"])].qubits,
+            tags=locations[str(row["location_id"])].tags,
+        )
+        for row in payload.get("top_hotspots", ())
+    )
     return DemHotspotResult(
         dem=dem,
         shots=int(payload["shots"]),
@@ -468,15 +606,107 @@ def _payload_to_dem_hotspot_result(dem: Any, payload: Mapping[str, Any]) -> Any:
         edge_hotspots=edge_hotspots,
         sensitivities=sensitivities,
         hotspots=hotspots,
-        by_detector=_aggregate_detector_hotspots(dem, edge_hotspots),
-        by_round=_aggregate_by_tag(hotspots, locations, "round"),
-        by_gate=_aggregate_by_tag(hotspots, locations, "gate"),
-        by_operation=_aggregate_by_tag(hotspots, locations, "operation"),
+        by_detector=by_detector,
+        by_round=payload["by_round"] if "by_round" in payload else _aggregate_by_tag(hotspots, locations, "round"),
+        by_gate=payload["by_gate"] if "by_gate" in payload else _aggregate_by_tag(hotspots, locations, "gate"),
+        by_operation=payload["by_operation"] if "by_operation" in payload else _aggregate_by_tag(hotspots, locations, "operation"),
         locations=locations,
-        detector_graph_hotspots=_edge_sensitivities_to_detector_graph(
-            dem,
-            edge_sensitivities,
-        ),
+        detector_graph_hotspots=detector_graph_hotspots,
+        top_edges_cache=top_edges_cache,
+        top_hotspots_cache=top_hotspots_cache,
+    )
+
+
+def _payload_to_detector_graph_hotspots(dem: Any, payload: Mapping[str, Any]) -> Any:
+    from npsim.dem import DetectorGraphEdgeHotspot, DetectorGraphHotspots
+
+    edge_hotspots = []
+    for row in payload["edge_hotspots"]:
+        edge_index = int(row["edge_index"])
+        edge = dem.edges[edge_index]
+        edge_hotspots.append(
+            DetectorGraphEdgeHotspot(
+                edge_index=edge_index,
+                location_id=edge.location_id,
+                event=edge.event,
+                probability=edge.probability,
+                detectors=edge.detectors,
+                observables=edge.observables,
+                sensitivity=float(row["sensitivity"]),
+                hotspot=float(row["hotspot"]),
+                weight=1.0,
+            )
+        )
+
+    return DetectorGraphHotspots(
+        edge_hotspots=tuple(edge_hotspots),
+        by_detector_edge=_graph_key_rows_to_dict(payload["by_detector_edge"]),
+        signed_by_detector_edge=_graph_key_rows_to_dict(payload["signed_by_detector_edge"]),
+        by_detector={int(key): float(value) for key, value in payload["by_detector"].items()},
+        signed_by_detector={
+            int(key): float(value)
+            for key, value in payload["signed_by_detector"].items()
+        },
+        by_observable={
+            int(key): float(value)
+            for key, value in payload["by_observable"].items()
+        },
+        signed_by_observable={
+            int(key): float(value)
+            for key, value in payload["signed_by_observable"].items()
+        },
+        by_location={
+            str(key): float(value)
+            for key, value in payload["by_location"].items()
+        },
+        signed_by_location={
+            str(key): float(value)
+            for key, value in payload["signed_by_location"].items()
+        },
+    )
+
+
+def _graph_key_rows_to_dict(rows: Any) -> dict[tuple[tuple[int, ...], tuple[int, ...]], float]:
+    if hasattr(rows, "items"):
+        return rows
+    return {
+        (
+            tuple(int(value) for value in row["detectors"]),
+            tuple(int(value) for value in row["observables"]),
+        ): float(row["value"])
+        for row in rows
+    }
+
+
+def _payload_to_simulation_result(circuit: Circuit, payload: Mapping[str, Any]) -> Any:
+    from npsim.simulator import HotspotRow, SimulationResult
+
+    locations = circuit.noise_locations()
+    sensitivities = payload["sensitivities"]
+    hotspots = payload["hotspots"]
+    top_hotspots_cache = tuple(
+        HotspotRow(
+            location_id=str(row["location_id"]),
+            sensitivity=float(row["sensitivity"]),
+            hotspot=float(row["hotspot"]),
+            qubits=locations[str(row["location_id"])].qubits,
+            tags=locations[str(row["location_id"])].tags,
+        )
+        for row in payload.get("top_hotspots", ())
+    )
+    return SimulationResult(
+        shots=int(payload["shots"]),
+        mean_loss=float(payload["mean_loss"]),
+        baseline=float(payload["baseline"]),
+        sensitivities=sensitivities,
+        hotspots=hotspots,
+        by_qubit=payload["by_qubit"],
+        by_round=payload["by_round"],
+        by_gate=payload["by_gate"],
+        by_operation=payload["by_operation"],
+        locations=locations,
+        losses=[],
+        top_hotspots_cache=top_hotspots_cache,
     )
 
 
