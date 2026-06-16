@@ -5,8 +5,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Mapping, Sequence
 
-from npsim.runtime.simulator import MeasurementRecord, Trajectory
-
 
 @dataclass(frozen=True)
 class NoCorrectionDecoder:
@@ -15,8 +13,8 @@ class NoCorrectionDecoder:
     def decode(
         self,
         detector_record: Any,
-        measurements: Mapping[str, MeasurementRecord],
-        trajectory: Trajectory,
+        measurements: Mapping[str, Any],
+        trajectory: Any,
     ) -> Any:
         del detector_record, measurements, trajectory
         return None
@@ -31,8 +29,8 @@ class RepetitionCodeDecoder:
     def decode(
         self,
         detector_record: Any,
-        measurements: Mapping[str, MeasurementRecord],
-        trajectory: Trajectory,
+        measurements: Mapping[str, Any],
+        trajectory: Any,
     ) -> list[int]:
         del measurements, trajectory
         syndrome = self._coerce_syndrome(detector_record)

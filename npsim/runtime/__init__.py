@@ -15,30 +15,17 @@ from npsim.runtime.native import (
     compile_native_sampler,
     generate_native_dem,
 )
-from npsim.runtime.simulator import (
-    Decoder,
-    ForwardNoiseAwareSimulator,
-    HotspotRow,
-    MeasurementRecord,
-    NoiseEvent,
-    SimulationResult,
-    Trajectory,
-)
+from npsim.runtime.results import HotspotRow, SimulationResult
 
 __all__ = [
     "BatchCorrectionMaskFn",
     "BatchForwardNoiseAwareSimulator",
     "BatchLossMaskFn",
     "BatchTrajectory",
-    "Decoder",
-    "ForwardNoiseAwareSimulator",
     "HotspotRow",
-    "MeasurementRecord",
     "NativeDemSampler",
     "NativePackedSampler",
-    "NoiseEvent",
     "SimulationResult",
-    "Trajectory",
     "UnsupportedBatchCircuitError",
     "UnsupportedNativeCircuitError",
     "compile_native_dem_sampler",

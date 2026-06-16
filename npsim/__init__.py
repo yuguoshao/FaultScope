@@ -41,7 +41,7 @@ from npsim.decoders import (
     PyMatchingUnavailableError,
     UnsupportedPyMatchingDemError,
 )
-from npsim.runtime import ForwardNoiseAwareSimulator, SimulationResult, Trajectory
+from npsim.runtime import HotspotRow, SimulationResult
 from npsim.io import StimImportError, StimImportResult, load_stim_file, parse_stim_circuit
 from npsim.viz import (
     VisualizationUnavailableError,
@@ -67,7 +67,7 @@ __all__ = [
     "DetectorErrorModelGenerator",
     "DetectorGraphEdgeHotspot",
     "DetectorGraphHotspots",
-    "ForwardNoiseAwareSimulator",
+    "HotspotRow",
     "LogicalObservable",
     "MeasurementBitFlip",
     "NativePackedSampler",
@@ -80,7 +80,6 @@ __all__ = [
     "SingleQubitDepolarizing",
     "StimImportError",
     "StimImportResult",
-    "Trajectory",
     "TwoQubitDepolarizing",
     "UnsupportedBatchCircuitError",
     "UnsupportedDemCircuitError",

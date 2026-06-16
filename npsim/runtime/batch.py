@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Mapping
 
 from npsim.core import Circuit
-from npsim.runtime.simulator import SimulationResult
+from npsim.runtime.results import SimulationResult
 
 
 class UnsupportedBatchCircuitError(ValueError):

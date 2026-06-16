@@ -31,7 +31,7 @@ from npsim.decoders import (
     UnsupportedPyMatchingDemError,
 )
 from npsim.experiments import make_repetition_code_experiment
-from npsim.runtime import ForwardNoiseAwareSimulator, SimulationResult
+from npsim.runtime import SimulationResult
 from npsim.core import StabilizerState
 from npsim.io import StimImportError, parse_stim_circuit
 from npsim.viz import (
@@ -50,6 +50,7 @@ from tests.reference.batch import (
 from tests.reference.dem import (
     DetectorErrorModelGenerator as ReferenceDetectorErrorModelGenerator,
 )
+from tests.reference.forward import ForwardNoiseAwareSimulator
 
 
 def _assert_binomial_count_close(

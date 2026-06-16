@@ -639,7 +639,7 @@ def _graph_key_rows_to_dict(rows: Any) -> dict[tuple[tuple[int, ...], tuple[int,
 
 
 def _payload_to_simulation_result(circuit: Circuit, payload: Mapping[str, Any]) -> Any:
-    from npsim.runtime.simulator import HotspotRow, SimulationResult
+    from npsim.runtime.results import HotspotRow, SimulationResult
 
     locations = circuit.noise_locations()
     sensitivities = payload["sensitivities"]

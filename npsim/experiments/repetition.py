@@ -3,14 +3,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Callable, Mapping
+from typing import Any, Callable, Mapping
 
 from npsim.runtime.batch import BatchTrajectory
 from npsim.core import Circuit, NoiseLocation, Operation
 from npsim.decoders import RepetitionCodeDecoder
 from npsim.dem import Detector, LogicalObservable
 from npsim.core import BernoulliPauliNoise, MeasurementBitFlip
-from npsim.runtime.simulator import Trajectory
 
 
 RateSpec = float | Mapping[tuple[int, int], float]
@@ -21,9 +20,9 @@ class RepetitionCodeExperiment:
     circuit: Circuit
     data_qubits: tuple[int, ...]
     ancilla_qubits: tuple[int, ...]
-    detector_fn: Callable[[Trajectory], list[int]]
+    detector_fn: Callable[[Any], list[int]]
     decoder: RepetitionCodeDecoder
-    loss_fn: Callable[[Trajectory, list[int]], float]
+    loss_fn: Callable[[Any, list[int]], float]
     batch_loss_mask_fn: Callable[[BatchTrajectory], int]
     detectors: tuple[Detector, ...]
     observables: tuple[LogicalObservable, ...]
@@ -124,14 +123,14 @@ def make_repetition_code_experiment(
         ),
     )
 
-    def detector_fn(trajectory: Trajectory) -> list[int]:
+    def detector_fn(trajectory: Any) -> list[int]:
         final_round = rounds - 1
         return [
             trajectory.measurement_by_key[f"r{final_round}_c{check_idx}"].bit
             for check_idx in range(distance - 1)
         ]
 
-    def loss_fn(trajectory: Trajectory, correction: list[int]) -> float:
+    def loss_fn(trajectory: Any, correction: list[int]) -> float:
         residual = [
             trajectory.frame.x[qubit] ^ int(correction[data_idx])
             for data_idx, qubit in enumerate(data)
