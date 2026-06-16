@@ -284,38 +284,48 @@ def _rotated_surface_code_checks(
                 x_checks.append({"id": f"x_check_{row}_{col}", **check})
             else:
                 z_checks.append({"id": f"z_check_{row}_{col}", **check})
-    x_checks.extend(
-        (
+    for col in range(0, distance - 1, 2):
+        x_checks.append(
             {
-                "id": "x_check_top_left",
-                "data": ((0, 0), (0, 1)),
-                "x": 0.5,
-                "y": -0.35,
-            },
-            {
-                "id": "x_check_bottom_right",
-                "data": ((distance - 1, distance - 2), (distance - 1, distance - 1)),
-                "x": distance - 1.5,
-                "y": distance - 0.65,
-            },
+                "id": f"x_check_top_{col}",
+                "data": ((0, col), (0, col + 1)),
+                "x": col + 0.5,
+                "y": -0.5,
+            }
         )
-    )
-    z_checks.extend(
-        (
+    for col in range(1, distance - 1, 2):
+        x_checks.append(
             {
-                "id": "z_check_top_right",
-                "data": ((0, distance - 2), (0, distance - 1)),
-                "x": distance - 1.5,
-                "y": -0.35,
-            },
-            {
-                "id": "z_check_bottom_left",
-                "data": ((distance - 1, 0), (distance - 1, 1)),
-                "x": 0.5,
-                "y": distance - 0.65,
-            },
+                "id": f"x_check_bottom_{col}",
+                "data": (
+                    (distance - 1, col),
+                    (distance - 1, col + 1),
+                ),
+                "x": col + 0.5,
+                "y": distance - 0.5,
+            }
         )
-    )
+    for row in range(1, distance - 1, 2):
+        z_checks.append(
+            {
+                "id": f"z_check_left_{row}",
+                "data": ((row, 0), (row + 1, 0)),
+                "x": -0.5,
+                "y": row + 0.5,
+            }
+        )
+    for row in range(0, distance - 1, 2):
+        z_checks.append(
+            {
+                "id": f"z_check_right_{row}",
+                "data": (
+                    (row, distance - 1),
+                    (row + 1, distance - 1),
+                ),
+                "x": distance - 0.5,
+                "y": row + 0.5,
+            }
+        )
     return x_checks, z_checks
 
 

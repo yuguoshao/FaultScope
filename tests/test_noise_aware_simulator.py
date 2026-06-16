@@ -41,7 +41,10 @@ from npsim.visualization import (
     write_repetition_gate_structure_hotspot_map,
     write_repetition_hotspot_heatmap,
 )
-from tests.surface_code_examples import make_large_rotated_surface_code_memory_example
+from tests.surface_code_examples import (
+    _rotated_surface_code_checks,
+    make_large_rotated_surface_code_memory_example,
+)
 
 
 def _assert_binomial_count_close(
@@ -1705,7 +1708,7 @@ class HotspotVisualizationTests(unittest.TestCase):
                     path,
                     distance=distance,
                     highlighted_data=(2, 2),
-                    highlighted_check_ids=("x_check_2_2",),
+                    highlighted_check_ids=("z_check_2_2",),
                 )
             except VisualizationUnavailableError as exc:
                 self.skipTest(str(exc))
@@ -1713,7 +1716,7 @@ class HotspotVisualizationTests(unittest.TestCase):
             self._assert_png_nonblank(path)
         self.assertEqual(len(result.locations), 49)
         self.assertIn("data_2_2", result.hotspots)
-        self.assertIn("x_check_2_2", result.hotspots)
+        self.assertIn("z_check_2_2", result.hotspots)
 
     def test_d5_rotated_surface_code_integration_generates_spatial_hotspot_map(
         self,
@@ -1810,43 +1813,32 @@ class HotspotVisualizationTests(unittest.TestCase):
                 sensitivities[location_id] = hotspot
                 qubit_index += 1
 
-        check_specs: list[tuple[str, str, float, float]] = []
-        for row in range(distance - 1):
-            for col in range(distance - 1):
-                basis = "x" if (row + col) % 2 == 0 else "z"
-                check_specs.append((basis, f"{row}_{col}", col + 0.5, row + 0.5))
-        check_specs.extend(
-            (
-                ("x", "top_0", 0.5, -0.35),
-                ("z", "top_1", 2.5, -0.35),
-                ("x", "bottom_0", 1.5, distance - 0.65),
-                ("z", "bottom_1", 3.5, distance - 0.65),
-                ("z", "left_0", -0.35, 0.5),
-                ("x", "left_1", -0.35, 2.5),
-                ("z", "right_0", distance - 0.65, 1.5),
-                ("x", "right_1", distance - 0.65, 3.5),
-            )
-        )
-        for basis, suffix, x_coord, y_coord in check_specs:
-            location_id = f"{basis}_check_{suffix}"
-            hotspot = 0.015 + 0.012 * ((len(suffix) + int(10 * x_coord)) % 4)
-            if location_id == "x_check_2_2":
-                hotspot = 0.36
-            locations[location_id] = NoiseLocation(
-                id=location_id,
-                model=BernoulliPauliNoise("X"),
-                rate=0.03,
-                qubits=(),
-                tags={
-                    "layout": "rotated_surface_code",
-                    "role": f"{basis}_check",
-                    "x": x_coord,
-                    "y": y_coord,
-                    "operation": "check_noise",
-                },
-            )
-            hotspots[location_id] = hotspot
-            sensitivities[location_id] = hotspot
+        x_checks, z_checks = _rotated_surface_code_checks(distance)
+        for basis, checks in (("x", x_checks), ("z", z_checks)):
+            for check in checks:
+                location_id = str(check["id"])
+                x_coord = float(check["x"])
+                y_coord = float(check["y"])
+                hotspot = 0.015 + 0.012 * (
+                    (len(location_id) + int(10 * x_coord)) % 4
+                )
+                if location_id == "z_check_2_2":
+                    hotspot = 0.36
+                locations[location_id] = NoiseLocation(
+                    id=location_id,
+                    model=BernoulliPauliNoise("X"),
+                    rate=0.03,
+                    qubits=(),
+                    tags={
+                        "layout": "rotated_surface_code",
+                        "role": f"{basis}_check",
+                        "x": x_coord,
+                        "y": y_coord,
+                        "operation": "check_noise",
+                    },
+                )
+                hotspots[location_id] = hotspot
+                sensitivities[location_id] = hotspot
 
         return SimulationResult(
             shots=12_000,
@@ -1866,41 +1858,8 @@ class HotspotVisualizationTests(unittest.TestCase):
         self,
         distance: int,
     ) -> list[dict[str, object]]:
-        checks: list[dict[str, object]] = []
-        for row in range(distance - 1):
-            for col in range(distance - 1):
-                if (row + col) % 2:
-                    continue
-                checks.append(
-                    {
-                        "id": f"z_check_{row}_{col}",
-                        "data": (
-                            (row, col),
-                            (row + 1, col),
-                            (row, col + 1),
-                            (row + 1, col + 1),
-                        ),
-                        "x": col + 0.5,
-                        "y": row + 0.5,
-                    }
-                )
-        checks.extend(
-            (
-                {
-                    "id": "z_check_top_right",
-                    "data": ((0, distance - 2), (0, distance - 1)),
-                    "x": distance - 1.5,
-                    "y": -0.35,
-                },
-                {
-                    "id": "z_check_bottom_left",
-                    "data": ((distance - 1, 0), (distance - 1, 1)),
-                    "x": 0.5,
-                    "y": distance - 0.65,
-                },
-            )
-        )
-        return checks
+        _, z_checks = _rotated_surface_code_checks(distance)
+        return [dict(check) for check in z_checks]
 
     def _make_rotated_surface_code_bitflip_circuit(
         self,

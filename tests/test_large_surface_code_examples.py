@@ -8,7 +8,10 @@ from npsim.visualization import (
     write_rotated_surface_code_spatial_hotspot_map,
 )
 
-from tests.surface_code_examples import make_large_rotated_surface_code_memory_example
+from tests.surface_code_examples import (
+    _rotated_surface_code_checks,
+    make_large_rotated_surface_code_memory_example,
+)
 
 
 class LargeRotatedSurfaceCodeExampleTests(unittest.TestCase):
@@ -26,6 +29,26 @@ class LargeRotatedSurfaceCodeExampleTests(unittest.TestCase):
                 )
                 self.assertEqual(example.data_qubits, expected)
                 self.assertEqual(example.circuit.n_qubits, expected)
+                self.assertEqual(
+                    len(example.x_checks) + len(example.z_checks),
+                    distance * distance - 1,
+                )
+                self.assertEqual(
+                    len(example.x_checks),
+                    (distance * distance - 1) // 2,
+                )
+                self.assertEqual(
+                    len(example.z_checks),
+                    (distance * distance - 1) // 2,
+                )
+                self.assertEqual(
+                    sum(
+                        1
+                        for check in (*example.x_checks, *example.z_checks)
+                        if len(check["data"]) == 2
+                    ),
+                    2 * (distance - 1),
+                )
 
                 locations = example.circuit.noise_locations()
                 self.assertEqual(
@@ -46,6 +69,43 @@ class LargeRotatedSurfaceCodeExampleTests(unittest.TestCase):
                 )
                 self.assertIn(f"d{distance}_meas_r1_{example.hot_x_check}", locations)
                 self.assertIn(f"d{distance}_meas_r1_{example.hot_z_check}", locations)
+
+    def test_d7_check_coordinates_match_stim_generated_rotated_layout(self) -> None:
+        try:
+            import stim
+        except ImportError as exc:
+            self.skipTest(f"optional Stim dependency is not installed: {exc}")
+
+        distance = 7
+        x_checks, z_checks = _rotated_surface_code_checks(distance)
+        local_coords = {
+            (int(2 * (float(check["x"]) + 0.5)), int(2 * (float(check["y"]) + 0.5)))
+            for check in (*x_checks, *z_checks)
+        }
+
+        circuit = stim.Circuit.generated(
+            "surface_code:rotated_memory_x",
+            distance=distance,
+            rounds=1,
+        )
+        qubit_coords = {}
+        stim_check_qubits = None
+        for instruction in circuit.flattened():
+            if instruction.name == "QUBIT_COORDS":
+                coords = tuple(int(coord) for coord in instruction.gate_args_copy()[:2])
+                for target in instruction.targets_copy():
+                    qubit_coords[int(target.value)] = coords
+            elif instruction.name == "MR" and stim_check_qubits is None:
+                stim_check_qubits = tuple(
+                    int(target.value) for target in instruction.targets_copy()
+                )
+
+        self.assertIsNotNone(stim_check_qubits)
+        assert stim_check_qubits is not None
+        stim_coords = {qubit_coords[qubit] for qubit in stim_check_qubits}
+
+        self.assertEqual(len(local_coords), distance * distance - 1)
+        self.assertEqual(local_coords, stim_coords)
 
     def test_d9_example_runs_batch_hotspot_estimation(self) -> None:
         example = make_large_rotated_surface_code_memory_example(

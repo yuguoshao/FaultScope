@@ -9,6 +9,7 @@ from npsim.visualization import (
     VisualizationUnavailableError,
     write_rotated_surface_code_spatial_hotspot_map,
 )
+from tests.surface_code_examples import _rotated_surface_code_checks
 
 
 class RotatedSurfaceCodeXZIntegrationTests(unittest.TestCase):
@@ -322,62 +323,6 @@ def _append_check_measurements(
                 noise=location,
             )
         )
-
-
-def _rotated_surface_code_checks(
-    distance: int,
-) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
-    x_checks = []
-    z_checks = []
-    for row in range(distance - 1):
-        for col in range(distance - 1):
-            check = {
-                "data": (
-                    (row, col),
-                    (row + 1, col),
-                    (row, col + 1),
-                    (row + 1, col + 1),
-                ),
-                "x": col + 0.5,
-                "y": row + 0.5,
-            }
-            if (row + col) % 2:
-                x_checks.append({"id": f"x_check_{row}_{col}", **check})
-            else:
-                z_checks.append({"id": f"z_check_{row}_{col}", **check})
-    x_checks.extend(
-        (
-            {
-                "id": "x_check_top_left",
-                "data": ((0, 0), (0, 1)),
-                "x": 0.5,
-                "y": -0.35,
-            },
-            {
-                "id": "x_check_bottom_right",
-                "data": ((distance - 1, distance - 2), (distance - 1, distance - 1)),
-                "x": distance - 1.5,
-                "y": distance - 0.65,
-            },
-        )
-    )
-    z_checks.extend(
-        (
-            {
-                "id": "z_check_top_right",
-                "data": ((0, distance - 2), (0, distance - 1)),
-                "x": distance - 1.5,
-                "y": -0.35,
-            },
-            {
-                "id": "z_check_bottom_left",
-                "data": ((distance - 1, 0), (distance - 1, 1)),
-                "x": 0.5,
-                "y": distance - 0.65,
-            },
-        )
-    )
-    return x_checks, z_checks
 
 
 def _make_matching(distance: int, checks, np, pymatching, sparse):
