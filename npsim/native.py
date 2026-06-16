@@ -147,6 +147,7 @@ class NativeDemSampler:
         shots: int,
         seed: int | None = None,
         rng: random.Random | None = None,
+        return_edge_events: bool = True,
     ) -> Any:
         if shots <= 0:
             raise ValueError("shots must be positive")
@@ -155,11 +156,19 @@ class NativeDemSampler:
         if self.backend_name == "native":
             if rng is not None:
                 raise ValueError("native DEM sampler accepts seed, not a Python rng")
-            payload = self._engine.run_batch(int(shots), seed)
+            payload = self._engine.run_batch(
+                int(shots),
+                seed,
+                bool(return_edge_events),
+            )
             return _payload_to_dem_batch(payload)
         if rng is None:
             rng = random.Random(seed)
-        return self._engine.run_batch(shots=shots, rng=rng)
+        return self._engine.run_batch(
+            shots=shots,
+            rng=rng,
+            return_edge_events=return_edge_events,
+        )
 
     def estimate_default(
         self,

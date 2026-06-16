@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from unittest import mock
 
-from npsim.batch import BatchForwardNoiseAwareSimulator
+from npsim.batch import BatchForwardNoiseAwareSimulator, BatchTrajectory
 from npsim.circuit import Circuit, NoiseLocation, Operation
 from npsim.dem import (
     Detector,
@@ -14,7 +14,7 @@ from npsim.dem import (
     LogicalObservable,
     UnsupportedDemCircuitError,
 )
-from npsim.dem_sampler import DemBatchHotspotSimulator
+from npsim.dem_sampler import DemBatchHotspotSimulator, DemBatchTrajectory
 from npsim.noise import (
     BernoulliPauliNoise,
     MeasurementBitFlip,
@@ -942,6 +942,17 @@ class NativeDetectorErrorModelTests(unittest.TestCase):
         self.assertEqual(batch.detectors[0], all_mask)
         self.assertEqual(batch.observables[0], all_mask)
 
+        compact_batch = sampler.run_batch(
+            shots=9,
+            seed=123,
+            return_edge_events=False,
+        )
+
+        self.assertEqual(compact_batch.all_mask, all_mask)
+        self.assertEqual(compact_batch.edge_event_masks, {})
+        self.assertEqual(compact_batch.detectors[0], all_mask)
+        self.assertEqual(compact_batch.observables[0], all_mask)
+
     def test_native_dem_sampler_edge_counts_are_statistical(self) -> None:
         self._require_native_dem()
         probabilities = (0.001, 0.025, 0.14)
@@ -1324,7 +1335,7 @@ class _FakeMatching:
         return [int(syndrome[0]) if syndrome else 0]
 
     def decode_batch(self, syndromes):
-        return [[int(row[0]) if row else 0] for row in syndromes]
+        return [[int(row[0]) if len(row) else 0] for row in syndromes]
 
 
 class _FakePyMatching:
@@ -1471,6 +1482,77 @@ class PyMatchingBatchDecoderTests(unittest.TestCase):
             [{0: 0}, {0: 1}],
         )
         self.assertEqual(decoder.decode_batch_masks({0: 0b1010}, shots=4), {0: 0b1010})
+
+    def test_real_pymatching_decodes_bit_packed_masks_from_batch_objects(self) -> None:
+        os.environ.setdefault(
+            "MPLCONFIGDIR",
+            os.path.join(tempfile.gettempdir(), "npsim-matplotlib-cache"),
+        )
+        try:
+            import pymatching  # noqa: F401
+            import numpy  # noqa: F401
+            from scipy import sparse  # noqa: F401
+        except ImportError as exc:
+            self.skipTest(f"optional PyMatching dependencies are not installed: {exc}")
+
+        dem = DetectorErrorModel(
+            detectors=(
+                Detector(id=0, measurement_keys=()),
+                Detector(id=1, measurement_keys=()),
+            ),
+            observables=(LogicalObservable(id=0), LogicalObservable(id=1)),
+            edges=(
+                DetectorErrorEdge(
+                    probability=0.1,
+                    detectors=(0,),
+                    observables=(0,),
+                    location_id="x0",
+                    event="X",
+                ),
+                DetectorErrorEdge(
+                    probability=0.1,
+                    detectors=(1,),
+                    observables=(1,),
+                    location_id="x1",
+                    event="X",
+                ),
+            ),
+        )
+        decoder = PyMatchingBatchDecoder.from_dem(dem)
+        detector_masks = {0: 0b1010, 1: 0b1100}
+        expected = {0: 0b1010, 1: 0b1100}
+
+        self.assertEqual(
+            decoder.decode_batch_masks(detector_masks, shots=4),
+            expected,
+        )
+        self.assertEqual(
+            decoder.decode_batch_masks(
+                DemBatchTrajectory(
+                    shots=4,
+                    all_mask=0b1111,
+                    detectors=detector_masks,
+                    observables={},
+                    edge_event_masks={},
+                )
+            ),
+            expected,
+        )
+        self.assertEqual(
+            decoder.decode_batch_masks(
+                BatchTrajectory(
+                    shots=4,
+                    all_mask=0b1111,
+                    x_frame=(),
+                    z_frame=(),
+                    measurements={},
+                    detectors=detector_masks,
+                    observables={},
+                    noise_event_masks={},
+                )
+            ),
+            expected,
+        )
 
 
 class HotspotVisualizationTests(unittest.TestCase):

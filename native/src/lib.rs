@@ -437,14 +437,20 @@ impl NativeDemSampler {
         self.edges.len()
     }
 
-    #[pyo3(signature = (shots, seed=None))]
-    fn run_batch(&self, py: Python<'_>, shots: usize, seed: Option<u64>) -> PyResult<PyObject> {
+    #[pyo3(signature = (shots, seed=None, return_edge_events=true))]
+    fn run_batch(
+        &self,
+        py: Python<'_>,
+        shots: usize,
+        seed: Option<u64>,
+        return_edge_events: bool,
+    ) -> PyResult<PyObject> {
         if shots == 0 {
             return Err(PyValueError::new_err("shots must be positive"));
         }
         let batch = py.allow_threads(|| {
             let mut rng = SmallRng::new(seed.unwrap_or(0x95f2_04dc_4291_a715));
-            run_dem_batch(self, shots, &mut rng)
+            run_dem_batch(self, shots, &mut rng, return_edge_events)
         });
         dem_batch_to_py(py, &batch)
     }
@@ -461,7 +467,7 @@ impl NativeDemSampler {
         }
         let batch = py.allow_threads(|| {
             let mut rng = SmallRng::new(seed.unwrap_or(0x95f2_04dc_4291_a715));
-            run_dem_batch(self, shots, &mut rng)
+            run_dem_batch(self, shots, &mut rng, true)
         });
         Ok(NativeDemBatch { batch })
     }
@@ -480,7 +486,7 @@ impl NativeDemSampler {
         }
         let estimate = py.allow_threads(|| {
             let mut rng = SmallRng::new(seed.unwrap_or(0x95f2_04dc_4291_a715));
-            let batch = run_dem_batch(self, shots, &mut rng);
+            let batch = run_dem_batch(self, shots, &mut rng, true);
             compute_dem_estimate(self, &batch, &batch.loss_mask, baseline, top_k)
         });
         dem_estimate_to_py(py, &estimate)
@@ -2276,7 +2282,12 @@ struct DetectorGraphEstimate {
     signed_by_location: HashMap<String, f64>,
 }
 
-fn run_dem_batch(sampler: &NativeDemSampler, shots: usize, rng: &mut SmallRng) -> DemBatch {
+fn run_dem_batch(
+    sampler: &NativeDemSampler,
+    shots: usize,
+    rng: &mut SmallRng,
+    return_edge_events: bool,
+) -> DemBatch {
     let words = word_count(shots);
     let all_mask = Mask::all(shots);
     let mut detectors = HashMap::new();
@@ -2287,7 +2298,11 @@ fn run_dem_batch(sampler: &NativeDemSampler, shots: usize, rng: &mut SmallRng) -
     for observable_id in &sampler.observables {
         observables.insert(*observable_id, Mask::zero(words));
     }
-    let mut edge_event_masks = Vec::with_capacity(sampler.edges.len());
+    let mut edge_event_masks = if return_edge_events {
+        Vec::with_capacity(sampler.edges.len())
+    } else {
+        Vec::new()
+    };
 
     for edge in &sampler.edges {
         let event_mask = bernoulli_mask(rng, shots, edge.probability);
@@ -2305,7 +2320,9 @@ fn run_dem_batch(sampler: &NativeDemSampler, shots: usize, rng: &mut SmallRng) -
                     .xor_assign(&event_mask);
             }
         }
-        edge_event_masks.push(event_mask);
+        if return_edge_events {
+            edge_event_masks.push(event_mask);
+        }
     }
 
     let mut loss_mask = Mask::zero(words);

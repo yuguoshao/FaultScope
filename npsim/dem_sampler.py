@@ -158,6 +158,7 @@ class DemBatchHotspotSimulator:
         shots: int,
         rng: random.Random | None = None,
         seed: int | None = None,
+        return_edge_events: bool = True,
     ) -> DemBatchTrajectory:
         if shots <= 0:
             raise ValueError("shots must be positive")
@@ -173,7 +174,11 @@ class DemBatchHotspotSimulator:
                 return compile_native_dem_sampler(
                     self.dem,
                     backend="native",
-                ).run_batch(shots=shots, seed=seed)
+                ).run_batch(
+                    shots=shots,
+                    seed=seed,
+                    return_edge_events=return_edge_events,
+                )
             except (ImportError, UnsupportedNativeCircuitError):
                 rng = random.Random(seed)
 
@@ -184,7 +189,8 @@ class DemBatchHotspotSimulator:
 
         for edge_index, edge in enumerate(self.dem.edges):
             event_mask = _bernoulli_mask(rng, shots, edge.probability) & all_mask
-            edge_event_masks[edge_index] = event_mask
+            if return_edge_events:
+                edge_event_masks[edge_index] = event_mask
             if not event_mask:
                 continue
             for detector_id in edge.detectors:

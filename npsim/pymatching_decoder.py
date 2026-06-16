@@ -142,25 +142,26 @@ class PyMatchingBatchDecoder:
         if not isinstance(masks, Mapping):
             raise TypeError("detector_masks must be a mapping or BatchTrajectory-like object")
 
-        syndromes = [
-            [
-                int((int(masks.get(detector_id, 0)) >> shot) & 1)
-                for detector_id in self.detector_ids
-            ]
-            for shot in range(shots)
-        ]
-        predictions = self.matching.decode_batch(syndromes)
-        observable_masks = {observable_id: 0 for observable_id in self.observable_ids}
-        for shot, row in enumerate(_rows(predictions)):
-            prediction = self._prediction_to_tuple(row)
-            if len(prediction) != len(self.observable_ids):
-                raise ValueError(
-                    "PyMatching prediction length does not match decoder observable count"
-                )
-            for observable_id, bit in zip(self.observable_ids, prediction):
-                if bit:
-                    observable_masks[observable_id] |= 1 << shot
-        return observable_masks
+        syndromes = _masks_to_packed_shots(masks, self.detector_ids, shots)
+        try:
+            predictions = self.matching.decode_batch(
+                syndromes,
+                bit_packed_shots=True,
+                bit_packed_predictions=True,
+            )
+            return _packed_predictions_to_masks(
+                predictions,
+                self.observable_ids,
+                shots,
+            )
+        except TypeError:
+            dense_syndromes = _packed_shots_to_dense(syndromes, len(self.detector_ids))
+            predictions = self.matching.decode_batch(dense_syndromes)
+            return _dense_predictions_to_masks(
+                predictions,
+                self.observable_ids,
+                shots,
+            )
 
     def _coerce_detector_record(
         self,
@@ -280,3 +281,91 @@ def _rows(predictions: Any) -> list[Any]:
     if hasattr(predictions, "tolist"):
         predictions = predictions.tolist()
     return list(predictions)
+
+
+def _masks_to_packed_shots(
+    masks: Mapping[int, int],
+    detector_ids: Sequence[int],
+    shots: int,
+) -> Any:
+    import numpy as np
+
+    byte_count_by_shots = (shots + 7) // 8
+    byte_count_by_detectors = (len(detector_ids) + 7) // 8
+    packed = np.zeros((shots, byte_count_by_detectors), dtype=np.uint8)
+    if shots == 0 or not detector_ids:
+        return packed
+    all_mask = (1 << shots) - 1
+    for detector_index, detector_id in enumerate(detector_ids):
+        mask = int(masks.get(detector_id, 0)) & all_mask
+        shot_bytes = mask.to_bytes(byte_count_by_shots, "little")
+        shot_bits = np.unpackbits(
+            np.frombuffer(shot_bytes, dtype=np.uint8),
+            bitorder="little",
+        )[:shots]
+        packed[:, detector_index // 8] |= (
+            shot_bits.astype(np.uint8) << (detector_index % 8)
+        )
+    return packed
+
+
+def _packed_shots_to_dense(packed: Any, detector_count: int) -> Any:
+    import numpy as np
+
+    if detector_count == 0:
+        return np.zeros((packed.shape[0], 0), dtype=np.uint8)
+    return np.unpackbits(
+        np.asarray(packed, dtype=np.uint8),
+        bitorder="little",
+        axis=1,
+    )[:, :detector_count].astype(np.uint8, copy=False)
+
+
+def _packed_predictions_to_masks(
+    predictions: Any,
+    observable_ids: Sequence[int],
+    shots: int,
+) -> dict[int, int]:
+    import numpy as np
+
+    predictions = np.asarray(predictions, dtype=np.uint8)
+    if predictions.ndim == 1:
+        predictions = predictions.reshape((shots, -1))
+    if predictions.ndim != 2 or predictions.shape[0] != shots:
+        raise ValueError(f"unexpected PyMatching prediction shape {predictions.shape}")
+    out = {observable_id: 0 for observable_id in observable_ids}
+    for observable_index, observable_id in enumerate(observable_ids):
+        if observable_index // 8 >= predictions.shape[1]:
+            raise ValueError(
+                "PyMatching prediction width does not match decoder observable count"
+            )
+        bits = (predictions[:, observable_index // 8] >> (observable_index % 8)) & 1
+        packed_bits = np.packbits(bits.astype(np.uint8), bitorder="little")
+        out[observable_id] = int.from_bytes(packed_bits.tobytes(), "little")
+    return out
+
+
+def _dense_predictions_to_masks(
+    predictions: Any,
+    observable_ids: Sequence[int],
+    shots: int,
+) -> dict[int, int]:
+    import numpy as np
+
+    predictions = np.asarray(predictions, dtype=np.uint8)
+    if predictions.ndim == 1:
+        predictions = predictions.reshape((shots, 1))
+    if predictions.ndim != 2 or predictions.shape[0] != shots:
+        raise ValueError(f"unexpected PyMatching prediction shape {predictions.shape}")
+    if predictions.shape[1] != len(observable_ids):
+        raise ValueError(
+            "PyMatching prediction length does not match decoder observable count"
+        )
+    out = {observable_id: 0 for observable_id in observable_ids}
+    for observable_index, observable_id in enumerate(observable_ids):
+        packed_bits = np.packbits(
+            predictions[:, observable_index].astype(np.uint8),
+            bitorder="little",
+        )
+        out[observable_id] = int.from_bytes(packed_bits.tobytes(), "little")
+    return out

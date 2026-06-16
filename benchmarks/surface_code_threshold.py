@@ -57,6 +57,18 @@ class LogicalFailureStats:
         return math.sqrt(p * (1.0 - p) / self.shots)
 
 
+@dataclass(frozen=True)
+class TimedLogicalFailureStats:
+    stats: LogicalFailureStats
+    compile_s: float
+    sample_s: float
+    decode_s: float
+
+    @property
+    def total_s(self) -> float:
+        return self.compile_s + self.sample_s + self.decode_s
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--distances", nargs="+", type=int, default=[3, 5, 7])
@@ -79,7 +91,7 @@ def main() -> None:
 
     print(
         "basis\tdistance\trounds\tp\tshots\tpath\tlogical_failure\t"
-        "failures\tstderr\telapsed_s\tstatus",
+        "failures\tstderr\tcompile_s\tsample_s\tdecode_s\ttotal_s\tstatus",
         flush=True,
     )
 
@@ -87,7 +99,9 @@ def main() -> None:
         path: {distance: {} for distance in distances}
         for path in PATHS
     }
-    elapsed_by_path: dict[str, list[float]] = {path: [] for path in PATHS}
+    timings_by_path: dict[str, list[TimedLogicalFailureStats]] = {
+        path: [] for path in PATHS
+    }
     for distance in distances:
         rounds = args.rounds if args.rounds is not None else distance
         for rate_index, p in enumerate(rates):
@@ -108,7 +122,7 @@ def main() -> None:
             path_fns = (
                 (
                     "stim",
-                    lambda seed: sample_stim_logical_failure(
+                    lambda seed: timed_stim_logical_failure(
                         circuit,
                         matcher,
                         args.shots,
@@ -117,7 +131,7 @@ def main() -> None:
                 ),
                 (
                     "stim-dem",
-                    lambda seed: sample_stim_dem_logical_failure(
+                    lambda seed: timed_stim_dem_logical_failure(
                         stim_dem,
                         matcher,
                         args.shots,
@@ -126,7 +140,7 @@ def main() -> None:
                 ),
                 (
                     "npsim-forward",
-                    lambda seed: sample_npsim_forward_logical_failure(
+                    lambda seed: timed_npsim_forward_logical_failure(
                         imported,
                         matcher,
                         args.shots,
@@ -135,7 +149,7 @@ def main() -> None:
                 ),
                 (
                     "npsim-dem",
-                    lambda seed: sample_npsim_dem_logical_failure(
+                    lambda seed: timed_npsim_dem_logical_failure(
                         npsim_dem,
                         matcher,
                         args.shots,
@@ -147,25 +161,26 @@ def main() -> None:
                 seed = args.seed + 1_000_000 * distance + 1_000 * rate_index + path_index
                 started = time.perf_counter()
                 try:
-                    stats = fn(seed)
+                    timed_stats = fn(seed)
                 except (ImportError, UnsupportedNativeCircuitError, ValueError) as exc:
                     elapsed_s = time.perf_counter() - started
                     print(
                         f"{args.basis}\t{distance}\t{rounds}\t{p:.17g}\t"
                         f"{args.shots}\t{path}\tNA\tNA\tNA\t"
-                        f"{elapsed_s:.6f}\t"
+                        f"NA\tNA\tNA\t{elapsed_s:.6f}\t"
                         f"skip:{type(exc).__name__}",
                         flush=True,
                     )
                     continue
-                elapsed_s = time.perf_counter() - started
+                stats = timed_stats.stats
                 results[path][distance][p] = stats.rate
-                elapsed_by_path[path].append(elapsed_s)
+                timings_by_path[path].append(timed_stats)
                 print(
                     f"{args.basis}\t{distance}\t{rounds}\t{p:.17g}\t"
                     f"{args.shots}\t{path}\t{stats.rate:.17g}\t"
                     f"{stats.failures}\t{stats.stderr:.17g}\t"
-                    f"{elapsed_s:.6f}\tok",
+                    f"{timed_stats.compile_s:.6f}\t{timed_stats.sample_s:.6f}\t"
+                    f"{timed_stats.decode_s:.6f}\t{timed_stats.total_s:.6f}\tok",
                     flush=True,
                 )
 
@@ -185,74 +200,134 @@ def main() -> None:
             )
 
     for path in PATHS:
-        elapsed_values = elapsed_by_path[path]
-        if not elapsed_values:
-            print(f"timing\t{args.basis}\t{path}\t0\tNA\tNA", flush=True)
+        timed_values = timings_by_path[path]
+        if not timed_values:
+            print(f"timing\t{args.basis}\t{path}\t0\tNA\tNA\tNA\tNA\tNA", flush=True)
             continue
-        total_elapsed = sum(elapsed_values)
-        average_elapsed = total_elapsed / len(elapsed_values)
+        compile_s = sum(value.compile_s for value in timed_values)
+        sample_s = sum(value.sample_s for value in timed_values)
+        decode_s = sum(value.decode_s for value in timed_values)
+        total_s = sum(value.total_s for value in timed_values)
+        average_total_s = total_s / len(timed_values)
         print(
-            f"timing\t{args.basis}\t{path}\t{len(elapsed_values)}\t"
-            f"{total_elapsed:.6f}\t{average_elapsed:.6f}",
+            f"timing\t{args.basis}\t{path}\t{len(timed_values)}\t"
+            f"{compile_s:.6f}\t{sample_s:.6f}\t{decode_s:.6f}\t"
+            f"{total_s:.6f}\t{average_total_s:.6f}",
             flush=True,
         )
 
 
-def sample_stim_logical_failure(
+def timed_stim_logical_failure(
     circuit: Any,
     matcher: Any,
     shots: int,
     seed: int,
-) -> LogicalFailureStats:
-    detectors, observables = circuit.compile_detector_sampler(seed=seed).sample(
+) -> TimedLogicalFailureStats:
+    started = time.perf_counter()
+    sampler = circuit.compile_detector_sampler(seed=seed)
+    compile_s = time.perf_counter() - started
+    started = time.perf_counter()
+    detectors, observables = sampler.sample(
         shots,
         separate_observables=True,
     )
-    return _logical_failure_stats(detectors, observables, matcher, shots)
+    sample_s = time.perf_counter() - started
+    started = time.perf_counter()
+    stats = _logical_failure_stats_from_arrays(detectors, observables, matcher, shots)
+    decode_s = time.perf_counter() - started
+    return TimedLogicalFailureStats(stats, compile_s, sample_s, decode_s)
 
 
-def sample_stim_dem_logical_failure(
+def timed_stim_dem_logical_failure(
     stim_dem: Any,
     matcher: Any,
     shots: int,
     seed: int,
-) -> LogicalFailureStats:
-    detectors, observables, _ = stim_dem.compile_sampler(seed=seed).sample(shots)
-    return _logical_failure_stats(detectors, observables, matcher, shots)
+) -> TimedLogicalFailureStats:
+    started = time.perf_counter()
+    sampler = stim_dem.compile_sampler(seed=seed)
+    compile_s = time.perf_counter() - started
+    started = time.perf_counter()
+    detectors, observables, _ = sampler.sample(shots)
+    sample_s = time.perf_counter() - started
+    started = time.perf_counter()
+    stats = _logical_failure_stats_from_arrays(detectors, observables, matcher, shots)
+    decode_s = time.perf_counter() - started
+    return TimedLogicalFailureStats(stats, compile_s, sample_s, decode_s)
 
 
-def sample_npsim_forward_logical_failure(
+def timed_npsim_forward_logical_failure(
     imported: StimImportResult,
     matcher: Any,
     shots: int,
     seed: int,
-) -> LogicalFailureStats:
-    batch = compile_native_sampler(
+) -> TimedLogicalFailureStats:
+    started = time.perf_counter()
+    sampler = compile_native_sampler(
         imported.circuit,
         backend="native",
-    ).sample(shots=shots, seed=seed)
+    )
+    compile_s = time.perf_counter() - started
+    started = time.perf_counter()
+    batch = sampler.sample(shots=shots, seed=seed)
+    sample_s = time.perf_counter() - started
+    started = time.perf_counter()
     detector_ids = tuple(detector.id for detector in imported.detectors)
     observable_ids = tuple(observable.id for observable in imported.observables)
-    detectors = _masks_to_bool_matrix(batch.detectors, detector_ids, shots)
-    observables = _masks_to_bool_matrix(batch.observables, observable_ids, shots)
-    return _logical_failure_stats(detectors, observables, matcher, shots)
+    corrections = _decode_batch_masks_with_matching(
+        matcher,
+        batch.detectors,
+        detector_ids,
+        observable_ids,
+        shots,
+    )
+    stats = _logical_failure_stats_from_masks(
+        batch.observables,
+        corrections,
+        observable_ids,
+        shots,
+    )
+    decode_s = time.perf_counter() - started
+    return TimedLogicalFailureStats(stats, compile_s, sample_s, decode_s)
 
 
-def sample_npsim_dem_logical_failure(
+def timed_npsim_dem_logical_failure(
     npsim_dem: DetectorErrorModel,
     matcher: Any,
     shots: int,
     seed: int,
-) -> LogicalFailureStats:
-    batch = compile_native_dem_sampler(
+) -> TimedLogicalFailureStats:
+    started = time.perf_counter()
+    sampler = compile_native_dem_sampler(
         npsim_dem,
         backend="native",
-    ).run_batch(shots=shots, seed=seed)
+    )
+    compile_s = time.perf_counter() - started
+    started = time.perf_counter()
+    batch = sampler.run_batch(
+        shots=shots,
+        seed=seed,
+        return_edge_events=False,
+    )
+    sample_s = time.perf_counter() - started
+    started = time.perf_counter()
     detector_ids = tuple(detector.id for detector in npsim_dem.detectors)
     observable_ids = tuple(observable.id for observable in npsim_dem.observables)
-    detectors = _masks_to_bool_matrix(batch.detectors, detector_ids, shots)
-    observables = _masks_to_bool_matrix(batch.observables, observable_ids, shots)
-    return _logical_failure_stats(detectors, observables, matcher, shots)
+    corrections = _decode_batch_masks_with_matching(
+        matcher,
+        batch.detectors,
+        detector_ids,
+        observable_ids,
+        shots,
+    )
+    stats = _logical_failure_stats_from_masks(
+        batch.observables,
+        corrections,
+        observable_ids,
+        shots,
+    )
+    decode_s = time.perf_counter() - started
+    return TimedLogicalFailureStats(stats, compile_s, sample_s, decode_s)
 
 
 def stim_dem_to_npsim_dem(stim_dem: Any) -> DetectorErrorModel:
@@ -330,7 +405,7 @@ def stim_dem_to_npsim_dem(stim_dem: Any) -> DetectorErrorModel:
     )
 
 
-def _logical_failure_stats(
+def _logical_failure_stats_from_arrays(
     detectors: Any,
     observables: Any,
     matcher: Any,
@@ -349,23 +424,126 @@ def _logical_failure_stats(
     return LogicalFailureStats(shots=shots, failures=failures)
 
 
-def _masks_to_bool_matrix(
+def _logical_failure_stats_from_masks(
+    observable_masks: Mapping[int, int],
+    correction_masks: Mapping[int, int],
+    observable_ids: Iterable[int],
+    shots: int,
+) -> LogicalFailureStats:
+    all_mask = (1 << shots) - 1
+    residual_loss_mask = 0
+    for observable_id in observable_ids:
+        residual_loss_mask |= (
+            int(observable_masks.get(observable_id, 0))
+            ^ int(correction_masks.get(observable_id, 0))
+        )
+    failures = (residual_loss_mask & all_mask).bit_count()
+    return LogicalFailureStats(shots=shots, failures=failures)
+
+
+def _decode_batch_masks_with_matching(
+    matcher: Any,
+    detector_masks: Mapping[int, int],
+    detector_ids: Iterable[int],
+    observable_ids: Iterable[int],
+    shots: int,
+) -> dict[int, int]:
+    detector_ids = tuple(detector_ids)
+    observable_ids = tuple(observable_ids)
+    packed_shots = _masks_to_packed_shots(detector_masks, detector_ids, shots)
+    try:
+        predictions = matcher.decode_batch(
+            packed_shots,
+            bit_packed_shots=True,
+            bit_packed_predictions=True,
+        )
+        return _packed_predictions_to_masks(predictions, observable_ids, shots)
+    except TypeError:
+        dense_shots = _packed_shots_to_dense(packed_shots, len(detector_ids))
+        predictions = matcher.decode_batch(dense_shots)
+        return _dense_predictions_to_masks(predictions, observable_ids, shots)
+
+
+def _masks_to_packed_shots(
     masks_by_id: Mapping[int, int],
     ids: Iterable[int],
     shots: int,
 ) -> Any:
     _, _, np = _load_required_modules()
     ids = tuple(ids)
-    matrix = np.zeros((shots, len(ids)), dtype=np.bool_)
+    packed = np.zeros((shots, (len(ids) + 7) // 8), dtype=np.uint8)
+    if shots == 0 or not ids:
+        return packed
     byte_count = (shots + 7) // 8
+    all_mask = (1 << shots) - 1
     for col, item_id in enumerate(ids):
-        mask = int(masks_by_id.get(item_id, 0))
-        packed = np.frombuffer(mask.to_bytes(byte_count, "little"), dtype=np.uint8)
-        matrix[:, col] = np.unpackbits(
-            packed,
+        mask = int(masks_by_id.get(item_id, 0)) & all_mask
+        shot_bits = np.unpackbits(
+            np.frombuffer(mask.to_bytes(byte_count, "little"), dtype=np.uint8),
             bitorder="little",
         )[:shots]
-    return matrix
+        packed[:, col // 8] |= shot_bits.astype(np.uint8) << (col % 8)
+    return packed
+
+
+def _packed_shots_to_dense(packed: Any, detector_count: int) -> Any:
+    _, _, np = _load_required_modules()
+    if detector_count == 0:
+        return np.zeros((packed.shape[0], 0), dtype=np.uint8)
+    return np.unpackbits(
+        np.asarray(packed, dtype=np.uint8),
+        bitorder="little",
+        axis=1,
+    )[:, :detector_count].astype(np.uint8, copy=False)
+
+
+def _packed_predictions_to_masks(
+    predictions: Any,
+    observable_ids: Iterable[int],
+    shots: int,
+) -> dict[int, int]:
+    _, _, np = _load_required_modules()
+    observable_ids = tuple(observable_ids)
+    predictions = np.asarray(predictions, dtype=np.uint8)
+    if predictions.ndim == 1:
+        predictions = predictions.reshape((shots, -1))
+    if predictions.ndim != 2 or predictions.shape[0] != shots:
+        raise ValueError(f"unexpected PyMatching prediction shape {predictions.shape}")
+    out = {observable_id: 0 for observable_id in observable_ids}
+    for col, observable_id in enumerate(observable_ids):
+        if col // 8 >= predictions.shape[1]:
+            raise ValueError(
+                "PyMatching prediction width does not match observable count"
+            )
+        bits = (predictions[:, col // 8] >> (col % 8)) & 1
+        out[observable_id] = int.from_bytes(
+            np.packbits(bits.astype(np.uint8), bitorder="little").tobytes(),
+            "little",
+        )
+    return out
+
+
+def _dense_predictions_to_masks(
+    predictions: Any,
+    observable_ids: Iterable[int],
+    shots: int,
+) -> dict[int, int]:
+    _, _, np = _load_required_modules()
+    observable_ids = tuple(observable_ids)
+    predictions = np.asarray(predictions, dtype=np.uint8)
+    if predictions.ndim == 1:
+        predictions = predictions.reshape((shots, 1))
+    if predictions.ndim != 2 or predictions.shape[0] != shots:
+        raise ValueError(f"unexpected PyMatching prediction shape {predictions.shape}")
+    if predictions.shape[1] != len(observable_ids):
+        raise ValueError("PyMatching prediction length does not match observable count")
+    out = {observable_id: 0 for observable_id in observable_ids}
+    for col, observable_id in enumerate(observable_ids):
+        out[observable_id] = int.from_bytes(
+            np.packbits(predictions[:, col].astype(np.uint8), bitorder="little").tobytes(),
+            "little",
+        )
+    return out
 
 
 def _ensure_2d_bool_array(value: Any, shots: int) -> Any:
