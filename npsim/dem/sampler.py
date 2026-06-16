@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import random
-from collections import defaultdict
 from dataclasses import dataclass
 from typing import Any, Callable, Mapping
 
@@ -229,31 +228,4 @@ def _default_loss_mask(
         )
     return loss_mask
 
-
-def _aggregate_detector_hotspots(
-    dem: DetectorErrorModel,
-    edge_hotspots: Mapping[int, float],
-) -> dict[int, float]:
-    out: dict[int, float] = defaultdict(float)
-    for edge_index, edge in enumerate(dem.edges):
-        hotspot = edge_hotspots[edge_index]
-        if not hotspot or not edge.detectors:
-            continue
-        share = hotspot / len(edge.detectors)
-        for detector_id in edge.detectors:
-            out[detector_id] += share
-    return dict(out)
-
-
-def _aggregate_by_tag(
-    hotspots: Mapping[str, float],
-    locations: Mapping[str, DemLocationMetadata],
-    tag: str,
-) -> dict[Any, float]:
-    out: dict[Any, float] = defaultdict(float)
-    for location_id, hotspot in hotspots.items():
-        value = locations[location_id].tags.get(tag)
-        if value is not None:
-            out[value] += hotspot
-    return dict(out)
 

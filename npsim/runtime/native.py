@@ -504,37 +504,17 @@ def _payload_to_dem_hotspot_result(dem: Any, payload: Mapping[str, Any]) -> Any:
         DemHotspotResult,
         DemLocationHotspotRow,
         DemLocationMetadata,
-        _aggregate_by_tag,
-        _aggregate_detector_hotspots,
     )
 
-    edge_sensitivities = payload["edge_sensitivities"]
-    edge_hotspots = payload.get("edge_hotspots", {})
-    if not edge_hotspots:
-        edge_hotspots = {
-            edge_index: abs(sensitivity)
-            for edge_index, sensitivity in edge_sensitivities.items()
-        }
-    sensitivities = payload["sensitivities"]
-    hotspots = payload.get("hotspots", {})
-    if not hotspots:
-        hotspots = {
-            location_id: abs(sensitivity)
-            for location_id, sensitivity in sensitivities.items()
-        }
+    edge_sensitivities = _required_payload_field(payload, "edge_sensitivities")
+    edge_hotspots = _required_payload_field(payload, "edge_hotspots")
+    sensitivities = _required_payload_field(payload, "sensitivities")
+    hotspots = _required_payload_field(payload, "hotspots")
     locations = _dem_location_metadata(dem)
-    by_detector = (
-        payload["by_detector"]
-        if "by_detector" in payload
-        else _aggregate_detector_hotspots(dem, edge_hotspots)
-    )
-    if "detector_graph_hotspots" not in payload:
-        raise UnsupportedNativeCircuitError(
-            "native DEM hotspot payload is missing detector_graph_hotspots"
-        )
+    by_detector = _required_payload_field(payload, "by_detector")
     detector_graph_hotspots = _payload_to_detector_graph_hotspots(
         dem,
-        payload["detector_graph_hotspots"],
+        _required_payload_field(payload, "detector_graph_hotspots"),
     )
     top_edges_cache = tuple(
         DemEdgeHotspotRow(
@@ -547,7 +527,7 @@ def _payload_to_dem_hotspot_result(dem: Any, payload: Mapping[str, Any]) -> Any:
             sensitivity=float(row["sensitivity"]),
             hotspot=float(row["hotspot"]),
         )
-        for row in payload.get("top_edges", ())
+        for row in _required_payload_field(payload, "top_edges")
     )
     top_hotspots_cache = tuple(
         DemLocationHotspotRow(
@@ -557,7 +537,7 @@ def _payload_to_dem_hotspot_result(dem: Any, payload: Mapping[str, Any]) -> Any:
             qubits=locations[str(row["location_id"])].qubits,
             tags=locations[str(row["location_id"])].tags,
         )
-        for row in payload.get("top_hotspots", ())
+        for row in _required_payload_field(payload, "top_hotspots")
     )
     return DemHotspotResult(
         dem=dem,
@@ -569,14 +549,23 @@ def _payload_to_dem_hotspot_result(dem: Any, payload: Mapping[str, Any]) -> Any:
         sensitivities=sensitivities,
         hotspots=hotspots,
         by_detector=by_detector,
-        by_round=payload["by_round"] if "by_round" in payload else _aggregate_by_tag(hotspots, locations, "round"),
-        by_gate=payload["by_gate"] if "by_gate" in payload else _aggregate_by_tag(hotspots, locations, "gate"),
-        by_operation=payload["by_operation"] if "by_operation" in payload else _aggregate_by_tag(hotspots, locations, "operation"),
+        by_round=_required_payload_field(payload, "by_round"),
+        by_gate=_required_payload_field(payload, "by_gate"),
+        by_operation=_required_payload_field(payload, "by_operation"),
         locations=locations,
         detector_graph_hotspots=detector_graph_hotspots,
         top_edges_cache=top_edges_cache,
         top_hotspots_cache=top_hotspots_cache,
     )
+
+
+def _required_payload_field(payload: Mapping[str, Any], field: str) -> Any:
+    try:
+        return payload[field]
+    except KeyError as exc:
+        raise UnsupportedNativeCircuitError(
+            f"native payload is missing {field}"
+        ) from exc
 
 
 def _payload_to_detector_graph_hotspots(dem: Any, payload: Mapping[str, Any]) -> Any:
@@ -654,7 +643,7 @@ def _payload_to_simulation_result(circuit: Circuit, payload: Mapping[str, Any]) 
             qubits=locations[str(row["location_id"])].qubits,
             tags=locations[str(row["location_id"])].tags,
         )
-        for row in payload.get("top_hotspots", ())
+        for row in _required_payload_field(payload, "top_hotspots")
     )
     return SimulationResult(
         shots=int(payload["shots"]),
