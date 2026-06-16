@@ -68,7 +68,7 @@ def main() -> None:
 
     stim, pymatching, np = _load_required_modules()
     distances = tuple(sorted(set(args.distances)))
-    rates = tuple(float(rate) for rate in args.rates)
+    rates = tuple(sorted(set(float(rate) for rate in args.rates)))
     if not distances:
         raise SystemExit("at least one distance is required")
     if not rates:
@@ -196,10 +196,7 @@ def sample_stim_dem_logical_failure(
     shots: int,
     seed: int,
 ) -> LogicalFailureStats:
-    detectors, observables, _ = stim_dem.compile_sampler(seed=seed).sample(
-        shots,
-        return_errors=True,
-    )
+    detectors, observables, _ = stim_dem.compile_sampler(seed=seed).sample(shots)
     return _logical_failure_stats(detectors, observables, matcher, shots)
 
 
@@ -286,6 +283,11 @@ def stim_dem_to_npsim_dem(stim_dem: Any) -> DetectorErrorModel:
                 )
         elif instruction_type == "shift_detectors":
             detector_offset += sum(int(target) for target in instruction.targets_copy())
+        elif instruction_type == "logical_observable":
+            for target in instruction.targets_copy():
+                if not target.is_logical_observable_id():
+                    raise ValueError(f"unsupported logical observable target {target!r}")
+                observable_ids.add(int(target.val))
         else:
             raise ValueError(f"unsupported Stim DEM instruction {instruction_type!r}")
 
@@ -364,10 +366,9 @@ def _crossing_rate(
         if rate not in small_distance_rates or rate not in large_distance_rates:
             continue
         delta = small_distance_rates[rate] - large_distance_rates[rate]
-        if delta == 0.0:
-            return rate
         if previous_rate is not None and previous_delta is not None:
-            if (previous_delta < 0.0 <= delta) or (previous_delta > 0.0 >= delta):
+            # Below threshold, larger distance should have lower logical failure.
+            if previous_delta > 0.0 >= delta:
                 fraction = -previous_delta / (delta - previous_delta)
                 return previous_rate + fraction * (rate - previous_rate)
         previous_rate = rate
