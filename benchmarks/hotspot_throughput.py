@@ -1,12 +1,13 @@
 """Hotspot identification throughput benchmark.
 
-Run from the repository root after building the optional native extension:
+Run from the repository root after building the native extension:
 
     .venv/bin/python benchmarks/hotspot_throughput.py --distances 9 13 21
 
 The benchmark separates sampling, Python loss-callback time, and hotspot
 aggregation time.  The target ratio applies to aggregation, which is the stage
-implemented in Rust for arbitrary Python loss functions.
+implemented in Rust for arbitrary Python loss functions.  Python comparisons
+use test-only reference implementations, not runtime fallbacks.
 """
 
 from __future__ import annotations
@@ -23,10 +24,8 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from npsim.batch import BatchForwardNoiseAwareSimulator
 from npsim.dem import DetectorErrorModelGenerator
 from npsim.dem_sampler import (
-    DemBatchHotspotSimulator,
     _aggregate_by_tag,
     _aggregate_detector_hotspots,
     _default_loss_mask,
@@ -38,6 +37,12 @@ from npsim.native import (
     compile_native_sampler,
 )
 from npsim.repetition import make_repetition_code_experiment
+from tests.reference.batch import (
+    BatchForwardNoiseAwareSimulator as ReferenceBatchForwardNoiseAwareSimulator,
+)
+from tests.reference.dem_sampler import (
+    DemBatchHotspotSimulator as ReferenceDemBatchHotspotSimulator,
+)
 
 
 def main() -> None:
@@ -51,10 +56,10 @@ def main() -> None:
 
     print(
         "case\tdistance\trounds\tshots\tlocations\tedges\t"
-        "native_batch_full_sps\tpython_batch_full_sps\tbatch_full_ratio\t"
-        "native_batch_agg_sps\tpython_batch_agg_sps\tbatch_agg_ratio\t"
-        "native_dem_full_sps\tpython_dem_full_sps\tdem_full_ratio\t"
-        "native_dem_agg_sps\tpython_dem_agg_sps\tdem_agg_ratio\tstatus",
+        "native_batch_full_sps\treference_batch_full_sps\tbatch_full_ratio\t"
+        "native_batch_agg_sps\treference_batch_agg_sps\tbatch_agg_ratio\t"
+        "native_dem_full_sps\treference_dem_full_sps\tdem_full_ratio\t"
+        "native_dem_agg_sps\treference_dem_agg_sps\tdem_agg_ratio\tstatus",
         flush=True,
     )
 
@@ -75,9 +80,11 @@ def main() -> None:
                 experiment.circuit,
                 backend="native",
             )
-            python_batch_engine = BatchForwardNoiseAwareSimulator(experiment.circuit)
+            reference_batch_engine = ReferenceBatchForwardNoiseAwareSimulator(
+                experiment.circuit,
+            )
             native_dem_sampler = compile_native_dem_sampler(dem, backend="native")
-            python_dem_engine = DemBatchHotspotSimulator(dem)
+            reference_dem_engine = ReferenceDemBatchHotspotSimulator(dem)
 
             native_batch_full_sps = _median_samples_per_second(
                 lambda seed: native_batch_sampler.estimate(
@@ -89,9 +96,9 @@ def main() -> None:
                 shots=args.shots,
                 repeats=args.repeats,
             )
-            python_batch_full_sps = _median_samples_per_second(
-                lambda seed: _python_batch_reference(
-                    python_batch_engine,
+            reference_batch_full_sps = _median_samples_per_second(
+                lambda seed: _reference_batch_estimate(
+                    reference_batch_engine,
                     shots=args.shots,
                     seed=seed,
                     loss_mask_fn=experiment.batch_loss_mask_fn,
@@ -105,11 +112,14 @@ def main() -> None:
             native_loss = int(experiment.batch_loss_mask_fn(native_batch)) & int(
                 native_batch.all_mask
             )
-            python_batch = python_batch_engine.run_batch(
+            reference_batch = reference_batch_engine.run_batch(
                 shots=args.shots,
                 rng=random.Random(777),
             )
-            python_loss = experiment.batch_loss_mask_fn(python_batch) & python_batch.all_mask
+            reference_loss = (
+                experiment.batch_loss_mask_fn(reference_batch)
+                & reference_batch.all_mask
+            )
 
             native_batch_agg_sps = _median_samples_per_second(
                 lambda seed: native_batch_sampler._engine.estimate_hotspots(
@@ -121,11 +131,11 @@ def main() -> None:
                 shots=args.shots,
                 repeats=args.repeats,
             )
-            python_batch_agg_sps = _median_samples_per_second(
-                lambda seed: _python_batch_aggregate(
-                    python_batch_engine,
-                    python_batch,
-                    python_loss,
+            reference_batch_agg_sps = _median_samples_per_second(
+                lambda seed: _reference_batch_aggregate(
+                    reference_batch_engine,
+                    reference_batch,
+                    reference_loss,
                     top_k=args.top_k,
                 ),
                 shots=args.shots,
@@ -141,8 +151,8 @@ def main() -> None:
                 shots=args.shots,
                 repeats=args.repeats,
             )
-            python_dem_full_sps = _median_samples_per_second(
-                lambda seed: python_dem_engine._estimate_python(
+            reference_dem_full_sps = _median_samples_per_second(
+                lambda seed: reference_dem_engine.estimate(
                     shots=args.shots,
                     seed=seed,
                     baseline="mean",
@@ -155,11 +165,14 @@ def main() -> None:
             native_dem_loss = _default_loss_mask(native_dem_batch, {}, dem) & int(
                 native_dem_batch.all_mask
             )
-            python_dem_batch = python_dem_engine.run_batch(
+            reference_dem_batch = reference_dem_engine.run_batch(
                 shots=args.shots,
                 rng=random.Random(888),
             )
-            python_dem_loss = _default_loss_mask(python_dem_batch, {}, dem) & python_dem_batch.all_mask
+            reference_dem_loss = (
+                _default_loss_mask(reference_dem_batch, {}, dem)
+                & reference_dem_batch.all_mask
+            )
 
             native_dem_agg_sps = _median_samples_per_second(
                 lambda seed: native_dem_sampler._engine.estimate_hotspots(
@@ -171,21 +184,21 @@ def main() -> None:
                 shots=args.shots,
                 repeats=args.repeats,
             )
-            python_dem_agg_sps = _median_samples_per_second(
-                lambda seed: _python_dem_aggregate(
-                    python_dem_engine,
-                    python_dem_batch,
-                    python_dem_loss,
+            reference_dem_agg_sps = _median_samples_per_second(
+                lambda seed: _reference_dem_aggregate(
+                    reference_dem_engine,
+                    reference_dem_batch,
+                    reference_dem_loss,
                     top_k=args.top_k,
                 ),
                 shots=args.shots,
                 repeats=args.repeats,
             )
 
-            batch_full_ratio = native_batch_full_sps / python_batch_full_sps
-            batch_agg_ratio = native_batch_agg_sps / python_batch_agg_sps
-            dem_full_ratio = native_dem_full_sps / python_dem_full_sps
-            dem_agg_ratio = native_dem_agg_sps / python_dem_agg_sps
+            batch_full_ratio = native_batch_full_sps / reference_batch_full_sps
+            batch_agg_ratio = native_batch_agg_sps / reference_batch_agg_sps
+            dem_full_ratio = native_dem_full_sps / reference_dem_full_sps
+            dem_agg_ratio = native_dem_agg_sps / reference_dem_agg_sps
             status = (
                 "pass"
                 if batch_agg_ratio >= 5.0 and dem_agg_ratio >= 5.0
@@ -194,10 +207,10 @@ def main() -> None:
             print(
                 f"repetition-d{distance}\t{distance}\t{args.rounds}\t{args.shots}\t"
                 f"{len(experiment.circuit.noise_locations())}\t{len(dem.edges)}\t"
-                f"{native_batch_full_sps:.3f}\t{python_batch_full_sps:.3f}\t{batch_full_ratio:.3f}\t"
-                f"{native_batch_agg_sps:.3f}\t{python_batch_agg_sps:.3f}\t{batch_agg_ratio:.3f}\t"
-                f"{native_dem_full_sps:.3f}\t{python_dem_full_sps:.3f}\t{dem_full_ratio:.3f}\t"
-                f"{native_dem_agg_sps:.3f}\t{python_dem_agg_sps:.3f}\t{dem_agg_ratio:.3f}\t{status}",
+                f"{native_batch_full_sps:.3f}\t{reference_batch_full_sps:.3f}\t{batch_full_ratio:.3f}\t"
+                f"{native_batch_agg_sps:.3f}\t{reference_batch_agg_sps:.3f}\t{batch_agg_ratio:.3f}\t"
+                f"{native_dem_full_sps:.3f}\t{reference_dem_full_sps:.3f}\t{dem_full_ratio:.3f}\t"
+                f"{native_dem_agg_sps:.3f}\t{reference_dem_agg_sps:.3f}\t{dem_agg_ratio:.3f}\t{status}",
                 flush=True,
             )
         except UnsupportedNativeCircuitError as exc:
@@ -221,8 +234,8 @@ def _median_samples_per_second(fn: Any, *, shots: int, repeats: int) -> float:
     return statistics.median(values)
 
 
-def _python_batch_aggregate(
-    engine: BatchForwardNoiseAwareSimulator,
+def _reference_batch_aggregate(
+    engine: ReferenceBatchForwardNoiseAwareSimulator,
     batch: Any,
     loss_mask: int,
     *,
@@ -268,8 +281,8 @@ def _python_batch_aggregate(
     return sensitivities, hotspots, by_qubit, by_round, by_gate, by_operation, top_hotspots
 
 
-def _python_dem_aggregate(
-    engine: DemBatchHotspotSimulator,
+def _reference_dem_aggregate(
+    engine: ReferenceDemBatchHotspotSimulator,
     batch: Any,
     loss_mask: int,
     *,
@@ -316,8 +329,8 @@ def _score_pair(probability: float) -> tuple[float, float]:
     return 1.0 / p, -1.0 / (1.0 - p)
 
 
-def _python_batch_reference(
-    engine: BatchForwardNoiseAwareSimulator,
+def _reference_batch_estimate(
+    engine: ReferenceBatchForwardNoiseAwareSimulator,
     *,
     shots: int,
     seed: int | None,
@@ -327,7 +340,7 @@ def _python_batch_reference(
     rng = random.Random(seed)
     batch = engine.run_batch(shots=shots, rng=rng)
     loss_mask = loss_mask_fn(batch) & batch.all_mask
-    return _python_batch_aggregate(engine, batch, loss_mask, top_k=top_k)
+    return _reference_batch_aggregate(engine, batch, loss_mask, top_k=top_k)
 
 
 if __name__ == "__main__":

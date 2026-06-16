@@ -1,4 +1,4 @@
-"""Detector-error-model hotspot sampling."""
+"""Test-only Python detector-error-model hotspot sampling reference."""
 
 from __future__ import annotations
 
@@ -146,7 +146,7 @@ class DemHotspotResult:
 
 
 class DemBatchHotspotSimulator:
-    """Native-backed DEM sampler for logical failure and hotspot estimation."""
+    """Fast DEM-level sampler for logical failure and hotspot estimation."""
 
     def __init__(self, dem: DetectorErrorModel):
         self.dem = dem
@@ -164,17 +164,33 @@ class DemBatchHotspotSimulator:
             raise ValueError("shots must be positive")
         if rng is not None and seed is not None:
             raise ValueError("supply either seed or rng, not both")
-        if rng is not None:
-            seed = rng.getrandbits(64)
-        from npsim.native import compile_native_dem_sampler
+        if rng is None:
+            rng = random.Random(seed)
 
-        return compile_native_dem_sampler(
-            self.dem,
-            backend="native",
-        ).run_batch(
+        all_mask = (1 << shots) - 1
+        detectors = {detector.id: 0 for detector in self.dem.detectors}
+        observables = {observable.id: 0 for observable in self.dem.observables}
+        edge_event_masks: dict[int, int] = {}
+
+        for edge_index, edge in enumerate(self.dem.edges):
+            event_mask = _bernoulli_mask(rng, shots, edge.probability) & all_mask
+            if return_edge_events:
+                edge_event_masks[edge_index] = event_mask
+            if not event_mask:
+                continue
+            for detector_id in edge.detectors:
+                detectors[detector_id] = detectors.get(detector_id, 0) ^ event_mask
+            for observable_id in edge.observables:
+                observables[observable_id] = (
+                    observables.get(observable_id, 0) ^ event_mask
+                )
+
+        return DemBatchTrajectory(
             shots=shots,
-            seed=seed,
-            return_edge_events=return_edge_events,
+            all_mask=all_mask,
+            detectors=detectors,
+            observables=observables,
+            edge_event_masks=edge_event_masks,
         )
 
     def estimate(
@@ -190,20 +206,151 @@ class DemBatchHotspotSimulator:
     ) -> DemHotspotResult:
         if decoder is not None and correction_mask_fn is not None:
             raise ValueError("supply either decoder or correction_mask_fn, not both")
-        from npsim.native import compile_native_dem_sampler
-
-        return compile_native_dem_sampler(
-            self.dem,
-            backend="native",
-        ).estimate(
+        return self._estimate_python(
             shots=shots,
             seed=seed,
             decoder=decoder,
             correction_mask_fn=correction_mask_fn,
             loss_mask_fn=loss_mask_fn,
             baseline=baseline,
-            top_k=top_k,
         )
+
+    def _estimate_python(
+        self,
+        *,
+        shots: int,
+        seed: int | None = None,
+        decoder: Any | None = None,
+        correction_mask_fn: DemCorrectionMaskFn | None = None,
+        loss_mask_fn: DemLossMaskFn | None = None,
+        baseline: str | float = "mean",
+    ) -> DemHotspotResult:
+        rng = random.Random(seed)
+        batch = self.run_batch(shots=shots, rng=rng)
+        corrections = self._correction_masks(batch, decoder, correction_mask_fn)
+        if loss_mask_fn is None:
+            loss_mask = _default_loss_mask(batch, corrections, self.dem) & batch.all_mask
+        else:
+            loss_mask = loss_mask_fn(batch, corrections) & batch.all_mask
+        loss_count = loss_mask.bit_count()
+        mean_loss = loss_count / shots
+
+        if baseline == "mean":
+            baseline_value = mean_loss
+        elif isinstance(baseline, (int, float)):
+            baseline_value = float(baseline)
+        else:
+            raise ValueError("baseline must be 'mean' or a numeric value")
+
+        edge_sensitivities = self._estimate_edge_sensitivities(
+            batch,
+            loss_mask,
+            loss_count,
+            baseline_value,
+        )
+        edge_hotspots = {
+            edge_index: abs(sensitivity)
+            for edge_index, sensitivity in edge_sensitivities.items()
+        }
+        sensitivities = self._aggregate_location_sensitivities(edge_sensitivities)
+        hotspots = {
+            location_id: abs(sensitivity)
+            for location_id, sensitivity in sensitivities.items()
+        }
+        locations = self._location_metadata()
+        result = DemHotspotResult(
+            dem=self.dem,
+            shots=shots,
+            mean_loss=mean_loss,
+            baseline=baseline_value,
+            edge_sensitivities=edge_sensitivities,
+            edge_hotspots=edge_hotspots,
+            sensitivities=sensitivities,
+            hotspots=hotspots,
+            by_detector=_aggregate_detector_hotspots(self.dem, edge_hotspots),
+            by_round=_aggregate_by_tag(hotspots, locations, "round"),
+            by_gate=_aggregate_by_tag(hotspots, locations, "gate"),
+            by_operation=_aggregate_by_tag(hotspots, locations, "operation"),
+            locations=locations,
+            detector_graph_hotspots=_edge_sensitivities_to_detector_graph(
+                self.dem,
+                edge_sensitivities,
+            ),
+        )
+        return result
+
+    def _correction_masks(
+        self,
+        batch: DemBatchTrajectory,
+        decoder: Any | None,
+        correction_mask_fn: DemCorrectionMaskFn | None,
+    ) -> Mapping[int, int]:
+        if correction_mask_fn is not None:
+            return dict(correction_mask_fn(batch))
+        if decoder is None:
+            return {}
+        if not hasattr(decoder, "decode_batch_masks"):
+            raise TypeError("DEM decoder must provide decode_batch_masks(batch)")
+        return dict(decoder.decode_batch_masks(batch))
+
+    def _estimate_edge_sensitivities(
+        self,
+        batch: DemBatchTrajectory,
+        loss_mask: int,
+        loss_count: int,
+        baseline: float,
+    ) -> dict[int, float]:
+        sensitivities: dict[int, float] = {}
+        for edge_index, edge in enumerate(self.dem.edges):
+            event_mask = batch.edge_event_masks.get(edge_index, 0) & batch.all_mask
+            event_score, no_event_score = _score_pair(edge.probability)
+            event_count = event_mask.bit_count()
+            no_event_count = batch.shots - event_count
+            loss_event_count = (loss_mask & event_mask).bit_count()
+            loss_no_event_count = loss_count - loss_event_count
+            sum_loss_score = (
+                loss_event_count * event_score
+                + loss_no_event_count * no_event_score
+            )
+            sum_score = event_count * event_score + no_event_count * no_event_score
+            sensitivities[edge_index] = (
+                sum_loss_score - baseline * sum_score
+            ) / batch.shots
+        return sensitivities
+
+    def _aggregate_location_sensitivities(
+        self,
+        edge_sensitivities: Mapping[int, float],
+    ) -> dict[str, float]:
+        edge_indices_by_location: dict[str, list[int]] = defaultdict(list)
+        for edge_index, edge in enumerate(self.dem.edges):
+            edge_indices_by_location[edge.location_id].append(edge_index)
+
+        out: dict[str, float] = {}
+        for location_id, edge_indices in edge_indices_by_location.items():
+            total_probability = sum(
+                self.dem.edges[edge_index].probability
+                for edge_index in edge_indices
+            )
+            value = 0.0
+            for edge_index in edge_indices:
+                if total_probability > 0:
+                    weight = self.dem.edges[edge_index].probability / total_probability
+                else:
+                    weight = 1.0 / len(edge_indices)
+                value += edge_sensitivities[edge_index] * weight
+            out[location_id] = value
+        return out
+
+    def _location_metadata(self) -> dict[str, DemLocationMetadata]:
+        out: dict[str, DemLocationMetadata] = {}
+        for edge in self.dem.edges:
+            if edge.location_id not in out:
+                out[edge.location_id] = DemLocationMetadata(
+                    id=edge.location_id,
+                    tags=edge.tags,
+                )
+        return out
 
     def _validate_probabilities(self) -> None:
         for edge_index, edge in enumerate(self.dem.edges):
@@ -229,6 +376,28 @@ def _default_loss_mask(
             0,
         )
     return loss_mask
+
+
+def _bernoulli_mask(rng: random.Random, shots: int, probability: float) -> int:
+    if probability <= 0:
+        return 0
+    if probability >= 1:
+        return (1 << shots) - 1
+    mask = 0
+    for shot in range(shots):
+        if rng.random() < probability:
+            mask |= 1 << shot
+    return mask
+
+
+def _score_pair(probability: float) -> tuple[float, float]:
+    p = _clamped_probability(probability)
+    return 1.0 / p, -1.0 / (1.0 - p)
+
+
+def _clamped_probability(probability: float) -> float:
+    eps = 1e-12
+    return min(1.0 - eps, max(eps, float(probability)))
 
 
 def _aggregate_detector_hotspots(

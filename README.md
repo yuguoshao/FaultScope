@@ -405,9 +405,11 @@ f_k,
 
 这个 batch sampler 当前是快速路径，而不是通用 adaptive tableau 分支引擎。它适合 repetition code、surface-code syndrome extraction 这类所有 shot 共享同一 stabilizer 支撑演化、差异由 generator sign mask 和 Pauli frame mask 表示的 QEC 电路。
 
-### Optional native packed sampler
+### Required native packed sampler
 
-`npsim.native.compile_native_sampler` 是面向原生 packed sampler 的稳定入口：
+`npsim.native.compile_native_sampler` 是面向 Rust packed sampler 的稳定入口。
+batch/DEM/hotspot 的运行时快速路径现在要求 `npsim._npsim_native` 可导入，并且
+电路能被 native 编译：
 
 ```python
 from npsim.native import compile_native_sampler
@@ -423,14 +425,18 @@ batch = sampler.sample(shots=100_000, seed=1)
 measurement_masks = sampler.sample_measurements(shots=100_000, seed=1)
 ```
 
-热点识别也有 native 路径。`BatchForwardNoiseAwareSimulator.estimate()` 和
-`DemBatchHotspotSimulator.estimate()` 默认会优先走 Rust：采样 batch 保留在 Rust
+热点识别同样强制走 native 路径。`BatchForwardNoiseAwareSimulator.estimate()` 和
+`DemBatchHotspotSimulator.estimate()` 会调用 Rust：采样 batch 保留在 Rust
 packed words 中，Python loss/decoder 回调只读取按需暴露的 bit helper 或 mask
 属性，最终 `loss_mask` 交回 Rust 计算 sensitivity、hotspot、metadata aggregation
-和 top-k cache。需要 Python `rng` 语义或 native 不支持的 tag / circuit 时会回退
-Python reference；`backend="native"` / `strict=True` 会直接抛错。
+和 top-k cache。没有 native 扩展或 native 不支持该电路时会抛
+`UnsupportedNativeCircuitError`，不再回退到 Python reference。
 
-`backend="auto"` 会优先尝试导入 `npsim._npsim_native`，失败或原生编译拒绝该电路时回退到现有 Python `BatchForwardNoiseAwareSimulator`。如果需要强制要求原生扩展，可使用：
+`backend="auto"` 和 `backend="native"` 都要求 native 成功；保留 `"auto"` 只是为了
+兼容旧调用。`backend="python"` 不再支持。向 `BatchForwardNoiseAwareSimulator.run_batch()`
+或 `DemBatchHotspotSimulator.run_batch()` 传入 Python `rng` 时，运行时会用
+`rng.getrandbits(64)` 派生 native seed；这只保持随机分布，不保证旧 Python 路径的
+bit-for-bit 序列一致。
 
 ```python
 sampler = compile_native_sampler(circuit, backend="native")
@@ -452,9 +458,9 @@ sampler = compile_native_sampler(circuit, backend="native")
 .venv/bin/python benchmarks/hotspot_throughput.py --distances 9 13 21 --rounds 3 --shots 100000
 ```
 
-默认场景是 rotated surface-code memory；`--family random-clifford` 会生成固定种子的随机 Clifford layer circuit，最后测量所有 qubits。random Clifford benchmark 可用 `--noise-rate` 和 `--noise-model depolarizing1|x` 在每层后加入单比特噪声，并用 `--measurement-noise-rate` 加测量 bit-flip。`dem_throughput.py` 比较 native Rust 与 Python reference 的 DEM generation 和默认 DEM hotspot estimate；若安装了 `stim`，也会报告 Stim DEM generation 和 detector bit-packed sampling 基线。若安装了 `stim`，sampling benchmark 会同时报告 Stim bit-packed sampler 吞吐和 NPSim/Stim 比值；未安装时只报告 NPSim 并标记 `stim-skip`。
+默认场景是 rotated surface-code memory；`--family random-clifford` 会生成固定种子的随机 Clifford layer circuit，最后测量所有 qubits。random Clifford benchmark 可用 `--noise-rate` 和 `--noise-model depolarizing1|x` 在每层后加入单比特噪声，并用 `--measurement-noise-rate` 加测量 bit-flip。`dem_throughput.py` 比较 native Rust 与 test-only Python reference 的 DEM generation 和默认 DEM hotspot estimate；若安装了 `stim`，也会报告 Stim DEM generation 和 detector bit-packed sampling 基线。若安装了 `stim`，sampling benchmark 会同时报告 Stim bit-packed sampler 吞吐和 NPSim/Stim 比值；未安装时只报告 NPSim 并标记 `stim-skip`。
 `hotspot_throughput.py` 同时报告全链路 estimate 和预生成 batch 上的纯 hotspot
-聚合阶段。全链路包含 Python reference 的采样和 loss callback；纯聚合阶段仍包含
+聚合阶段。全链路包含 test-only Python reference 的采样和 loss callback；纯聚合阶段仍包含
 把完整 public result payload 转成 Python mapping 的兼容成本。
 
 ## 7. Stabilizer 更新规则

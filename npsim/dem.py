@@ -2,20 +2,10 @@
 
 from __future__ import annotations
 
-import random
 from dataclasses import dataclass, field
 from typing import Any, Mapping, Sequence
 
-from npsim.circuit import Circuit, NoiseLocation, Operation
-from npsim.noise import (
-    BernoulliPauliNoise,
-    MeasurementBitFlip,
-    PauliChannel,
-    SingleQubitDepolarizing,
-    TwoQubitDepolarizing,
-)
-from npsim.pauli import PauliFrame, sparse_pauli_to_xz
-from npsim.stabilizer import StabilizerState
+from npsim.circuit import Circuit
 
 
 class UnsupportedDemCircuitError(ValueError):
@@ -264,21 +254,8 @@ class DetectorErrorModel:
         )
 
 
-@dataclass(frozen=True)
-class _NoiseOccurrence:
-    op_index: int
-    location: NoiseLocation
-    is_measurement_noise: bool
-
-
-@dataclass(frozen=True)
-class _RunRecord:
-    measurements: Mapping[str, int]
-    frame: PauliFrame
-
-
 class DetectorErrorModelGenerator:
-    """Generate a detector error model by propagating each single error event."""
+    """Generate a detector error model through the native implementation."""
 
     def __init__(
         self,
@@ -299,292 +276,16 @@ class DetectorErrorModelGenerator:
             else _observables_from_circuit(circuit)
         )
         self._validate_declarations()
-        self._occurrences = self._collect_noise_occurrences()
 
     def generate(self) -> DetectorErrorModel:
-        try:
-            from npsim.native import UnsupportedNativeCircuitError, generate_native_dem
+        from npsim.native import generate_native_dem
 
-            return generate_native_dem(
-                self.circuit,
-                detectors=self.detectors,
-                observables=self.observables,
-                backend="native",
-            )
-        except (ImportError, UnsupportedNativeCircuitError):
-            return self._generate_python()
-
-    def _generate_python(self) -> DetectorErrorModel:
-        reference = self._run_with_injection(None, None)
-        reference_detectors = self._evaluate_detectors(reference)
-        reference_observables = self._evaluate_observables(reference)
-
-        edges: list[DetectorErrorEdge] = []
-        for occurrence in self._occurrences:
-            for event, probability in _non_identity_events(occurrence.location):
-                injected = self._run_with_injection(occurrence.op_index, event)
-                detector_flips = _flipped_ids(
-                    reference_detectors,
-                    self._evaluate_detectors(injected),
-                )
-                observable_flips = _flipped_ids(
-                    reference_observables,
-                    self._evaluate_observables(injected),
-                )
-                if not detector_flips and not observable_flips:
-                    continue
-                edges.append(
-                    DetectorErrorEdge(
-                        probability=probability,
-                        detectors=detector_flips,
-                        observables=observable_flips,
-                        location_id=occurrence.location.id,
-                        event=event,
-                        tags=occurrence.location.tags,
-                    )
-                )
-
-        return DetectorErrorModel(
+        return generate_native_dem(
+            self.circuit,
             detectors=self.detectors,
             observables=self.observables,
-            edges=tuple(edges),
+            backend="native",
         )
-
-    def _run_with_injection(
-        self,
-        injected_op_index: int | None,
-        injected_event: object | None,
-    ) -> _RunRecord:
-        state = StabilizerState.zero(self.circuit.n_qubits)
-        frame = PauliFrame.zero(self.circuit.n_qubits)
-        measurements: dict[str, int] = {}
-        rng = random.Random(0)
-
-        for op_index, operation in enumerate(self.circuit.operations):
-            self._apply_operation(
-                operation,
-                op_index,
-                injected_op_index,
-                injected_event,
-                state,
-                frame,
-                measurements,
-                rng,
-            )
-        return _RunRecord(measurements=measurements, frame=frame)
-
-    def _apply_operation(
-        self,
-        operation: Operation,
-        op_index: int,
-        injected_op_index: int | None,
-        injected_event: object | None,
-        state: StabilizerState,
-        frame: PauliFrame,
-        measurements: dict[str, int],
-        rng: random.Random,
-    ) -> None:
-        kind = operation.kind
-        if kind == "h":
-            (qubit,) = operation.qubits
-            state.apply_h(qubit)
-            frame.apply_h(qubit)
-            return
-        if kind == "s":
-            (qubit,) = operation.qubits
-            state.apply_s(qubit)
-            frame.apply_s(qubit)
-            return
-        if kind == "s_dag":
-            (qubit,) = operation.qubits
-            state.apply_s_dag(qubit)
-            frame.apply_s_dag(qubit)
-            return
-        if kind == "cx":
-            control, target = operation.qubits
-            state.apply_cx(control, target)
-            frame.apply_cx(control, target)
-            return
-        if kind == "cz":
-            left, right = operation.qubits
-            state.apply_cz(left, right)
-            frame.apply_cz(left, right)
-            return
-        if kind == "swap":
-            left, right = operation.qubits
-            state.apply_swap(left, right)
-            frame.apply_swap(left, right)
-            return
-        if kind == "pauli":
-            if operation.pauli is None:
-                raise ValueError("pauli operation requires a Pauli string")
-            x, z = sparse_pauli_to_xz(
-                self.circuit.n_qubits,
-                operation.qubits,
-                operation.pauli,
-            )
-            state.apply_pauli_string(x, z)
-            return
-        if kind == "noise":
-            if op_index == injected_op_index:
-                if operation.noise_location is None:
-                    raise ValueError("noise operation requires a noise location")
-                operation.noise_location.model.apply(
-                    injected_event,
-                    state,
-                    frame,
-                    operation.noise_location.qubits,
-                )
-            return
-        if kind == "measure":
-            bit = self._measure(operation, state, rng)
-            if op_index == injected_op_index:
-                bit ^= int(bool(injected_event))
-            key = operation.key or f"m{len(measurements)}"
-            _record_measurement(measurements, key, bit)
-            return
-        if kind == "measure_pauli":
-            bit = self._measure_pauli(operation, state, rng)
-            if op_index == injected_op_index:
-                bit ^= int(bool(injected_event))
-            key = operation.key or f"m{len(measurements)}"
-            _record_measurement(measurements, key, bit)
-            return
-        if kind == "reset":
-            self._reset(operation, state, frame, measurements, rng)
-            return
-        if kind in {"detector", "observable_include"}:
-            return
-        raise ValueError(f"unsupported operation kind {kind!r}")
-
-    def _measure(
-        self,
-        operation: Operation,
-        state: StabilizerState,
-        rng: random.Random,
-    ) -> int:
-        (qubit,) = operation.qubits
-        basis = operation.basis.upper()
-        x, z = sparse_pauli_to_xz(self.circuit.n_qubits, operation.qubits, basis)
-        if not state.is_deterministic_pauli(x, z):
-            raise UnsupportedDemCircuitError(
-                f"measurement {operation.key or operation.kind!r} is random in "
-                "the ideal/single-error circuit"
-            )
-        if basis == "Z":
-            return state.measure_z(qubit, rng)
-        if basis == "X":
-            return state.measure_x(qubit, rng)
-        if basis == "Y":
-            return state.measure_y(qubit, rng)
-        raise ValueError(f"unsupported measurement basis {operation.basis!r}")
-
-    def _measure_pauli(
-        self,
-        operation: Operation,
-        state: StabilizerState,
-        rng: random.Random,
-    ) -> int:
-        if operation.pauli is None:
-            raise ValueError("measure_pauli operation requires a Pauli string")
-        x, z = sparse_pauli_to_xz(self.circuit.n_qubits, operation.qubits, operation.pauli)
-        if not state.is_deterministic_pauli(x, z):
-            raise UnsupportedDemCircuitError(
-                f"measurement {operation.key or operation.kind!r} is random in "
-                "the ideal/single-error circuit"
-            )
-        return state.measure_pauli(x, z, rng)
-
-    def _reset(
-        self,
-        operation: Operation,
-        state: StabilizerState,
-        frame: PauliFrame,
-        measurements: dict[str, int],
-        rng: random.Random,
-    ) -> None:
-        (qubit,) = operation.qubits
-        basis = operation.basis.upper()
-        if operation.key is not None:
-            x, z = sparse_pauli_to_xz(self.circuit.n_qubits, operation.qubits, basis)
-            if not state.is_deterministic_pauli(x, z):
-                raise UnsupportedDemCircuitError(
-                    f"reset measurement {operation.key!r} is random"
-                )
-            bit = state.deterministic_measurement_bit(x, z)
-            _record_measurement(measurements, operation.key, bit)
-
-        if basis == "Z":
-            state.reset_z(qubit, rng)
-        elif basis == "X":
-            state.reset_x(qubit, rng)
-        elif basis == "Y":
-            state.reset_y(qubit, rng)
-        else:
-            raise ValueError(f"unsupported reset basis {operation.basis!r}")
-        frame.reset(qubit)
-
-    def _evaluate_detectors(self, run: _RunRecord) -> dict[int, int]:
-        return {
-            detector.id: _parity_from_measurements(
-                run.measurements,
-                detector.measurement_keys,
-            )
-            for detector in self.detectors
-        }
-
-    def _evaluate_observables(self, run: _RunRecord) -> dict[int, int]:
-        values: dict[int, int] = {}
-        for observable in self.observables:
-            value = _parity_from_measurements(
-                run.measurements,
-                observable.measurement_keys,
-            )
-            if observable.pauli:
-                value ^= run.frame.measurement_flip(
-                    observable.pauli_qubits,
-                    observable.pauli,
-                )
-            values[observable.id] = value
-        return values
-
-    def _collect_noise_occurrences(self) -> tuple[_NoiseOccurrence, ...]:
-        occurrences: list[_NoiseOccurrence] = []
-        seen_ids: set[str] = set()
-        for op_index, operation in enumerate(self.circuit.operations):
-            if operation.kind == "noise":
-                if operation.noise_location is None:
-                    raise ValueError("noise operation requires a noise location")
-                location = operation.noise_location
-                if location.id in seen_ids:
-                    raise ValueError(
-                        "DetectorErrorModelGenerator requires unique noise "
-                        f"location ids; duplicate id {location.id!r}"
-                    )
-                seen_ids.add(location.id)
-                occurrences.append(
-                    _NoiseOccurrence(op_index, location, is_measurement_noise=False)
-                )
-            elif (
-                operation.kind in {"measure", "measure_pauli"}
-                and operation.noise_location is not None
-            ):
-                location = operation.noise_location
-                if not isinstance(location.model, MeasurementBitFlip):
-                    raise UnsupportedDemCircuitError(
-                        "DEM generation currently supports MeasurementBitFlip "
-                        "on measurement operations"
-                    )
-                if location.id in seen_ids:
-                    raise ValueError(
-                        "DetectorErrorModelGenerator requires unique noise "
-                        f"location ids; duplicate id {location.id!r}"
-                    )
-                seen_ids.add(location.id)
-                occurrences.append(
-                    _NoiseOccurrence(op_index, location, is_measurement_noise=True)
-                )
-        return tuple(occurrences)
 
     def _validate_declarations(self) -> None:
         detector_ids = [detector.id for detector in self.detectors]
@@ -593,59 +294,6 @@ class DetectorErrorModelGenerator:
         observable_ids = [observable.id for observable in self.observables]
         if len(observable_ids) != len(set(observable_ids)):
             raise ValueError("logical observable ids must be unique")
-
-
-def _non_identity_events(location: NoiseLocation) -> tuple[tuple[object, float], ...]:
-    model = location.model
-    rate = location.rate
-    if isinstance(model, BernoulliPauliNoise):
-        return ((model.pauli, rate),)
-    if isinstance(model, MeasurementBitFlip):
-        return ((True, rate),)
-    if isinstance(model, SingleQubitDepolarizing):
-        return tuple((event, rate / 3.0) for event in ("X", "Y", "Z"))
-    if isinstance(model, TwoQubitDepolarizing):
-        return tuple((event, rate / len(model._events)) for event in model._events)
-    if isinstance(model, PauliChannel):
-        total_weight = model.total_weight
-        return tuple(
-            (event, rate * weight / total_weight)
-            for event, weight in model.weights.items()
-            if weight > 0
-        )
-    raise UnsupportedDemCircuitError(
-        f"unsupported DEM noise model {type(model).__name__}"
-    )
-
-
-def _record_measurement(measurements: dict[str, int], key: str, bit: int) -> None:
-    if key in measurements:
-        raise ValueError(f"duplicate measurement key {key!r}")
-    measurements[key] = int(bit)
-
-
-def _parity_from_measurements(
-    measurements: Mapping[str, int],
-    keys: Sequence[str],
-) -> int:
-    parity = 0
-    for key in keys:
-        try:
-            parity ^= int(measurements[key])
-        except KeyError as exc:
-            raise ValueError(f"unknown measurement key {key!r}") from exc
-    return parity
-
-
-def _flipped_ids(
-    reference: Mapping[int, int],
-    injected: Mapping[int, int],
-) -> tuple[int, ...]:
-    return tuple(
-        item_id
-        for item_id in sorted(reference)
-        if int(reference[item_id]) ^ int(injected[item_id])
-    )
 
 
 def _add(out: dict[Any, float], key: Any, value: float) -> None:

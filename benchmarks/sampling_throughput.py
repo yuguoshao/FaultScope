@@ -1,7 +1,7 @@
 """Packed sampling throughput benchmark for NPSim native sampler.
 
-Run from the repository root, preferably after building the optional native
-extension in release mode:
+Run from the repository root after building the native extension in release
+mode:
 
     .venv/bin/python benchmarks/sampling_throughput.py --distances 15 21 31
     .venv/bin/python benchmarks/sampling_throughput.py --family random-clifford \
@@ -69,7 +69,7 @@ def main() -> None:
     parser.add_argument("--shots", type=int, default=20_000)
     parser.add_argument("--repeats", type=int, default=5)
     parser.add_argument("--seed", type=int, default=1234)
-    parser.add_argument("--backend", choices=("auto", "native", "python"), default="auto")
+    parser.add_argument("--backend", choices=("auto", "native"), default="auto")
     args = parser.parse_args()
 
     stim_module = _load_stim()

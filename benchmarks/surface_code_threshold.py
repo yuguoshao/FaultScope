@@ -1,6 +1,6 @@
 """Surface-code threshold comparison benchmark.
 
-Run from the repository root after building the optional native extension:
+Run from the repository root after building the native extension:
 
     .venv/bin/python benchmarks/surface_code_threshold.py
 

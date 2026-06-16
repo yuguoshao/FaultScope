@@ -1,11 +1,11 @@
 """DEM generation and default-estimate throughput benchmark.
 
-Run from the repository root after building the optional native extension:
+Run from the repository root after building the native extension:
 
     .venv/bin/python benchmarks/dem_throughput.py --distances 9 13 21
 
 The benchmark compares native Rust DEM generation / default DEM hotspot
-estimation against the Python reference implementation on deterministic
+estimation against the test-only Python reference implementation on deterministic
 repetition-code detector error models.  When Stim is installed, it also reports
 Stim detector-error-model generation and detector-sampler throughput.
 """
@@ -24,7 +24,6 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from npsim.circuit import Circuit, Operation
-from npsim.dem import DetectorErrorModelGenerator
 from npsim.native import (
     UnsupportedNativeCircuitError,
     compile_native_dem_sampler,
@@ -32,6 +31,12 @@ from npsim.native import (
 )
 from npsim.noise import BernoulliPauliNoise, MeasurementBitFlip, PauliChannel
 from npsim.repetition import make_repetition_code_experiment
+from tests.reference.dem import (
+    DetectorErrorModelGenerator as ReferenceDetectorErrorModelGenerator,
+)
+from tests.reference.dem_sampler import (
+    DemBatchHotspotSimulator as ReferenceDemBatchHotspotSimulator,
+)
 
 
 def main() -> None:
@@ -44,9 +49,9 @@ def main() -> None:
 
     stim_module = _load_stim()
     print(
-        "case\tdistance\trounds\tedges\tnative_gen_s\tpython_gen_s\t"
+        "case\tdistance\trounds\tedges\tnative_gen_s\treference_gen_s\t"
         "gen_ratio\tnative_det_gen_s\tstim_gen_s\tnative_vs_stim_gen\t"
-        "native_est_sps\tpython_est_sps\test_ratio\t"
+        "native_est_sps\treference_est_sps\test_ratio\t"
         "native_det_sps\tstim_det_sps\tdet_ratio\tstatus",
         flush=True,
     )
@@ -57,7 +62,7 @@ def main() -> None:
             data_error_rate=0.025,
             measurement_error_rate=0.015,
         )
-        generator = DetectorErrorModelGenerator(
+        reference_generator = ReferenceDetectorErrorModelGenerator(
             experiment.circuit,
             detectors=experiment.detectors,
             observables=experiment.observables,
@@ -72,9 +77,9 @@ def main() -> None:
                     backend="native",
                 )
             )
-            python_gen_s, python_dem = _time_once(generator._generate_python)
+            reference_gen_s, reference_dem = _time_once(reference_generator.generate)
             native_sampler = compile_native_dem_sampler(native_dem, backend="native")
-            python_sampler = compile_native_dem_sampler(python_dem, backend="python")
+            reference_sampler = ReferenceDemBatchHotspotSimulator(reference_dem)
             stim_gen_s: float | None = None
             native_vs_stim_gen = float("nan")
             native_det_sps: float | None = None
@@ -133,16 +138,16 @@ def main() -> None:
                 shots=args.shots,
                 repeats=args.repeats,
             )
-            python_est_sps = _median_samples_per_second(
-                lambda seed: python_sampler.estimate_default(
+            reference_est_sps = _median_samples_per_second(
+                lambda seed: reference_sampler.estimate(
                     shots=args.shots,
                     seed=seed,
                 ),
                 shots=args.shots,
                 repeats=args.repeats,
             )
-            gen_ratio = python_gen_s / native_gen_s if native_gen_s else float("inf")
-            est_ratio = native_est_sps / python_est_sps if python_est_sps else float("inf")
+            gen_ratio = reference_gen_s / native_gen_s if native_gen_s else float("inf")
+            est_ratio = native_est_sps / reference_est_sps if reference_est_sps else float("inf")
             status = "pass" if gen_ratio >= 2.0 and est_ratio >= 5.0 else "below-target"
             stim_gen_cell = f"{stim_gen_s:.6f}" if stim_gen_s is not None else "NA"
             native_detector_gen_cell = (
@@ -158,10 +163,10 @@ def main() -> None:
             det_ratio_cell = f"{det_ratio:.3f}" if stim_det_sps is not None else "NA"
             print(
                 f"repetition-d{distance}\t{distance}\t{args.rounds}\t"
-                f"{len(native_dem.edges)}\t{native_gen_s:.6f}\t{python_gen_s:.6f}\t"
+                f"{len(native_dem.edges)}\t{native_gen_s:.6f}\t{reference_gen_s:.6f}\t"
                 f"{gen_ratio:.3f}\t{native_detector_gen_cell}\t"
                 f"{stim_gen_cell}\t{native_vs_stim_gen_cell}\t"
-                f"{native_est_sps:.3f}\t{python_est_sps:.3f}\t{est_ratio:.3f}\t"
+                f"{native_est_sps:.3f}\t{reference_est_sps:.3f}\t{est_ratio:.3f}\t"
                 f"{native_det_cell}\t{stim_det_cell}\t{det_ratio_cell}\t{status}",
                 flush=True,
             )

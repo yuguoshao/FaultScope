@@ -1,8 +1,9 @@
-"""Optional native packed sampler API.
+"""Native packed sampler API.
 
-The public entry point in this module is intentionally stable even when the
-Rust extension is not installed.  ``backend="auto"`` tries the native extension
-first and falls back to the existing Python bit-packed sampler.
+The Rust extension is the only runtime backend for packed batch sampling and
+detector-error-model sampling.  ``backend="auto"`` is kept for API
+compatibility, but it now requires the native extension to import and compile
+successfully.
 """
 
 from __future__ import annotations
@@ -12,7 +13,7 @@ import random
 from dataclasses import dataclass
 from typing import Any, Mapping
 
-from npsim.batch import BatchForwardNoiseAwareSimulator, BatchTrajectory
+from npsim.batch import BatchTrajectory
 from npsim.circuit import Circuit, NoiseLocation, Operation
 from npsim.noise import (
     BernoulliPauliNoise,
@@ -31,8 +32,7 @@ class UnsupportedNativeCircuitError(ValueError):
 class NativePackedSampler:
     """Compiled packed sampler wrapper.
 
-    ``backend_name`` is ``"native"`` when the Rust extension is active and
-    ``"python"`` when the object is using the compatibility fallback.
+    ``backend_name`` is always ``"native"``.
     """
 
     circuit: Circuit
@@ -54,14 +54,10 @@ class NativePackedSampler:
             raise ValueError("shots must be positive")
         if seed is not None and rng is not None:
             raise ValueError("supply either seed or rng, not both")
-        if self.backend_name == "native":
-            if rng is not None:
-                raise ValueError("native sampler accepts seed, not a Python rng")
-            payload = self._engine.sample(int(shots), seed)
-            return _payload_to_batch_trajectory(payload)
-        if rng is None:
-            rng = random.Random(seed)
-        return self._engine.run_batch(shots=shots, rng=rng)
+        if rng is not None:
+            raise ValueError("native sampler accepts seed, not a Python rng")
+        payload = self._engine.sample(int(shots), seed)
+        return _payload_to_batch_trajectory(payload)
 
     def sample_measurements(
         self,
@@ -76,12 +72,12 @@ class NativePackedSampler:
             raise ValueError("shots must be positive")
         if seed is not None and rng is not None:
             raise ValueError("supply either seed or rng, not both")
-        if self.backend_name == "native" and hasattr(self._engine, "sample_measurements"):
-            if rng is not None:
-                raise ValueError("native sampler accepts seed, not a Python rng")
+        if rng is not None:
+            raise ValueError("native sampler accepts seed, not a Python rng")
+        if hasattr(self._engine, "sample_measurements"):
             payload = self._engine.sample_measurements(int(shots), seed)
             return {str(key): int(value) for key, value in payload.items()}
-        return self.sample(shots=shots, seed=seed, rng=rng).measurements
+        return self.sample(shots=shots, seed=seed).measurements
 
     def estimate(
         self,
@@ -98,61 +94,51 @@ class NativePackedSampler:
             raise ValueError("shots must be positive")
         if decoder is not None and correction_mask_fn is not None:
             raise ValueError("supply either decoder or correction_mask_fn, not both")
-        if self.backend_name == "native":
-            native_baseline = _native_baseline_value(baseline)
-            native_loss = _native_packed_loss_spec(loss_mask_fn)
-            if (
-                decoder is None
-                and correction_mask_fn is None
-                and native_loss is not None
-                and hasattr(
-                    self._engine,
-                    "estimate_surface_diagnostic",
-                )
-            ):
-                payload = self._engine.estimate_surface_diagnostic(
-                    int(shots),
-                    native_loss["x_qubits"],
-                    native_loss["z_qubits"],
-                    native_loss["measurement_pairs"],
-                    seed,
-                    native_baseline,
-                    int(top_k),
-                )
-                return _payload_to_simulation_result(self.circuit, payload)
-
-            batch = self._engine.run_native_batch(int(shots), seed)
-            corrections = _forward_correction_masks(
-                batch,
-                decoder,
-                correction_mask_fn,
+        native_baseline = _native_baseline_value(baseline)
+        native_loss = _native_packed_loss_spec(loss_mask_fn)
+        if (
+            decoder is None
+            and correction_mask_fn is None
+            and native_loss is not None
+            and hasattr(
+                self._engine,
+                "estimate_surface_diagnostic",
             )
-            if loss_mask_fn is None:
-                loss_mask = _forward_default_loss_mask(batch, corrections)
-            else:
-                loss_mask = int(loss_mask_fn(batch))
-            loss_mask &= int(batch.all_mask)
-            payload = self._engine.estimate_hotspots(
-                batch,
-                loss_mask,
+        ):
+            payload = self._engine.estimate_surface_diagnostic(
+                int(shots),
+                native_loss["x_qubits"],
+                native_loss["z_qubits"],
+                native_loss["measurement_pairs"],
+                seed,
                 native_baseline,
                 int(top_k),
             )
             return _payload_to_simulation_result(self.circuit, payload)
-        return self._engine.estimate(
-            shots=shots,
-            loss_mask_fn=loss_mask_fn,
-            decoder=decoder,
-            correction_mask_fn=correction_mask_fn,
-            seed=seed,
-            baseline=baseline,
-            top_k=top_k,
+
+        batch = self._engine.run_native_batch(int(shots), seed)
+        corrections = _forward_correction_masks(
+            batch,
+            decoder,
+            correction_mask_fn,
         )
+        if loss_mask_fn is None:
+            loss_mask = _forward_default_loss_mask(batch, corrections)
+        else:
+            loss_mask = int(loss_mask_fn(batch))
+        loss_mask &= int(batch.all_mask)
+        payload = self._engine.estimate_hotspots(
+            batch,
+            loss_mask,
+            native_baseline,
+            int(top_k),
+        )
+        return _payload_to_simulation_result(self.circuit, payload)
 
 
 @dataclass(frozen=True)
 class NativeDemSampler:
-    """Compiled DEM sampler wrapper with native/Python fallback parity."""
+    """Compiled native DEM sampler wrapper."""
 
     dem: Any
     backend_name: str
@@ -174,22 +160,14 @@ class NativeDemSampler:
             raise ValueError("shots must be positive")
         if seed is not None and rng is not None:
             raise ValueError("supply either seed or rng, not both")
-        if self.backend_name == "native":
-            if rng is not None:
-                raise ValueError("native DEM sampler accepts seed, not a Python rng")
-            payload = self._engine.run_batch(
-                int(shots),
-                seed,
-                bool(return_edge_events),
-            )
-            return _payload_to_dem_batch(payload)
-        if rng is None:
-            rng = random.Random(seed)
-        return self._engine.run_batch(
-            shots=shots,
-            rng=rng,
-            return_edge_events=return_edge_events,
+        if rng is not None:
+            raise ValueError("native DEM sampler accepts seed, not a Python rng")
+        payload = self._engine.run_batch(
+            int(shots),
+            seed,
+            bool(return_edge_events),
         )
+        return _payload_to_dem_batch(payload)
 
     def estimate_default(
         self,
@@ -201,19 +179,14 @@ class NativeDemSampler:
     ) -> Any:
         if shots <= 0:
             raise ValueError("shots must be positive")
-        if self.backend_name == "native":
-            native_baseline = _native_baseline_value(baseline)
-            payload = self._engine.estimate_default(
-                int(shots),
-                seed,
-                native_baseline,
-                int(top_k),
-            )
-            return _payload_to_dem_hotspot_result(self.dem, payload)
-        estimate_python = getattr(self._engine, "_estimate_python", None)
-        if estimate_python is not None:
-            return estimate_python(shots=shots, seed=seed, baseline=baseline)
-        return self._engine.estimate(shots=shots, seed=seed, baseline=baseline)
+        native_baseline = _native_baseline_value(baseline)
+        payload = self._engine.estimate_default(
+            int(shots),
+            seed,
+            native_baseline,
+            int(top_k),
+        )
+        return _payload_to_dem_hotspot_result(self.dem, payload)
 
     def estimate(
         self,
@@ -230,59 +203,39 @@ class NativeDemSampler:
             raise ValueError("shots must be positive")
         if decoder is not None and correction_mask_fn is not None:
             raise ValueError("supply either decoder or correction_mask_fn, not both")
-        if self.backend_name == "native":
-            native_baseline = _native_baseline_value(baseline)
-            if decoder is None and correction_mask_fn is None and loss_mask_fn is None:
-                payload = self._engine.estimate_default(
-                    int(shots),
-                    seed,
-                    native_baseline,
-                    int(top_k),
-                )
-                return _payload_to_dem_hotspot_result(self.dem, payload)
-
-            from npsim.dem_sampler import _default_loss_mask
-
-            batch = self._engine.run_native_batch(int(shots), seed)
-            if correction_mask_fn is not None:
-                corrections = dict(correction_mask_fn(batch))
-            elif decoder is not None:
-                if not hasattr(decoder, "decode_batch_masks"):
-                    raise TypeError("DEM decoder must provide decode_batch_masks(batch)")
-                corrections = dict(decoder.decode_batch_masks(batch))
-            else:
-                corrections = {}
-            if loss_mask_fn is None:
-                loss_mask = _default_loss_mask(batch, corrections, self.dem)
-            else:
-                loss_mask = loss_mask_fn(batch, corrections)
-            loss_mask = int(loss_mask) & int(batch.all_mask)
-            payload = self._engine.estimate_hotspots(
-                batch,
-                loss_mask,
+        native_baseline = _native_baseline_value(baseline)
+        if decoder is None and correction_mask_fn is None and loss_mask_fn is None:
+            payload = self._engine.estimate_default(
+                int(shots),
+                seed,
                 native_baseline,
                 int(top_k),
             )
             return _payload_to_dem_hotspot_result(self.dem, payload)
 
-        estimate_python = getattr(self._engine, "_estimate_python", None)
-        if estimate_python is not None:
-            return estimate_python(
-                shots=shots,
-                seed=seed,
-                decoder=decoder,
-                correction_mask_fn=correction_mask_fn,
-                loss_mask_fn=loss_mask_fn,
-                baseline=baseline,
-            )
-        return self._engine.estimate(
-            shots=shots,
-            seed=seed,
-            decoder=decoder,
-            correction_mask_fn=correction_mask_fn,
-            loss_mask_fn=loss_mask_fn,
-            baseline=baseline,
+        from npsim.dem_sampler import _default_loss_mask
+
+        batch = self._engine.run_native_batch(int(shots), seed)
+        if correction_mask_fn is not None:
+            corrections = dict(correction_mask_fn(batch))
+        elif decoder is not None:
+            if not hasattr(decoder, "decode_batch_masks"):
+                raise TypeError("DEM decoder must provide decode_batch_masks(batch)")
+            corrections = dict(decoder.decode_batch_masks(batch))
+        else:
+            corrections = {}
+        if loss_mask_fn is None:
+            loss_mask = _default_loss_mask(batch, corrections, self.dem)
+        else:
+            loss_mask = loss_mask_fn(batch, corrections)
+        loss_mask = int(loss_mask) & int(batch.all_mask)
+        payload = self._engine.estimate_hotspots(
+            batch,
+            loss_mask,
+            native_baseline,
+            int(top_k),
         )
+        return _payload_to_dem_hotspot_result(self.dem, payload)
 
 
 def compile_native_sampler(
@@ -296,27 +249,24 @@ def compile_native_sampler(
     Parameters
     ----------
     backend:
-        ``"auto"`` tries the Rust extension and falls back to Python.
-        ``"native"`` requires the Rust extension.
-        ``"python"`` forces the existing Python bit-packed sampler.
+        ``"auto"`` and ``"native"`` both require the Rust extension.
+        ``"python"`` is no longer supported.
     strict:
-        When true with ``backend="auto"``, native compile/import failures are
-        surfaced instead of falling back.
+        Kept for compatibility. Native compile/import failures are always
+        surfaced.
     """
 
     if backend not in {"auto", "native", "python"}:
         raise ValueError("backend must be 'auto', 'native', or 'python'")
     if backend == "python":
-        return _python_sampler(circuit)
+        raise UnsupportedNativeCircuitError("Python backend is no longer supported")
 
     try:
         spec = _serialize_circuit(circuit)
         native_mod = importlib.import_module("npsim._npsim_native")
         engine = native_mod.compile_sampler(spec)
     except Exception as exc:
-        if backend == "native" or strict:
-            raise UnsupportedNativeCircuitError(str(exc)) from exc
-        return _python_sampler(circuit)
+        raise UnsupportedNativeCircuitError(str(exc)) from exc
 
     return NativePackedSampler(
         circuit=circuit,
@@ -333,13 +283,13 @@ def generate_native_dem(
     backend: str = "auto",
     strict: bool = False,
 ) -> Any:
-    """Generate a detector error model through the optional native extension."""
+    """Generate a detector error model through the native extension."""
 
     if backend not in {"auto", "native", "python"}:
         raise ValueError("backend must be 'auto', 'native', or 'python'")
     detectors, observables = _coerce_dem_declarations(circuit, detectors, observables)
     if backend == "python":
-        return _python_generate_dem(circuit, detectors, observables)
+        raise UnsupportedNativeCircuitError("Python backend is no longer supported")
 
     try:
         spec = _serialize_circuit(circuit)
@@ -356,9 +306,7 @@ def generate_native_dem(
             payload,
         )
     except Exception as exc:
-        if backend == "native" or strict:
-            raise UnsupportedNativeCircuitError(str(exc)) from exc
-        return _python_generate_dem(circuit, detectors, observables)
+        raise UnsupportedNativeCircuitError(str(exc)) from exc
 
 
 def compile_native_dem_sampler(
@@ -372,54 +320,20 @@ def compile_native_dem_sampler(
     if backend not in {"auto", "native", "python"}:
         raise ValueError("backend must be 'auto', 'native', or 'python'")
     if backend == "python":
-        return _python_dem_sampler(dem)
+        raise UnsupportedNativeCircuitError("Python backend is no longer supported")
 
     try:
         spec = _serialize_dem(dem)
         native_mod = importlib.import_module("npsim._npsim_native")
         engine = native_mod.compile_dem_sampler(spec)
     except Exception as exc:
-        if backend == "native" or strict:
-            raise UnsupportedNativeCircuitError(str(exc)) from exc
-        return _python_dem_sampler(dem)
+        raise UnsupportedNativeCircuitError(str(exc)) from exc
 
     return NativeDemSampler(
         dem=dem,
         backend_name="native",
         _engine=engine,
     )
-
-
-def _python_sampler(circuit: Circuit) -> NativePackedSampler:
-    return NativePackedSampler(
-        circuit=circuit,
-        backend_name="python",
-        _engine=BatchForwardNoiseAwareSimulator(circuit),
-    )
-
-
-def _python_dem_sampler(dem: Any) -> NativeDemSampler:
-    from npsim.dem_sampler import DemBatchHotspotSimulator
-
-    return NativeDemSampler(
-        dem=dem,
-        backend_name="python",
-        _engine=DemBatchHotspotSimulator(dem),
-    )
-
-
-def _python_generate_dem(circuit: Circuit, detectors: Any, observables: Any) -> Any:
-    from npsim.dem import DetectorErrorModelGenerator
-
-    generator = DetectorErrorModelGenerator(
-        circuit,
-        detectors=detectors,
-        observables=observables,
-    )
-    generate_python = getattr(generator, "_generate_python", None)
-    if generate_python is not None:
-        return generate_python()
-    return generator.generate()
 
 
 def _serialize_circuit(circuit: Circuit) -> dict[str, Any]:
