@@ -14,7 +14,12 @@ from npsim.dem import (
     UnsupportedDemCircuitError,
 )
 from npsim.dem_sampler import DemBatchHotspotSimulator
-from npsim.noise import BernoulliPauliNoise, MeasurementBitFlip, PauliChannel
+from npsim.noise import (
+    BernoulliPauliNoise,
+    MeasurementBitFlip,
+    PauliChannel,
+    SingleQubitDepolarizing,
+)
 from npsim.native import (
     UnsupportedNativeCircuitError,
     compile_native_dem_sampler,
@@ -35,6 +40,18 @@ from npsim.visualization import (
     write_repetition_gate_structure_hotspot_map,
     write_repetition_hotspot_heatmap,
 )
+
+
+def _assert_binomial_count_close(
+    testcase: unittest.TestCase,
+    observed: int,
+    *,
+    shots: int,
+    probability: float,
+) -> None:
+    expected = shots * probability
+    sigma = (shots * probability * (1.0 - probability)) ** 0.5
+    testcase.assertLessEqual(abs(observed - expected), max(12.0, 6.0 * sigma))
 
 
 class StabilizerStateTests(unittest.TestCase):
@@ -573,6 +590,58 @@ class NativePackedSamplerTests(unittest.TestCase):
 
         self.assertEqual(measurements, batch.measurements)
 
+    def test_measurement_only_sampling_applies_native_noise_fast_path(self) -> None:
+        location = NoiseLocation(
+            id="x0",
+            model=BernoulliPauliNoise("X"),
+            rate=1.0,
+            qubits=(0,),
+        )
+        circuit = Circuit(
+            n_qubits=1,
+            operations=[
+                Operation.noise(location),
+                Operation.measure(0, key="m", basis="Z"),
+            ],
+        )
+        sampler = self._native_sampler_or_skip(circuit)
+        measurements = sampler.sample_measurements(shots=13, seed=22)
+
+        self.assertEqual(measurements["m"], (1 << 13) - 1)
+
+    def test_native_noise_event_counts_are_statistical(self) -> None:
+        cases = (
+            ("x_low_rate", BernoulliPauliNoise("X"), 0.001),
+            ("depol_mid_rate", SingleQubitDepolarizing(), 0.025),
+            ("channel_high_rate", PauliChannel({"X": 1.0, "Y": 2.0, "Z": 1.0}), 0.14),
+        )
+        shots = 50_000
+        for case_index, (location_id, model, rate) in enumerate(cases):
+            with self.subTest(location_id=location_id):
+                location = NoiseLocation(
+                    id=location_id,
+                    model=model,
+                    rate=rate,
+                    qubits=(0,),
+                )
+                circuit = Circuit(
+                    n_qubits=1,
+                    operations=[
+                        Operation.noise(location),
+                        Operation.measure(0, key="m", basis="Z"),
+                    ],
+                )
+                sampler = self._native_sampler_or_skip(circuit)
+                batch = sampler.sample(shots=shots, seed=90 + case_index)
+
+                observed = batch.noise_event_masks[location_id].bit_count()
+                _assert_binomial_count_close(
+                    self,
+                    observed,
+                    shots=shots,
+                    probability=rate,
+                )
+
 
 class NativeDetectorErrorModelTests(unittest.TestCase):
     def _require_native_dem(self) -> None:
@@ -686,6 +755,36 @@ class NativeDetectorErrorModelTests(unittest.TestCase):
         self.assertEqual(batch.edge_event_masks[1], 0)
         self.assertEqual(batch.detectors[0], all_mask)
         self.assertEqual(batch.observables[0], all_mask)
+
+    def test_native_dem_sampler_edge_counts_are_statistical(self) -> None:
+        self._require_native_dem()
+        probabilities = (0.001, 0.025, 0.14)
+        dem = DetectorErrorModel(
+            detectors=(),
+            observables=(),
+            edges=tuple(
+                DetectorErrorEdge(
+                    probability=probability,
+                    detectors=(),
+                    observables=(),
+                    location_id=f"edge_{index}",
+                    event="X",
+                )
+                for index, probability in enumerate(probabilities)
+            ),
+        )
+        sampler = compile_native_dem_sampler(dem, backend="native")
+        shots = 50_000
+        batch = sampler.run_batch(shots=shots, seed=57)
+
+        for edge_index, probability in enumerate(probabilities):
+            observed = batch.edge_event_masks[edge_index].bit_count()
+            _assert_binomial_count_close(
+                self,
+                observed,
+                shots=shots,
+                probability=probability,
+            )
 
     def test_native_dem_default_estimate_matches_logical_edge_gradient(self) -> None:
         self._require_native_dem()

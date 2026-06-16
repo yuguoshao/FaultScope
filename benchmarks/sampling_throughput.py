@@ -6,6 +6,8 @@ extension in release mode:
     .venv/bin/python benchmarks/sampling_throughput.py --distances 15 21 31
     .venv/bin/python benchmarks/sampling_throughput.py --family random-clifford \
         --qubits 128 256 512 --depth 20
+    .venv/bin/python benchmarks/sampling_throughput.py --family random-clifford \
+        --qubits 128 256 512 --depth 20 --noise-rate 0.001
 
 Stim is optional.  When it is not installed, the script reports only NPSim
 throughput and marks the Stim comparison as skipped.
@@ -26,9 +28,14 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from npsim.circuit import Circuit, Operation
+from npsim.circuit import Circuit, NoiseLocation, Operation
 from npsim.native import compile_native_sampler
-from npsim.noise import BernoulliPauliNoise, MeasurementBitFlip, PauliChannel
+from npsim.noise import (
+    BernoulliPauliNoise,
+    MeasurementBitFlip,
+    PauliChannel,
+    SingleQubitDepolarizing,
+)
 from tests.surface_code_examples import make_large_rotated_surface_code_memory_example
 
 
@@ -51,6 +58,13 @@ def main() -> None:
     parser.add_argument("--distances", nargs="+", type=int, default=[15, 21, 31])
     parser.add_argument("--qubits", nargs="+", type=int, default=[128, 256, 512])
     parser.add_argument("--depth", type=int, default=20)
+    parser.add_argument(
+        "--noise-model",
+        choices=("depolarizing1", "x"),
+        default="depolarizing1",
+    )
+    parser.add_argument("--noise-rate", type=float, default=0.0)
+    parser.add_argument("--measurement-noise-rate", type=float, default=0.0)
     parser.add_argument("--rounds", type=int, default=3)
     parser.add_argument("--shots", type=int, default=20_000)
     parser.add_argument("--repeats", type=int, default=5)
@@ -60,7 +74,8 @@ def main() -> None:
 
     stim_module = _load_stim()
     print(
-        "case\tqubits\tdepth\trounds\tshots\tbackend\tnpsim_sps\tstim_sps\tratio\tstatus",
+        "case\tqubits\tdepth\trounds\tnoise\tmeas_noise\tshots\tbackend\t"
+        "npsim_sps\tstim_sps\tratio\tstatus",
         flush=True,
     )
     for case in _make_cases(args):
@@ -93,6 +108,9 @@ def _make_cases(args: argparse.Namespace) -> list[BenchmarkCase]:
                 n_qubits=n_qubits,
                 depth=args.depth,
                 seed=args.seed + n_qubits,
+                noise_model=args.noise_model,
+                noise_rate=args.noise_rate,
+                measurement_noise_rate=args.measurement_noise_rate,
             ),
             qubits=n_qubits,
             depth=args.depth,
@@ -136,8 +154,10 @@ def _run_case(
     ratio_cell = f"{ratio:.3f}" if stim_sps is not None else "NA"
     depth_cell = str(case.depth) if case.depth is not None else "NA"
     rounds_cell = str(case.rounds) if case.rounds is not None else "NA"
+    noise_cell = "circuit" if case.depth is None else _noise_label(args)
     print(
         f"{case.label}\t{case.qubits}\t{depth_cell}\t{rounds_cell}\t"
+        f"{noise_cell}\t{args.measurement_noise_rate:.17g}\t"
         f"{args.shots}\t{sampler.backend_name}\t{npsim_sps:.3f}\t"
         f"{stim_cell}\t{ratio_cell}\t{status}",
         flush=True,
@@ -149,13 +169,20 @@ def _make_random_clifford_circuit(
     n_qubits: int,
     depth: int,
     seed: int,
+    noise_model: str,
+    noise_rate: float,
+    measurement_noise_rate: float,
 ) -> Circuit:
+    if not 0.0 <= noise_rate <= 1.0:
+        raise ValueError("noise-rate must be in [0, 1]")
+    if not 0.0 <= measurement_noise_rate <= 1.0:
+        raise ValueError("measurement-noise-rate must be in [0, 1]")
     rng = random.Random(seed)
     operations: list[Operation] = []
     single_qubit_gates = ("h", "s", "s_dag", "none")
     two_qubit_gates = ("cx", "cz", "swap", "none")
 
-    for _ in range(depth):
+    for layer in range(depth):
         for qubit in range(n_qubits):
             gate = rng.choice(single_qubit_gates)
             if gate == "h":
@@ -176,10 +203,63 @@ def _make_random_clifford_circuit(
             elif gate == "swap":
                 operations.append(Operation.swap(left, right))
 
+        if noise_rate > 0.0:
+            for qubit in range(n_qubits):
+                operations.append(
+                    Operation.noise(
+                        NoiseLocation(
+                            id=f"rc_l{layer}_q{qubit}_{noise_model}",
+                            model=_random_clifford_noise(noise_model),
+                            rate=noise_rate,
+                            qubits=(qubit,),
+                            tags={
+                                "family": "random_clifford",
+                                "layer": layer,
+                                "qubit": qubit,
+                                "operation": "layer_noise",
+                                "noise_model": noise_model,
+                            },
+                        )
+                    )
+                )
+
     for qubit in range(n_qubits):
-        operations.append(Operation.measure(qubit, key=f"m{qubit}"))
+        measurement_noise = None
+        if measurement_noise_rate > 0.0:
+            measurement_noise = NoiseLocation(
+                id=f"rc_m_q{qubit}",
+                model=MeasurementBitFlip(),
+                rate=measurement_noise_rate,
+                qubits=(qubit,),
+                tags={
+                    "family": "random_clifford",
+                    "qubit": qubit,
+                    "operation": "measurement_noise",
+                },
+            )
+        operations.append(
+            Operation.measure(
+                qubit,
+                key=f"m{qubit}",
+                noise=measurement_noise,
+            )
+        )
 
     return Circuit(n_qubits=n_qubits, operations=tuple(operations))
+
+
+def _random_clifford_noise(noise_model: str) -> object:
+    if noise_model == "depolarizing1":
+        return SingleQubitDepolarizing()
+    if noise_model == "x":
+        return BernoulliPauliNoise("X")
+    raise ValueError(f"unsupported random Clifford noise model {noise_model!r}")
+
+
+def _noise_label(args: argparse.Namespace) -> str:
+    if args.noise_rate <= 0:
+        return "none"
+    return f"{args.noise_model}:{args.noise_rate:.17g}"
 
 
 def _median_samples_per_second(fn: Any, *, shots: int, repeats: int) -> float:
@@ -254,6 +334,8 @@ def _noise_to_stim_line(location: Any) -> str:
     targets = " ".join(str(qubit) for qubit in location.qubits)
     if isinstance(model, BernoulliPauliNoise) and len(model.pauli) == 1:
         return f"{model.pauli}_ERROR({location.rate:.17g}) {targets}"
+    if isinstance(model, SingleQubitDepolarizing) and len(location.qubits) == 1:
+        return f"DEPOLARIZE1({location.rate:.17g}) {targets}"
     if isinstance(model, PauliChannel) and len(location.qubits) == 1:
         probs = {pauli: 0.0 for pauli in ("X", "Y", "Z")}
         total = model.total_weight
