@@ -23,14 +23,14 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from npsim.circuit import Circuit, Operation
-from npsim.native import (
+from npsim.core import Circuit, Operation
+from npsim.runtime import (
     UnsupportedNativeCircuitError,
     compile_native_dem_sampler,
     generate_native_dem,
 )
-from npsim.noise import BernoulliPauliNoise, MeasurementBitFlip, PauliChannel
-from npsim.repetition import make_repetition_code_experiment
+from npsim.core import BernoulliPauliNoise, MeasurementBitFlip, PauliChannel
+from npsim.experiments import make_repetition_code_experiment
 from tests.reference.dem import (
     DetectorErrorModelGenerator as ReferenceDetectorErrorModelGenerator,
 )

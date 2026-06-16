@@ -7,17 +7,17 @@ from collections import defaultdict
 from dataclasses import dataclass
 from typing import Any, Callable, Mapping
 
-from npsim.circuit import Circuit, NoiseLocation, Operation
-from npsim.noise import (
+from npsim.core import Circuit, NoiseLocation, Operation
+from npsim.core import (
     BernoulliPauliNoise,
     MeasurementBitFlip,
     PauliChannel,
     SingleQubitDepolarizing,
     TwoQubitDepolarizing,
 )
-from npsim.pauli import pauli_to_xz, sparse_pauli_to_xz
-from npsim.simulator import SimulationResult
-from npsim.stabilizer import BatchStabilizerState
+from npsim.core import pauli_to_xz, sparse_pauli_to_xz
+from npsim.runtime import SimulationResult
+from npsim.core import BatchStabilizerState
 
 
 class UnsupportedBatchCircuitError(ValueError):

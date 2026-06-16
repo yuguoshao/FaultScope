@@ -7,9 +7,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Sequence
 
-from npsim.circuit import Circuit, NoiseLocation, Operation
+from npsim.core import Circuit, NoiseLocation, Operation
 from npsim.dem import Detector, LogicalObservable
-from npsim.noise import (
+from npsim.core import (
     BernoulliPauliNoise,
     MeasurementBitFlip,
     PauliChannel,

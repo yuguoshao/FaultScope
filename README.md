@@ -407,12 +407,12 @@ f_k,
 
 ### Required native packed sampler
 
-`npsim.native.compile_native_sampler` 是面向 Rust packed sampler 的稳定入口。
+`npsim.runtime.compile_native_sampler` 是面向 Rust packed sampler 的稳定入口。
 batch/DEM/hotspot 的运行时快速路径现在要求 `npsim._npsim_native` 可导入，并且
 电路能被 native 编译：
 
 ```python
-from npsim.native import compile_native_sampler
+from npsim.runtime import compile_native_sampler
 
 sampler = compile_native_sampler(circuit, backend="auto")
 batch = sampler.sample(shots=100_000, seed=1)

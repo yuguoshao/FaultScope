@@ -2,8 +2,8 @@ import os
 import tempfile
 import unittest
 
-from npsim.batch import BatchForwardNoiseAwareSimulator
-from npsim.visualization import (
+from npsim.runtime import BatchForwardNoiseAwareSimulator
+from npsim.viz import (
     VisualizationUnavailableError,
     write_rotated_surface_code_spatial_hotspot_map,
 )

@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Mapping, Sequence
 
-from npsim.noise import StochasticNoise
+from npsim.core.noise import StochasticNoise
 
 
 @dataclass(frozen=True)

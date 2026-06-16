@@ -5,12 +5,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Callable, Mapping
 
-from npsim.batch import BatchTrajectory
-from npsim.circuit import Circuit, NoiseLocation, Operation
+from npsim.runtime.batch import BatchTrajectory
+from npsim.core import Circuit, NoiseLocation, Operation
 from npsim.decoders import RepetitionCodeDecoder
 from npsim.dem import Detector, LogicalObservable
-from npsim.noise import BernoulliPauliNoise, MeasurementBitFlip
-from npsim.simulator import Trajectory
+from npsim.core import BernoulliPauliNoise, MeasurementBitFlip
+from npsim.runtime.simulator import Trajectory
 
 
 RateSpec = float | Mapping[tuple[int, int], float]

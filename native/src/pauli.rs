@@ -1,0 +1,162 @@
+use crate::*;
+
+pub(crate) fn sparse_pauli_to_xz(
+    n_qubits: usize,
+    qubits: &[usize],
+    pauli: &str,
+) -> PyResult<(Vec<u8>, Vec<u8>)> {
+    if qubits.len() != pauli.len() {
+        return Err(PyValueError::new_err(
+            "qubits and paulis must have the same length",
+        ));
+    }
+    let mut x = vec![0; n_qubits];
+    let mut z = vec![0; n_qubits];
+    for (qubit, local) in qubits.iter().zip(pauli.chars()) {
+        let (px, pz) = pauli_to_xz(local)?;
+        x[*qubit] ^= px;
+        z[*qubit] ^= pz;
+    }
+    Ok((x, z))
+}
+
+pub(crate) fn pauli_to_xz(pauli: char) -> PyResult<(u8, u8)> {
+    match pauli {
+        'I' => Ok((0, 0)),
+        'X' => Ok((1, 0)),
+        'Y' => Ok((1, 1)),
+        'Z' => Ok((0, 1)),
+        _ => Err(PyValueError::new_err(format!(
+            "unsupported Pauli {pauli:?}"
+        ))),
+    }
+}
+
+pub(crate) fn xz_to_pauli(x: u8, z: u8) -> char {
+    match (x & 1, z & 1) {
+        (0, 0) => 'I',
+        (1, 0) => 'X',
+        (1, 1) => 'Y',
+        (0, 1) => 'Z',
+        _ => unreachable!(),
+    }
+}
+
+pub(crate) fn symplectic_product(x1: &[u8], z1: &[u8], x2: &[u8], z2: &[u8]) -> u8 {
+    let mut acc = 0;
+    for (((a_x, a_z), b_x), b_z) in x1.iter().zip(z1).zip(x2).zip(z2) {
+        acc ^= (a_x & b_z) ^ (a_z & b_x);
+    }
+    acc & 1
+}
+
+pub(crate) fn multiply_symbolic_rows(
+    left_x: &[u8],
+    left_z: &[u8],
+    left_sign: &Expr,
+    right_x: &[u8],
+    right_z: &[u8],
+    right_sign: &Expr,
+) -> PyResult<(Vec<u8>, Vec<u8>, Expr)> {
+    let mut phase = 0u8;
+    let mut out_x = Vec::with_capacity(left_x.len());
+    let mut out_z = Vec::with_capacity(left_x.len());
+    for (((lx, lz), rx), rz) in left_x.iter().zip(left_z).zip(right_x).zip(right_z) {
+        let lp = xz_to_pauli(*lx, *lz);
+        let rp = xz_to_pauli(*rx, *rz);
+        let (local_phase, product) = pauli_product(lp, rp);
+        phase = (phase + local_phase) & 3;
+        let (px, pz) = pauli_to_xz(product)?;
+        out_x.push(px);
+        out_z.push(pz);
+    }
+    let mut out_sign = left_sign.clone();
+    out_sign.xor_assign(right_sign);
+    if phase == 2 {
+        out_sign.toggle_constant();
+    } else if phase != 0 {
+        return Err(PyValueError::new_err(
+            "product of stabilizer rows produced a non-Hermitian phase",
+        ));
+    }
+    Ok((out_x, out_z, out_sign))
+}
+
+pub(crate) fn pauli_product(left: char, right: char) -> (u8, char) {
+    match (left, right) {
+        ('I', p) => (0, p),
+        (p, 'I') => (0, p),
+        ('X', 'X') | ('Y', 'Y') | ('Z', 'Z') => (0, 'I'),
+        ('X', 'Y') => (1, 'Z'),
+        ('Y', 'Z') => (1, 'X'),
+        ('Z', 'X') => (1, 'Y'),
+        ('Y', 'X') => (3, 'Z'),
+        ('Z', 'Y') => (3, 'X'),
+        ('X', 'Z') => (3, 'Y'),
+        _ => unreachable!(),
+    }
+}
+
+pub(crate) fn support_to_words(x: &[u8], z: &[u8]) -> Vec<u64> {
+    let bits = x.len() * 2;
+    let mut words = vec![0u64; (bits + 63) / 64];
+    for (idx, bit) in x.iter().chain(z.iter()).enumerate() {
+        if *bit != 0 {
+            words[idx / 64] |= 1u64 << (idx % 64);
+        }
+    }
+    words
+}
+
+pub(crate) fn solve_row_span(
+    rows: &[Vec<u64>],
+    target: &[u64],
+    row_count: usize,
+) -> Option<Vec<u64>> {
+    let bit_count = rows.first().map(|row| row.len() * 64).unwrap_or(0);
+    let coeff_words = (row_count + 63) / 64;
+    let mut basis: Vec<Option<(Vec<u64>, Vec<u64>)>> = vec![None; bit_count];
+    for (row_idx, row) in rows.iter().enumerate() {
+        let mut vec = row.clone();
+        let mut coeff = vec![0u64; coeff_words];
+        coeff[row_idx / 64] |= 1u64 << (row_idx % 64);
+        while let Some(pivot) = highest_bit(&vec) {
+            if basis[pivot].is_none() {
+                basis[pivot] = Some((vec, coeff));
+                break;
+            }
+            let (basis_vec, basis_coeff) = basis[pivot].as_ref().unwrap();
+            xor_words(&mut vec, basis_vec);
+            xor_words(&mut coeff, basis_coeff);
+        }
+    }
+
+    let mut vec = target.to_vec();
+    let mut coeff = vec![0u64; coeff_words];
+    while let Some(pivot) = highest_bit(&vec) {
+        let (basis_vec, basis_coeff) = basis[pivot].as_ref()?;
+        xor_words(&mut vec, basis_vec);
+        xor_words(&mut coeff, basis_coeff);
+    }
+    Some(coeff)
+}
+
+pub(crate) fn highest_bit(words: &[u64]) -> Option<usize> {
+    for (word_idx, word) in words.iter().enumerate().rev() {
+        if *word != 0 {
+            let local = 63 - word.leading_zeros() as usize;
+            return Some(word_idx * 64 + local);
+        }
+    }
+    None
+}
+
+pub(crate) fn xor_words(left: &mut [u64], right: &[u64]) {
+    for (a, b) in left.iter_mut().zip(right) {
+        *a ^= *b;
+    }
+}
+
+pub(crate) fn coeff_bit(coeff: &[u64], idx: usize) -> bool {
+    ((coeff[idx / 64] >> (idx % 64)) & 1) != 0
+}

@@ -4,8 +4,8 @@ import tempfile
 import unittest
 from unittest import mock
 
-from npsim.batch import BatchForwardNoiseAwareSimulator, BatchTrajectory
-from npsim.circuit import Circuit, NoiseLocation, Operation
+from npsim.runtime import BatchForwardNoiseAwareSimulator, BatchTrajectory
+from npsim.core import Circuit, NoiseLocation, Operation
 from npsim.dem import (
     Detector,
     DetectorErrorEdge,
@@ -13,28 +13,28 @@ from npsim.dem import (
     DetectorErrorModelGenerator,
     LogicalObservable,
 )
-from npsim.dem_sampler import DemBatchHotspotSimulator, DemBatchTrajectory
-from npsim.noise import (
+from npsim.dem import DemBatchHotspotSimulator, DemBatchTrajectory
+from npsim.core import (
     BernoulliPauliNoise,
     MeasurementBitFlip,
     PauliChannel,
     SingleQubitDepolarizing,
 )
-from npsim.native import (
+from npsim.runtime import (
     UnsupportedNativeCircuitError,
     compile_native_dem_sampler,
     compile_native_sampler,
     generate_native_dem,
 )
-from npsim.pymatching_decoder import (
+from npsim.decoders import (
     PyMatchingBatchDecoder,
     UnsupportedPyMatchingDemError,
 )
-from npsim.repetition import make_repetition_code_experiment
-from npsim.simulator import ForwardNoiseAwareSimulator, SimulationResult
-from npsim.stabilizer import StabilizerState
-from npsim.stim_import import StimImportError, parse_stim_circuit
-from npsim.visualization import (
+from npsim.experiments import make_repetition_code_experiment
+from npsim.runtime import ForwardNoiseAwareSimulator, SimulationResult
+from npsim.core import StabilizerState
+from npsim.io import StimImportError, parse_stim_circuit
+from npsim.viz import (
     VisualizationUnavailableError,
     write_rotated_surface_code_spatial_hotspot_map,
     write_repetition_gate_structure_hotspot_map,
@@ -611,7 +611,7 @@ class NativePackedSamplerTests(unittest.TestCase):
             return fake_sampler
 
         with mock.patch(
-            "npsim.native.compile_native_sampler",
+            "npsim.runtime.native.compile_native_sampler",
             side_effect=compile_once,
         ) as patched:
             first = engine.estimate(shots=1, seed=1, loss_mask_fn=lambda batch: 0)

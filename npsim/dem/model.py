@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Mapping, Sequence
 
-from npsim.circuit import Circuit
+from npsim.core import Circuit
 
 
 class UnsupportedDemCircuitError(ValueError):
@@ -278,7 +278,7 @@ class DetectorErrorModelGenerator:
         self._validate_declarations()
 
     def generate(self) -> DetectorErrorModel:
-        from npsim.native import generate_native_dem
+        from npsim.runtime.native import generate_native_dem
 
         return generate_native_dem(
             self.circuit,

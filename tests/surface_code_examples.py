@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from npsim.circuit import Circuit, NoiseLocation, Operation
-from npsim.noise import BernoulliPauliNoise, MeasurementBitFlip
+from npsim.core import Circuit, NoiseLocation, Operation
+from npsim.core import BernoulliPauliNoise, MeasurementBitFlip
 
 
 @dataclass(frozen=True)

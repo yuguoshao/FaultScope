@@ -2,10 +2,10 @@ import os
 import tempfile
 import unittest
 
-from npsim.circuit import Circuit, NoiseLocation, Operation
-from npsim.batch import BatchForwardNoiseAwareSimulator
-from npsim.noise import BernoulliPauliNoise, MeasurementBitFlip
-from npsim.visualization import (
+from npsim.core import Circuit, NoiseLocation, Operation
+from npsim.runtime import BatchForwardNoiseAwareSimulator
+from npsim.core import BernoulliPauliNoise, MeasurementBitFlip
+from npsim.viz import (
     VisualizationUnavailableError,
     write_rotated_surface_code_spatial_hotspot_map,
 )

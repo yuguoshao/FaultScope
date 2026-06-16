@@ -30,12 +30,12 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from npsim.dem import Detector, DetectorErrorEdge, DetectorErrorModel, LogicalObservable
-from npsim.native import (
+from npsim.runtime import (
     UnsupportedNativeCircuitError,
     compile_native_dem_sampler,
     compile_native_sampler,
 )
-from npsim.stim_import import StimImportResult, parse_stim_circuit
+from npsim.io import StimImportResult, parse_stim_circuit
 
 
 DEFAULT_RATES = (0.002, 0.004, 0.006, 0.008, 0.010, 0.012)

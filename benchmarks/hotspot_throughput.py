@@ -25,18 +25,18 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from npsim.dem import DetectorErrorModelGenerator
-from npsim.dem_sampler import (
+from npsim.dem.sampler import (
     _aggregate_by_tag,
     _aggregate_detector_hotspots,
     _default_loss_mask,
     _edge_sensitivities_to_detector_graph,
 )
-from npsim.native import (
+from npsim.runtime import (
     UnsupportedNativeCircuitError,
     compile_native_dem_sampler,
     compile_native_sampler,
 )
-from npsim.repetition import make_repetition_code_experiment
+from npsim.experiments import make_repetition_code_experiment
 from tests.reference.batch import (
     BatchForwardNoiseAwareSimulator as ReferenceBatchForwardNoiseAwareSimulator,
 )

@@ -6,16 +6,16 @@ import random
 from dataclasses import dataclass, field
 from typing import Any, Mapping, Sequence
 
-from npsim.circuit import Circuit, NoiseLocation, Operation
-from npsim.noise import (
+from npsim.core import Circuit, NoiseLocation, Operation
+from npsim.core import (
     BernoulliPauliNoise,
     MeasurementBitFlip,
     PauliChannel,
     SingleQubitDepolarizing,
     TwoQubitDepolarizing,
 )
-from npsim.pauli import PauliFrame, sparse_pauli_to_xz
-from npsim.stabilizer import StabilizerState
+from npsim.core import PauliFrame, sparse_pauli_to_xz
+from npsim.core import StabilizerState
 
 
 class UnsupportedDemCircuitError(ValueError):

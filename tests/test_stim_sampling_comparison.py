@@ -1,19 +1,19 @@
 import unittest
 from typing import Iterable, Sequence
 
-from npsim.batch import BatchTrajectory
-from npsim.circuit import Circuit, NoiseLocation, Operation
+from npsim.runtime import BatchTrajectory
+from npsim.core import Circuit, NoiseLocation, Operation
 from npsim.dem import Detector, LogicalObservable
-from npsim.native import UnsupportedNativeCircuitError, compile_native_sampler
-from npsim.native import compile_native_dem_sampler, generate_native_dem
-from npsim.noise import (
+from npsim.runtime import UnsupportedNativeCircuitError, compile_native_sampler
+from npsim.runtime import compile_native_dem_sampler, generate_native_dem
+from npsim.core import (
     BernoulliPauliNoise,
     MeasurementBitFlip,
     PauliChannel,
     SingleQubitDepolarizing,
     TwoQubitDepolarizing,
 )
-from npsim.repetition import make_repetition_code_experiment
+from npsim.experiments import make_repetition_code_experiment
 from tests.surface_code_examples import make_large_rotated_surface_code_memory_example
 
 

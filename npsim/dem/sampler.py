@@ -7,7 +7,7 @@ from collections import defaultdict
 from dataclasses import dataclass
 from typing import Any, Callable, Mapping
 
-from npsim.dem import (
+from npsim.dem.model import (
     DetectorErrorModel,
     DetectorGraphEdgeHotspot,
     DetectorGraphHotspots,
@@ -166,7 +166,7 @@ class DemBatchHotspotSimulator:
             raise ValueError("supply either seed or rng, not both")
         if rng is not None:
             seed = rng.getrandbits(64)
-        from npsim.native import compile_native_dem_sampler
+        from npsim.runtime.native import compile_native_dem_sampler
 
         return compile_native_dem_sampler(
             self.dem,
@@ -190,7 +190,7 @@ class DemBatchHotspotSimulator:
     ) -> DemHotspotResult:
         if decoder is not None and correction_mask_fn is not None:
             raise ValueError("supply either decoder or correction_mask_fn, not both")
-        from npsim.native import compile_native_dem_sampler
+        from npsim.runtime.native import compile_native_dem_sampler
 
         return compile_native_dem_sampler(
             self.dem,

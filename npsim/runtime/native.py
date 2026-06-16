@@ -13,9 +13,9 @@ import random
 from dataclasses import dataclass
 from typing import Any, Mapping
 
-from npsim.batch import BatchTrajectory
-from npsim.circuit import Circuit, NoiseLocation, Operation
-from npsim.noise import (
+from npsim.runtime.batch import BatchTrajectory
+from npsim.core import Circuit, NoiseLocation, Operation
+from npsim.core import (
     BernoulliPauliNoise,
     MeasurementBitFlip,
     PauliChannel,
@@ -213,7 +213,7 @@ class NativeDemSampler:
             )
             return _payload_to_dem_hotspot_result(self.dem, payload)
 
-        from npsim.dem_sampler import _default_loss_mask
+        from npsim.dem.sampler import _default_loss_mask
 
         batch = self._engine.run_native_batch(int(shots), seed)
         if correction_mask_fn is not None:
@@ -402,7 +402,7 @@ def _coerce_dem_declarations(
     detectors: Any | None,
     observables: Any | None,
 ) -> tuple[tuple[Any, ...], tuple[Any, ...]]:
-    from npsim.dem import _detectors_from_circuit, _observables_from_circuit
+    from npsim.dem.model import _detectors_from_circuit, _observables_from_circuit
 
     return (
         tuple(detectors) if detectors is not None else _detectors_from_circuit(circuit),
@@ -456,7 +456,7 @@ def _payload_to_detector_error_model(
     observables: tuple[Any, ...],
     payload: Any,
 ) -> Any:
-    from npsim.dem import DetectorErrorEdge, DetectorErrorModel
+    from npsim.dem.model import DetectorErrorEdge, DetectorErrorModel
 
     locations = circuit.noise_locations()
     edges = []
@@ -481,7 +481,7 @@ def _payload_to_detector_error_model(
 
 
 def _payload_to_dem_batch(payload: Mapping[str, Any]) -> Any:
-    from npsim.dem_sampler import DemBatchTrajectory
+    from npsim.dem.sampler import DemBatchTrajectory
 
     return DemBatchTrajectory(
         shots=int(payload["shots"]),
@@ -499,7 +499,7 @@ def _payload_to_dem_batch(payload: Mapping[str, Any]) -> Any:
 
 
 def _payload_to_dem_hotspot_result(dem: Any, payload: Mapping[str, Any]) -> Any:
-    from npsim.dem_sampler import (
+    from npsim.dem.sampler import (
         DemEdgeHotspotRow,
         DemHotspotResult,
         DemLocationHotspotRow,
@@ -578,7 +578,7 @@ def _payload_to_dem_hotspot_result(dem: Any, payload: Mapping[str, Any]) -> Any:
 
 
 def _payload_to_detector_graph_hotspots(dem: Any, payload: Mapping[str, Any]) -> Any:
-    from npsim.dem import DetectorGraphEdgeHotspot, DetectorGraphHotspots
+    from npsim.dem.model import DetectorGraphEdgeHotspot, DetectorGraphHotspots
 
     edge_hotspots = []
     for row in payload["edge_hotspots"]:
@@ -639,7 +639,7 @@ def _graph_key_rows_to_dict(rows: Any) -> dict[tuple[tuple[int, ...], tuple[int,
 
 
 def _payload_to_simulation_result(circuit: Circuit, payload: Mapping[str, Any]) -> Any:
-    from npsim.simulator import HotspotRow, SimulationResult
+    from npsim.runtime.simulator import HotspotRow, SimulationResult
 
     locations = circuit.noise_locations()
     sensitivities = payload["sensitivities"]
@@ -671,7 +671,7 @@ def _payload_to_simulation_result(circuit: Circuit, payload: Mapping[str, Any]) 
 
 
 def _dem_location_metadata(dem: Any) -> dict[str, Any]:
-    from npsim.dem_sampler import DemLocationMetadata
+    from npsim.dem.sampler import DemLocationMetadata
 
     out: dict[str, DemLocationMetadata] = {}
     for edge in dem.edges:

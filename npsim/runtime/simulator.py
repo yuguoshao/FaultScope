@@ -7,10 +7,10 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Any, Callable, Mapping, Protocol, Sequence
 
-from npsim.circuit import Circuit, NoiseLocation, Operation
-from npsim.noise import MeasurementBitFlip
-from npsim.pauli import PauliFrame, sparse_pauli_to_xz
-from npsim.stabilizer import StabilizerState
+from npsim.core import Circuit, NoiseLocation, Operation
+from npsim.core import MeasurementBitFlip
+from npsim.core import PauliFrame, sparse_pauli_to_xz
+from npsim.core import StabilizerState
 
 
 class Decoder(Protocol):

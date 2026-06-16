@@ -6,7 +6,7 @@ import random
 from dataclasses import dataclass
 from typing import Sequence
 
-from npsim.pauli import (
+from npsim.core.pauli import (
     multiply_pauli_rows,
     sparse_pauli_to_xz,
     symplectic_product,

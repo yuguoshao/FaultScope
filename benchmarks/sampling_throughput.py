@@ -28,9 +28,9 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from npsim.circuit import Circuit, NoiseLocation, Operation
-from npsim.native import compile_native_sampler
-from npsim.noise import (
+from npsim.core import Circuit, NoiseLocation, Operation
+from npsim.runtime import compile_native_sampler
+from npsim.core import (
     BernoulliPauliNoise,
     MeasurementBitFlip,
     PauliChannel,

@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Mapping, Sequence
 
-from npsim.simulator import MeasurementRecord, Trajectory
+from npsim.runtime.simulator import MeasurementRecord, Trajectory
 
 
 @dataclass(frozen=True)

@@ -6,8 +6,8 @@ import random
 from dataclasses import dataclass
 from typing import Any, Callable, Mapping
 
-from npsim.circuit import Circuit
-from npsim.simulator import SimulationResult
+from npsim.core import Circuit
+from npsim.runtime.simulator import SimulationResult
 
 
 class UnsupportedBatchCircuitError(ValueError):
@@ -81,7 +81,7 @@ class BatchForwardNoiseAwareSimulator:
 
     def _native_sampler(self) -> Any:
         if self._native_sampler_cache is None:
-            from npsim.native import compile_native_sampler
+            from npsim.runtime.native import compile_native_sampler
 
             self._native_sampler_cache = compile_native_sampler(
                 self.circuit,

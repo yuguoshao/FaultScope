@@ -6,8 +6,8 @@ import random
 from dataclasses import dataclass
 from typing import Protocol, Sequence
 
-from npsim.pauli import PauliFrame, sparse_pauli_to_xz
-from npsim.stabilizer import StabilizerState
+from npsim.core.pauli import PauliFrame, sparse_pauli_to_xz
+from npsim.core.stabilizer import StabilizerState
 
 
 MIN_SCORE_RATE = 1e-12

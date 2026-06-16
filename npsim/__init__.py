@@ -1,11 +1,11 @@
 """Forward noise-aware stabilizer trajectory simulator."""
 
-from npsim.batch import (
+from npsim.runtime import (
     BatchForwardNoiseAwareSimulator,
     BatchTrajectory,
     UnsupportedBatchCircuitError,
 )
-from npsim.circuit import Circuit, NoiseLocation, Operation
+from npsim.core import Circuit, NoiseLocation, Operation
 from npsim.dem import (
     Detector,
     DetectorErrorEdge,
@@ -16,7 +16,7 @@ from npsim.dem import (
     LogicalObservable,
     UnsupportedDemCircuitError,
 )
-from npsim.dem_sampler import (
+from npsim.dem import (
     DemBatchHotspotSimulator,
     DemBatchTrajectory,
     DemEdgeHotspotRow,
@@ -24,26 +24,26 @@ from npsim.dem_sampler import (
     DemLocationHotspotRow,
     DemLocationMetadata,
 )
-from npsim.noise import (
+from npsim.core import (
     BernoulliPauliNoise,
     MeasurementBitFlip,
     PauliChannel,
     SingleQubitDepolarizing,
     TwoQubitDepolarizing,
 )
-from npsim.native import (
+from npsim.runtime import (
     NativePackedSampler,
     UnsupportedNativeCircuitError,
     compile_native_sampler,
 )
-from npsim.pymatching_decoder import (
+from npsim.decoders import (
     PyMatchingBatchDecoder,
     PyMatchingUnavailableError,
     UnsupportedPyMatchingDemError,
 )
-from npsim.simulator import ForwardNoiseAwareSimulator, SimulationResult, Trajectory
-from npsim.stim_import import StimImportError, StimImportResult, load_stim_file, parse_stim_circuit
-from npsim.visualization import (
+from npsim.runtime import ForwardNoiseAwareSimulator, SimulationResult, Trajectory
+from npsim.io import StimImportError, StimImportResult, load_stim_file, parse_stim_circuit
+from npsim.viz import (
     VisualizationUnavailableError,
     write_rotated_surface_code_spatial_hotspot_map,
     write_repetition_gate_structure_hotspot_map,
