@@ -614,6 +614,66 @@ class NativePackedSamplerTests(unittest.TestCase):
             example.diagnostic_loss_mask(converted_batch),
         )
 
+    def test_surface_diagnostic_native_loss_mask_matches_python_loss(self) -> None:
+        example = make_large_rotated_surface_code_memory_example(
+            distance=5,
+            rounds=1,
+        )
+        sampler = self._native_sampler_or_skip(example.circuit)
+        native_batch = sampler._engine.run_native_batch(64, 29)
+        spec = example.native_loss_spec("surface_diagnostic")
+        self.assertIsNotNone(spec)
+        assert spec is not None
+
+        native_loss = int(
+            native_batch.surface_diagnostic_loss_mask(
+                spec["x_qubits"],
+                spec["z_qubits"],
+                spec["measurement_pairs"],
+            )
+        )
+
+        self.assertEqual(native_loss, example.diagnostic_loss_mask(native_batch))
+
+    def test_surface_diagnostic_estimate_uses_native_loss_spec(self) -> None:
+        example = make_large_rotated_surface_code_memory_example(
+            distance=5,
+            rounds=1,
+        )
+        sampler = self._native_sampler_or_skip(example.circuit)
+
+        class NativeOnlyLoss:
+            _npsim_native_loss = "surface_diagnostic"
+
+            def native_loss_spec(self, kind):
+                return example.native_loss_spec(kind)
+
+            def __call__(self, batch):
+                raise AssertionError("Python loss path was used")
+
+        fast = sampler.estimate(
+            shots=96,
+            seed=37,
+            loss_mask_fn=NativeOnlyLoss(),
+        )
+
+        def python_loss(batch):
+            return example.diagnostic_loss_mask(batch)
+
+        reference = sampler.estimate(
+            shots=96,
+            seed=37,
+            loss_mask_fn=python_loss,
+        )
+
+        self.assertEqual(fast.mean_loss, reference.mean_loss)
+        self.assertEqual(fast.sensitivities, reference.sensitivities)
+        self.assertEqual(fast.hotspots, reference.hotspots)
+        self.assertEqual(fast.by_qubit, reference.by_qubit)
+        self.assertEqual(fast.by_round, reference.by_round)
+        self.assertEqual(fast.by_gate, reference.by_gate)
+        self.assertEqual(fast.by_operation, reference.by_operation)
+
     def test_native_backend_samples_random_measurement_masks(self) -> None:
         circuit = Circuit(
             n_qubits=1,

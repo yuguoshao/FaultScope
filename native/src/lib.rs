@@ -245,6 +245,44 @@ impl NativePackedSampler {
         let estimate = compute_packed_estimate(self, &batch.state, &loss_mask, baseline, top_k);
         packed_estimate_to_py(py, &estimate)
     }
+
+    #[pyo3(signature = (
+        shots,
+        x_qubits,
+        z_qubits,
+        measurement_pairs,
+        seed=None,
+        baseline=None,
+        top_k=10
+    ))]
+    fn estimate_surface_diagnostic(
+        &self,
+        py: Python<'_>,
+        shots: usize,
+        x_qubits: Vec<usize>,
+        z_qubits: Vec<usize>,
+        measurement_pairs: Vec<(String, String)>,
+        seed: Option<u64>,
+        baseline: Option<f64>,
+        top_k: usize,
+    ) -> PyResult<PyObject> {
+        if shots == 0 {
+            return Err(PyValueError::new_err("shots must be positive"));
+        }
+        let estimate = py.allow_threads(|| -> PyResult<PackedEstimate> {
+            let state = run_packed_sample(self, shots, seed, true)?;
+            let loss_mask = compute_surface_diagnostic_loss_mask(
+                &state,
+                &x_qubits,
+                &z_qubits,
+                &measurement_pairs,
+            )?;
+            Ok(compute_packed_estimate(
+                self, &state, &loss_mask, baseline, top_k,
+            ))
+        })?;
+        packed_estimate_to_py(py, &estimate)
+    }
 }
 
 #[pymethods]
@@ -314,6 +352,22 @@ impl NativePackedBatch {
             .get(key)
             .ok_or_else(|| PyValueError::new_err(format!("unknown measurement key {key:?}")))?;
         mask_to_py(py, mask)
+    }
+
+    fn surface_diagnostic_loss_mask(
+        &self,
+        py: Python<'_>,
+        x_qubits: Vec<usize>,
+        z_qubits: Vec<usize>,
+        measurement_pairs: Vec<(String, String)>,
+    ) -> PyResult<PyObject> {
+        let loss_mask = compute_surface_diagnostic_loss_mask(
+            &self.state,
+            &x_qubits,
+            &z_qubits,
+            &measurement_pairs,
+        )?;
+        mask_to_py(py, &loss_mask)
     }
 
     fn bit(&self, mask: &Bound<'_, PyAny>, shot: usize) -> PyResult<u8> {
@@ -2158,6 +2212,51 @@ struct PackedEstimate {
     by_gate: HashMap<TagValue, f64>,
     by_operation: HashMap<TagValue, f64>,
     top_locations: Vec<String>,
+}
+
+fn compute_surface_diagnostic_loss_mask(
+    state: &RuntimeState,
+    x_qubits: &[usize],
+    z_qubits: &[usize],
+    measurement_pairs: &[(String, String)],
+) -> PyResult<Mask> {
+    let words = state.all_mask.words.len();
+    let mut loss_mask = Mask::zero(words);
+
+    let mut x_logical = Mask::zero(words);
+    for qubit in x_qubits {
+        let mask = state
+            .x_frame
+            .get(*qubit)
+            .ok_or_else(|| PyValueError::new_err(format!("unknown qubit {qubit}")))?;
+        x_logical.xor_assign(mask);
+    }
+    loss_mask.or_assign(&x_logical);
+
+    let mut z_logical = Mask::zero(words);
+    for qubit in z_qubits {
+        let mask = state
+            .z_frame
+            .get(*qubit)
+            .ok_or_else(|| PyValueError::new_err(format!("unknown qubit {qubit}")))?;
+        z_logical.xor_assign(mask);
+    }
+    loss_mask.or_assign(&z_logical);
+
+    for (left_key, right_key) in measurement_pairs {
+        let left = state.measurements.get(left_key).ok_or_else(|| {
+            PyValueError::new_err(format!("unknown measurement key {left_key:?}"))
+        })?;
+        let right = state.measurements.get(right_key).ok_or_else(|| {
+            PyValueError::new_err(format!("unknown measurement key {right_key:?}"))
+        })?;
+        let mut detector = left.clone();
+        detector.xor_assign(right);
+        loss_mask.or_assign(&detector);
+    }
+
+    loss_mask.and_assign(&state.all_mask);
+    Ok(loss_mask)
 }
 
 #[derive(Clone, PartialEq, Eq, Hash)]

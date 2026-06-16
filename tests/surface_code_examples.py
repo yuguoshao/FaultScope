@@ -22,6 +22,25 @@ class RotatedSurfaceCodeMemoryExample:
     def data_qubits(self) -> int:
         return self.distance * self.distance
 
+    def native_loss_spec(self, kind: str) -> dict[str, object] | None:
+        if kind != "surface_diagnostic":
+            return None
+        return {
+            "kind": kind,
+            "x_qubits": tuple(
+                _data_index(self.distance, row, 0)
+                for row in range(self.distance)
+            ),
+            "z_qubits": tuple(
+                _data_index(self.distance, 0, col)
+                for col in range(self.distance)
+            ),
+            "measurement_pairs": (
+                (f"r{self.rounds}_{self.hot_x_check}", f"r0_{self.hot_x_check}"),
+                (f"r{self.rounds}_{self.hot_z_check}", f"r0_{self.hot_z_check}"),
+            ),
+        }
+
     def diagnostic_loss_mask(self, batch) -> int:
         """A cheap smoke-test loss involving logical paths and hot detectors."""
 
@@ -62,6 +81,11 @@ class RotatedSurfaceCodeMemoryExample:
                     ^ measurements[f"r0_{check_id}"]
                 )
         return (x_logical | z_logical | detector_mask) & all_mask
+
+
+RotatedSurfaceCodeMemoryExample.diagnostic_loss_mask._npsim_native_loss = (  # type: ignore[attr-defined]
+    "surface_diagnostic"
+)
 
 
 def make_large_rotated_surface_code_memory_example(

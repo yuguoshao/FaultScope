@@ -96,6 +96,22 @@ class NativePackedSampler:
             raise ValueError("shots must be positive")
         if self.backend_name == "native":
             native_baseline = _native_baseline_value(baseline)
+            native_loss = _native_packed_loss_spec(loss_mask_fn)
+            if native_loss is not None and hasattr(
+                self._engine,
+                "estimate_surface_diagnostic",
+            ):
+                payload = self._engine.estimate_surface_diagnostic(
+                    int(shots),
+                    native_loss["x_qubits"],
+                    native_loss["z_qubits"],
+                    native_loss["measurement_pairs"],
+                    seed,
+                    native_baseline,
+                    int(top_k),
+                )
+                return _payload_to_simulation_result(self.circuit, payload)
+
             batch = self._engine.run_native_batch(int(shots), seed)
             loss_mask = int(loss_mask_fn(batch)) & int(batch.all_mask)
             payload = self._engine.estimate_hotspots(
@@ -729,6 +745,41 @@ def _native_baseline_value(baseline: str | float) -> float | None:
     if isinstance(baseline, (int, float)):
         return float(baseline)
     raise ValueError("baseline must be 'mean' or a numeric value")
+
+
+def _native_packed_loss_spec(loss_mask_fn: Any) -> dict[str, Any] | None:
+    kind = _native_loss_kind(loss_mask_fn)
+    if kind != "surface_diagnostic":
+        return None
+
+    owner = getattr(loss_mask_fn, "__self__", None)
+    provider = owner if owner is not None else loss_mask_fn
+    spec_fn = getattr(provider, "native_loss_spec", None)
+    if not callable(spec_fn):
+        return None
+    spec = spec_fn(kind)
+    if not spec or spec.get("kind") != kind:
+        return None
+    return {
+        "kind": kind,
+        "x_qubits": tuple(int(qubit) for qubit in spec["x_qubits"]),
+        "z_qubits": tuple(int(qubit) for qubit in spec["z_qubits"]),
+        "measurement_pairs": tuple(
+            (str(left), str(right))
+            for left, right in spec["measurement_pairs"]
+        ),
+    }
+
+
+def _native_loss_kind(loss_mask_fn: Any) -> str | None:
+    kind = getattr(loss_mask_fn, "_npsim_native_loss", None)
+    if isinstance(kind, str):
+        return kind
+    function = getattr(loss_mask_fn, "__func__", None)
+    kind = getattr(function, "_npsim_native_loss", None)
+    if isinstance(kind, str):
+        return kind
+    return None
 
 
 def _payload_to_batch_trajectory(payload: Mapping[str, Any]) -> BatchTrajectory:
