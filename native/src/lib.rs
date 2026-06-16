@@ -289,6 +289,33 @@ impl NativePackedBatch {
         map_to_py(py, &self.state.event_masks)
     }
 
+    fn x_mask(&self, py: Python<'_>, qubit: usize) -> PyResult<PyObject> {
+        let mask = self
+            .state
+            .x_frame
+            .get(qubit)
+            .ok_or_else(|| PyValueError::new_err(format!("unknown qubit {qubit}")))?;
+        mask_to_py(py, mask)
+    }
+
+    fn z_mask(&self, py: Python<'_>, qubit: usize) -> PyResult<PyObject> {
+        let mask = self
+            .state
+            .z_frame
+            .get(qubit)
+            .ok_or_else(|| PyValueError::new_err(format!("unknown qubit {qubit}")))?;
+        mask_to_py(py, mask)
+    }
+
+    fn measurement_mask(&self, py: Python<'_>, key: &str) -> PyResult<PyObject> {
+        let mask = self
+            .state
+            .measurements
+            .get(key)
+            .ok_or_else(|| PyValueError::new_err(format!("unknown measurement key {key:?}")))?;
+        mask_to_py(py, mask)
+    }
+
     fn bit(&self, mask: &Bound<'_, PyAny>, shot: usize) -> PyResult<u8> {
         py_int_bit(mask, shot)
     }

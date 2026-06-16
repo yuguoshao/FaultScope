@@ -141,15 +141,17 @@ def make_repetition_code_experiment(
     def batch_loss_mask_fn(batch: BatchTrajectory) -> int:
         loss_mask = 0
         final_round = rounds - 1
+        measurements = batch.measurements
+        x_frame = batch.x_frame
         for shot in range(batch.shots):
             syndrome = [
-                batch.measurement_bit(f"r{final_round}_c{check_idx}", shot)
+                (measurements[f"r{final_round}_c{check_idx}"] >> shot) & 1
                 for check_idx in range(distance - 1)
             ]
             correction = _decode_repetition_shot(syndrome)
             residual_weight = 0
             for data_idx, qubit in enumerate(data):
-                residual_weight += batch.x_bit(qubit, shot) ^ correction[data_idx]
+                residual_weight += ((x_frame[qubit] >> shot) & 1) ^ correction[data_idx]
             if residual_weight > distance // 2:
                 loss_mask |= 1 << shot
         return loss_mask

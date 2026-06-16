@@ -2,6 +2,7 @@ import os
 import random
 import tempfile
 import unittest
+from unittest import mock
 
 from npsim.batch import BatchForwardNoiseAwareSimulator
 from npsim.circuit import Circuit, NoiseLocation, Operation
@@ -40,6 +41,7 @@ from npsim.visualization import (
     write_repetition_gate_structure_hotspot_map,
     write_repetition_hotspot_heatmap,
 )
+from tests.surface_code_examples import make_large_rotated_surface_code_memory_example
 
 
 def _assert_binomial_count_close(
@@ -545,6 +547,72 @@ class NativePackedSamplerTests(unittest.TestCase):
         self.assertEqual(native_batch.detectors, reference.detectors)
         self.assertEqual(native_batch.observables, reference.observables)
         self.assertEqual(native_batch.noise_event_masks, reference.noise_event_masks)
+
+    def test_native_batch_single_mask_accessors_match_bulk_properties(self) -> None:
+        x_location = NoiseLocation(
+            id="x0",
+            model=BernoulliPauliNoise("X"),
+            rate=1.0,
+            qubits=(0,),
+        )
+        circuit = Circuit(
+            n_qubits=1,
+            operations=[
+                Operation.noise(x_location),
+                Operation.measure(0, key="m", basis="Z"),
+            ],
+        )
+        sampler = self._native_sampler_or_skip(circuit)
+        native_batch = sampler._engine.run_native_batch(17, 11)
+
+        self.assertEqual(int(native_batch.x_mask(0)), native_batch.x_frame[0])
+        self.assertEqual(int(native_batch.z_mask(0)), native_batch.z_frame[0])
+        self.assertEqual(
+            int(native_batch.measurement_mask("m")),
+            native_batch.measurements["m"],
+        )
+
+    def test_batch_estimate_reuses_compiled_native_sampler(self) -> None:
+        circuit = Circuit(
+            n_qubits=1,
+            operations=[
+                Operation.measure(0, key="m", basis="Z"),
+            ],
+        )
+        engine = BatchForwardNoiseAwareSimulator(circuit)
+        fake_sampler = mock.Mock()
+        fake_sampler.estimate.side_effect = ("first", "second")
+
+        def compile_once(compiled_circuit, *, backend):
+            self.assertIs(compiled_circuit, circuit)
+            self.assertEqual(backend, "native")
+            return fake_sampler
+
+        with mock.patch(
+            "npsim.native.compile_native_sampler",
+            side_effect=compile_once,
+        ) as patched:
+            first = engine.estimate(shots=1, seed=1, loss_mask_fn=lambda batch: 0)
+            second = engine.estimate(shots=1, seed=2, loss_mask_fn=lambda batch: 0)
+
+        self.assertEqual(first, "first")
+        self.assertEqual(second, "second")
+        self.assertEqual(patched.call_count, 1)
+        self.assertEqual(fake_sampler.estimate.call_count, 2)
+
+    def test_surface_diagnostic_loss_matches_native_batch_accessors(self) -> None:
+        example = make_large_rotated_surface_code_memory_example(
+            distance=5,
+            rounds=1,
+        )
+        sampler = self._native_sampler_or_skip(example.circuit)
+        native_batch = sampler._engine.run_native_batch(64, 23)
+        converted_batch = sampler.sample(shots=64, seed=23)
+
+        self.assertEqual(
+            example.diagnostic_loss_mask(native_batch),
+            example.diagnostic_loss_mask(converted_batch),
+        )
 
     def test_native_backend_samples_random_measurement_masks(self) -> None:
         circuit = Circuit(

@@ -51,6 +51,9 @@ class BatchTrajectory:
     def measurement_bit(self, key: str, shot: int) -> int:
         return self.bit(self.measurements[key], shot)
 
+    def measurement_mask(self, key: str) -> int:
+        return self.measurements[key]
+
     def detector_bit(self, detector_id: int, shot: int) -> int:
         return self.bit(self.detectors[detector_id], shot)
 
@@ -60,8 +63,14 @@ class BatchTrajectory:
     def x_bit(self, qubit: int, shot: int) -> int:
         return self.bit(self.x_frame[qubit], shot)
 
+    def x_mask(self, qubit: int) -> int:
+        return self.x_frame[qubit]
+
     def z_bit(self, qubit: int, shot: int) -> int:
         return self.bit(self.z_frame[qubit], shot)
+
+    def z_mask(self, qubit: int) -> int:
+        return self.z_frame[qubit]
 
 
 @dataclass
@@ -87,7 +96,18 @@ class BatchForwardNoiseAwareSimulator:
     def __init__(self, circuit: Circuit):
         self.circuit = circuit
         self.locations = circuit.noise_locations()
+        self._native_sampler_cache: Any | None = None
         self._ensure_unique_noise_location_ids()
+
+    def _native_sampler(self) -> Any:
+        if self._native_sampler_cache is None:
+            from npsim.native import compile_native_sampler
+
+            self._native_sampler_cache = compile_native_sampler(
+                self.circuit,
+                backend="native",
+            )
+        return self._native_sampler_cache
 
     def estimate(
         self,
@@ -102,15 +122,9 @@ class BatchForwardNoiseAwareSimulator:
             raise ValueError("shots must be positive")
 
         try:
-            from npsim.native import (
-                UnsupportedNativeCircuitError,
-                compile_native_sampler,
-            )
+            from npsim.native import UnsupportedNativeCircuitError
 
-            return compile_native_sampler(
-                self.circuit,
-                backend="native",
-            ).estimate(
+            return self._native_sampler().estimate(
                 shots=shots,
                 loss_mask_fn=loss_mask_fn,
                 seed=seed,

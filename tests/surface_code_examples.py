@@ -25,21 +25,43 @@ class RotatedSurfaceCodeMemoryExample:
     def diagnostic_loss_mask(self, batch) -> int:
         """A cheap smoke-test loss involving logical paths and hot detectors."""
 
+        all_mask = int(batch.all_mask)
         x_logical = 0
-        for row in range(self.distance):
-            x_logical ^= batch.x_frame[_data_index(self.distance, row, 0)]
+        x_mask = getattr(batch, "x_mask", None)
+        if callable(x_mask):
+            for row in range(self.distance):
+                x_logical ^= int(x_mask(_data_index(self.distance, row, 0)))
+        else:
+            x_frame = batch.x_frame
+            for row in range(self.distance):
+                x_logical ^= x_frame[_data_index(self.distance, row, 0)]
 
         z_logical = 0
-        for col in range(self.distance):
-            z_logical ^= batch.z_frame[_data_index(self.distance, 0, col)]
+        z_mask = getattr(batch, "z_mask", None)
+        if callable(z_mask):
+            for col in range(self.distance):
+                z_logical ^= int(z_mask(_data_index(self.distance, 0, col)))
+        else:
+            z_frame = batch.z_frame
+            for col in range(self.distance):
+                z_logical ^= z_frame[_data_index(self.distance, 0, col)]
 
         detector_mask = 0
-        for check_id in (self.hot_x_check, self.hot_z_check):
-            detector_mask |= (
-                batch.measurements[f"r{self.rounds}_{check_id}"]
-                ^ batch.measurements[f"r0_{check_id}"]
-            )
-        return (x_logical | z_logical | detector_mask) & batch.all_mask
+        measurement_mask = getattr(batch, "measurement_mask", None)
+        if callable(measurement_mask):
+            for check_id in (self.hot_x_check, self.hot_z_check):
+                detector_mask |= (
+                    int(measurement_mask(f"r{self.rounds}_{check_id}"))
+                    ^ int(measurement_mask(f"r0_{check_id}"))
+                )
+        else:
+            measurements = batch.measurements
+            for check_id in (self.hot_x_check, self.hot_z_check):
+                detector_mask |= (
+                    measurements[f"r{self.rounds}_{check_id}"]
+                    ^ measurements[f"r0_{check_id}"]
+                )
+        return (x_logical | z_logical | detector_mask) & all_mask
 
 
 def make_large_rotated_surface_code_memory_example(
