@@ -506,7 +506,6 @@ def _payload_to_dem_hotspot_result(dem: Any, payload: Mapping[str, Any]) -> Any:
         DemLocationMetadata,
         _aggregate_by_tag,
         _aggregate_detector_hotspots,
-        _edge_sensitivities_to_detector_graph,
     )
 
     edge_sensitivities = payload["edge_sensitivities"]
@@ -529,10 +528,13 @@ def _payload_to_dem_hotspot_result(dem: Any, payload: Mapping[str, Any]) -> Any:
         if "by_detector" in payload
         else _aggregate_detector_hotspots(dem, edge_hotspots)
     )
-    detector_graph_hotspots = (
-        _payload_to_detector_graph_hotspots(dem, payload["detector_graph_hotspots"])
-        if "detector_graph_hotspots" in payload
-        else _edge_sensitivities_to_detector_graph(dem, edge_sensitivities)
+    if "detector_graph_hotspots" not in payload:
+        raise UnsupportedNativeCircuitError(
+            "native DEM hotspot payload is missing detector_graph_hotspots"
+        )
+    detector_graph_hotspots = _payload_to_detector_graph_hotspots(
+        dem,
+        payload["detector_graph_hotspots"],
     )
     top_edges_cache = tuple(
         DemEdgeHotspotRow(

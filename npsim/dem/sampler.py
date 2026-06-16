@@ -9,7 +9,6 @@ from typing import Any, Callable, Mapping
 
 from npsim.dem.model import (
     DetectorErrorModel,
-    DetectorGraphEdgeHotspot,
     DetectorGraphHotspots,
 )
 
@@ -258,74 +257,3 @@ def _aggregate_by_tag(
             out[value] += hotspot
     return dict(out)
 
-
-def _edge_sensitivities_to_detector_graph(
-    dem: DetectorErrorModel,
-    edge_sensitivities: Mapping[int, float],
-) -> DetectorGraphHotspots:
-    edge_hotspots: list[DetectorGraphEdgeHotspot] = []
-    by_detector_edge: dict[tuple[tuple[int, ...], tuple[int, ...]], float] = {}
-    signed_by_detector_edge: dict[tuple[tuple[int, ...], tuple[int, ...]], float] = {}
-    by_detector: dict[int, float] = {}
-    signed_by_detector: dict[int, float] = {}
-    by_observable: dict[int, float] = {}
-    signed_by_observable: dict[int, float] = {}
-    by_location: dict[str, float] = {}
-    signed_by_location: dict[str, float] = {}
-
-    for edge_index, edge in enumerate(dem.edges):
-        sensitivity = float(edge_sensitivities.get(edge_index, 0.0))
-        hotspot = abs(sensitivity)
-        edge_hotspots.append(
-            DetectorGraphEdgeHotspot(
-                edge_index=edge_index,
-                location_id=edge.location_id,
-                event=edge.event,
-                probability=edge.probability,
-                detectors=edge.detectors,
-                observables=edge.observables,
-                sensitivity=sensitivity,
-                hotspot=hotspot,
-                weight=1.0,
-            )
-        )
-        if not hotspot:
-            continue
-
-        graph_key = (edge.detectors, edge.observables)
-        _add(by_detector_edge, graph_key, hotspot)
-        _add(signed_by_detector_edge, graph_key, sensitivity)
-        _add(by_location, edge.location_id, hotspot)
-        _add(signed_by_location, edge.location_id, sensitivity)
-
-        detector_share = hotspot / len(edge.detectors) if edge.detectors else 0.0
-        signed_detector_share = (
-            sensitivity / len(edge.detectors) if edge.detectors else 0.0
-        )
-        for detector_id in edge.detectors:
-            _add(by_detector, detector_id, detector_share)
-            _add(signed_by_detector, detector_id, signed_detector_share)
-
-        observable_share = hotspot / len(edge.observables) if edge.observables else 0.0
-        signed_observable_share = (
-            sensitivity / len(edge.observables) if edge.observables else 0.0
-        )
-        for observable_id in edge.observables:
-            _add(by_observable, observable_id, observable_share)
-            _add(signed_by_observable, observable_id, signed_observable_share)
-
-    return DetectorGraphHotspots(
-        edge_hotspots=tuple(edge_hotspots),
-        by_detector_edge=by_detector_edge,
-        signed_by_detector_edge=signed_by_detector_edge,
-        by_detector=by_detector,
-        signed_by_detector=signed_by_detector,
-        by_observable=by_observable,
-        signed_by_observable=signed_by_observable,
-        by_location=by_location,
-        signed_by_location=signed_by_location,
-    )
-
-
-def _add(out: dict[Any, float], key: Any, value: float) -> None:
-    out[key] = out.get(key, 0.0) + value

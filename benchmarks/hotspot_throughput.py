@@ -25,12 +25,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from npsim.dem import DetectorErrorModelGenerator
-from npsim.dem.sampler import (
-    _aggregate_by_tag,
-    _aggregate_detector_hotspots,
-    _default_loss_mask,
-    _edge_sensitivities_to_detector_graph,
-)
+from npsim.dem.sampler import _default_loss_mask
 from npsim.runtime import (
     UnsupportedNativeCircuitError,
     compile_native_dem_sampler,
@@ -42,6 +37,9 @@ from tests.reference.batch import (
 )
 from tests.reference.dem_sampler import (
     DemBatchHotspotSimulator as ReferenceDemBatchHotspotSimulator,
+    _aggregate_by_tag,
+    _aggregate_detector_hotspots,
+    _edge_sensitivities_to_detector_graph,
 )
 
 
