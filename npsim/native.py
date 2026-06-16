@@ -87,19 +87,28 @@ class NativePackedSampler:
         self,
         *,
         shots: int,
-        loss_mask_fn: Any,
+        loss_mask_fn: Any | None = None,
+        decoder: Any | None = None,
+        correction_mask_fn: Any | None = None,
         seed: int | None = None,
         baseline: str | float = "mean",
         top_k: int = 10,
     ) -> Any:
         if shots <= 0:
             raise ValueError("shots must be positive")
+        if decoder is not None and correction_mask_fn is not None:
+            raise ValueError("supply either decoder or correction_mask_fn, not both")
         if self.backend_name == "native":
             native_baseline = _native_baseline_value(baseline)
             native_loss = _native_packed_loss_spec(loss_mask_fn)
-            if native_loss is not None and hasattr(
-                self._engine,
-                "estimate_surface_diagnostic",
+            if (
+                decoder is None
+                and correction_mask_fn is None
+                and native_loss is not None
+                and hasattr(
+                    self._engine,
+                    "estimate_surface_diagnostic",
+                )
             ):
                 payload = self._engine.estimate_surface_diagnostic(
                     int(shots),
@@ -113,7 +122,16 @@ class NativePackedSampler:
                 return _payload_to_simulation_result(self.circuit, payload)
 
             batch = self._engine.run_native_batch(int(shots), seed)
-            loss_mask = int(loss_mask_fn(batch)) & int(batch.all_mask)
+            corrections = _forward_correction_masks(
+                batch,
+                decoder,
+                correction_mask_fn,
+            )
+            if loss_mask_fn is None:
+                loss_mask = _forward_default_loss_mask(batch, corrections)
+            else:
+                loss_mask = int(loss_mask_fn(batch))
+            loss_mask &= int(batch.all_mask)
             payload = self._engine.estimate_hotspots(
                 batch,
                 loss_mask,
@@ -124,8 +142,11 @@ class NativePackedSampler:
         return self._engine.estimate(
             shots=shots,
             loss_mask_fn=loss_mask_fn,
+            decoder=decoder,
+            correction_mask_fn=correction_mask_fn,
             seed=seed,
             baseline=baseline,
+            top_k=top_k,
         )
 
 
@@ -754,6 +775,34 @@ def _native_baseline_value(baseline: str | float) -> float | None:
     if isinstance(baseline, (int, float)):
         return float(baseline)
     raise ValueError("baseline must be 'mean' or a numeric value")
+
+
+def _forward_correction_masks(
+    batch: Any,
+    decoder: Any | None,
+    correction_mask_fn: Any | None,
+) -> Mapping[int, int]:
+    if correction_mask_fn is not None:
+        return dict(correction_mask_fn(batch))
+    if decoder is None:
+        return {}
+    if not hasattr(decoder, "decode_batch_masks"):
+        raise TypeError("batch decoder must provide decode_batch_masks(batch)")
+    return dict(decoder.decode_batch_masks(batch))
+
+
+def _forward_default_loss_mask(
+    batch: Any,
+    corrections: Mapping[int, int],
+) -> int:
+    observable_ids = set(batch.observables)
+    observable_ids.update(corrections)
+    loss_mask = 0
+    for observable_id in observable_ids:
+        loss_mask |= int(batch.observables.get(observable_id, 0)) ^ int(
+            corrections.get(observable_id, 0)
+        )
+    return loss_mask & int(batch.all_mask)
 
 
 def _native_packed_loss_spec(loss_mask_fn: Any) -> dict[str, Any] | None:

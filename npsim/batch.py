@@ -25,6 +25,7 @@ class UnsupportedBatchCircuitError(ValueError):
 
 
 BatchLossMaskFn = Callable[["BatchTrajectory"], int]
+BatchCorrectionMaskFn = Callable[["BatchTrajectory"], Mapping[int, int]]
 
 
 @dataclass(frozen=True)
@@ -113,13 +114,17 @@ class BatchForwardNoiseAwareSimulator:
         self,
         *,
         shots: int,
-        loss_mask_fn: BatchLossMaskFn,
+        loss_mask_fn: BatchLossMaskFn | None = None,
+        decoder: Any | None = None,
+        correction_mask_fn: BatchCorrectionMaskFn | None = None,
         seed: int | None = None,
         baseline: str | float = "mean",
         top_k: int = 10,
     ) -> SimulationResult:
         if shots <= 0:
             raise ValueError("shots must be positive")
+        if decoder is not None and correction_mask_fn is not None:
+            raise ValueError("supply either decoder or correction_mask_fn, not both")
 
         try:
             from npsim.native import UnsupportedNativeCircuitError
@@ -127,6 +132,8 @@ class BatchForwardNoiseAwareSimulator:
             return self._native_sampler().estimate(
                 shots=shots,
                 loss_mask_fn=loss_mask_fn,
+                decoder=decoder,
+                correction_mask_fn=correction_mask_fn,
                 seed=seed,
                 baseline=baseline,
                 top_k=top_k,
@@ -136,7 +143,12 @@ class BatchForwardNoiseAwareSimulator:
 
         rng = random.Random(seed)
         batch = self.run_batch(shots=shots, rng=rng)
-        loss_mask = loss_mask_fn(batch) & batch.all_mask
+        corrections = _correction_masks(batch, decoder, correction_mask_fn)
+        if loss_mask_fn is None:
+            loss_mask = _default_loss_mask(batch, corrections)
+        else:
+            loss_mask = loss_mask_fn(batch)
+        loss_mask &= batch.all_mask
         loss_count = loss_mask.bit_count()
         mean_loss = loss_count / shots
 
@@ -540,6 +552,35 @@ def _bernoulli_mask(rng: random.Random, shots: int, rate: float) -> int:
 def _validate_rate(rate: float) -> None:
     if not 0.0 <= rate <= 1.0:
         raise ValueError(f"noise rate must be in [0, 1], got {rate}")
+
+
+def _correction_masks(
+    batch: BatchTrajectory,
+    decoder: Any | None,
+    correction_mask_fn: BatchCorrectionMaskFn | None,
+) -> Mapping[int, int]:
+    if correction_mask_fn is not None:
+        return dict(correction_mask_fn(batch))
+    if decoder is None:
+        return {}
+    if not hasattr(decoder, "decode_batch_masks"):
+        raise TypeError("batch decoder must provide decode_batch_masks(batch)")
+    return dict(decoder.decode_batch_masks(batch))
+
+
+def _default_loss_mask(
+    batch: BatchTrajectory,
+    corrections: Mapping[int, int],
+) -> int:
+    observable_ids = set(batch.observables)
+    observable_ids.update(corrections)
+    loss_mask = 0
+    for observable_id in observable_ids:
+        loss_mask |= batch.observables.get(observable_id, 0) ^ corrections.get(
+            observable_id,
+            0,
+        )
+    return loss_mask & batch.all_mask
 
 
 def _apply_masked_pauli_to_frame(

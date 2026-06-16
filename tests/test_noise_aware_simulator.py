@@ -674,6 +674,56 @@ class NativePackedSamplerTests(unittest.TestCase):
         self.assertEqual(fast.by_gate, reference.by_gate)
         self.assertEqual(fast.by_operation, reference.by_operation)
 
+    def test_forward_estimate_uses_pymatching_batch_decoder(self) -> None:
+        try:
+            decoder = PyMatchingBatchDecoder.from_dem(
+                DetectorErrorModel(
+                    detectors=(Detector(id=0, measurement_keys=("m",)),),
+                    observables=(LogicalObservable(id=0, measurement_keys=("m",)),),
+                    edges=(
+                        DetectorErrorEdge(
+                            probability=0.1,
+                            detectors=(0,),
+                            observables=(0,),
+                            location_id="x0",
+                            event="X",
+                        ),
+                    ),
+                )
+            )
+        except ImportError as exc:
+            self.skipTest(f"optional PyMatching dependencies are not installed: {exc}")
+
+        location = NoiseLocation(
+            id="x0",
+            model=BernoulliPauliNoise("X"),
+            rate=1.0,
+            qubits=(0,),
+        )
+        circuit = Circuit(
+            n_qubits=1,
+            operations=[
+                Operation.noise(location),
+                Operation.measure(0, key="m", basis="Z"),
+                Operation.detector(("m",), detector_id=0),
+                Operation.observable_include(0, ("m",)),
+            ],
+        )
+
+        raw = BatchForwardNoiseAwareSimulator(circuit).estimate(
+            shots=16,
+            seed=53,
+        )
+        decoded = BatchForwardNoiseAwareSimulator(circuit).estimate(
+            shots=16,
+            seed=53,
+            decoder=decoder,
+        )
+
+        self.assertEqual(raw.mean_loss, 1.0)
+        self.assertEqual(decoded.mean_loss, 0.0)
+        self.assertEqual(decoded.hotspots["x0"], 0.0)
+
     def test_native_backend_samples_random_measurement_masks(self) -> None:
         circuit = Circuit(
             n_qubits=1,
