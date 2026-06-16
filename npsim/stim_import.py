@@ -102,6 +102,9 @@ class _StimImporter:
         if name in {"R", "RX", "RY"}:
             self._parse_reset(name, targets, line_no)
             return
+        if name in {"MR", "MRX", "MRY"}:
+            self._parse_measure_reset(name, args, targets, line_no)
+            return
         if name in {"M", "MX", "MY"}:
             self._parse_measurement(name, args, targets, line_no)
             return
@@ -175,6 +178,24 @@ class _StimImporter:
         basis = {"R": "Z", "RX": "X", "RY": "Y"}[name]
         for qubit in _parse_qubit_targets(targets, line_no):
             self.operations.append(Operation.reset(qubit, basis=basis))
+            self._record_qubits((qubit,))
+
+    def _parse_measure_reset(
+        self,
+        name: str,
+        args: tuple[float, ...],
+        targets: Sequence[str],
+        line_no: int,
+    ) -> None:
+        rate = _optional_single_arg(args, name, line_no)
+        if rate not in {None, 0.0}:
+            raise StimImportError(
+                f"{name} measurement noise is not supported on line {line_no}"
+            )
+        basis = {"MR": "Z", "MRX": "X", "MRY": "Y"}[name]
+        for qubit in _parse_qubit_targets(targets, line_no):
+            key = self._next_measurement_key()
+            self.operations.append(Operation.reset(qubit, key=key, basis=basis))
             self._record_qubits((qubit,))
 
     def _parse_measurement(

@@ -2025,6 +2025,25 @@ class StimImportTests(unittest.TestCase):
         self.assertEqual(imported.observables[0].id, 3)
         self.assertEqual(imported.observables[0].measurement_keys, ("m0",))
 
+    def test_imports_generated_rotated_surface_code_with_measure_resets(self) -> None:
+        try:
+            import stim
+        except ImportError as exc:
+            self.skipTest(f"Stim is not installed: {exc}")
+
+        stim_circuit = stim.Circuit.generated(
+            code_task="surface_code:rotated_memory_x",
+            distance=3,
+            rounds=3,
+            after_clifford_depolarization=0.001,
+        )
+        imported = parse_stim_circuit(str(stim_circuit.flattened()))
+
+        self.assertEqual(len(imported.measurement_keys), stim_circuit.num_measurements)
+        self.assertEqual(len(imported.detectors), stim_circuit.num_detectors)
+        self.assertEqual(len(imported.observables), stim_circuit.num_observables)
+        self.assertIn("reset", [operation.kind for operation in imported.circuit.operations])
+
     def test_rejects_repeat_blocks(self) -> None:
         with self.assertRaises(StimImportError):
             parse_stim_circuit(
