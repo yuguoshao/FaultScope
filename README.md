@@ -440,9 +440,10 @@ sampler = compile_native_sampler(circuit, backend="native")
 ```bash
 .venv/bin/python benchmarks/sampling_throughput.py --distances 15 21 31 --rounds 3
 .venv/bin/python benchmarks/sampling_throughput.py --family random-clifford --qubits 128 256 512 --depth 20
+.venv/bin/python benchmarks/dem_throughput.py --distances 9 13 21 --rounds 3
 ```
 
-默认场景是 rotated surface-code memory；`--family random-clifford` 会生成固定种子的随机 Clifford layer circuit，最后测量所有 qubits。若安装了 `stim`，benchmark 会同时报告 Stim bit-packed sampler 吞吐和 NPSim/Stim 比值；未安装时只报告 NPSim 并标记 `stim-skip`。
+默认场景是 rotated surface-code memory；`--family random-clifford` 会生成固定种子的随机 Clifford layer circuit，最后测量所有 qubits。`dem_throughput.py` 比较 native Rust 与 Python reference 的 DEM generation 和默认 DEM hotspot estimate；若安装了 `stim`，也会报告 Stim DEM generation 和 detector bit-packed sampling 基线。若安装了 `stim`，sampling benchmark 会同时报告 Stim bit-packed sampler 吞吐和 NPSim/Stim 比值；未安装时只报告 NPSim 并标记 `stim-skip`。
 
 ## 7. Stabilizer 更新规则
 

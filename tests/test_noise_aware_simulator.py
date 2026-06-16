@@ -17,7 +17,9 @@ from npsim.dem_sampler import DemBatchHotspotSimulator
 from npsim.noise import BernoulliPauliNoise, MeasurementBitFlip, PauliChannel
 from npsim.native import (
     UnsupportedNativeCircuitError,
+    compile_native_dem_sampler,
     compile_native_sampler,
+    generate_native_dem,
 )
 from npsim.pymatching_decoder import (
     PyMatchingBatchDecoder,
@@ -570,6 +572,160 @@ class NativePackedSamplerTests(unittest.TestCase):
         batch = sampler.sample(shots=6, seed=14)
 
         self.assertEqual(measurements, batch.measurements)
+
+
+class NativeDetectorErrorModelTests(unittest.TestCase):
+    def _require_native_dem(self) -> None:
+        try:
+            __import__("npsim._npsim_native")
+        except ImportError as exc:
+            self.skipTest(f"native extension unavailable: {exc}")
+
+    def test_native_dem_generator_matches_repetition_reference(self) -> None:
+        self._require_native_dem()
+        experiment = make_repetition_code_experiment(
+            distance=3,
+            rounds=1,
+            data_error_rate=0.1,
+            measurement_error_rate=0.01,
+        )
+        generator = DetectorErrorModelGenerator(
+            experiment.circuit,
+            detectors=experiment.detectors,
+            observables=experiment.observables,
+        )
+        reference = generator._generate_python()
+        native = generate_native_dem(
+            experiment.circuit,
+            detectors=experiment.detectors,
+            observables=experiment.observables,
+            backend="native",
+        )
+
+        self.assertEqual(native.to_dem_text(), reference.to_dem_text())
+        self.assertEqual(
+            [
+                (
+                    edge.location_id,
+                    edge.event,
+                    edge.probability,
+                    edge.detectors,
+                    edge.observables,
+                    dict(edge.tags),
+                )
+                for edge in native.edges
+            ],
+            [
+                (
+                    edge.location_id,
+                    edge.event,
+                    edge.probability,
+                    edge.detectors,
+                    edge.observables,
+                    dict(edge.tags),
+                )
+                for edge in reference.edges
+            ],
+        )
+
+    def test_native_dem_generator_splits_pauli_channel_edges(self) -> None:
+        self._require_native_dem()
+        location = NoiseLocation(
+            id="pc",
+            model=PauliChannel({"X": 1.0, "Y": 3.0}),
+            rate=0.4,
+            qubits=(0,),
+            tags={"gate": "channel"},
+        )
+        circuit = Circuit(
+            n_qubits=1,
+            operations=[
+                Operation.noise(location),
+                Operation.measure(0, key="m", basis="Z"),
+                Operation.detector(("m",), detector_id=0),
+            ],
+        )
+
+        native = generate_native_dem(circuit, backend="native")
+        by_event = {edge.event: edge for edge in native.edges}
+
+        self.assertEqual(set(by_event), {"X", "Y"})
+        self.assertAlmostEqual(by_event["X"].probability, 0.1)
+        self.assertAlmostEqual(by_event["Y"].probability, 0.3)
+        self.assertEqual(by_event["Y"].detectors, (0,))
+        self.assertEqual(dict(by_event["Y"].tags), {"gate": "channel"})
+
+    def test_native_dem_sampler_samples_packed_masks(self) -> None:
+        self._require_native_dem()
+        dem = DetectorErrorModel(
+            detectors=(Detector(id=0, measurement_keys=()),),
+            observables=(LogicalObservable(id=0),),
+            edges=(
+                DetectorErrorEdge(
+                    probability=1.0,
+                    detectors=(0,),
+                    observables=(0,),
+                    location_id="certain",
+                    event="X",
+                ),
+                DetectorErrorEdge(
+                    probability=0.0,
+                    detectors=(0,),
+                    observables=(),
+                    location_id="never",
+                    event="Z",
+                ),
+            ),
+        )
+        sampler = compile_native_dem_sampler(dem, backend="native")
+        batch = sampler.run_batch(shots=9, seed=123)
+
+        all_mask = (1 << 9) - 1
+        self.assertEqual(batch.all_mask, all_mask)
+        self.assertEqual(batch.edge_event_masks[0], all_mask)
+        self.assertEqual(batch.edge_event_masks[1], 0)
+        self.assertEqual(batch.detectors[0], all_mask)
+        self.assertEqual(batch.observables[0], all_mask)
+
+    def test_native_dem_default_estimate_matches_logical_edge_gradient(self) -> None:
+        self._require_native_dem()
+        dem = DetectorErrorModel(
+            detectors=(),
+            observables=(LogicalObservable(id=0),),
+            edges=(
+                DetectorErrorEdge(
+                    probability=0.2,
+                    detectors=(),
+                    observables=(0,),
+                    location_id="logical_edge",
+                    event="L",
+                    tags={"round": 1},
+                ),
+            ),
+        )
+        sampler = compile_native_dem_sampler(dem, backend="native")
+        result = sampler.estimate_default(shots=40_000, seed=54)
+
+        self.assertAlmostEqual(result.mean_loss, 0.2, delta=0.02)
+        self.assertAlmostEqual(result.edge_sensitivities[0], 1.0, delta=0.08)
+        self.assertAlmostEqual(result.sensitivities["logical_edge"], 1.0, delta=0.08)
+        self.assertEqual(result.by_round[1], result.hotspots["logical_edge"])
+
+    def test_native_dem_generator_rejects_random_ideal_measurement(self) -> None:
+        self._require_native_dem()
+        circuit = Circuit(
+            n_qubits=1,
+            operations=[
+                Operation.h(0),
+                Operation.measure(0, key="m", basis="Z"),
+            ],
+        )
+        with self.assertRaises(UnsupportedNativeCircuitError):
+            generate_native_dem(
+                circuit,
+                detectors=(Detector(id=0, measurement_keys=("m",)),),
+                backend="native",
+            )
 
 
 class DetectorErrorModelTests(unittest.TestCase):

@@ -146,9 +146,31 @@ class DemBatchHotspotSimulator:
         self.dem = dem
         self._validate_probabilities()
 
-    def run_batch(self, *, shots: int, rng: random.Random) -> DemBatchTrajectory:
+    def run_batch(
+        self,
+        *,
+        shots: int,
+        rng: random.Random | None = None,
+        seed: int | None = None,
+    ) -> DemBatchTrajectory:
         if shots <= 0:
             raise ValueError("shots must be positive")
+        if rng is not None and seed is not None:
+            raise ValueError("supply either seed or rng, not both")
+        if rng is None:
+            try:
+                from npsim.native import (
+                    UnsupportedNativeCircuitError,
+                    compile_native_dem_sampler,
+                )
+
+                return compile_native_dem_sampler(
+                    self.dem,
+                    backend="native",
+                ).run_batch(shots=shots, seed=seed)
+            except (ImportError, UnsupportedNativeCircuitError):
+                rng = random.Random(seed)
+
         all_mask = (1 << shots) - 1
         detectors = {detector.id: 0 for detector in self.dem.detectors}
         observables = {observable.id: 0 for observable in self.dem.observables}
@@ -186,7 +208,39 @@ class DemBatchHotspotSimulator:
     ) -> DemHotspotResult:
         if decoder is not None and correction_mask_fn is not None:
             raise ValueError("supply either decoder or correction_mask_fn, not both")
+        if decoder is None and correction_mask_fn is None and loss_mask_fn is None:
+            try:
+                from npsim.native import (
+                    UnsupportedNativeCircuitError,
+                    compile_native_dem_sampler,
+                )
 
+                return compile_native_dem_sampler(
+                    self.dem,
+                    backend="native",
+                ).estimate_default(shots=shots, seed=seed, baseline=baseline)
+            except (ImportError, UnsupportedNativeCircuitError):
+                pass
+
+        return self._estimate_python(
+            shots=shots,
+            seed=seed,
+            decoder=decoder,
+            correction_mask_fn=correction_mask_fn,
+            loss_mask_fn=loss_mask_fn,
+            baseline=baseline,
+        )
+
+    def _estimate_python(
+        self,
+        *,
+        shots: int,
+        seed: int | None = None,
+        decoder: Any | None = None,
+        correction_mask_fn: DemCorrectionMaskFn | None = None,
+        loss_mask_fn: DemLossMaskFn | None = None,
+        baseline: str | float = "mean",
+    ) -> DemHotspotResult:
         rng = random.Random(seed)
         batch = self.run_batch(shots=shots, rng=rng)
         corrections = self._correction_masks(batch, decoder, correction_mask_fn)

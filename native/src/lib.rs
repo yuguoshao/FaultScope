@@ -23,6 +23,55 @@ struct NoiseLocationSpec {
 }
 
 #[derive(Clone)]
+enum DemEvent {
+    Pauli(String),
+    Bool(bool),
+}
+
+#[derive(Clone)]
+struct DemDetectorSpec {
+    id: i64,
+    measurement_keys: Vec<String>,
+}
+
+#[derive(Clone)]
+struct DemObservableSpec {
+    id: i64,
+    measurement_keys: Vec<String>,
+    pauli_qubits: Vec<usize>,
+    pauli: String,
+}
+
+#[derive(Clone)]
+struct DemEdgeSpec {
+    probability: f64,
+    detectors: Vec<i64>,
+    observables: Vec<i64>,
+    location_id: String,
+}
+
+struct GeneratedDemEdge {
+    probability: f64,
+    detectors: Vec<i64>,
+    observables: Vec<i64>,
+    location_id: String,
+    event: DemEvent,
+}
+
+#[derive(Clone)]
+struct NoiseOccurrence {
+    op_index: usize,
+    location: NoiseLocationSpec,
+}
+
+#[derive(Clone)]
+struct DemRunRecord {
+    measurements: HashMap<String, bool>,
+    x_frame: Vec<u8>,
+    z_frame: Vec<u8>,
+}
+
+#[derive(Clone)]
 enum Op {
     H(usize),
     S(usize),
@@ -159,18 +208,50 @@ impl NativePackedSampler {
     }
 }
 
+#[pyclass]
+struct NativeDemSampler {
+    detectors: Vec<i64>,
+    observables: Vec<i64>,
+    edges: Vec<DemEdgeSpec>,
+}
+
+#[pymethods]
+impl NativeDemSampler {
+    #[getter]
+    fn edge_count(&self) -> usize {
+        self.edges.len()
+    }
+
+    #[pyo3(signature = (shots, seed=None))]
+    fn run_batch(&self, py: Python<'_>, shots: usize, seed: Option<u64>) -> PyResult<PyObject> {
+        if shots == 0 {
+            return Err(PyValueError::new_err("shots must be positive"));
+        }
+        let mut rng = SmallRng::new(seed.unwrap_or(0x95f2_04dc_4291_a715));
+        let batch = run_dem_batch(self, shots, &mut rng);
+        dem_batch_to_py(py, &batch)
+    }
+
+    #[pyo3(signature = (shots, seed=None, baseline=None))]
+    fn estimate_default(
+        &self,
+        py: Python<'_>,
+        shots: usize,
+        seed: Option<u64>,
+        baseline: Option<f64>,
+    ) -> PyResult<PyObject> {
+        if shots == 0 {
+            return Err(PyValueError::new_err("shots must be positive"));
+        }
+        let mut rng = SmallRng::new(seed.unwrap_or(0x95f2_04dc_4291_a715));
+        let batch = run_dem_batch(self, shots, &mut rng);
+        dem_estimate_to_py(py, self, &batch, baseline)
+    }
+}
+
 #[pyfunction]
 fn compile_sampler(spec: &Bound<'_, PyDict>) -> PyResult<NativePackedSampler> {
-    let n_qubits = required(spec, "n_qubits")?.extract::<usize>()?;
-    let operations_any = required(spec, "operations")?;
-    let operations_seq = operations_any.downcast::<PyList>()?;
-    let mut operations = Vec::with_capacity(operations_seq.len());
-
-    for item in operations_seq.iter() {
-        let dict = item.downcast::<PyDict>()?;
-        let op = parse_operation(dict)?;
-        operations.push(op);
-    }
+    let (n_qubits, operations) = parse_circuit_spec(spec)?;
     let compiled = compile_runtime_operations(n_qubits, operations)?;
 
     Ok(NativePackedSampler {
@@ -181,11 +262,69 @@ fn compile_sampler(spec: &Bound<'_, PyDict>) -> PyResult<NativePackedSampler> {
     })
 }
 
+#[pyfunction]
+fn generate_dem(
+    py: Python<'_>,
+    spec: &Bound<'_, PyDict>,
+    detectors: &Bound<'_, PyList>,
+    observables: &Bound<'_, PyList>,
+) -> PyResult<PyObject> {
+    let (n_qubits, operations) = parse_circuit_spec(spec)?;
+    let detectors = parse_dem_detectors(detectors)?;
+    let observables = parse_dem_observables(observables)?;
+    let edges = generate_dem_edges(n_qubits, &operations, &detectors, &observables)?;
+    dem_edges_to_py(py, &edges)
+}
+
+#[pyfunction]
+fn compile_dem_sampler(spec: &Bound<'_, PyDict>) -> PyResult<NativeDemSampler> {
+    let detectors = required(spec, "detectors")?
+        .downcast::<PyList>()?
+        .iter()
+        .map(|item| item.downcast::<PyDict>()?.get_item("id")?.ok_or_else(|| {
+            PyValueError::new_err("native DEM detector missing id")
+        })?.extract::<i64>())
+        .collect::<PyResult<Vec<_>>>()?;
+    let observables = required(spec, "observables")?
+        .downcast::<PyList>()?
+        .iter()
+        .map(|item| item.downcast::<PyDict>()?.get_item("id")?.ok_or_else(|| {
+            PyValueError::new_err("native DEM observable missing id")
+        })?.extract::<i64>())
+        .collect::<PyResult<Vec<_>>>()?;
+    let edge_items_any = required(spec, "edges")?;
+    let edge_items = edge_items_any.downcast::<PyList>()?;
+    let mut edges = Vec::with_capacity(edge_items.len());
+    for item in edge_items.iter() {
+        let dict = item.downcast::<PyDict>()?;
+        let probability = required(dict, "probability")?.extract::<f64>()?;
+        if !(0.0..=1.0).contains(&probability) {
+            return Err(PyValueError::new_err(format!(
+                "DEM edge probability must be in [0, 1], got {probability}"
+            )));
+        }
+        edges.push(DemEdgeSpec {
+            probability,
+            detectors: required(dict, "detectors")?.extract::<Vec<i64>>()?,
+            observables: required(dict, "observables")?.extract::<Vec<i64>>()?,
+            location_id: required(dict, "location_id")?.extract::<String>()?,
+        });
+    }
+    Ok(NativeDemSampler {
+        detectors,
+        observables,
+        edges,
+    })
+}
+
 #[pymodule]
 fn _npsim_native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add("__version__", NATIVE_KERNEL_VERSION)?;
     module.add_class::<NativePackedSampler>()?;
+    module.add_class::<NativeDemSampler>()?;
     module.add_function(wrap_pyfunction!(compile_sampler, module)?)?;
+    module.add_function(wrap_pyfunction!(generate_dem, module)?)?;
+    module.add_function(wrap_pyfunction!(compile_dem_sampler, module)?)?;
     Ok(())
 }
 
@@ -575,6 +714,18 @@ fn compile_runtime_operations(n_qubits: usize, operations: Vec<Op>) -> PyResult<
     })
 }
 
+fn parse_circuit_spec(spec: &Bound<'_, PyDict>) -> PyResult<(usize, Vec<Op>)> {
+    let n_qubits = required(spec, "n_qubits")?.extract::<usize>()?;
+    let operations_any = required(spec, "operations")?;
+    let operations_seq = operations_any.downcast::<PyList>()?;
+    let mut operations = Vec::with_capacity(operations_seq.len());
+    for item in operations_seq.iter() {
+        let dict = item.downcast::<PyDict>()?;
+        operations.push(parse_operation(dict)?);
+    }
+    Ok((n_qubits, operations))
+}
+
 fn parse_operation(dict: &Bound<'_, PyDict>) -> PyResult<Op> {
     let kind = required(dict, "kind")?.extract::<String>()?;
     let qubits = optional_vec_usize(dict, "qubits")?.unwrap_or_default();
@@ -721,6 +872,743 @@ fn two_qubits(qubits: &[usize], kind: &str) -> PyResult<(usize, usize)> {
     }
 }
 
+fn parse_dem_detectors(items: &Bound<'_, PyList>) -> PyResult<Vec<DemDetectorSpec>> {
+    let mut out = Vec::with_capacity(items.len());
+    let mut seen = HashSet::new();
+    for item in items.iter() {
+        let dict = item.downcast::<PyDict>()?;
+        let id = required(dict, "id")?.extract::<i64>()?;
+        if !seen.insert(id) {
+            return Err(PyValueError::new_err("detector ids must be unique"));
+        }
+        out.push(DemDetectorSpec {
+            id,
+            measurement_keys: required(dict, "measurement_keys")?.extract::<Vec<String>>()?,
+        });
+    }
+    Ok(out)
+}
+
+fn parse_dem_observables(items: &Bound<'_, PyList>) -> PyResult<Vec<DemObservableSpec>> {
+    let mut out = Vec::with_capacity(items.len());
+    let mut seen = HashSet::new();
+    for item in items.iter() {
+        let dict = item.downcast::<PyDict>()?;
+        let id = required(dict, "id")?.extract::<i64>()?;
+        if !seen.insert(id) {
+            return Err(PyValueError::new_err("logical observable ids must be unique"));
+        }
+        let pauli_qubits = required(dict, "pauli_qubits")?.extract::<Vec<usize>>()?;
+        let pauli = required(dict, "pauli")?.extract::<String>()?;
+        if pauli_qubits.len() != pauli.len() {
+            return Err(PyValueError::new_err(
+                "pauli_qubits and pauli must have the same length",
+            ));
+        }
+        out.push(DemObservableSpec {
+            id,
+            measurement_keys: required(dict, "measurement_keys")?.extract::<Vec<String>>()?,
+            pauli_qubits,
+            pauli,
+        });
+    }
+    Ok(out)
+}
+
+fn generate_dem_edges(
+    n_qubits: usize,
+    operations: &[Op],
+    detectors: &[DemDetectorSpec],
+    observables: &[DemObservableSpec],
+) -> PyResult<Vec<GeneratedDemEdge>> {
+    let occurrences = collect_noise_occurrences(operations)?;
+    let reference = run_dem_with_injection(n_qubits, operations, None, None)?;
+    let reference_detectors = evaluate_dem_detectors(&reference, detectors)?;
+    let reference_observables = evaluate_dem_observables(&reference, observables)?;
+    let mut edges = Vec::new();
+
+    for occurrence in occurrences {
+        for (event, probability) in non_identity_events(&occurrence.location)? {
+            let injected = run_dem_with_injection(
+                n_qubits,
+                operations,
+                Some(occurrence.op_index),
+                Some(&event),
+            )?;
+            let detector_flips = flipped_ids(
+                &reference_detectors,
+                &evaluate_dem_detectors(&injected, detectors)?,
+            );
+            let observable_flips = flipped_ids(
+                &reference_observables,
+                &evaluate_dem_observables(&injected, observables)?,
+            );
+            if detector_flips.is_empty() && observable_flips.is_empty() {
+                continue;
+            }
+            edges.push(GeneratedDemEdge {
+                probability,
+                detectors: detector_flips,
+                observables: observable_flips,
+                location_id: occurrence.location.id.clone(),
+                event,
+            });
+        }
+    }
+    Ok(edges)
+}
+
+fn collect_noise_occurrences(operations: &[Op]) -> PyResult<Vec<NoiseOccurrence>> {
+    let mut out = Vec::new();
+    let mut seen = HashSet::new();
+    for (op_index, operation) in operations.iter().enumerate() {
+        match operation {
+            Op::Noise(location) => {
+                if !seen.insert(location.id.clone()) {
+                    return Err(PyValueError::new_err(format!(
+                        "DetectorErrorModelGenerator requires unique noise location ids; duplicate id {:?}",
+                        location.id
+                    )));
+                }
+                out.push(NoiseOccurrence {
+                    op_index,
+                    location: location.clone(),
+                });
+            }
+            Op::Measure {
+                noise: Some(location),
+                ..
+            }
+            | Op::MeasurePauli {
+                noise: Some(location),
+                ..
+            } => {
+                if !matches!(location.model, NoiseModel::MeasurementBitFlip) {
+                    return Err(PyValueError::new_err(
+                        "DEM generation currently supports MeasurementBitFlip on measurement operations",
+                    ));
+                }
+                if !seen.insert(location.id.clone()) {
+                    return Err(PyValueError::new_err(format!(
+                        "DetectorErrorModelGenerator requires unique noise location ids; duplicate id {:?}",
+                        location.id
+                    )));
+                }
+                out.push(NoiseOccurrence {
+                    op_index,
+                    location: location.clone(),
+                });
+            }
+            _ => {}
+        }
+    }
+    Ok(out)
+}
+
+fn non_identity_events(location: &NoiseLocationSpec) -> PyResult<Vec<(DemEvent, f64)>> {
+    match &location.model {
+        NoiseModel::BernoulliPauli(pauli) => {
+            Ok(vec![(DemEvent::Pauli(pauli.clone()), location.rate)])
+        }
+        NoiseModel::MeasurementBitFlip => Ok(vec![(DemEvent::Bool(true), location.rate)]),
+        NoiseModel::SingleQubitDepolarizing => Ok(["X", "Y", "Z"]
+            .iter()
+            .map(|event| (DemEvent::Pauli((*event).to_string()), location.rate / 3.0))
+            .collect()),
+        NoiseModel::TwoQubitDepolarizing => {
+            let events = [
+                "IX", "IY", "IZ", "XI", "XX", "XY", "XZ", "YI", "YX", "YY", "YZ", "ZI",
+                "ZX", "ZY", "ZZ",
+            ];
+            Ok(events
+                .iter()
+                .map(|event| {
+                    (
+                        DemEvent::Pauli((*event).to_string()),
+                        location.rate / events.len() as f64,
+                    )
+                })
+                .collect())
+        }
+        NoiseModel::PauliChannel(weights) => {
+            let total: f64 = weights.iter().map(|(_, weight)| *weight).sum();
+            if total <= 0.0 {
+                return Err(PyValueError::new_err(
+                    "PauliChannel weights must have positive total weight",
+                ));
+            }
+            Ok(weights
+                .iter()
+                .filter(|(_, weight)| *weight > 0.0)
+                .map(|(event, weight)| {
+                    (
+                        DemEvent::Pauli(event.clone()),
+                        location.rate * *weight / total,
+                    )
+                })
+                .collect())
+        }
+    }
+}
+
+fn run_dem_with_injection(
+    n_qubits: usize,
+    operations: &[Op],
+    injected_op_index: Option<usize>,
+    injected_event: Option<&DemEvent>,
+) -> PyResult<DemRunRecord> {
+    let mut state = ConcreteStabilizer::zero(n_qubits);
+    let mut x_frame = vec![0; n_qubits];
+    let mut z_frame = vec![0; n_qubits];
+    let mut measurements = HashMap::new();
+    for (op_index, operation) in operations.iter().enumerate() {
+        apply_dem_operation(
+            operation,
+            op_index,
+            injected_op_index,
+            injected_event,
+            &mut state,
+            &mut x_frame,
+            &mut z_frame,
+            &mut measurements,
+        )?;
+    }
+    Ok(DemRunRecord {
+        measurements,
+        x_frame,
+        z_frame,
+    })
+}
+
+fn apply_dem_operation(
+    operation: &Op,
+    op_index: usize,
+    injected_op_index: Option<usize>,
+    injected_event: Option<&DemEvent>,
+    state: &mut ConcreteStabilizer,
+    x_frame: &mut [u8],
+    z_frame: &mut [u8],
+    measurements: &mut HashMap<String, bool>,
+) -> PyResult<()> {
+    match operation {
+        Op::H(q) => {
+            state.apply_h(*q);
+            frame_apply_h(x_frame, z_frame, *q);
+        }
+        Op::S(q) => {
+            state.apply_s(*q);
+            frame_apply_s(x_frame, z_frame, *q);
+        }
+        Op::SDag(q) => {
+            state.apply_s_dag(*q);
+            frame_apply_s(x_frame, z_frame, *q);
+        }
+        Op::Cx(control, target) => {
+            state.apply_cx(*control, *target);
+            frame_apply_cx(x_frame, z_frame, *control, *target);
+        }
+        Op::Cz(left, right) => {
+            state.apply_cz(*left, *right);
+            frame_apply_cz(x_frame, z_frame, *left, *right);
+        }
+        Op::Swap(left, right) => {
+            state.apply_swap(*left, *right);
+            frame_apply_swap(x_frame, z_frame, *left, *right);
+        }
+        Op::Pauli { qubits, pauli } => {
+            let (x, z) = sparse_pauli_to_xz(state.n_qubits(), qubits, pauli)?;
+            state.apply_pauli_string(&x, &z);
+        }
+        Op::Noise(location) => {
+            if Some(op_index) == injected_op_index {
+                let event = injected_event.ok_or_else(|| {
+                    PyValueError::new_err("missing injected DEM event for noise operation")
+                })?;
+                apply_dem_noise_event(location, event, state, x_frame, z_frame)?;
+            }
+        }
+        Op::Measure {
+            qubit,
+            key,
+            basis,
+            ..
+        } => {
+            let qubits = vec![*qubit];
+            let bit = deterministic_dem_measurement(state, &qubits, basis, key.as_deref())?;
+            let bit = maybe_flip_measurement_bit(bit, op_index, injected_op_index, injected_event)?;
+            let key = key
+                .clone()
+                .unwrap_or_else(|| format!("m{}", measurements.len()));
+            record_dem_measurement(measurements, &key, bit)?;
+        }
+        Op::MeasurePauli {
+            qubits,
+            pauli,
+            key,
+            ..
+        } => {
+            let bit = deterministic_dem_measurement(state, qubits, pauli, key.as_deref())?;
+            let bit = maybe_flip_measurement_bit(bit, op_index, injected_op_index, injected_event)?;
+            let key = key
+                .clone()
+                .unwrap_or_else(|| format!("m{}", measurements.len()));
+            record_dem_measurement(measurements, &key, bit)?;
+        }
+        Op::Reset { qubit, key, basis } => {
+            let qubits = vec![*qubit];
+            if let Some(key) = key {
+                let bit = deterministic_dem_measurement(state, &qubits, basis, Some(key))?;
+                record_dem_measurement(measurements, key, bit)?;
+            }
+            state.reset_prepare(*qubit, basis)?;
+            x_frame[*qubit] = 0;
+            z_frame[*qubit] = 0;
+        }
+        Op::Detector { .. } | Op::ObservableInclude { .. } => {}
+    }
+    Ok(())
+}
+
+fn deterministic_dem_measurement(
+    state: &ConcreteStabilizer,
+    qubits: &[usize],
+    pauli: &str,
+    key: Option<&str>,
+) -> PyResult<bool> {
+    let (x, z) = sparse_pauli_to_xz(state.n_qubits(), qubits, pauli)?;
+    if !state.is_deterministic_pauli(&x, &z) {
+        return Err(PyValueError::new_err(format!(
+            "measurement {:?} is random in the ideal/single-error circuit",
+            key.unwrap_or("measure")
+        )));
+    }
+    state.deterministic_measurement_bit(&x, &z)
+}
+
+fn maybe_flip_measurement_bit(
+    bit: bool,
+    op_index: usize,
+    injected_op_index: Option<usize>,
+    injected_event: Option<&DemEvent>,
+) -> PyResult<bool> {
+    if Some(op_index) != injected_op_index {
+        return Ok(bit);
+    }
+    match injected_event {
+        Some(DemEvent::Bool(value)) => Ok(bit ^ *value),
+        Some(DemEvent::Pauli(_)) => Err(PyValueError::new_err(
+            "measurement injection requires a boolean event",
+        )),
+        None => Err(PyValueError::new_err(
+            "missing injected DEM event for measurement operation",
+        )),
+    }
+}
+
+fn apply_dem_noise_event(
+    location: &NoiseLocationSpec,
+    event: &DemEvent,
+    state: &mut ConcreteStabilizer,
+    x_frame: &mut [u8],
+    z_frame: &mut [u8],
+) -> PyResult<()> {
+    match event {
+        DemEvent::Bool(_) => {
+            if matches!(location.model, NoiseModel::MeasurementBitFlip) {
+                Ok(())
+            } else {
+                Err(PyValueError::new_err(
+                    "non-measurement DEM noise event must be a Pauli string",
+                ))
+            }
+        }
+        DemEvent::Pauli(pauli) => {
+            let (x, z) = sparse_pauli_to_xz(state.n_qubits(), &location.qubits, pauli)?;
+            state.apply_pauli_string(&x, &z);
+            frame_apply_pauli_string(x_frame, z_frame, &location.qubits, pauli)
+        }
+    }
+}
+
+fn evaluate_dem_detectors(
+    run: &DemRunRecord,
+    detectors: &[DemDetectorSpec],
+) -> PyResult<HashMap<i64, bool>> {
+    let mut out = HashMap::new();
+    for detector in detectors {
+        out.insert(
+            detector.id,
+            dem_measurement_parity(&run.measurements, &detector.measurement_keys)?,
+        );
+    }
+    Ok(out)
+}
+
+fn evaluate_dem_observables(
+    run: &DemRunRecord,
+    observables: &[DemObservableSpec],
+) -> PyResult<HashMap<i64, bool>> {
+    let mut out = HashMap::new();
+    for observable in observables {
+        let mut value = dem_measurement_parity(&run.measurements, &observable.measurement_keys)?;
+        if !observable.pauli.is_empty() {
+            value ^= frame_measurement_flip_bits(
+                &run.x_frame,
+                &run.z_frame,
+                &observable.pauli_qubits,
+                &observable.pauli,
+            )?;
+        }
+        out.insert(observable.id, value);
+    }
+    Ok(out)
+}
+
+fn dem_measurement_parity(
+    measurements: &HashMap<String, bool>,
+    keys: &[String],
+) -> PyResult<bool> {
+    let mut parity = false;
+    for key in keys {
+        let value = measurements
+            .get(key)
+            .ok_or_else(|| PyValueError::new_err(format!("unknown measurement key {key:?}")))?;
+        parity ^= *value;
+    }
+    Ok(parity)
+}
+
+fn record_dem_measurement(
+    measurements: &mut HashMap<String, bool>,
+    key: &str,
+    bit: bool,
+) -> PyResult<()> {
+    if measurements.contains_key(key) {
+        return Err(PyValueError::new_err(format!(
+            "duplicate measurement key {key:?}"
+        )));
+    }
+    measurements.insert(key.to_string(), bit);
+    Ok(())
+}
+
+fn flipped_ids(reference: &HashMap<i64, bool>, injected: &HashMap<i64, bool>) -> Vec<i64> {
+    let mut ids: Vec<i64> = reference.keys().copied().collect();
+    ids.sort_unstable();
+    ids.into_iter()
+        .filter(|id| reference.get(id).copied().unwrap_or(false) ^ injected.get(id).copied().unwrap_or(false))
+        .collect()
+}
+
+fn dem_edges_to_py(py: Python<'_>, edges: &[GeneratedDemEdge]) -> PyResult<PyObject> {
+    let list = PyList::empty(py);
+    for edge in edges {
+        let dict = PyDict::new(py);
+        dict.set_item("probability", edge.probability)?;
+        dict.set_item("detectors", edge.detectors.clone())?;
+        dict.set_item("observables", edge.observables.clone())?;
+        dict.set_item("location_id", edge.location_id.clone())?;
+        match &edge.event {
+            DemEvent::Pauli(pauli) => dict.set_item("event", pauli)?,
+            DemEvent::Bool(value) => dict.set_item("event", *value)?,
+        }
+        list.append(dict)?;
+    }
+    Ok(list.into())
+}
+
+#[derive(Clone)]
+struct ConcreteStabilizer {
+    x: Vec<Vec<u8>>,
+    z: Vec<Vec<u8>>,
+    sign: Vec<bool>,
+}
+
+impl ConcreteStabilizer {
+    fn zero(n_qubits: usize) -> Self {
+        let x = vec![vec![0; n_qubits]; n_qubits];
+        let mut z = vec![vec![0; n_qubits]; n_qubits];
+        for qubit in 0..n_qubits {
+            z[qubit][qubit] = 1;
+        }
+        Self {
+            x,
+            z,
+            sign: vec![false; n_qubits],
+        }
+    }
+
+    fn n_qubits(&self) -> usize {
+        self.x.len()
+    }
+
+    fn apply_h(&mut self, qubit: usize) {
+        for row in 0..self.n_qubits() {
+            let old_x = self.x[row][qubit];
+            let old_z = self.z[row][qubit];
+            if old_x != 0 && old_z != 0 {
+                self.sign[row] ^= true;
+            }
+            self.x[row][qubit] = old_z;
+            self.z[row][qubit] = old_x;
+        }
+    }
+
+    fn apply_s(&mut self, qubit: usize) {
+        for row in 0..self.n_qubits() {
+            let old_x = self.x[row][qubit];
+            let old_z = self.z[row][qubit];
+            if old_x != 0 && old_z != 0 {
+                self.sign[row] ^= true;
+            }
+            self.z[row][qubit] = old_z ^ old_x;
+        }
+    }
+
+    fn apply_s_dag(&mut self, qubit: usize) {
+        for row in 0..self.n_qubits() {
+            let old_x = self.x[row][qubit];
+            let old_z = self.z[row][qubit];
+            if old_x != 0 && old_z == 0 {
+                self.sign[row] ^= true;
+            }
+            self.z[row][qubit] = old_z ^ old_x;
+        }
+    }
+
+    fn apply_cx(&mut self, control: usize, target: usize) {
+        for row in 0..self.n_qubits() {
+            let x_c = self.x[row][control];
+            let z_c = self.z[row][control];
+            let x_t = self.x[row][target];
+            let z_t = self.z[row][target];
+            if (x_t & z_c & (x_c ^ z_t ^ 1)) != 0 {
+                self.sign[row] ^= true;
+            }
+            self.x[row][target] ^= x_c;
+            self.z[row][control] ^= z_t;
+        }
+    }
+
+    fn apply_cz(&mut self, left: usize, right: usize) {
+        self.apply_h(right);
+        self.apply_cx(left, right);
+        self.apply_h(right);
+    }
+
+    fn apply_swap(&mut self, left: usize, right: usize) {
+        if left == right {
+            return;
+        }
+        self.apply_cx(left, right);
+        self.apply_cx(right, left);
+        self.apply_cx(left, right);
+    }
+
+    fn apply_pauli_string(&mut self, x: &[u8], z: &[u8]) {
+        for row in 0..self.n_qubits() {
+            if symplectic_product(&self.x[row], &self.z[row], x, z) != 0 {
+                self.sign[row] ^= true;
+            }
+        }
+    }
+
+    fn is_deterministic_pauli(&self, x: &[u8], z: &[u8]) -> bool {
+        (0..self.n_qubits())
+            .all(|row| symplectic_product(&self.x[row], &self.z[row], x, z) == 0)
+    }
+
+    fn deterministic_measurement_bit(&self, x: &[u8], z: &[u8]) -> PyResult<bool> {
+        let rows: Vec<Vec<u64>> = (0..self.n_qubits())
+            .map(|row| support_to_words(&self.x[row], &self.z[row]))
+            .collect();
+        let target = support_to_words(x, z);
+        let coeff = solve_row_span(&rows, &target, self.n_qubits()).ok_or_else(|| {
+            PyValueError::new_err("commuting Pauli was not in the stabilizer span")
+        })?;
+
+        let mut selected_any = false;
+        let mut acc_x = vec![0; self.n_qubits()];
+        let mut acc_z = vec![0; self.n_qubits()];
+        let mut acc_sign = false;
+        for row in 0..self.n_qubits() {
+            if !coeff_bit(&coeff, row) {
+                continue;
+            }
+            if !selected_any {
+                acc_x = self.x[row].clone();
+                acc_z = self.z[row].clone();
+                acc_sign = self.sign[row];
+                selected_any = true;
+            } else {
+                let (new_x, new_z, new_sign) = multiply_concrete_rows(
+                    &acc_x,
+                    &acc_z,
+                    acc_sign,
+                    &self.x[row],
+                    &self.z[row],
+                    self.sign[row],
+                )?;
+                acc_x = new_x;
+                acc_z = new_z;
+                acc_sign = new_sign;
+            }
+        }
+        Ok(selected_any && acc_sign)
+    }
+
+    fn measure_pauli_with_outcome(&mut self, x: &[u8], z: &[u8], outcome: bool) -> PyResult<bool> {
+        let anti: Vec<usize> = (0..self.n_qubits())
+            .filter(|row| symplectic_product(&self.x[*row], &self.z[*row], x, z) != 0)
+            .collect();
+        if anti.is_empty() {
+            return self.deterministic_measurement_bit(x, z);
+        }
+
+        let pivot = anti[0];
+        let old_x = self.x[pivot].clone();
+        let old_z = self.z[pivot].clone();
+        let old_sign = self.sign[pivot];
+        for row in anti.into_iter().skip(1) {
+            let (new_x, new_z, new_sign) = multiply_concrete_rows(
+                &self.x[row],
+                &self.z[row],
+                self.sign[row],
+                &old_x,
+                &old_z,
+                old_sign,
+            )?;
+            self.x[row] = new_x;
+            self.z[row] = new_z;
+            self.sign[row] = new_sign;
+        }
+        self.x[pivot] = x.to_vec();
+        self.z[pivot] = z.to_vec();
+        self.sign[pivot] = outcome;
+        Ok(outcome)
+    }
+
+    fn reset_prepare(&mut self, qubit: usize, basis: &str) -> PyResult<()> {
+        let qubits = vec![qubit];
+        let (x, z) = sparse_pauli_to_xz(self.n_qubits(), &qubits, basis)?;
+        if self.is_deterministic_pauli(&x, &z) {
+            let bit = self.deterministic_measurement_bit(&x, &z)?;
+            if bit {
+                let correction = match basis {
+                    "Z" => "X",
+                    "X" => "Z",
+                    "Y" => "X",
+                    _ => {
+                        return Err(PyValueError::new_err(format!(
+                            "unsupported reset basis {basis:?}"
+                        )))
+                    }
+                };
+                let (cx, cz) = sparse_pauli_to_xz(self.n_qubits(), &qubits, correction)?;
+                self.apply_pauli_string(&cx, &cz);
+            }
+        } else {
+            self.measure_pauli_with_outcome(&x, &z, false)?;
+        }
+        Ok(())
+    }
+}
+
+fn multiply_concrete_rows(
+    left_x: &[u8],
+    left_z: &[u8],
+    left_sign: bool,
+    right_x: &[u8],
+    right_z: &[u8],
+    right_sign: bool,
+) -> PyResult<(Vec<u8>, Vec<u8>, bool)> {
+    let mut phase = 0u8;
+    let mut out_x = Vec::with_capacity(left_x.len());
+    let mut out_z = Vec::with_capacity(left_x.len());
+    for (((lx, lz), rx), rz) in left_x.iter().zip(left_z).zip(right_x).zip(right_z) {
+        let lp = xz_to_pauli(*lx, *lz);
+        let rp = xz_to_pauli(*rx, *rz);
+        let (local_phase, product) = pauli_product(lp, rp);
+        phase = (phase + local_phase) & 3;
+        let (px, pz) = pauli_to_xz(product)?;
+        out_x.push(px);
+        out_z.push(pz);
+    }
+    let mut sign = left_sign ^ right_sign;
+    if phase == 2 {
+        sign ^= true;
+    } else if phase != 0 {
+        return Err(PyValueError::new_err(
+            "product of stabilizer rows produced a non-Hermitian phase",
+        ));
+    }
+    Ok((out_x, out_z, sign))
+}
+
+fn frame_apply_h(x_frame: &mut [u8], z_frame: &mut [u8], qubit: usize) {
+    std::mem::swap(&mut x_frame[qubit], &mut z_frame[qubit]);
+}
+
+fn frame_apply_s(x_frame: &mut [u8], z_frame: &mut [u8], qubit: usize) {
+    z_frame[qubit] ^= x_frame[qubit];
+}
+
+fn frame_apply_cx(x_frame: &mut [u8], z_frame: &mut [u8], control: usize, target: usize) {
+    x_frame[target] ^= x_frame[control];
+    z_frame[control] ^= z_frame[target];
+}
+
+fn frame_apply_cz(x_frame: &mut [u8], z_frame: &mut [u8], left: usize, right: usize) {
+    frame_apply_h(x_frame, z_frame, right);
+    frame_apply_cx(x_frame, z_frame, left, right);
+    frame_apply_h(x_frame, z_frame, right);
+}
+
+fn frame_apply_swap(x_frame: &mut [u8], z_frame: &mut [u8], left: usize, right: usize) {
+    if left == right {
+        return;
+    }
+    frame_apply_cx(x_frame, z_frame, left, right);
+    frame_apply_cx(x_frame, z_frame, right, left);
+    frame_apply_cx(x_frame, z_frame, left, right);
+}
+
+fn frame_apply_pauli_string(
+    x_frame: &mut [u8],
+    z_frame: &mut [u8],
+    qubits: &[usize],
+    pauli: &str,
+) -> PyResult<()> {
+    if qubits.len() != pauli.len() {
+        return Err(PyValueError::new_err("event Pauli length does not match qubits"));
+    }
+    for (qubit, local) in qubits.iter().zip(pauli.chars()) {
+        let (x, z) = pauli_to_xz(local)?;
+        x_frame[*qubit] ^= x;
+        z_frame[*qubit] ^= z;
+    }
+    Ok(())
+}
+
+fn frame_measurement_flip_bits(
+    x_frame: &[u8],
+    z_frame: &[u8],
+    qubits: &[usize],
+    pauli: &str,
+) -> PyResult<bool> {
+    if qubits.len() != pauli.len() {
+        return Err(PyValueError::new_err("qubits and paulis must have the same length"));
+    }
+    let mut x = vec![0; x_frame.len()];
+    let mut z = vec![0; z_frame.len()];
+    for (qubit, local) in qubits.iter().zip(pauli.chars()) {
+        let (px, pz) = pauli_to_xz(local)?;
+        x[*qubit] ^= px;
+        z[*qubit] ^= pz;
+    }
+    Ok(symplectic_product(x_frame, z_frame, &x, &z) != 0)
+}
+
 #[derive(Clone)]
 struct Mask {
     words: Vec<u64>,
@@ -746,6 +1634,30 @@ impl Mask {
         for (left, right) in self.words.iter_mut().zip(&other.words) {
             *left ^= *right;
         }
+    }
+
+    fn or_assign(&mut self, other: &Mask) {
+        for (left, right) in self.words.iter_mut().zip(&other.words) {
+            *left |= *right;
+        }
+    }
+
+    fn and_assign(&mut self, other: &Mask) {
+        for (left, right) in self.words.iter_mut().zip(&other.words) {
+            *left &= *right;
+        }
+    }
+
+    fn bit_count(&self) -> usize {
+        self.words.iter().map(|word| word.count_ones() as usize).sum()
+    }
+
+    fn and_count(&self, other: &Mask) -> usize {
+        self.words
+            .iter()
+            .zip(&other.words)
+            .map(|(left, right)| (left & right).count_ones() as usize)
+            .sum()
     }
 
     fn is_zero(&self) -> bool {
@@ -854,6 +1766,156 @@ fn int_map_to_py(py: Python<'_>, values: &HashMap<i64, Mask>) -> PyResult<PyObje
         dict.set_item(key, mask_to_py(py, value)?)?;
     }
     Ok(dict.into())
+}
+
+struct DemBatch {
+    shots: usize,
+    all_mask: Mask,
+    detectors: HashMap<i64, Mask>,
+    observables: HashMap<i64, Mask>,
+    edge_event_masks: Vec<Mask>,
+    loss_mask: Mask,
+}
+
+fn run_dem_batch(sampler: &NativeDemSampler, shots: usize, rng: &mut SmallRng) -> DemBatch {
+    let words = word_count(shots);
+    let all_mask = Mask::all(shots);
+    let mut detectors = HashMap::new();
+    for detector_id in &sampler.detectors {
+        detectors.insert(*detector_id, Mask::zero(words));
+    }
+    let mut observables = HashMap::new();
+    for observable_id in &sampler.observables {
+        observables.insert(*observable_id, Mask::zero(words));
+    }
+    let mut edge_event_masks = Vec::with_capacity(sampler.edges.len());
+
+    for edge in &sampler.edges {
+        let event_mask = bernoulli_mask(rng, shots, edge.probability);
+        if !event_mask.is_zero() {
+            for detector_id in &edge.detectors {
+                detectors
+                    .entry(*detector_id)
+                    .or_insert_with(|| Mask::zero(words))
+                    .xor_assign(&event_mask);
+            }
+            for observable_id in &edge.observables {
+                observables
+                    .entry(*observable_id)
+                    .or_insert_with(|| Mask::zero(words))
+                    .xor_assign(&event_mask);
+            }
+        }
+        edge_event_masks.push(event_mask);
+    }
+
+    let mut loss_mask = Mask::zero(words);
+    for observable in observables.values() {
+        loss_mask.or_assign(observable);
+    }
+    loss_mask.and_assign(&all_mask);
+
+    DemBatch {
+        shots,
+        all_mask,
+        detectors,
+        observables,
+        edge_event_masks,
+        loss_mask,
+    }
+}
+
+fn dem_batch_to_py(py: Python<'_>, batch: &DemBatch) -> PyResult<PyObject> {
+    let out = PyDict::new(py);
+    out.set_item("shots", batch.shots)?;
+    out.set_item("all_mask", mask_to_py(py, &batch.all_mask)?)?;
+    out.set_item("detectors", int_map_to_py(py, &batch.detectors)?)?;
+    out.set_item("observables", int_map_to_py(py, &batch.observables)?)?;
+    let edge_masks = PyDict::new(py);
+    for (edge_index, mask) in batch.edge_event_masks.iter().enumerate() {
+        edge_masks.set_item(edge_index, mask_to_py(py, mask)?)?;
+    }
+    out.set_item("edge_event_masks", edge_masks)?;
+    Ok(out.into())
+}
+
+fn dem_estimate_to_py(
+    py: Python<'_>,
+    sampler: &NativeDemSampler,
+    batch: &DemBatch,
+    baseline: Option<f64>,
+) -> PyResult<PyObject> {
+    let loss_count = batch.loss_mask.bit_count();
+    let mean_loss = loss_count as f64 / batch.shots as f64;
+    let baseline_value = baseline.unwrap_or(mean_loss);
+    let mut edge_sensitivities = Vec::with_capacity(sampler.edges.len());
+    for (edge_index, edge) in sampler.edges.iter().enumerate() {
+        let event_mask = &batch.edge_event_masks[edge_index];
+        let event_count = event_mask.bit_count();
+        let no_event_count = batch.shots - event_count;
+        let loss_event_count = batch.loss_mask.and_count(event_mask);
+        let loss_no_event_count = loss_count - loss_event_count;
+        let (event_score, no_event_score) = score_pair(edge.probability);
+        let sum_loss_score =
+            loss_event_count as f64 * event_score + loss_no_event_count as f64 * no_event_score;
+        let sum_score = event_count as f64 * event_score + no_event_count as f64 * no_event_score;
+        edge_sensitivities.push((sum_loss_score - baseline_value * sum_score) / batch.shots as f64);
+    }
+
+    let location_sensitivities = aggregate_dem_location_sensitivities(sampler, &edge_sensitivities);
+
+    let out = PyDict::new(py);
+    out.set_item("shots", batch.shots)?;
+    out.set_item("mean_loss", mean_loss)?;
+    out.set_item("baseline", baseline_value)?;
+    let edge_dict = PyDict::new(py);
+    for (edge_index, sensitivity) in edge_sensitivities.iter().enumerate() {
+        edge_dict.set_item(edge_index, *sensitivity)?;
+    }
+    out.set_item("edge_sensitivities", edge_dict)?;
+    let location_dict = PyDict::new(py);
+    for (location_id, sensitivity) in location_sensitivities {
+        location_dict.set_item(location_id, sensitivity)?;
+    }
+    out.set_item("sensitivities", location_dict)?;
+    Ok(out.into())
+}
+
+fn aggregate_dem_location_sensitivities(
+    sampler: &NativeDemSampler,
+    edge_sensitivities: &[f64],
+) -> HashMap<String, f64> {
+    let mut by_location: HashMap<String, Vec<usize>> = HashMap::new();
+    for (edge_index, edge) in sampler.edges.iter().enumerate() {
+        by_location
+            .entry(edge.location_id.clone())
+            .or_default()
+            .push(edge_index);
+    }
+
+    let mut out = HashMap::new();
+    for (location_id, edge_indices) in by_location {
+        let total_probability: f64 = edge_indices
+            .iter()
+            .map(|edge_index| sampler.edges[*edge_index].probability)
+            .sum();
+        let mut value = 0.0;
+        for edge_index in &edge_indices {
+            let weight = if total_probability > 0.0 {
+                sampler.edges[*edge_index].probability / total_probability
+            } else {
+                1.0 / edge_indices.len() as f64
+            };
+            value += edge_sensitivities[*edge_index] * weight;
+        }
+        out.insert(location_id, value);
+    }
+    out
+}
+
+fn score_pair(probability: f64) -> (f64, f64) {
+    let p = probability.clamp(1e-12, 1.0 - 1e-12);
+    (1.0 / p, -1.0 / (1.0 - p))
 }
 
 fn apply_operation(

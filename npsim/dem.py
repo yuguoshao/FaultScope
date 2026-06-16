@@ -302,6 +302,19 @@ class DetectorErrorModelGenerator:
         self._occurrences = self._collect_noise_occurrences()
 
     def generate(self) -> DetectorErrorModel:
+        try:
+            from npsim.native import UnsupportedNativeCircuitError, generate_native_dem
+
+            return generate_native_dem(
+                self.circuit,
+                detectors=self.detectors,
+                observables=self.observables,
+                backend="native",
+            )
+        except (ImportError, UnsupportedNativeCircuitError):
+            return self._generate_python()
+
+    def _generate_python(self) -> DetectorErrorModel:
         reference = self._run_with_injection(None, None)
         reference_detectors = self._evaluate_detectors(reference)
         reference_observables = self._evaluate_observables(reference)
