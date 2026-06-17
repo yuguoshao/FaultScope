@@ -159,6 +159,30 @@ S_l
 \mathbb E_\tau[(L(\tau)-b)s_l(\tau)].
 ```
 
+这个 baseline 不改变真实敏感度。因为 score function 满足：
+
+```math
+\mathbb E_\tau[s_l(\tau)] = 0,
+```
+
+所以只要 `b` 不依赖于当前 shot 中第 `l` 个噪声位置的实际事件，就有：
+
+```math
+\mathbb E_\tau[(L(\tau)-b)s_l(\tau)]
+=
+\mathbb E_\tau[L(\tau)s_l(\tau)]
+- b\,\mathbb E_\tau[s_l(\tau)]
+=
+\mathbb E_\tau[L(\tau)s_l(\tau)].
+```
+
+因此在无限采样极限下，baseline 不会改变 `S_l`，也不会改变 hotspot
+相对排序。它只是一个控制变量，用来降低 Monte Carlo 方差。有限 batch 中
+`\frac{1}{N}\sum_k s_l(\tau_k)` 不会严格为 0，所以 baseline 可能改变单次估计值和
+top-k 排序；这通常表示 shots 不足、两个位置的真实敏感度很接近，或 loss/decoder
+本身噪声较大。默认使用 batch mean loss 作为 baseline 时，会带来约 `1 - 1/N`
+量级的轻微有限样本效应，shots 足够大时可以忽略。
+
 在 batch 估计中，默认取：
 
 ```math
