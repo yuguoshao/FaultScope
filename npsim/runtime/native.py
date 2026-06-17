@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from typing import Any, Mapping
 
 from npsim.runtime.batch import BatchTrajectory
+from npsim.runtime.loss import logical_residual_loss_mask
 from npsim.core import Circuit, NoiseLocation, Operation
 from npsim.core import (
     BernoulliPauliNoise,
@@ -193,8 +194,6 @@ class NativeDemSampler:
             )
             return _payload_to_dem_hotspot_result(self.dem, payload)
 
-        from npsim.dem.sampler import _default_loss_mask
-
         batch = self._engine.run_native_batch(int(shots), seed)
         if correction_mask_fn is not None:
             corrections = dict(correction_mask_fn(batch))
@@ -205,7 +204,12 @@ class NativeDemSampler:
         else:
             corrections = {}
         if loss_mask_fn is None:
-            loss_mask = _default_loss_mask(batch, corrections, self.dem)
+            loss_mask = logical_residual_loss_mask(
+                batch.observables,
+                corrections,
+                observable_ids=(observable.id for observable in self.dem.observables),
+                all_mask=batch.all_mask,
+            )
         else:
             loss_mask = loss_mask_fn(batch, corrections)
         loss_mask = int(loss_mask) & int(batch.all_mask)
@@ -692,19 +696,11 @@ def _forward_default_loss_mask(
     batch: Any,
     corrections: Mapping[Any, int],
 ) -> int:
-    observable_ids = set(batch.observables)
-    observable_ids.update(corrections)
-    loss_mask = 0
-    for observable_id in observable_ids:
-        if not isinstance(observable_id, int):
-            raise TypeError(
-                "default batch loss requires observable-id correction masks; "
-                "supply loss_mask_fn for data-qubit corrections"
-            )
-        loss_mask |= int(batch.observables.get(observable_id, 0)) ^ int(
-            corrections.get(observable_id, 0)
-        )
-    return loss_mask & int(batch.all_mask)
+    return logical_residual_loss_mask(
+        batch.observables,
+        corrections,
+        all_mask=batch.all_mask,
+    )
 
 
 def _call_forward_loss_mask_fn(

@@ -10,6 +10,7 @@ from npsim.dem.model import (
     DetectorErrorModel,
     DetectorGraphHotspots,
 )
+from npsim.runtime.loss import logical_residual_loss_mask
 
 
 DemCorrectionMaskFn = Callable[["DemBatchTrajectory"], Mapping[int, int]]
@@ -217,15 +218,9 @@ def _default_loss_mask(
     corrections: Mapping[int, int],
     dem: DetectorErrorModel,
 ) -> int:
-    observable_ids = {observable.id for observable in dem.observables}
-    observable_ids.update(batch.observables)
-    observable_ids.update(corrections)
-    loss_mask = 0
-    for observable_id in observable_ids:
-        loss_mask |= batch.observables.get(observable_id, 0) ^ corrections.get(
-            observable_id,
-            0,
-        )
-    return loss_mask
-
+    return logical_residual_loss_mask(
+        batch.observables,
+        corrections,
+        observable_ids=(observable.id for observable in dem.observables),
+    )
 

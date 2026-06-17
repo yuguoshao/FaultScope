@@ -26,6 +26,7 @@ from npsim.runtime import (
     compile_native_sampler,
     generate_native_dem,
 )
+from npsim.runtime.loss import logical_residual_loss_mask
 from npsim.decoders import (
     PyMatchingBatchDecoder,
     UnsupportedPyMatchingDemError,
@@ -457,14 +458,11 @@ class BatchNoiseAwareSimulatorTests(unittest.TestCase):
 
 
 def _default_batch_loss(batch, corrections) -> int:
-    observable_ids = set(batch.observables)
-    observable_ids.update(corrections)
-    loss_mask = 0
-    for observable_id in observable_ids:
-        loss_mask |= int(batch.observables.get(observable_id, 0)) ^ int(
-            corrections.get(observable_id, 0)
-        )
-    return loss_mask & int(batch.all_mask)
+    return logical_residual_loss_mask(
+        batch.observables,
+        corrections,
+        all_mask=batch.all_mask,
+    )
 
 
 class NativePackedSamplerTests(unittest.TestCase):

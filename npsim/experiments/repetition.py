@@ -5,7 +5,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Callable, Mapping
 
-from npsim.runtime.batch import BatchTrajectory
 from npsim.core import Circuit, NoiseLocation, Operation
 from npsim.decoders import RepetitionCodeDecoder
 from npsim.dem import Detector, LogicalObservable
@@ -23,7 +22,6 @@ class RepetitionCodeExperiment:
     detector_fn: Callable[[Any], list[int]]
     decoder: RepetitionCodeDecoder
     loss_fn: Callable[[Any, list[int]], float]
-    batch_loss_mask_fn: Callable[[BatchTrajectory, Mapping[Any, int]], int]
     detectors: tuple[Detector, ...]
     observables: tuple[LogicalObservable, ...]
 
@@ -141,16 +139,6 @@ def make_repetition_code_experiment(
     def loss_fn(trajectory: Any, correction: list[int]) -> float:
         return float(trajectory.frame.x[data[0]] ^ int(correction[0]))
 
-    def batch_loss_mask_fn(
-        batch: BatchTrajectory,
-        corrections: Mapping[Any, int],
-    ) -> int:
-        observable_id = 0
-        return (
-            int(batch.observables.get(observable_id, 0))
-            ^ int(corrections.get(observable_id, 0))
-        ) & int(batch.all_mask)
-
     return RepetitionCodeExperiment(
         circuit=circuit,
         data_qubits=data,
@@ -158,7 +146,6 @@ def make_repetition_code_experiment(
         detector_fn=detector_fn,
         decoder=decoder,
         loss_fn=loss_fn,
-        batch_loss_mask_fn=batch_loss_mask_fn,
         detectors=detectors,
         observables=observables,
     )

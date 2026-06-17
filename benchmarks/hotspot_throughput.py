@@ -25,12 +25,12 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from npsim.dem import DetectorErrorModelGenerator
-from npsim.dem.sampler import _default_loss_mask
 from npsim.runtime import (
     UnsupportedNativeCircuitError,
     compile_native_dem_sampler,
     compile_native_sampler,
 )
+from npsim.runtime.loss import logical_residual_loss_mask
 from npsim.experiments import make_repetition_code_experiment
 from tests.reference.batch import (
     BatchForwardNoiseAwareSimulator as ReferenceBatchForwardNoiseAwareSimulator,
@@ -110,7 +110,11 @@ def main() -> None:
 
             native_batch = native_batch_sampler._engine.run_native_batch(args.shots, 777)
             native_corrections = experiment.decoder.decode_batch_masks(native_batch)
-            native_loss = _forward_default_loss_mask(native_batch, native_corrections)
+            native_loss = logical_residual_loss_mask(
+                native_batch.observables,
+                native_corrections,
+                all_mask=native_batch.all_mask,
+            )
             reference_batch = reference_batch_engine.run_batch(
                 shots=args.shots,
                 rng=random.Random(777),
@@ -118,9 +122,10 @@ def main() -> None:
             reference_corrections = experiment.decoder.decode_batch_masks(
                 reference_batch
             )
-            reference_loss = _forward_default_loss_mask(
-                reference_batch,
+            reference_loss = logical_residual_loss_mask(
+                reference_batch.observables,
                 reference_corrections,
+                all_mask=reference_batch.all_mask,
             )
 
             native_batch_agg_sps = _median_samples_per_second(
@@ -164,16 +169,21 @@ def main() -> None:
             )
 
             native_dem_batch = native_dem_sampler._engine.run_native_batch(args.shots, 888)
-            native_dem_loss = _default_loss_mask(native_dem_batch, {}, dem) & int(
-                native_dem_batch.all_mask
+            native_dem_loss = logical_residual_loss_mask(
+                native_dem_batch.observables,
+                {},
+                observable_ids=(observable.id for observable in dem.observables),
+                all_mask=native_dem_batch.all_mask,
             )
             reference_dem_batch = reference_dem_engine.run_batch(
                 shots=args.shots,
                 rng=random.Random(888),
             )
-            reference_dem_loss = (
-                _default_loss_mask(reference_dem_batch, {}, dem)
-                & reference_dem_batch.all_mask
+            reference_dem_loss = logical_residual_loss_mask(
+                reference_dem_batch.observables,
+                {},
+                observable_ids=(observable.id for observable in dem.observables),
+                all_mask=reference_dem_batch.all_mask,
             )
 
             native_dem_agg_sps = _median_samples_per_second(
@@ -342,19 +352,12 @@ def _reference_batch_estimate(
     rng = random.Random(seed)
     batch = engine.run_batch(shots=shots, rng=rng)
     corrections = decoder.decode_batch_masks(batch)
-    loss_mask = _forward_default_loss_mask(batch, corrections)
+    loss_mask = logical_residual_loss_mask(
+        batch.observables,
+        corrections,
+        all_mask=batch.all_mask,
+    )
     return _reference_batch_aggregate(engine, batch, loss_mask, top_k=top_k)
-
-
-def _forward_default_loss_mask(batch: Any, corrections: Any) -> int:
-    observable_ids = set(batch.observables)
-    observable_ids.update(corrections)
-    loss_mask = 0
-    for observable_id in observable_ids:
-        loss_mask |= int(batch.observables.get(observable_id, 0)) ^ int(
-            corrections.get(observable_id, 0)
-        )
-    return loss_mask & int(batch.all_mask)
 
 
 if __name__ == "__main__":

@@ -35,6 +35,7 @@ from npsim.runtime import (
     compile_native_dem_sampler,
     compile_native_sampler,
 )
+from npsim.runtime.loss import logical_residual_loss_mask
 from npsim.io import StimImportResult, parse_stim_circuit
 
 
@@ -431,12 +432,12 @@ def _logical_failure_stats_from_masks(
     shots: int,
 ) -> LogicalFailureStats:
     all_mask = (1 << shots) - 1
-    residual_loss_mask = 0
-    for observable_id in observable_ids:
-        residual_loss_mask |= (
-            int(observable_masks.get(observable_id, 0))
-            ^ int(correction_masks.get(observable_id, 0))
-        )
+    residual_loss_mask = logical_residual_loss_mask(
+        observable_masks,
+        correction_masks,
+        observable_ids=observable_ids,
+        all_mask=all_mask,
+    )
     failures = (residual_loss_mask & all_mask).bit_count()
     return LogicalFailureStats(shots=shots, failures=failures)
 

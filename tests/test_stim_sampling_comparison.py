@@ -12,6 +12,7 @@ from npsim.dem import Detector, DetectorErrorEdge, DetectorErrorModel, LogicalOb
 from npsim.io import parse_stim_circuit
 from npsim.runtime import UnsupportedNativeCircuitError, compile_native_sampler
 from npsim.runtime import compile_native_dem_sampler, generate_native_dem
+from npsim.runtime.loss import logical_residual_loss_mask
 from npsim.core import (
     BernoulliPauliNoise,
     MeasurementBitFlip,
@@ -650,7 +651,15 @@ def _stim_column_mask(samples: object, column: int) -> int:
 
 def _residual_rate(observable_mask: int, correction_mask: int, shots: int) -> float:
     all_mask = (1 << shots) - 1
-    return ((int(observable_mask) ^ int(correction_mask)) & all_mask).bit_count() / shots
+    return (
+        logical_residual_loss_mask(
+            {0: observable_mask},
+            {0: correction_mask},
+            observable_ids=(0,),
+            all_mask=all_mask,
+        ).bit_count()
+        / shots
+    )
 
 
 def _dem_decoded_loss_rate(
@@ -660,11 +669,13 @@ def _dem_decoded_loss_rate(
     observable_id: int,
 ) -> float:
     corrections = decoder.decode_batch_masks(batch)
-    return _residual_rate(
-        batch.observables[int(observable_id)],
-        corrections.get(int(observable_id), 0),
-        batch.shots,
+    loss_mask = logical_residual_loss_mask(
+        batch.observables,
+        corrections,
+        observable_ids=(int(observable_id),),
+        all_mask=batch.all_mask,
     )
+    return loss_mask.bit_count() / batch.shots
 
 
 def _masks_to_dense_array(
