@@ -165,6 +165,54 @@ S_l
 \mathbb E_\tau[s_l(\tau)] = 0,
 ```
 
+这是 log-derivative score 的归一化恒等式。对第 `l` 个噪声事件边缘化：
+
+```math
+\begin{aligned}
+\mathbb E[s_l]
+&=
+\sum_{e_l} p_l(e_l;\lambda_l)
+\frac{\partial}{\partial \lambda_l}
+\log p_l(e_l;\lambda_l) \\
+&=
+\sum_{e_l}
+\frac{\partial}{\partial \lambda_l}
+p_l(e_l;\lambda_l) \\
+&=
+\frac{\partial}{\partial \lambda_l}
+\sum_{e_l} p_l(e_l;\lambda_l)
+=
+\frac{\partial}{\partial \lambda_l}1
+=
+0.
+\end{aligned}
+```
+
+例如 Bernoulli 噪声中：
+
+```math
+s_l(\text{event})=\frac{1}{\lambda_l},
+\qquad
+s_l(\text{no event})=-\frac{1}{1-\lambda_l},
+```
+
+因此：
+
+```math
+\lambda_l\frac{1}{\lambda_l}
++
+(1-\lambda_l)\left(-\frac{1}{1-\lambda_l}\right)
+=
+1-1
+=
+0.
+```
+
+完整 trajectory 中的其它噪声事件、测量随机性和 decoder 输出都会被一起边缘化掉；
+`s_l(\tau)` 只对第 `l` 个噪声位置的事件取这个 log-derivative，因此仍满足
+同一个期望为零的性质。这个推导要求概率模型在 `\lambda_l` 附近可微，且事件支持集不随
+`\lambda_l` 改变；实现中会对 `\lambda_l` 做数值裁剪，避免 `0` 或 `1` 附近的发散。
+
 所以只要 `b` 不依赖于当前 shot 中第 `l` 个噪声位置的实际事件，就有：
 
 ```math

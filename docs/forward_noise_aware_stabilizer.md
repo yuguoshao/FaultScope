@@ -52,7 +52,12 @@ dJ / d lambda_l = E[(L(tau) - b) s_l(tau)]
 s_l(tau) = d log p_l(e_l; lambda_l) / d lambda_l
 ```
 
-其中 baseline `b` 默认取 batch mean loss。
+其中 baseline `b` 默认取 batch mean loss。baseline 不改变真实敏感度，因为
+`s_l = d log p_l / d lambda_l` 是 log-derivative score，而
+`E[s_l] = sum_e p_l(e) d log p_l(e) / d lambda_l = d sum_e p_l(e) / d lambda_l = 0`；
+所以 `E[(L-b)s_l] = E[L s_l]`。它只作为控制变量降低 Monte Carlo 方差。有限 batch
+中 `mean(s_l)` 不会严格为 0，因此 baseline 可能改变单次估计的 top-k 排序，但在
+shots 增大后该影响会消失，通常换来更稳定的 sensitivity 估计。
 
 ## 热点分数
 
