@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 
 from npsim.core import Circuit, NoiseLocation, Operation
 from npsim.core import BernoulliPauliNoise, MeasurementBitFlip
+from npsim.dem import LogicalObservable
 
 
 @dataclass(frozen=True)
@@ -22,70 +24,117 @@ class RotatedSurfaceCodeMemoryExample:
     def data_qubits(self) -> int:
         return self.distance * self.distance
 
-    def native_loss_spec(self, kind: str) -> dict[str, object] | None:
-        if kind != "surface_diagnostic":
-            return None
-        return {
-            "kind": kind,
-            "x_qubits": tuple(
-                _data_index(self.distance, row, 0)
-                for row in range(self.distance)
+    @property
+    def x_logical_qubits(self) -> tuple[int, ...]:
+        return tuple(
+            _data_index(self.distance, row, 0)
+            for row in range(self.distance)
+        )
+
+    @property
+    def z_logical_qubits(self) -> tuple[int, ...]:
+        return tuple(
+            _data_index(self.distance, 0, col)
+            for col in range(self.distance)
+        )
+
+    @property
+    def terminal_measurement_pairs(self) -> tuple[tuple[str, str], ...]:
+        return (
+            (f"r{self.rounds}_{self.hot_x_check}", f"r0_{self.hot_x_check}"),
+            (f"r{self.rounds}_{self.hot_z_check}", f"r0_{self.hot_z_check}"),
+        )
+
+    @property
+    def observables(self) -> tuple[LogicalObservable, ...]:
+        return (
+            LogicalObservable(
+                id=0,
+                pauli_qubits=self.x_logical_qubits,
+                pauli="Z" * self.distance,
             ),
-            "z_qubits": tuple(
-                _data_index(self.distance, 0, col)
-                for col in range(self.distance)
+            LogicalObservable(
+                id=1,
+                pauli_qubits=self.z_logical_qubits,
+                pauli="X" * self.distance,
             ),
-            "measurement_pairs": (
-                (f"r{self.rounds}_{self.hot_x_check}", f"r0_{self.hot_x_check}"),
-                (f"r{self.rounds}_{self.hot_z_check}", f"r0_{self.hot_z_check}"),
+        )
+
+    def make_decoder(self) -> "RotatedSurfaceCodeMemoryDecoder":
+        np, pymatching, sparse = _load_matching_modules()
+        return RotatedSurfaceCodeMemoryDecoder(
+            distance=self.distance,
+            rounds=self.rounds,
+            x_checks=self.x_checks,
+            z_checks=self.z_checks,
+            x_logical_qubits=self.x_logical_qubits,
+            z_logical_qubits=self.z_logical_qubits,
+            matching_x=_make_matching(
+                self.distance,
+                self.x_checks,
+                np,
+                pymatching,
+                sparse,
             ),
-        }
-
-    def diagnostic_loss_mask(self, batch) -> int:
-        """A cheap smoke-test loss involving logical paths and hot detectors."""
-
-        all_mask = int(batch.all_mask)
-        x_logical = 0
-        x_mask = getattr(batch, "x_mask", None)
-        if callable(x_mask):
-            for row in range(self.distance):
-                x_logical ^= int(x_mask(_data_index(self.distance, row, 0)))
-        else:
-            x_frame = batch.x_frame
-            for row in range(self.distance):
-                x_logical ^= x_frame[_data_index(self.distance, row, 0)]
-
-        z_logical = 0
-        z_mask = getattr(batch, "z_mask", None)
-        if callable(z_mask):
-            for col in range(self.distance):
-                z_logical ^= int(z_mask(_data_index(self.distance, 0, col)))
-        else:
-            z_frame = batch.z_frame
-            for col in range(self.distance):
-                z_logical ^= z_frame[_data_index(self.distance, 0, col)]
-
-        detector_mask = 0
-        measurement_mask = getattr(batch, "measurement_mask", None)
-        if callable(measurement_mask):
-            for check_id in (self.hot_x_check, self.hot_z_check):
-                detector_mask |= (
-                    int(measurement_mask(f"r{self.rounds}_{check_id}"))
-                    ^ int(measurement_mask(f"r0_{check_id}"))
-                )
-        else:
-            measurements = batch.measurements
-            for check_id in (self.hot_x_check, self.hot_z_check):
-                detector_mask |= (
-                    measurements[f"r{self.rounds}_{check_id}"]
-                    ^ measurements[f"r0_{check_id}"]
-                )
-        return (x_logical | z_logical | detector_mask) & all_mask
+            matching_z=_make_matching(
+                self.distance,
+                self.z_checks,
+                np,
+                pymatching,
+                sparse,
+            ),
+        )
 
 
-RotatedSurfaceCodeMemoryExample.diagnostic_loss_mask._npsim_native_loss = (  # type: ignore[attr-defined]
-    "surface_diagnostic"
-)
+@dataclass(frozen=True)
+class RotatedSurfaceCodeMemoryDecoder:
+    distance: int
+    rounds: int
+    x_checks: tuple[dict[str, object], ...]
+    z_checks: tuple[dict[str, object], ...]
+    x_logical_qubits: tuple[int, ...]
+    z_logical_qubits: tuple[int, ...]
+    matching_x: Any
+    matching_z: Any
+
+    def decode_batch_masks(self, batch: Any) -> dict[int, int]:
+        x_syndromes = [
+            [
+                batch.measurement_bit(f"r{self.rounds}_{check['id']}", shot)
+                ^ batch.measurement_bit(f"r0_{check['id']}", shot)
+                for check in self.x_checks
+            ]
+            for shot in range(batch.shots)
+        ]
+        z_syndromes = [
+            [
+                batch.measurement_bit(f"r{self.rounds}_{check['id']}", shot)
+                ^ batch.measurement_bit(f"r0_{check['id']}", shot)
+                for check in self.z_checks
+            ]
+            for shot in range(batch.shots)
+        ]
+        z_corrections = self.matching_x.decode_batch(x_syndromes)
+        x_corrections = self.matching_z.decode_batch(z_syndromes)
+
+        x_correction_masks = [0] * (self.distance * self.distance)
+        for shot, row in enumerate(_rows(x_corrections)):
+            for qubit, bit in enumerate(row):
+                if int(bit):
+                    x_correction_masks[qubit] |= 1 << shot
+        z_correction_masks = [0] * (self.distance * self.distance)
+        for shot, row in enumerate(_rows(z_corrections)):
+            for qubit, bit in enumerate(row):
+                if int(bit):
+                    z_correction_masks[qubit] |= 1 << shot
+
+        x_prediction = 0
+        for qubit in self.x_logical_qubits:
+            x_prediction ^= x_correction_masks[qubit]
+        z_prediction = 0
+        for qubit in self.z_logical_qubits:
+            z_prediction ^= z_correction_masks[qubit]
+        return {0: x_prediction, 1: z_prediction}
 
 
 def make_large_rotated_surface_code_memory_example(
@@ -341,3 +390,45 @@ def _central_check_id(checks: list[dict[str, object]], distance: int) -> str:
 
 def _data_index(distance: int, row: int, col: int) -> int:
     return row * distance + col
+
+
+def _load_matching_modules() -> tuple[Any, Any, Any]:
+    try:
+        import numpy as np
+        import pymatching
+        from scipy import sparse
+    except ImportError as exc:
+        raise ImportError(
+            "PyMatching, NumPy, and SciPy are required for the surface-code decoder"
+        ) from exc
+    return np, pymatching, sparse
+
+
+def _make_matching(distance: int, checks, np, pymatching, sparse):
+    rows = []
+    cols = []
+    data = []
+    for check_index, check in enumerate(checks):
+        for row, col in check["data"]:
+            rows.append(check_index)
+            cols.append(_data_index(distance, row, col))
+            data.append(1)
+    h = sparse.csc_matrix(
+        (data, (rows, cols)),
+        shape=(len(checks), distance * distance),
+        dtype=np.uint8,
+    )
+    faults_matrix = sparse.eye(distance * distance, format="csc", dtype=np.uint8)
+    return pymatching.Matching.from_check_matrix(
+        h,
+        faults_matrix=faults_matrix,
+        weights=np.ones(distance * distance),
+        merge_strategy="independent",
+        use_virtual_boundary_node=True,
+    )
+
+
+def _rows(values: Any) -> list[Any]:
+    if hasattr(values, "tolist"):
+        return values.tolist()
+    return list(values)

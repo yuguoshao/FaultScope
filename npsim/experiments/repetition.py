@@ -23,7 +23,7 @@ class RepetitionCodeExperiment:
     detector_fn: Callable[[Any], list[int]]
     decoder: RepetitionCodeDecoder
     loss_fn: Callable[[Any, list[int]], float]
-    batch_loss_mask_fn: Callable[[BatchTrajectory], int]
+    batch_loss_mask_fn: Callable[[BatchTrajectory, Mapping[Any, int]], int]
     detectors: tuple[Detector, ...]
     observables: tuple[LogicalObservable, ...]
 
@@ -97,8 +97,17 @@ def make_repetition_code_experiment(
                 )
             )
 
+    final_round = rounds - 1
+    final_measurement_keys = tuple(
+        f"r{final_round}_c{check_idx}"
+        for check_idx in range(distance - 1)
+    )
     circuit = Circuit(n_qubits=distance + distance - 1, operations=operations)
-    decoder = RepetitionCodeDecoder(distance)
+    decoder = RepetitionCodeDecoder(
+        distance,
+        measurement_keys=final_measurement_keys,
+        observable_id=0,
+    )
     detectors = tuple(
         Detector(
             id=round_idx * (distance - 1) + check_idx,
@@ -124,36 +133,23 @@ def make_repetition_code_experiment(
     )
 
     def detector_fn(trajectory: Any) -> list[int]:
-        final_round = rounds - 1
         return [
-            trajectory.measurement_by_key[f"r{final_round}_c{check_idx}"].bit
-            for check_idx in range(distance - 1)
+            trajectory.measurement_by_key[key].bit
+            for key in final_measurement_keys
         ]
 
     def loss_fn(trajectory: Any, correction: list[int]) -> float:
-        residual = [
-            trajectory.frame.x[qubit] ^ int(correction[data_idx])
-            for data_idx, qubit in enumerate(data)
-        ]
-        return float(sum(residual) > distance // 2)
+        return float(trajectory.frame.x[data[0]] ^ int(correction[0]))
 
-    def batch_loss_mask_fn(batch: BatchTrajectory) -> int:
-        loss_mask = 0
-        final_round = rounds - 1
-        measurements = batch.measurements
-        x_frame = batch.x_frame
-        for shot in range(batch.shots):
-            syndrome = [
-                (measurements[f"r{final_round}_c{check_idx}"] >> shot) & 1
-                for check_idx in range(distance - 1)
-            ]
-            correction = _decode_repetition_shot(syndrome)
-            residual_weight = 0
-            for data_idx, qubit in enumerate(data):
-                residual_weight += ((x_frame[qubit] >> shot) & 1) ^ correction[data_idx]
-            if residual_weight > distance // 2:
-                loss_mask |= 1 << shot
-        return loss_mask
+    def batch_loss_mask_fn(
+        batch: BatchTrajectory,
+        corrections: Mapping[Any, int],
+    ) -> int:
+        observable_id = 0
+        return (
+            int(batch.observables.get(observable_id, 0))
+            ^ int(corrections.get(observable_id, 0))
+        ) & int(batch.all_mask)
 
     return RepetitionCodeExperiment(
         circuit=circuit,
@@ -172,11 +168,3 @@ def _lookup_rate(rate_spec: RateSpec, round_idx: int, index: int) -> float:
     if isinstance(rate_spec, Mapping):
         return float(rate_spec.get((round_idx, index), 0.0))
     return float(rate_spec)
-
-
-def _decode_repetition_shot(syndrome: list[int]) -> list[int]:
-    candidate = [0] * (len(syndrome) + 1)
-    for idx, bit in enumerate(syndrome):
-        candidate[idx + 1] = candidate[idx] ^ int(bit)
-    complement = [bit ^ 1 for bit in candidate]
-    return candidate if sum(candidate) <= sum(complement) else complement

@@ -25,6 +25,8 @@ class RepetitionCodeDecoder:
     """Open-boundary minimum-weight decoder for a final repetition syndrome."""
 
     distance: int
+    measurement_keys: tuple[str, ...] = ()
+    observable_id: int = 0
 
     def decode(
         self,
@@ -53,3 +55,19 @@ class RepetitionCodeDecoder:
         if isinstance(detector_record, Sequence) and not isinstance(detector_record, str):
             return [int(bit) for bit in detector_record]
         raise ValueError("repetition decoder requires a sequence or mapping syndrome")
+
+    def decode_batch_masks(self, batch: Any) -> dict[int, int]:
+        if len(self.measurement_keys) != self.distance - 1:
+            raise ValueError(
+                "repetition batch decoder requires distance-1 measurement keys"
+            )
+        correction_mask = 0
+        for shot in range(int(batch.shots)):
+            syndrome = [
+                (int(batch.measurements[key]) >> shot) & 1
+                for key in self.measurement_keys
+            ]
+            correction = self.decode(syndrome, {}, batch)
+            if correction[0]:
+                correction_mask |= 1 << shot
+        return {self.observable_id: correction_mask}

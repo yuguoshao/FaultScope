@@ -14,8 +14,8 @@ class UnsupportedBatchCircuitError(ValueError):
     """Raised when a circuit needs per-shot tableau branching."""
 
 
-BatchLossMaskFn = Callable[["BatchTrajectory"], int]
-BatchCorrectionMaskFn = Callable[["BatchTrajectory"], Mapping[int, int]]
+BatchLossMaskFn = Callable[..., int]
+BatchCorrectionMaskFn = Callable[["BatchTrajectory"], Mapping[Any, int]]
 
 
 @dataclass(frozen=True)
@@ -73,8 +73,9 @@ class BatchForwardNoiseAwareSimulator:
     bit-for-bit sequence.
     """
 
-    def __init__(self, circuit: Circuit):
+    def __init__(self, circuit: Circuit, *, observables: Any | None = None):
         self.circuit = circuit
+        self.observables = tuple(observables) if observables is not None else ()
         self.locations = circuit.noise_locations()
         self._native_sampler_cache: Any | None = None
         self._ensure_unique_noise_location_ids()
@@ -85,6 +86,7 @@ class BatchForwardNoiseAwareSimulator:
 
             self._native_sampler_cache = compile_native_sampler(
                 self.circuit,
+                observables=self.observables,
                 backend="native",
             )
         return self._native_sampler_cache

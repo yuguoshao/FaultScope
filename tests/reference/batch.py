@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import random
+import inspect
 from collections import defaultdict
 from dataclasses import dataclass
 from typing import Any, Callable, Mapping
@@ -24,8 +25,8 @@ class UnsupportedBatchCircuitError(ValueError):
     """Raised when a circuit needs per-shot tableau branching."""
 
 
-BatchLossMaskFn = Callable[["BatchTrajectory"], int]
-BatchCorrectionMaskFn = Callable[["BatchTrajectory"], Mapping[int, int]]
+BatchLossMaskFn = Callable[..., int]
+BatchCorrectionMaskFn = Callable[["BatchTrajectory"], Mapping[Any, int]]
 
 
 @dataclass(frozen=True)
@@ -94,8 +95,9 @@ class BatchForwardNoiseAwareSimulator:
     evolution.
     """
 
-    def __init__(self, circuit: Circuit):
+    def __init__(self, circuit: Circuit, *, observables: Any | None = None):
         self.circuit = circuit
+        self.observables = tuple(observables) if observables is not None else ()
         self.locations = circuit.noise_locations()
         self._ensure_unique_noise_location_ids()
 
@@ -121,7 +123,7 @@ class BatchForwardNoiseAwareSimulator:
         if loss_mask_fn is None:
             loss_mask = _default_loss_mask(batch, corrections)
         else:
-            loss_mask = loss_mask_fn(batch)
+            loss_mask = _call_loss_mask_fn(loss_mask_fn, batch, corrections)
         loss_mask &= batch.all_mask
         loss_count = loss_mask.bit_count()
         mean_loss = loss_count / shots
@@ -189,6 +191,11 @@ class BatchForwardNoiseAwareSimulator:
 
         for operation in self.circuit.operations:
             self._apply_operation(operation, state, shots, all_mask, rng)
+
+        for observable in self.observables:
+            state.observables[int(observable.id)] = (
+                _observable_mask(observable, state) & all_mask
+            )
 
         return BatchTrajectory(
             shots=shots,
@@ -544,17 +551,49 @@ def _correction_masks(
 
 def _default_loss_mask(
     batch: BatchTrajectory,
-    corrections: Mapping[int, int],
+    corrections: Mapping[Any, int],
 ) -> int:
     observable_ids = set(batch.observables)
     observable_ids.update(corrections)
     loss_mask = 0
     for observable_id in observable_ids:
+        if not isinstance(observable_id, int):
+            raise TypeError(
+                "default batch loss requires observable-id correction masks; "
+                "supply loss_mask_fn for data-qubit corrections"
+            )
         loss_mask |= batch.observables.get(observable_id, 0) ^ corrections.get(
             observable_id,
             0,
         )
     return loss_mask & batch.all_mask
+
+
+def _call_loss_mask_fn(
+    loss_mask_fn: Callable[..., int],
+    batch: BatchTrajectory,
+    corrections: Mapping[Any, int],
+) -> int:
+    if _accepts_positional_args(loss_mask_fn, 2):
+        return int(loss_mask_fn(batch, corrections))
+    return int(loss_mask_fn(batch))
+
+
+def _accepts_positional_args(fn: Callable[..., object], count: int) -> bool:
+    try:
+        signature = inspect.signature(fn)
+    except (TypeError, ValueError):
+        return False
+    positional = 0
+    for parameter in signature.parameters.values():
+        if parameter.kind == inspect.Parameter.VAR_POSITIONAL:
+            return True
+        if parameter.kind in (
+            inspect.Parameter.POSITIONAL_ONLY,
+            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+        ):
+            positional += 1
+    return positional >= count
 
 
 def _apply_masked_pauli_to_frame(
@@ -623,3 +662,17 @@ def _measurement_mask_parity(
         except KeyError as exc:
             raise ValueError(f"unknown measurement key {key!r}") from exc
     return parity
+
+
+def _observable_mask(observable: Any, state: _BatchState) -> int:
+    value = _measurement_mask_parity(
+        state.measurements,
+        tuple(str(key) for key in observable.measurement_keys),
+    )
+    if observable.pauli:
+        value ^= _frame_measurement_flip(
+            state,
+            tuple(int(qubit) for qubit in observable.pauli_qubits),
+            str(observable.pauli),
+        )
+    return value

@@ -112,10 +112,14 @@ class LargeRotatedSurfaceCodeExampleTests(unittest.TestCase):
             distance=9,
             rounds=2,
         )
-        result = BatchForwardNoiseAwareSimulator(example.circuit).estimate(
+        decoder = self._make_decoder_or_skip(example)
+        result = BatchForwardNoiseAwareSimulator(
+            example.circuit,
+            observables=example.observables,
+        ).estimate(
             shots=256,
             seed=91,
-            loss_mask_fn=example.diagnostic_loss_mask,
+            decoder=decoder,
         )
 
         self.assertEqual(result.shots, 256)
@@ -133,10 +137,14 @@ class LargeRotatedSurfaceCodeExampleTests(unittest.TestCase):
                     distance=distance,
                     rounds=1,
                 )
-                result = BatchForwardNoiseAwareSimulator(example.circuit).estimate(
+                decoder = self._make_decoder_or_skip(example)
+                result = BatchForwardNoiseAwareSimulator(
+                    example.circuit,
+                    observables=example.observables,
+                ).estimate(
                     shots=32,
                     seed=100 + distance,
-                    loss_mask_fn=example.diagnostic_loss_mask,
+                    decoder=decoder,
                 )
 
                 self.assertEqual(result.shots, 32)
@@ -157,10 +165,14 @@ class LargeRotatedSurfaceCodeExampleTests(unittest.TestCase):
             distance=13,
             rounds=1,
         )
-        result = BatchForwardNoiseAwareSimulator(example.circuit).estimate(
+        decoder = self._make_decoder_or_skip(example)
+        result = BatchForwardNoiseAwareSimulator(
+            example.circuit,
+            observables=example.observables,
+        ).estimate(
             shots=32,
             seed=113,
-            loss_mask_fn=example.diagnostic_loss_mask,
+            decoder=decoder,
         )
 
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -193,6 +205,12 @@ class LargeRotatedSurfaceCodeExampleTests(unittest.TestCase):
             colors = image.convert("RGB").resize((32, 32)).getcolors(maxcolors=1024)
         self.assertIsNotNone(colors)
         self.assertGreater(len(colors), 8)
+
+    def _make_decoder_or_skip(self, example):
+        try:
+            return example.make_decoder()
+        except ImportError as exc:
+            self.skipTest(str(exc))
 
 
 if __name__ == "__main__":

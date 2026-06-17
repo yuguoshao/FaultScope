@@ -5,6 +5,7 @@ import unittest
 from npsim.core import Circuit, NoiseLocation, Operation
 from npsim.runtime import BatchForwardNoiseAwareSimulator
 from npsim.core import BernoulliPauliNoise, MeasurementBitFlip
+from npsim.dem import LogicalObservable
 from npsim.viz import (
     VisualizationUnavailableError,
     write_rotated_surface_code_spatial_hotspot_map,
@@ -47,10 +48,13 @@ class RotatedSurfaceCodeXZIntegrationTests(unittest.TestCase):
             rounds=rounds,
         )
 
-        result = BatchForwardNoiseAwareSimulator(circuit).estimate(
+        result = BatchForwardNoiseAwareSimulator(
+            circuit,
+            observables=_surface_observables(distance),
+        ).estimate(
             shots=1_000,
             seed=41,
-            loss_mask_fn=decoder.loss_mask,
+            decoder=decoder,
         )
 
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -147,7 +151,7 @@ class _SurfaceCodeXZDecoder:
             z_logical ^= trajectory.frame.z[qubit] ^ correction["z_correction"][qubit]
         return float(bool(x_logical or z_logical))
 
-    def loss_mask(self, batch) -> int:
+    def decode_batch_masks(self, batch):
         x_syndromes = [
             [
                 batch.measurement_bit(f"r{self.rounds}_{check['id']}", shot)
@@ -171,21 +175,24 @@ class _SurfaceCodeXZDecoder:
         if hasattr(x_corrections, "tolist"):
             x_corrections = x_corrections.tolist()
 
-        loss_mask = 0
-        for shot, (x_correction, z_correction) in enumerate(
-            zip(x_corrections, z_corrections)
-        ):
-            x_logical = 0
-            z_logical = 0
-            for row in range(self.distance):
-                qubit = _data_index(self.distance, row, 0)
-                x_logical ^= batch.x_bit(qubit, shot) ^ int(x_correction[qubit])
-            for col in range(self.distance):
-                qubit = _data_index(self.distance, 0, col)
-                z_logical ^= batch.z_bit(qubit, shot) ^ int(z_correction[qubit])
-            if x_logical or z_logical:
-                loss_mask |= 1 << shot
-        return loss_mask
+        x_correction_masks = [0] * (self.distance * self.distance)
+        for shot, x_correction in enumerate(x_corrections):
+            for qubit, bit in enumerate(x_correction):
+                if int(bit):
+                    x_correction_masks[qubit] |= 1 << shot
+        z_correction_masks = [0] * (self.distance * self.distance)
+        for shot, z_correction in enumerate(z_corrections):
+            for qubit, bit in enumerate(z_correction):
+                if int(bit):
+                    z_correction_masks[qubit] |= 1 << shot
+
+        x_prediction = 0
+        for row in range(self.distance):
+            x_prediction ^= x_correction_masks[_data_index(self.distance, row, 0)]
+        z_prediction = 0
+        for col in range(self.distance):
+            z_prediction ^= z_correction_masks[_data_index(self.distance, 0, col)]
+        return {0: x_prediction, 1: z_prediction}
 
 
 def _make_full_xz_memory_circuit(
@@ -351,6 +358,21 @@ def _make_matching(distance: int, checks, np, pymatching, sparse):
 
 def _data_index(distance: int, row: int, col: int) -> int:
     return row * distance + col
+
+
+def _surface_observables(distance: int) -> tuple[LogicalObservable, ...]:
+    return (
+        LogicalObservable(
+            id=0,
+            pauli_qubits=tuple(_data_index(distance, row, 0) for row in range(distance)),
+            pauli="Z" * distance,
+        ),
+        LogicalObservable(
+            id=1,
+            pauli_qubits=tuple(_data_index(distance, 0, col) for col in range(distance)),
+            pauli="X" * distance,
+        ),
+    )
 
 
 def _assert_png_nonblank(path: str) -> None:

@@ -9,6 +9,7 @@ successfully.
 from __future__ import annotations
 
 import importlib
+import inspect
 import random
 from dataclasses import dataclass
 from typing import Any, Mapping
@@ -95,27 +96,6 @@ class NativePackedSampler:
         if decoder is not None and correction_mask_fn is not None:
             raise ValueError("supply either decoder or correction_mask_fn, not both")
         native_baseline = _native_baseline_value(baseline)
-        native_loss = _native_packed_loss_spec(loss_mask_fn)
-        if (
-            decoder is None
-            and correction_mask_fn is None
-            and native_loss is not None
-            and hasattr(
-                self._engine,
-                "estimate_surface_diagnostic",
-            )
-        ):
-            payload = self._engine.estimate_surface_diagnostic(
-                int(shots),
-                native_loss["x_qubits"],
-                native_loss["z_qubits"],
-                native_loss["measurement_pairs"],
-                seed,
-                native_baseline,
-                int(top_k),
-            )
-            return _payload_to_simulation_result(self.circuit, payload)
-
         batch = self._engine.run_native_batch(int(shots), seed)
         corrections = _forward_correction_masks(
             batch,
@@ -125,7 +105,7 @@ class NativePackedSampler:
         if loss_mask_fn is None:
             loss_mask = _forward_default_loss_mask(batch, corrections)
         else:
-            loss_mask = int(loss_mask_fn(batch))
+            loss_mask = _call_forward_loss_mask_fn(loss_mask_fn, batch, corrections)
         loss_mask &= int(batch.all_mask)
         payload = self._engine.estimate_hotspots(
             batch,
@@ -241,6 +221,7 @@ class NativeDemSampler:
 def compile_native_sampler(
     circuit: Circuit,
     *,
+    observables: Any | None = None,
     backend: str = "auto",
     strict: bool = False,
 ) -> NativePackedSampler:
@@ -262,7 +243,10 @@ def compile_native_sampler(
         raise UnsupportedNativeCircuitError("Python backend is no longer supported")
 
     try:
-        spec = _serialize_circuit(circuit)
+        spec = _serialize_circuit(
+            circuit,
+            observables=tuple(observables) if observables is not None else (),
+        )
         native_mod = importlib.import_module("npsim._npsim_native")
         engine = native_mod.compile_sampler(spec)
     except Exception as exc:
@@ -336,12 +320,20 @@ def compile_native_dem_sampler(
     )
 
 
-def _serialize_circuit(circuit: Circuit) -> dict[str, Any]:
+def _serialize_circuit(
+    circuit: Circuit,
+    *,
+    observables: tuple[Any, ...] = (),
+) -> dict[str, Any]:
     return {
         "n_qubits": int(circuit.n_qubits),
         "operations": [
             _serialize_operation(operation)
             for operation in circuit.operations
+        ],
+        "observables": [
+            _serialize_dem_observable(observable)
+            for observable in observables
         ],
     }
 
@@ -698,51 +690,48 @@ def _forward_correction_masks(
 
 def _forward_default_loss_mask(
     batch: Any,
-    corrections: Mapping[int, int],
+    corrections: Mapping[Any, int],
 ) -> int:
     observable_ids = set(batch.observables)
     observable_ids.update(corrections)
     loss_mask = 0
     for observable_id in observable_ids:
+        if not isinstance(observable_id, int):
+            raise TypeError(
+                "default batch loss requires observable-id correction masks; "
+                "supply loss_mask_fn for data-qubit corrections"
+            )
         loss_mask |= int(batch.observables.get(observable_id, 0)) ^ int(
             corrections.get(observable_id, 0)
         )
     return loss_mask & int(batch.all_mask)
 
 
-def _native_packed_loss_spec(loss_mask_fn: Any) -> dict[str, Any] | None:
-    kind = _native_loss_kind(loss_mask_fn)
-    if kind != "surface_diagnostic":
-        return None
-
-    owner = getattr(loss_mask_fn, "__self__", None)
-    provider = owner if owner is not None else loss_mask_fn
-    spec_fn = getattr(provider, "native_loss_spec", None)
-    if not callable(spec_fn):
-        return None
-    spec = spec_fn(kind)
-    if not spec or spec.get("kind") != kind:
-        return None
-    return {
-        "kind": kind,
-        "x_qubits": tuple(int(qubit) for qubit in spec["x_qubits"]),
-        "z_qubits": tuple(int(qubit) for qubit in spec["z_qubits"]),
-        "measurement_pairs": tuple(
-            (str(left), str(right))
-            for left, right in spec["measurement_pairs"]
-        ),
-    }
+def _call_forward_loss_mask_fn(
+    loss_mask_fn: Any,
+    batch: Any,
+    corrections: Mapping[Any, int],
+) -> int:
+    if _accepts_positional_args(loss_mask_fn, 2):
+        return int(loss_mask_fn(batch, corrections))
+    return int(loss_mask_fn(batch))
 
 
-def _native_loss_kind(loss_mask_fn: Any) -> str | None:
-    kind = getattr(loss_mask_fn, "_npsim_native_loss", None)
-    if isinstance(kind, str):
-        return kind
-    function = getattr(loss_mask_fn, "__func__", None)
-    kind = getattr(function, "_npsim_native_loss", None)
-    if isinstance(kind, str):
-        return kind
-    return None
+def _accepts_positional_args(fn: Any, count: int) -> bool:
+    try:
+        signature = inspect.signature(fn)
+    except (TypeError, ValueError):
+        return False
+    positional = 0
+    for parameter in signature.parameters.values():
+        if parameter.kind == inspect.Parameter.VAR_POSITIONAL:
+            return True
+        if parameter.kind in (
+            inspect.Parameter.POSITIONAL_ONLY,
+            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+        ):
+            positional += 1
+    return positional >= count
 
 
 def _payload_to_batch_trajectory(payload: Mapping[str, Any]) -> BatchTrajectory:

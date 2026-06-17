@@ -19,6 +19,7 @@ pub(crate) fn run_packed_sample(
     for operation in &sampler.runtime_operations {
         apply_operation(operation, &mut state, &random_masks, &mut rng)?;
     }
+    evaluate_observables(&mut state, &sampler.observables)?;
     Ok(state)
 }
 
@@ -511,4 +512,19 @@ pub(crate) fn measurement_parity(
         parity.xor_assign(value);
     }
     Ok(parity)
+}
+
+pub(crate) fn evaluate_observables(
+    state: &mut RuntimeState,
+    observables: &[DemObservableSpec],
+) -> PyResult<()> {
+    for observable in observables {
+        let mut value = measurement_parity(&state.measurements, &observable.measurement_keys)?;
+        if !observable.pauli.is_empty() {
+            let flip = frame_measurement_flip(state, &observable.pauli_qubits, &observable.pauli)?;
+            value.xor_assign(&flip);
+        }
+        state.observables.insert(observable.id, value);
+    }
+    Ok(())
 }

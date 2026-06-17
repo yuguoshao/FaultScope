@@ -325,10 +325,13 @@ class BatchNoiseAwareSimulatorTests(unittest.TestCase):
             data_error_rate={(0, 0): 0.15, (0, 1): 0.15, (0, 2): 0.01},
             measurement_error_rate=0.02,
         )
-        result = BatchForwardNoiseAwareSimulator(experiment.circuit).estimate(
+        result = BatchForwardNoiseAwareSimulator(
+            experiment.circuit,
+            observables=experiment.observables,
+        ).estimate(
             shots=10_000,
             seed=14,
-            loss_mask_fn=experiment.batch_loss_mask_fn,
+            decoder=experiment.decoder,
         )
 
         self.assertGreaterEqual(result.mean_loss, 0.0)
@@ -453,12 +456,33 @@ class BatchNoiseAwareSimulatorTests(unittest.TestCase):
         self.assertEqual(batch.noise_event_masks["mflip"], batch.all_mask)
 
 
+def _default_batch_loss(batch, corrections) -> int:
+    observable_ids = set(batch.observables)
+    observable_ids.update(corrections)
+    loss_mask = 0
+    for observable_id in observable_ids:
+        loss_mask |= int(batch.observables.get(observable_id, 0)) ^ int(
+            corrections.get(observable_id, 0)
+        )
+    return loss_mask & int(batch.all_mask)
+
+
 class NativePackedSamplerTests(unittest.TestCase):
-    def _native_sampler_or_skip(self, circuit: Circuit):
+    def _native_sampler_or_skip(self, circuit: Circuit, *, observables=()):
         try:
-            return compile_native_sampler(circuit, backend="native")
+            return compile_native_sampler(
+                circuit,
+                observables=observables,
+                backend="native",
+            )
         except UnsupportedNativeCircuitError as exc:
             self.skipTest(f"native extension unavailable: {exc}")
+
+    def _surface_decoder_or_skip(self, example):
+        try:
+            return example.make_decoder()
+        except ImportError as exc:
+            self.skipTest(str(exc))
 
     def test_native_backend_matches_reference_batch_sampler_masks(self) -> None:
         location = NoiseLocation(
@@ -606,8 +630,9 @@ class NativePackedSamplerTests(unittest.TestCase):
         fake_sampler = mock.Mock()
         fake_sampler.estimate.side_effect = ("first", "second")
 
-        def compile_once(compiled_circuit, *, backend):
+        def compile_once(compiled_circuit, *, observables, backend):
             self.assertIs(compiled_circuit, circuit)
+            self.assertEqual(observables, ())
             self.assertEqual(backend, "native")
             return fake_sampler
 
@@ -623,79 +648,73 @@ class NativePackedSamplerTests(unittest.TestCase):
         self.assertEqual(patched.call_count, 1)
         self.assertEqual(fake_sampler.estimate.call_count, 2)
 
-    def test_surface_diagnostic_loss_matches_native_batch_accessors(self) -> None:
+    def test_surface_code_decoder_loss_matches_native_batch_accessors(self) -> None:
         example = make_large_rotated_surface_code_memory_example(
             distance=5,
             rounds=1,
         )
-        sampler = self._native_sampler_or_skip(example.circuit)
+        decoder = self._surface_decoder_or_skip(example)
+        sampler = self._native_sampler_or_skip(
+            example.circuit,
+            observables=example.observables,
+        )
         native_batch = sampler._engine.run_native_batch(64, 23)
         converted_batch = sampler.sample(shots=64, seed=23)
+        native_corrections = decoder.decode_batch_masks(native_batch)
+        converted_corrections = decoder.decode_batch_masks(converted_batch)
 
         self.assertEqual(
-            example.diagnostic_loss_mask(native_batch),
-            example.diagnostic_loss_mask(converted_batch),
+            _default_batch_loss(native_batch, native_corrections),
+            _default_batch_loss(converted_batch, converted_corrections),
         )
 
-    def test_surface_diagnostic_native_loss_mask_matches_python_loss(self) -> None:
+    def test_surface_code_estimate_uses_default_logical_loss(self) -> None:
         example = make_large_rotated_surface_code_memory_example(
             distance=5,
             rounds=1,
         )
-        sampler = self._native_sampler_or_skip(example.circuit)
-        native_batch = sampler._engine.run_native_batch(64, 29)
-        spec = example.native_loss_spec("surface_diagnostic")
-        self.assertIsNotNone(spec)
-        assert spec is not None
+        decoder = self._surface_decoder_or_skip(example)
+        sampler = self._native_sampler_or_skip(
+            example.circuit,
+            observables=example.observables,
+        )
+        batch = sampler._engine.run_native_batch(96, 37)
+        corrections = decoder.decode_batch_masks(batch)
+        loss_mask = _default_batch_loss(batch, corrections)
 
-        native_loss = int(
-            native_batch.surface_diagnostic_loss_mask(
-                spec["x_qubits"],
-                spec["z_qubits"],
-                spec["measurement_pairs"],
-            )
+        result = sampler.estimate(
+            shots=96,
+            seed=37,
+            decoder=decoder,
         )
 
-        self.assertEqual(native_loss, example.diagnostic_loss_mask(native_batch))
+        self.assertEqual(result.mean_loss, loss_mask.bit_count() / 96)
 
-    def test_surface_diagnostic_estimate_uses_native_loss_spec(self) -> None:
-        example = make_large_rotated_surface_code_memory_example(
+    def test_repetition_code_estimate_uses_default_logical_loss(self) -> None:
+        experiment = make_repetition_code_experiment(
             distance=5,
-            rounds=1,
+            rounds=3,
+            data_error_rate={(0, 1): 0.12, (1, 3): 0.09},
+            measurement_error_rate={(0, 0): 0.04, (2, 2): 0.05},
         )
-        sampler = self._native_sampler_or_skip(example.circuit)
-
-        class NativeOnlyLoss:
-            _npsim_native_loss = "surface_diagnostic"
-
-            def native_loss_spec(self, kind):
-                return example.native_loss_spec(kind)
-
-            def __call__(self, batch):
-                raise AssertionError("Python loss path was used")
-
-        fast = sampler.estimate(
-            shots=96,
-            seed=37,
-            loss_mask_fn=NativeOnlyLoss(),
+        sampler = self._native_sampler_or_skip(
+            experiment.circuit,
+            observables=experiment.observables,
         )
 
-        def python_loss(batch):
-            return example.diagnostic_loss_mask(batch)
-
-        reference = sampler.estimate(
-            shots=96,
-            seed=37,
-            loss_mask_fn=python_loss,
+        result = sampler.estimate(
+            shots=256,
+            seed=49,
+            decoder=experiment.decoder,
         )
 
-        self.assertEqual(fast.mean_loss, reference.mean_loss)
-        self.assertEqual(fast.sensitivities, reference.sensitivities)
-        self.assertEqual(fast.hotspots, reference.hotspots)
-        self.assertEqual(fast.by_qubit, reference.by_qubit)
-        self.assertEqual(fast.by_round, reference.by_round)
-        self.assertEqual(fast.by_gate, reference.by_gate)
-        self.assertEqual(fast.by_operation, reference.by_operation)
+        native_batch = sampler._engine.run_native_batch(256, 49)
+        reference_loss = _default_batch_loss(
+            native_batch,
+            experiment.decoder.decode_batch_masks(native_batch),
+        )
+
+        self.assertEqual(result.mean_loss, reference_loss.bit_count() / 256)
 
     def test_forward_estimate_uses_pymatching_batch_decoder(self) -> None:
         try:
@@ -1678,10 +1697,13 @@ class HotspotVisualizationTests(unittest.TestCase):
             data_error_rate=data_rates,
             measurement_error_rate=measurement_rates,
         )
-        result = BatchForwardNoiseAwareSimulator(experiment.circuit).estimate(
+        result = BatchForwardNoiseAwareSimulator(
+            experiment.circuit,
+            observables=experiment.observables,
+        ).estimate(
             shots=5_000,
             seed=31,
-            loss_mask_fn=experiment.batch_loss_mask_fn,
+            decoder=experiment.decoder,
         )
 
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -1716,10 +1738,13 @@ class HotspotVisualizationTests(unittest.TestCase):
             distance=distance,
             hot_cx=hot_cx,
         )
-        result = BatchForwardNoiseAwareSimulator(circuit).estimate(
+        result = BatchForwardNoiseAwareSimulator(
+            circuit,
+            observables=experiment.observables,
+        ).estimate(
             shots=5_000,
             seed=32,
-            loss_mask_fn=experiment.batch_loss_mask_fn,
+            decoder=experiment.decoder,
         )
 
         with tempfile.TemporaryDirectory() as temp_dir:

@@ -39,51 +39,6 @@ pub(crate) struct PackedEstimate {
     pub(crate) top_locations: Vec<String>,
 }
 
-pub(crate) fn compute_surface_diagnostic_loss_mask(
-    state: &RuntimeState,
-    x_qubits: &[usize],
-    z_qubits: &[usize],
-    measurement_pairs: &[(String, String)],
-) -> PyResult<Mask> {
-    let words = state.all_mask.words.len();
-    let mut loss_mask = Mask::zero(words);
-
-    let mut x_logical = Mask::zero(words);
-    for qubit in x_qubits {
-        let mask = state
-            .x_frame
-            .get(*qubit)
-            .ok_or_else(|| PyValueError::new_err(format!("unknown qubit {qubit}")))?;
-        x_logical.xor_assign(mask);
-    }
-    loss_mask.or_assign(&x_logical);
-
-    let mut z_logical = Mask::zero(words);
-    for qubit in z_qubits {
-        let mask = state
-            .z_frame
-            .get(*qubit)
-            .ok_or_else(|| PyValueError::new_err(format!("unknown qubit {qubit}")))?;
-        z_logical.xor_assign(mask);
-    }
-    loss_mask.or_assign(&z_logical);
-
-    for (left_key, right_key) in measurement_pairs {
-        let left = state.measurements.get(left_key).ok_or_else(|| {
-            PyValueError::new_err(format!("unknown measurement key {left_key:?}"))
-        })?;
-        let right = state.measurements.get(right_key).ok_or_else(|| {
-            PyValueError::new_err(format!("unknown measurement key {right_key:?}"))
-        })?;
-        let mut detector = left.clone();
-        detector.xor_assign(right);
-        loss_mask.or_assign(&detector);
-    }
-
-    loss_mask.and_assign(&state.all_mask);
-    Ok(loss_mask)
-}
-
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub(crate) struct DetectorGraphKey {
     pub(crate) detectors: Vec<i64>,

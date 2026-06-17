@@ -76,10 +76,12 @@ def main() -> None:
         try:
             native_batch_sampler = compile_native_sampler(
                 experiment.circuit,
+                observables=experiment.observables,
                 backend="native",
             )
             reference_batch_engine = ReferenceBatchForwardNoiseAwareSimulator(
                 experiment.circuit,
+                observables=experiment.observables,
             )
             native_dem_sampler = compile_native_dem_sampler(dem, backend="native")
             reference_dem_engine = ReferenceDemBatchHotspotSimulator(dem)
@@ -88,7 +90,7 @@ def main() -> None:
                 lambda seed: native_batch_sampler.estimate(
                     shots=args.shots,
                     seed=seed,
-                    loss_mask_fn=experiment.batch_loss_mask_fn,
+                    decoder=experiment.decoder,
                     top_k=args.top_k,
                 ),
                 shots=args.shots,
@@ -99,7 +101,7 @@ def main() -> None:
                     reference_batch_engine,
                     shots=args.shots,
                     seed=seed,
-                    loss_mask_fn=experiment.batch_loss_mask_fn,
+                    decoder=experiment.decoder,
                     top_k=args.top_k,
                 ),
                 shots=args.shots,
@@ -107,16 +109,18 @@ def main() -> None:
             )
 
             native_batch = native_batch_sampler._engine.run_native_batch(args.shots, 777)
-            native_loss = int(experiment.batch_loss_mask_fn(native_batch)) & int(
-                native_batch.all_mask
-            )
+            native_corrections = experiment.decoder.decode_batch_masks(native_batch)
+            native_loss = _forward_default_loss_mask(native_batch, native_corrections)
             reference_batch = reference_batch_engine.run_batch(
                 shots=args.shots,
                 rng=random.Random(777),
             )
-            reference_loss = (
-                experiment.batch_loss_mask_fn(reference_batch)
-                & reference_batch.all_mask
+            reference_corrections = experiment.decoder.decode_batch_masks(
+                reference_batch
+            )
+            reference_loss = _forward_default_loss_mask(
+                reference_batch,
+                reference_corrections,
             )
 
             native_batch_agg_sps = _median_samples_per_second(
@@ -332,13 +336,25 @@ def _reference_batch_estimate(
     *,
     shots: int,
     seed: int | None,
-    loss_mask_fn: Any,
+    decoder: Any,
     top_k: int,
 ) -> Any:
     rng = random.Random(seed)
     batch = engine.run_batch(shots=shots, rng=rng)
-    loss_mask = loss_mask_fn(batch) & batch.all_mask
+    corrections = decoder.decode_batch_masks(batch)
+    loss_mask = _forward_default_loss_mask(batch, corrections)
     return _reference_batch_aggregate(engine, batch, loss_mask, top_k=top_k)
+
+
+def _forward_default_loss_mask(batch: Any, corrections: Any) -> int:
+    observable_ids = set(batch.observables)
+    observable_ids.update(corrections)
+    loss_mask = 0
+    for observable_id in observable_ids:
+        loss_mask |= int(batch.observables.get(observable_id, 0)) ^ int(
+            corrections.get(observable_id, 0)
+        )
+    return loss_mask & int(batch.all_mask)
 
 
 if __name__ == "__main__":

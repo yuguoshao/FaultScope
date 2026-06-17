@@ -1,9 +1,15 @@
 import unittest
-from typing import Iterable, Sequence
+from typing import Any, Iterable, Mapping, Sequence
 
 from npsim.runtime import BatchTrajectory
 from npsim.core import Circuit, NoiseLocation, Operation
-from npsim.dem import Detector, LogicalObservable
+from npsim.decoders import (
+    PyMatchingBatchDecoder,
+    PyMatchingUnavailableError,
+    UnsupportedPyMatchingDemError,
+)
+from npsim.dem import Detector, DetectorErrorEdge, DetectorErrorModel, LogicalObservable
+from npsim.io import parse_stim_circuit
 from npsim.runtime import UnsupportedNativeCircuitError, compile_native_sampler
 from npsim.runtime import compile_native_dem_sampler, generate_native_dem
 from npsim.core import (
@@ -14,7 +20,11 @@ from npsim.core import (
     TwoQubitDepolarizing,
 )
 from npsim.experiments import make_repetition_code_experiment
-from tests.surface_code_examples import make_large_rotated_surface_code_memory_example
+from tests.surface_code_examples import (
+    _data_index,
+    _rotated_surface_code_checks,
+    make_large_rotated_surface_code_memory_example,
+)
 
 
 try:
@@ -151,10 +161,7 @@ class StimSamplingComparisonTests(unittest.TestCase):
         for key in sorted(selected_keys):
             _assert_key_rate_close(self, batch, stim_samples, key_order, key)
 
-        spec = example.native_loss_spec("surface_diagnostic")
-        self.assertIsNotNone(spec)
-        assert spec is not None
-        for measurement_pair in spec["measurement_pairs"]:
+        for measurement_pair in example.terminal_measurement_pairs:
             _assert_parity_rate_close(
                 self,
                 batch,
@@ -168,13 +175,10 @@ class StimSamplingComparisonTests(unittest.TestCase):
             distance=5,
             rounds=2,
         )
-        spec = example.native_loss_spec("surface_diagnostic")
-        self.assertIsNotNone(spec)
-        assert spec is not None
 
         for prefix, qubits, basis in (
-            ("x_path_z_readout", spec["x_qubits"], "Z"),
-            ("z_path_x_readout", spec["z_qubits"], "X"),
+            ("x_path_z_readout", example.x_logical_qubits, "Z"),
+            ("z_path_x_readout", example.z_logical_qubits, "X"),
         ):
             with self.subTest(prefix=prefix):
                 circuit = _with_final_data_measurements(
@@ -193,6 +197,127 @@ class StimSamplingComparisonTests(unittest.TestCase):
                     stim_samples,
                     key_order,
                     path_keys,
+                )
+
+    def test_repetition_code_logical_error_rate_matches_stim_raw_samples(self) -> None:
+        shots = 15_000
+        experiment = make_repetition_code_experiment(
+            distance=5,
+            rounds=3,
+            data_error_rate={(1, 2): 0.17, (2, 0): 0.09},
+            measurement_error_rate=0.035,
+        )
+        try:
+            npsim_result = compile_native_sampler(
+                experiment.circuit,
+                observables=experiment.observables,
+                backend="native",
+            ).estimate(
+                shots=shots,
+                seed=12345,
+                decoder=experiment.decoder,
+            )
+        except UnsupportedNativeCircuitError as exc:
+            self.skipTest(f"native forward sampler unavailable: {exc}")
+
+        observable = LogicalObservable(id=0, measurement_keys=("final_d_0",))
+        declared_circuit = _with_dem_declarations(
+            _with_final_data_measurements(
+                experiment.circuit,
+                (experiment.data_qubits[0],),
+                basis="Z",
+                prefix="final_d",
+            ),
+            detectors=experiment.detectors,
+            observables=(observable,),
+        )
+        stim_batch, stim_observables = _sample_stim_measurements_and_observables(
+            declared_circuit,
+            observables=(observable,),
+            shots=shots,
+            seed=67890,
+        )
+        stim_corrections = experiment.decoder.decode_batch_masks(stim_batch)
+        stim_loss_rate = _residual_rate(
+            stim_observables[0],
+            stim_corrections.get(0, 0),
+            stim_batch.shots,
+        )
+
+        _assert_rates_close(
+            self,
+            npsim_result.mean_loss,
+            stim_loss_rate,
+            shots,
+            "repetition raw-sample decoded logical error rate",
+        )
+
+    def test_surface_code_initialized_memory_logical_error_rates_match_stim_raw_samples(self) -> None:
+        shots = 20_000
+        for basis in ("x", "z"):
+            with self.subTest(basis=basis):
+                stim_circuit = stim.Circuit.generated(
+                    code_task=f"surface_code:rotated_memory_{basis}",
+                    distance=3,
+                    rounds=3,
+                    after_clifford_depolarization=0.01,
+                )
+                imported = parse_stim_circuit(str(stim_circuit.flattened()))
+                try:
+                    stim_dem = stim_circuit.detector_error_model(
+                        decompose_errors=True,
+                        flatten_loops=True,
+                    )
+                    pymatching = _load_pymatching_or_skip(self)
+                    matcher = pymatching.Matching.from_detector_error_model(stim_dem)
+                    decoder = _StimMatcherBatchDecoder(
+                        matcher=matcher,
+                        detector_ids=tuple(
+                            detector.id
+                            for detector in imported.detectors
+                        ),
+                        observable_ids=tuple(
+                            observable.id
+                            for observable in imported.observables
+                        ),
+                    )
+                    npsim_result = compile_native_sampler(
+                        imported.circuit,
+                        backend="native",
+                    ).estimate(
+                        shots=shots,
+                        seed=22345,
+                        decoder=decoder,
+                    )
+                except UnsupportedNativeCircuitError as exc:
+                    self.skipTest(f"native forward sampler unavailable: {exc}")
+                except (PyMatchingUnavailableError, UnsupportedPyMatchingDemError) as exc:
+                    self.skipTest(f"PyMatching DEM decoder unavailable: {exc}")
+
+                stim_detectors, stim_observables = stim_circuit.compile_detector_sampler(
+                    seed=77890,
+                ).sample(
+                    shots,
+                    separate_observables=True,
+                )
+                stim_batch = _stim_dem_batch(
+                    stim_detectors,
+                    stim_observables,
+                    detectors=imported.detectors,
+                    observables=imported.observables,
+                )
+                stim_loss_rate = _dem_decoded_loss_rate(
+                    stim_batch,
+                    decoder,
+                    observable_id=0,
+                )
+
+                _assert_rates_close(
+                    self,
+                    npsim_result.mean_loss,
+                    stim_loss_rate,
+                    shots,
+                    f"surface initialized memory raw logical error rate {basis}",
                 )
 
     def test_native_dem_generator_matches_stim_detector_error_model(self) -> None:
@@ -281,6 +406,113 @@ class StimSamplingComparisonTests(unittest.TestCase):
 
         self.assertEqual(stim_observables.shape[1], 0)
 
+    def test_repetition_code_dem_logical_error_rate_matches_stim_dem_sampler(self) -> None:
+        shots = 18_000
+        experiment = make_repetition_code_experiment(
+            distance=5,
+            rounds=3,
+            data_error_rate={(0, 1): 0.12, (1, 3): 0.09, (2, 0): 0.07},
+            measurement_error_rate={(0, 0): 0.04, (1, 2): 0.06, (2, 3): 0.05},
+        )
+        observable = LogicalObservable(id=0, measurement_keys=("final_d_0",))
+        circuit = _with_final_data_measurements(
+            experiment.circuit,
+            (experiment.data_qubits[0],),
+            basis="Z",
+            prefix="final_d",
+        )
+
+        try:
+            npsim_dem = generate_native_dem(
+                circuit,
+                detectors=experiment.detectors,
+                observables=(observable,),
+                backend="native",
+            )
+            decoder = PyMatchingBatchDecoder.from_dem(npsim_dem)
+            npsim_batch = compile_native_dem_sampler(
+                npsim_dem,
+                backend="native",
+            ).run_batch(shots=shots, seed=24680)
+        except UnsupportedNativeCircuitError as exc:
+            self.skipTest(f"native DEM mode unavailable: {exc}")
+        except (PyMatchingUnavailableError, UnsupportedPyMatchingDemError) as exc:
+            self.skipTest(f"PyMatching DEM decoder unavailable: {exc}")
+
+        stim_circuit, _ = _to_stim_circuit(
+            _with_dem_declarations(
+                circuit,
+                detectors=experiment.detectors,
+                observables=(observable,),
+            )
+        )
+        stim_dem = stim_circuit.detector_error_model(decompose_errors=False)
+        stim_detectors, stim_observables, _ = stim_dem.compile_sampler(seed=13579).sample(
+            shots,
+        )
+        stim_batch = _stim_dem_batch(
+            stim_detectors,
+            stim_observables,
+            detectors=experiment.detectors,
+            observables=(observable,),
+        )
+
+        _assert_rates_close(
+            self,
+            _dem_decoded_loss_rate(npsim_batch, decoder, observable_id=0),
+            _dem_decoded_loss_rate(stim_batch, decoder, observable_id=0),
+            shots,
+            "repetition DEM decoded logical error rate",
+        )
+
+    def test_surface_code_dem_logical_error_rates_match_stim_dem_sampler(self) -> None:
+        shots = 12_000
+        for label, circuit, detectors, observables in _deterministic_surface_memory_cases():
+            with self.subTest(memory=label):
+                try:
+                    npsim_dem = generate_native_dem(
+                        circuit,
+                        detectors=detectors,
+                        observables=observables,
+                        backend="native",
+                    )
+                    decoder = PyMatchingBatchDecoder.from_dem(npsim_dem)
+                    npsim_batch = compile_native_dem_sampler(
+                        npsim_dem,
+                        backend="native",
+                    ).run_batch(shots=shots, seed=34680)
+                except UnsupportedNativeCircuitError as exc:
+                    self.skipTest(f"native DEM mode unavailable: {exc}")
+                except (PyMatchingUnavailableError, UnsupportedPyMatchingDemError) as exc:
+                    self.skipTest(f"PyMatching DEM decoder unavailable: {exc}")
+
+                stim_circuit, _ = _to_stim_circuit(
+                    _with_dem_declarations(
+                        circuit,
+                        detectors=detectors,
+                        observables=observables,
+                    )
+                )
+                stim_dem = stim_circuit.detector_error_model(decompose_errors=False)
+
+                stim_detectors, stim_observables, _ = stim_dem.compile_sampler(
+                    seed=23579,
+                ).sample(shots)
+                stim_batch = _stim_dem_batch(
+                    stim_detectors,
+                    stim_observables,
+                    detectors=detectors,
+                    observables=observables,
+                )
+
+                _assert_rates_close(
+                    self,
+                    _dem_decoded_loss_rate(npsim_batch, decoder, observable_id=0),
+                    _dem_decoded_loss_rate(stim_batch, decoder, observable_id=0),
+                    shots,
+                    f"surface DEM decoded logical error rate {label}",
+                )
+
 
 def _sample_both(
     circuit: Circuit,
@@ -297,6 +529,314 @@ def _sample_both(
     stim_circuit, key_order = _to_stim_circuit(circuit)
     samples = stim_circuit.compile_sampler(seed=stim_seed).sample(shots)
     return batch, samples, key_order
+
+
+class _StimMatcherBatchDecoder:
+    def __init__(
+        self,
+        *,
+        matcher: Any,
+        detector_ids: Sequence[int],
+        observable_ids: Sequence[int],
+    ) -> None:
+        self.matcher = matcher
+        self.detector_ids = tuple(int(detector_id) for detector_id in detector_ids)
+        self.observable_ids = tuple(
+            int(observable_id)
+            for observable_id in observable_ids
+        )
+
+    def decode_batch_masks(self, batch: BatchTrajectory) -> dict[int, int]:
+        syndromes = _masks_to_dense_array(
+            batch.detectors,
+            self.detector_ids,
+            batch.shots,
+        )
+        predictions = self.matcher.decode_batch(syndromes)
+        return _dense_predictions_to_masks(
+            predictions,
+            self.observable_ids,
+            batch.shots,
+        )
+
+
+def _load_pymatching_or_skip(testcase: unittest.TestCase) -> Any:
+    try:
+        import pymatching
+    except ImportError as exc:
+        testcase.skipTest(f"PyMatching is not installed: {exc}")
+    return pymatching
+
+
+def _sample_stim_measurements_and_observables(
+    circuit: Circuit,
+    *,
+    observables: Sequence[LogicalObservable],
+    shots: int,
+    seed: int,
+) -> tuple[BatchTrajectory, dict[int, int]]:
+    stim_circuit, key_order = _to_stim_circuit(circuit)
+    samples = stim_circuit.compile_sampler(seed=seed).sample(shots)
+    _, observable_flips = stim_circuit.compile_m2d_converter().convert(
+        measurements=samples,
+        separate_observables=True,
+    )
+    return (
+        _measurement_batch_from_stim_samples(samples, key_order),
+        _stim_observable_masks(observable_flips, observables),
+    )
+
+
+def _measurement_batch_from_stim_samples(
+    samples: object,
+    key_order: Sequence[str],
+) -> BatchTrajectory:
+    shots = int(samples.shape[0])
+    return BatchTrajectory(
+        shots=shots,
+        all_mask=(1 << shots) - 1,
+        x_frame=(),
+        z_frame=(),
+        measurements={
+            key: _stim_column_mask(samples, column)
+            for column, key in enumerate(key_order)
+        },
+        detectors={},
+        observables={},
+        noise_event_masks={},
+    )
+
+
+def _stim_dem_batch(
+    stim_detectors: object,
+    stim_observables: object,
+    *,
+    detectors: Sequence[Detector],
+    observables: Sequence[LogicalObservable],
+) -> BatchTrajectory:
+    shots = int(stim_detectors.shape[0])
+    return BatchTrajectory(
+        shots=shots,
+        all_mask=(1 << shots) - 1,
+        x_frame=(),
+        z_frame=(),
+        measurements={},
+        detectors={
+            int(detector.id): _stim_column_mask(stim_detectors, column)
+            for column, detector in enumerate(detectors)
+        },
+        observables=_stim_observable_masks(stim_observables, observables),
+        noise_event_masks={},
+    )
+
+
+def _stim_observable_masks(
+    stim_observables: object,
+    observables: Sequence[LogicalObservable],
+) -> dict[int, int]:
+    return {
+        int(observable.id): _stim_column_mask(stim_observables, int(observable.id))
+        for observable in observables
+    }
+
+
+def _stim_column_mask(samples: object, column: int) -> int:
+    assert np is not None
+    mask = 0
+    for shot in np.flatnonzero(samples[:, column]):
+        mask |= 1 << int(shot)
+    return mask
+
+
+def _residual_rate(observable_mask: int, correction_mask: int, shots: int) -> float:
+    all_mask = (1 << shots) - 1
+    return ((int(observable_mask) ^ int(correction_mask)) & all_mask).bit_count() / shots
+
+
+def _dem_decoded_loss_rate(
+    batch: BatchTrajectory,
+    decoder: PyMatchingBatchDecoder,
+    *,
+    observable_id: int,
+) -> float:
+    corrections = decoder.decode_batch_masks(batch)
+    return _residual_rate(
+        batch.observables[int(observable_id)],
+        corrections.get(int(observable_id), 0),
+        batch.shots,
+    )
+
+
+def _masks_to_dense_array(
+    masks: Mapping[int, int],
+    ids: Sequence[int],
+    shots: int,
+) -> Any:
+    assert np is not None
+    out = np.zeros((shots, len(ids)), dtype=np.uint8)
+    if shots == 0 or not ids:
+        return out
+    byte_count = (shots + 7) // 8
+    all_mask = (1 << shots) - 1
+    for col, item_id in enumerate(ids):
+        mask = int(masks.get(int(item_id), 0)) & all_mask
+        out[:, col] = np.unpackbits(
+            np.frombuffer(mask.to_bytes(byte_count, "little"), dtype=np.uint8),
+            bitorder="little",
+        )[:shots]
+    return out
+
+
+def _dense_predictions_to_masks(
+    predictions: Any,
+    observable_ids: Sequence[int],
+    shots: int,
+) -> dict[int, int]:
+    assert np is not None
+    observable_ids = tuple(int(observable_id) for observable_id in observable_ids)
+    predictions = np.asarray(predictions, dtype=np.uint8)
+    if predictions.ndim == 1:
+        predictions = predictions.reshape((shots, 1))
+    if predictions.ndim != 2 or predictions.shape[0] != shots:
+        raise ValueError(f"unexpected PyMatching prediction shape {predictions.shape}")
+    if predictions.shape[1] != len(observable_ids):
+        raise ValueError("PyMatching prediction length does not match observable count")
+    return {
+        observable_id: int.from_bytes(
+            np.packbits(
+                predictions[:, col].astype(np.uint8),
+                bitorder="little",
+            ).tobytes(),
+            "little",
+        )
+        for col, observable_id in enumerate(observable_ids)
+    }
+
+
+def _deterministic_surface_memory_cases(
+) -> tuple[tuple[str, Circuit, tuple[Detector, ...], tuple[LogicalObservable, ...]], ...]:
+    return (
+        _deterministic_surface_memory_case("z_memory"),
+        _deterministic_surface_memory_case("x_memory"),
+    )
+
+
+def _deterministic_surface_memory_case(
+    memory: str,
+) -> tuple[str, Circuit, tuple[Detector, ...], tuple[LogicalObservable, ...]]:
+    distance = 5
+    rounds = 2
+    x_checks, z_checks = _rotated_surface_code_checks(distance)
+    operations: list[Operation] = []
+    if memory == "z_memory":
+        checks = z_checks
+        basis = "Z"
+        data_error = "X"
+        logical_qubits = tuple(
+            _data_index(distance, row, 0)
+            for row in range(distance)
+        )
+    elif memory == "x_memory":
+        checks = x_checks
+        basis = "X"
+        data_error = "Z"
+        logical_qubits = tuple(
+            _data_index(distance, 0, col)
+            for col in range(distance)
+        )
+        for qubit in range(distance * distance):
+            operations.append(Operation.h(qubit))
+    else:
+        raise ValueError(f"unknown surface memory case {memory!r}")
+
+    _append_surface_memory_checks(
+        operations,
+        distance=distance,
+        round_idx=0,
+        checks=checks,
+        basis=basis,
+        noise=False,
+    )
+    for round_idx in range(1, rounds + 1):
+        for qubit in range(distance * distance):
+            operations.append(
+                Operation.noise(
+                    NoiseLocation(
+                        id=f"{memory}_data_r{round_idx}_q{qubit}",
+                        model=BernoulliPauliNoise(data_error),
+                        rate=0.04,
+                        qubits=(qubit,),
+                    )
+                )
+            )
+        _append_surface_memory_checks(
+            operations,
+            distance=distance,
+            round_idx=round_idx,
+            checks=checks,
+            basis=basis,
+            noise=True,
+        )
+    for idx, qubit in enumerate(logical_qubits):
+        operations.append(Operation.measure(qubit, key=f"logical_{idx}", basis=basis))
+
+    detectors = tuple(
+        Detector(
+            id=idx,
+            measurement_keys=(f"r{rounds}_{check['id']}", f"r0_{check['id']}"),
+            coords=(float(check["x"]), float(check["y"])),
+        )
+        for idx, check in enumerate(checks)
+    )
+    observables = (
+        LogicalObservable(
+            id=0,
+            measurement_keys=_path_keys("logical", len(logical_qubits)),
+        ),
+    )
+    return (
+        memory,
+        Circuit(n_qubits=distance * distance, operations=operations),
+        detectors,
+        observables,
+    )
+
+
+def _append_surface_memory_checks(
+    operations: list[Operation],
+    *,
+    distance: int,
+    round_idx: int,
+    checks: Sequence[dict[str, object]],
+    basis: str,
+    noise: bool,
+) -> None:
+    for check in checks:
+        check_id = str(check["id"])
+        qubits = tuple(
+            _data_index(distance, row, col)
+            for row, col in check["data"]
+        )
+        location = None
+        if noise:
+            location = NoiseLocation(
+                id=f"surface_{basis.lower()}_meas_r{round_idx}_{check_id}",
+                model=MeasurementBitFlip(),
+                rate=0.02,
+                qubits=qubits[:1],
+            )
+        operations.append(
+            Operation.measure_pauli(
+                qubits,
+                basis * len(qubits),
+                key=f"r{round_idx}_{check_id}",
+                noise=location,
+            )
+        )
+
+
+def _path_keys(prefix: str, count: int) -> tuple[str, ...]:
+    return tuple(f"{prefix}_{idx}" for idx in range(count))
 
 
 def _to_stim_circuit(circuit: Circuit) -> tuple[object, tuple[str, ...]]:
@@ -660,6 +1200,81 @@ def _stim_dem_error_edges(stim_dem: object) -> tuple[tuple[float, tuple[int, ...
             )
         )
     return tuple(sorted(edges))
+
+
+def _npsim_dem_from_stim_dem(stim_dem: object) -> DetectorErrorModel:
+    detectors_by_id: dict[int, Detector] = {}
+    observable_ids: set[int] = set()
+    edges: list[DetectorErrorEdge] = []
+    detector_offset = 0
+
+    for instruction in stim_dem:
+        instruction_type = instruction.type
+        if instruction_type == "error":
+            detectors: list[int] = []
+            observables: list[int] = []
+            for target in instruction.targets_copy():
+                if target.is_relative_detector_id():
+                    detectors.append(detector_offset + int(target.val))
+                elif target.is_logical_observable_id():
+                    observable_id = int(target.val)
+                    observables.append(observable_id)
+                    observable_ids.add(observable_id)
+                elif target.is_separator():
+                    continue
+                else:
+                    raise ValueError(f"unsupported Stim DEM target {target!r}")
+            edge_index = len(edges)
+            edges.append(
+                DetectorErrorEdge(
+                    probability=float(instruction.args_copy()[0]),
+                    detectors=tuple(detectors),
+                    observables=tuple(observables),
+                    location_id=f"stim_dem_edge_{edge_index}",
+                    event=edge_index,
+                    tags={"source": "stim_dem"},
+                )
+            )
+        elif instruction_type == "detector":
+            coords = tuple(float(coord) for coord in instruction.args_copy())
+            for target in instruction.targets_copy():
+                if not target.is_relative_detector_id():
+                    raise ValueError(f"unsupported detector target {target!r}")
+                detector_id = detector_offset + int(target.val)
+                detectors_by_id.setdefault(
+                    detector_id,
+                    Detector(
+                        id=detector_id,
+                        measurement_keys=(),
+                        coords=coords,
+                    ),
+                )
+        elif instruction_type == "shift_detectors":
+            detector_offset += sum(int(target) for target in instruction.targets_copy())
+        elif instruction_type == "logical_observable":
+            for target in instruction.targets_copy():
+                if not target.is_logical_observable_id():
+                    raise ValueError(f"unsupported logical observable target {target!r}")
+                observable_ids.add(int(target.val))
+        else:
+            raise ValueError(f"unsupported Stim DEM instruction {instruction_type!r}")
+
+    for edge in edges:
+        for detector_id in edge.detectors:
+            detectors_by_id.setdefault(
+                detector_id,
+                Detector(id=detector_id, measurement_keys=()),
+            )
+        observable_ids.update(edge.observables)
+
+    return DetectorErrorModel(
+        detectors=tuple(detectors_by_id[key] for key in sorted(detectors_by_id)),
+        observables=tuple(
+            LogicalObservable(id=observable_id)
+            for observable_id in sorted(observable_ids)
+        ),
+        edges=tuple(edges),
+    )
 
 
 def _repetition_final_data_loss_mask(
