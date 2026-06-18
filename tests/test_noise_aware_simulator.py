@@ -34,6 +34,7 @@ from npsim.runtime import (
     UnsupportedNativeCircuitError,
     NativeDemSampler,
     NativePackedSampler,
+    compile_native_dem_generator,
     compile_native_dem_sampler,
     compile_native_dem_sampler_from_circuit,
     compile_native_sampler,
@@ -1221,6 +1222,7 @@ class NativeDetectorErrorModelTests(unittest.TestCase):
         )
         dem = generate_native_dem(circuit)
         regular_sampler = compile_native_dem_sampler(dem)
+        generator = compile_native_dem_generator(circuit)
         direct_sampler = compile_native_dem_sampler_from_circuit(circuit)
         direct_light_sampler = compile_native_dem_sampler_from_circuit(
             circuit,
@@ -1242,6 +1244,7 @@ class NativeDetectorErrorModelTests(unittest.TestCase):
 
         self.assertIsInstance(direct_sampler.dem, DetectorErrorModel)
         self.assertEqual(edge_rows(direct_sampler.dem), edge_rows(dem))
+        self.assertEqual(edge_rows(generator.generate_dem()), edge_rows(dem))
         self.assertIsNone(direct_light_sampler.dem)
 
         regular_batch = regular_sampler.run_batch(shots=256, seed=123)
@@ -1254,31 +1257,22 @@ class NativeDetectorErrorModelTests(unittest.TestCase):
         self.assertEqual(direct_light_batch.detectors, regular_batch.detectors)
         self.assertEqual(direct_light_batch.observables, regular_batch.observables)
         self.assertEqual(direct_light_batch.edge_event_masks, regular_batch.edge_event_masks)
+        generator_light_batch = generator.compile_sampler(
+            materialize_dem=False,
+        ).run_batch(shots=256, seed=123)
+        self.assertEqual(generator_light_batch.detectors, regular_batch.detectors)
+        self.assertEqual(generator_light_batch.observables, regular_batch.observables)
+        self.assertEqual(generator_light_batch.edge_event_masks, regular_batch.edge_event_masks)
 
         direct_result = direct_sampler.estimate_default(shots=256, seed=123)
         self.assertEqual(direct_result.dem.edges[0].location_id, "x0")
         self.assertEqual(dict(direct_result.dem.edges[0].tags), {"round": 1})
-        direct_light_result = direct_light_sampler.estimate_default(shots=256, seed=123)
-        self.assertIsNone(direct_light_result.dem)
-        self.assertEqual(direct_light_result.mean_loss, direct_result.mean_loss)
-        self.assertEqual(direct_light_result.edge_sensitivities, direct_result.edge_sensitivities)
-        self.assertEqual(direct_light_result.edge_hotspots, direct_result.edge_hotspots)
+        with self.assertRaises(ValueError):
+            direct_light_sampler.estimate_default(shots=256, seed=123)
 
         direct_edge = direct_result.top_edges(1)[0]
-        direct_light_edge = direct_light_result.top_edges(2)[0]
-        self.assertEqual(direct_light_edge.edge_index, direct_edge.edge_index)
-        self.assertEqual(direct_light_edge.location_id, "x0")
-        self.assertEqual(direct_light_edge.event, "X")
-        self.assertEqual(direct_light_edge.detectors, direct_edge.detectors)
-        self.assertEqual(direct_light_edge.observables, direct_edge.observables)
-        self.assertEqual(direct_light_edge.sensitivity, direct_edge.sensitivity)
-        self.assertEqual(direct_light_edge.hotspot, direct_edge.hotspot)
-
         direct_graph_edge = direct_result.detector_graph_hotspots.edge_hotspots[0]
-        direct_light_graph_edge = direct_light_result.detector_graph_hotspots.edge_hotspots[0]
-        self.assertEqual(direct_light_graph_edge.edge_index, direct_graph_edge.edge_index)
-        self.assertEqual(direct_light_graph_edge.location_id, "x0")
-        self.assertEqual(direct_light_graph_edge.event, "X")
+        self.assertEqual(direct_edge.edge_index, direct_graph_edge.edge_index)
 
     def test_native_dem_generator_rejects_random_ideal_measurement(self) -> None:
         self._require_native_dem()

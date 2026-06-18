@@ -32,9 +32,11 @@ from npsim.core import (
     TwoQubitDepolarizing,
 )
 from npsim.runtime import (
+    NativeDemGenerator,
     NativeDemSampler,
     NativePackedSampler,
     UnsupportedNativeCircuitError,
+    compile_native_dem_generator,
     compile_native_dem_sampler,
     compile_native_dem_sampler_from_circuit,
     compile_native_sampler,
@@ -75,6 +77,7 @@ __all__ = [
     "LogicalObservable",
     "MeasurementBitFlip",
     "NativeDemSampler",
+    "NativeDemGenerator",
     "NativePackedSampler",
     "NoiseLocation",
     "Operation",
@@ -91,6 +94,7 @@ __all__ = [
     "UnsupportedNativeCircuitError",
     "UnsupportedPyMatchingDemError",
     "VisualizationUnavailableError",
+    "compile_native_dem_generator",
     "compile_native_dem_sampler",
     "compile_native_dem_sampler_from_circuit",
     "compile_native_sampler",

@@ -1,9 +1,9 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::{
-    sparse_pauli_to_xz, word_count, Circuit, ConcreteStabilizer, DemEvent, Detector,
-    DetectorErrorEdge, DetectorErrorModel, LogicalObservable, Mask, NoiseLocation, NoiseModel,
-    NpError, NpResult, Operation,
+    sparse_pauli_to_xz, word_count, Circuit, ConcreteStabilizer, DemEvent, DemSamplerEdge,
+    Detector, DetectorErrorEdge, DetectorErrorModel, LogicalObservable, Mask, NoiseLocation,
+    NoiseModel, NpError, NpResult, Operation,
 };
 
 /// Detector error model generator based on single-error propagation.
@@ -16,6 +16,7 @@ pub struct DetectorErrorModelGenerator {
     pub circuit: Circuit,
     pub detectors: Vec<Detector>,
     pub observables: Vec<LogicalObservable>,
+    event_plan: DemEventPlan,
 }
 
 impl DetectorErrorModelGenerator {
@@ -36,42 +37,170 @@ impl DetectorErrorModelGenerator {
         for observable in &observables {
             observable.validate()?;
         }
+        let event_plan = collect_dem_event_plan(&circuit.operations)?;
         Ok(Self {
             circuit,
             detectors,
             observables,
+            event_plan,
         })
     }
 
     /// Generate a typed detector error model.
     pub fn generate(&self) -> NpResult<DetectorErrorModel> {
-        let generated_edges = generate_dem_edges(
+        let generated_edges = generate_dem_edges_from_plan(
             self.circuit.n_qubits,
             &self.circuit.operations,
             &self.detectors,
             &self.observables,
+            &self.event_plan,
         )?;
-        let noise_locations = self.circuit.noise_locations();
-        let edges = generated_edges
-            .into_iter()
-            .map(|edge| DetectorErrorEdge {
-                probability: edge.probability,
-                detectors: edge.detectors,
-                observables: edge.observables,
-                tags: noise_locations
-                    .get(&edge.location_id)
-                    .map(|location| location.tags.clone())
-                    .unwrap_or_default(),
-                location_id: edge.location_id,
-                event: edge.event,
-            })
-            .collect();
         Ok(DetectorErrorModel {
             detectors: self.detectors.clone(),
             observables: self.observables.clone(),
-            edges,
+            edges: generated_edges_to_detector_edges(&self.circuit, generated_edges),
         })
     }
+
+    /// Generate only the edge metadata required by the native DEM sampler.
+    pub fn generate_sampler_edges(&self) -> NpResult<Vec<DemSamplerEdge>> {
+        let generated_edges = generate_dem_edges_from_plan(
+            self.circuit.n_qubits,
+            &self.circuit.operations,
+            &self.detectors,
+            &self.observables,
+            &self.event_plan,
+        )?;
+        Ok(generated_edges_to_sampler_edges(
+            &self.circuit,
+            generated_edges,
+        ))
+    }
+}
+
+fn generated_edges_to_detector_edges(
+    circuit: &Circuit,
+    generated_edges: Vec<GeneratedDemEdge>,
+) -> Vec<DetectorErrorEdge> {
+    let noise_locations = circuit.noise_locations();
+    generated_edges
+        .into_iter()
+        .map(|edge| DetectorErrorEdge {
+            probability: edge.probability,
+            detectors: edge.detectors,
+            observables: edge.observables,
+            tags: noise_locations
+                .get(&edge.location_id)
+                .map(|location| location.tags.clone())
+                .unwrap_or_default(),
+            location_id: edge.location_id,
+            event: edge.event,
+        })
+        .collect()
+}
+
+fn generated_edges_to_sampler_edges(
+    circuit: &Circuit,
+    generated_edges: Vec<GeneratedDemEdge>,
+) -> Vec<DemSamplerEdge> {
+    let noise_locations = circuit.noise_locations();
+    generated_edges
+        .into_iter()
+        .map(|edge| DemSamplerEdge {
+            probability: edge.probability,
+            detectors: edge.detectors,
+            observables: edge.observables,
+            tags: noise_locations
+                .get(&edge.location_id)
+                .map(|location| location.tags.clone())
+                .unwrap_or_default(),
+            location_id: edge.location_id,
+            event: edge.event,
+        })
+        .collect()
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct DemEventPlan {
+    events: Vec<SensitivityEvent>,
+    events_by_op: Vec<Vec<usize>>,
+}
+
+pub fn collect_dem_event_plan(operations: &[Operation]) -> NpResult<DemEventPlan> {
+    let (events, events_by_op) = collect_sensitivity_events(operations)?;
+    Ok(DemEventPlan {
+        events,
+        events_by_op,
+    })
+}
+
+pub fn generate_dem_edges(
+    n_qubits: usize,
+    operations: &[Operation],
+    detectors: &[Detector],
+    observables: &[LogicalObservable],
+) -> NpResult<Vec<GeneratedDemEdge>> {
+    let event_plan = collect_dem_event_plan(operations)?;
+    generate_dem_edges_from_plan(n_qubits, operations, detectors, observables, &event_plan)
+}
+
+pub fn generate_dem_edges_from_plan(
+    n_qubits: usize,
+    operations: &[Operation],
+    detectors: &[Detector],
+    observables: &[LogicalObservable],
+    event_plan: &DemEventPlan,
+) -> NpResult<Vec<GeneratedDemEdge>> {
+    let events = &event_plan.events;
+    let events_by_op = &event_plan.events_by_op;
+    let mut state = DemSensitivityState::new(n_qubits, events.len());
+    for (op_index, operation) in operations.iter().enumerate() {
+        apply_sensitivity_operation(operation, op_index, events, events_by_op, &mut state)?;
+    }
+    let detector_sensitivities =
+        evaluate_sensitivity_detectors(&state.measurements, detectors, state.event_words)?;
+    let observable_sensitivities = evaluate_sensitivity_observables(
+        &state.measurements,
+        &state.x_frame,
+        &state.z_frame,
+        observables,
+        state.event_words,
+    )?;
+    Ok(assemble_generated_dem_edges(
+        events,
+        detector_sensitivities,
+        observable_sensitivities,
+    ))
+}
+
+fn assemble_generated_dem_edges(
+    events: &[SensitivityEvent],
+    detector_sensitivities: HashMap<i64, Mask>,
+    observable_sensitivities: HashMap<i64, Mask>,
+) -> Vec<GeneratedDemEdge> {
+    let detector_sensitivities = sorted_sensitivities(detector_sensitivities);
+    let observable_sensitivities = sorted_sensitivities(observable_sensitivities);
+    let mut detector_flips_by_event =
+        sensitivity_flips_by_event(&detector_sensitivities, events.len());
+    let mut observable_flips_by_event =
+        sensitivity_flips_by_event(&observable_sensitivities, events.len());
+    let mut edges = Vec::new();
+
+    for (event_index, event) in events.iter().enumerate() {
+        let detector_flips = std::mem::take(&mut detector_flips_by_event[event_index]);
+        let observable_flips = std::mem::take(&mut observable_flips_by_event[event_index]);
+        if detector_flips.is_empty() && observable_flips.is_empty() {
+            continue;
+        }
+        edges.push(GeneratedDemEdge {
+            probability: event.probability,
+            detectors: detector_flips,
+            observables: observable_flips,
+            location_id: event.location_id.clone(),
+            event: event.event.clone(),
+        });
+    }
+    edges
 }
 
 /// Infer detector declarations from detector operations in a circuit.
@@ -159,7 +288,7 @@ struct NoiseOccurrence {
     location: NoiseLocation,
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone, PartialEq)]
 struct SensitivityEvent {
     location_id: String,
     qubits: Vec<usize>,
@@ -186,51 +315,6 @@ impl DemSensitivityState {
             event_words,
         }
     }
-}
-
-pub fn generate_dem_edges(
-    n_qubits: usize,
-    operations: &[Operation],
-    detectors: &[Detector],
-    observables: &[LogicalObservable],
-) -> NpResult<Vec<GeneratedDemEdge>> {
-    let (events, events_by_op) = collect_sensitivity_events(operations)?;
-    let mut state = DemSensitivityState::new(n_qubits, events.len());
-    for (op_index, operation) in operations.iter().enumerate() {
-        apply_sensitivity_operation(operation, op_index, &events, &events_by_op, &mut state)?;
-    }
-    let detector_sensitivities =
-        evaluate_sensitivity_detectors(&state.measurements, detectors, state.event_words)?;
-    let observable_sensitivities = evaluate_sensitivity_observables(
-        &state.measurements,
-        &state.x_frame,
-        &state.z_frame,
-        observables,
-        state.event_words,
-    )?;
-    let detector_sensitivities = sorted_sensitivities(detector_sensitivities);
-    let observable_sensitivities = sorted_sensitivities(observable_sensitivities);
-    let mut detector_flips_by_event =
-        sensitivity_flips_by_event(&detector_sensitivities, events.len());
-    let mut observable_flips_by_event =
-        sensitivity_flips_by_event(&observable_sensitivities, events.len());
-    let mut edges = Vec::new();
-
-    for (event_index, event) in events.iter().enumerate() {
-        let detector_flips = std::mem::take(&mut detector_flips_by_event[event_index]);
-        let observable_flips = std::mem::take(&mut observable_flips_by_event[event_index]);
-        if detector_flips.is_empty() && observable_flips.is_empty() {
-            continue;
-        }
-        edges.push(GeneratedDemEdge {
-            probability: event.probability,
-            detectors: detector_flips,
-            observables: observable_flips,
-            location_id: event.location_id.clone(),
-            event: event.event.clone(),
-        });
-    }
-    Ok(edges)
 }
 
 fn collect_sensitivity_events(
@@ -780,6 +864,59 @@ mod tests {
             dem.edges[0].tags.get("gate"),
             Some(&crate::TagValue::String("idle".to_string()))
         );
+    }
+
+    #[test]
+    fn generator_sampler_edges_match_full_dem_edges() {
+        let mut tags = HashMap::new();
+        tags.insert(
+            "operation".to_string(),
+            crate::TagValue::String("idle".to_string()),
+        );
+        let location = NoiseLocation {
+            id: "x0".to_string(),
+            model: NoiseModel::BernoulliPauli("X".to_string()),
+            rate: 0.25,
+            qubits: vec![0],
+            tags,
+        };
+        let circuit = Circuit {
+            n_qubits: 1,
+            operations: vec![
+                Operation::Noise(location),
+                Operation::Measure {
+                    qubit: 0,
+                    key: Some("m0".to_string()),
+                    basis: "Z".to_string(),
+                    noise: None,
+                },
+                Operation::Detector {
+                    detector_id: Some(0),
+                    measurement_keys: vec!["m0".to_string()],
+                    coords: Vec::new(),
+                },
+                Operation::ObservableInclude {
+                    observable_id: 0,
+                    measurement_keys: vec!["m0".to_string()],
+                },
+            ],
+        };
+        let generator = DetectorErrorModelGenerator::new(circuit, None, None).unwrap();
+
+        let first = generator.generate().unwrap();
+        let second = generator.generate().unwrap();
+        let sampler_edges = generator.generate_sampler_edges().unwrap();
+
+        assert_eq!(first, second);
+        assert_eq!(sampler_edges.len(), first.edges.len());
+        for (sampler_edge, dem_edge) in sampler_edges.iter().zip(first.edges.iter()) {
+            assert_eq!(sampler_edge.probability, dem_edge.probability);
+            assert_eq!(sampler_edge.detectors, dem_edge.detectors);
+            assert_eq!(sampler_edge.observables, dem_edge.observables);
+            assert_eq!(sampler_edge.location_id, dem_edge.location_id);
+            assert_eq!(sampler_edge.event, dem_edge.event);
+            assert_eq!(sampler_edge.tags, dem_edge.tags);
+        }
     }
 
     #[test]

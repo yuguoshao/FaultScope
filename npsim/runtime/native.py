@@ -21,9 +21,11 @@ try:
     _native_mod = importlib.import_module("npsim._npsim_native")
     NativePackedSampler = _native_mod.NativePackedSampler
     NativeDemSampler = _native_mod.NativeDemSampler
-except ImportError:
+    NativeDemGenerator = _native_mod.NativeDemGenerator
+except (AttributeError, ImportError):
     NativePackedSampler = Any
     NativeDemSampler = Any
+    NativeDemGenerator = Any
 
 
 def compile_native_sampler(
@@ -51,12 +53,40 @@ def generate_native_dem(
     """Generate a detector error model through the native extension."""
 
     try:
-        native_mod = importlib.import_module("npsim._npsim_native")
-        return native_mod.DetectorErrorModelGenerator(
+        generator = compile_native_dem_generator(
             circuit,
             detectors=detectors,
             observables=observables,
-        ).generate()
+        )
+        if hasattr(generator, "generate_dem"):
+            return generator.generate_dem()
+        return generator.generate()
+    except UnsupportedNativeCircuitError:
+        raise
+    except Exception as exc:
+        raise UnsupportedNativeCircuitError(str(exc)) from exc
+
+
+def compile_native_dem_generator(
+    circuit: Circuit,
+    *,
+    detectors: Any | None = None,
+    observables: Any | None = None,
+) -> NativeDemGenerator:
+    """Compile ``circuit`` into a reusable native DEM generator."""
+
+    try:
+        native_mod = importlib.import_module("npsim._npsim_native")
+        compile_generator = getattr(native_mod, "compile_dem_generator", None)
+        if compile_generator is None:
+            generator = native_mod.DetectorErrorModelGenerator(
+                circuit,
+                detectors=detectors,
+                observables=observables,
+            )
+        else:
+            generator = compile_generator(circuit, detectors, observables)
+        return generator
     except Exception as exc:
         raise UnsupportedNativeCircuitError(str(exc)) from exc
 
@@ -83,33 +113,43 @@ def compile_native_dem_sampler_from_circuit(
     """Generate and compile a native DEM sampler directly from ``circuit``.
 
     ``materialize_dem=False`` skips constructing the Python ``DetectorErrorModel``
-    object while keeping Rust-side edge metadata for sampling and hotspot
-    results. In that mode, ``sampler.dem`` and hotspot ``result.dem`` are
-    ``None``.
+    object. In that mode, ``sampler.dem`` is ``None`` and APIs requiring full
+    DEM metadata raise ``ValueError``.
     """
 
     try:
-        native_mod = importlib.import_module("npsim._npsim_native")
-        if materialize_dem:
-            payload = native_mod.generate_and_compile_dem_sampler(
+        generator = compile_native_dem_generator(
+            circuit,
+            detectors=detectors,
+            observables=observables,
+        )
+        if not hasattr(generator, "compile_sampler"):
+            native_mod = importlib.import_module("npsim._npsim_native")
+            if materialize_dem:
+                payload = native_mod.generate_and_compile_dem_sampler(
+                    circuit,
+                    detectors,
+                    observables,
+                )
+                return payload["sampler"]
+            return native_mod.compile_generated_dem_sampler(
                 circuit,
                 detectors,
                 observables,
             )
-            return payload["sampler"]
-        return native_mod.compile_generated_dem_sampler(
-            circuit,
-            detectors,
-            observables,
-        )
+        if materialize_dem:
+            return generator.compile_sampler(materialize_dem=True)
+        return generator.compile_sampler(materialize_dem=False)
     except Exception as exc:
         raise UnsupportedNativeCircuitError(str(exc)) from exc
 
 
 __all__ = [
     "NativeDemSampler",
+    "NativeDemGenerator",
     "NativePackedSampler",
     "UnsupportedNativeCircuitError",
+    "compile_native_dem_generator",
     "compile_native_dem_sampler",
     "compile_native_dem_sampler_from_circuit",
     "compile_native_sampler",
