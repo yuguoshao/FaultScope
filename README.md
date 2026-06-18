@@ -2,6 +2,12 @@
 
 本文档描述一个用于量子纠错协议噪声热点分析的前向 stabilizer 模拟器。模拟器不使用 Heisenberg picture，也不对观测量做反向传播；它在 Schrodinger picture 中按纠错电路的真实时间顺序执行 trajectory，记录噪声事件、测量结果、syndrome、decoder 输出和逻辑失败事件，并通过对局部噪声率求导得到噪声热点。
 
+当前项目结构是 Rust Cargo workspace with Python API：
+
+- `crates/npsim-core`：Python 无关的 typed Rust core，承载 circuit/DEM 数据模型、batch sampling、DEM generation、hotspot 估计等主体逻辑。
+- `crates/npsim-python`：PyO3 binding crate，构建 Python 模块 `npsim._npsim_native`。
+- `npsim/`：轻量 Python package surface，保留 re-export、typing helper、PyMatching/Stim/Pillow adapters、benchmark 和 reference-test 入口。
+
 核心目标是估计每个局部噪声位置 `l` 对纠错协议 logical failure probability 的边际影响：
 
 ```math
@@ -477,11 +483,11 @@ f_k,
 
 这个 batch sampler 当前是快速路径，而不是通用 adaptive tableau 分支引擎。它适合 repetition code、surface-code syndrome extraction 这类所有 shot 共享同一 stabilizer 支撑演化、差异由 generator sign mask 和 Pauli frame mask 表示的 QEC 电路。
 
-### Required native packed sampler
+### Rust Workspace Python API
 
 `npsim.runtime.compile_native_sampler` 是面向 Rust packed sampler 的稳定入口。
-batch/DEM/hotspot 的运行时快速路径现在要求 `npsim._npsim_native` 可导入，并且
-电路能被 native 编译：
+batch/DEM/hotspot 的产品运行时由 Rust core 提供，并通过 PyO3 模块
+`npsim._npsim_native` 暴露到 Python；电路必须能被 Rust core 编译：
 
 ```python
 from npsim.runtime import compile_native_sampler
@@ -497,14 +503,14 @@ batch = sampler.sample(shots=100_000, seed=1)
 measurement_masks = sampler.sample_measurements(shots=100_000, seed=1)
 ```
 
-热点识别同样强制走 native 路径。`BatchForwardNoiseAwareSimulator.estimate()` 和
+热点识别同样走 Rust core。`BatchForwardNoiseAwareSimulator.estimate()` 和
 `DemBatchHotspotSimulator.estimate()` 会调用 Rust：采样 batch 保留在 Rust
 packed words 中，Python loss/decoder 回调只读取按需暴露的 bit helper 或 mask
 属性，最终 `loss_mask` 交回 Rust 计算 sensitivity、hotspot、metadata aggregation
-和 top-k cache。没有 native 扩展或 native 不支持该电路时会抛
+和 top-k cache。没有构建 `npsim._npsim_native` 或 Rust core 不支持该电路时会抛
 `UnsupportedNativeCircuitError`，不再回退到 Python reference。
 
-运行时不再暴露 backend 选择参数；Rust native 扩展是唯一执行路径。向
+运行时不再暴露 backend 选择参数；Rust core 是唯一产品执行路径。向
 `BatchForwardNoiseAwareSimulator.run_batch()` 或
 `DemBatchHotspotSimulator.run_batch()` 传入 Python `rng` 时，运行时会用
 `rng.getrandbits(64)` 派生 native seed；这只保持随机分布，不保证旧 Python
@@ -514,11 +520,53 @@ reference 路径的 bit-for-bit 序列一致。
 sampler = compile_native_sampler(circuit)
 ```
 
-原生扩展源码位于 `native/`，使用 PyO3/maturin：
+Rust 源码位于根目录 Cargo workspace：
+
+- `crates/npsim-core`：PyO3 无关的 typed Rust core types 和算法承载 crate。
+- `crates/npsim-python`：PyO3 binding crate，构建 `npsim._npsim_native`。
+
+`npsim-core` 也可以被 Rust 代码直接使用。Rust API 目前仍按 pre-1.0
+unstable 处理，但主入口已经是 typed core API：
+
+```rust
+use std::collections::HashMap;
+
+use npsim_core::{
+    BatchForwardNoiseAwareSimulator, Circuit, NoiseLocation, NoiseModel, Operation,
+};
+
+let noise = NoiseLocation {
+    id: "x0".to_string(),
+    model: NoiseModel::BernoulliPauli("X".to_string()),
+    rate: 0.1,
+    qubits: vec![0],
+    tags: HashMap::new(),
+};
+let circuit = Circuit {
+    n_qubits: 1,
+    operations: vec![
+        Operation::Noise(noise),
+        Operation::Measure {
+            qubit: 0,
+            key: Some("m".to_string()),
+            basis: "Z".to_string(),
+            noise: None,
+        },
+    ],
+};
+let simulator = BatchForwardNoiseAwareSimulator::new(circuit, vec![])?;
+let batch = simulator.run_batch(1024, Some(1), true)?;
+```
+
+根目录通过 maturin 构建 Python package：
 
 ```bash
-(cd native && ../.venv/bin/python -m maturin develop --release)
+.venv/bin/maturin develop --release
+cargo test --workspace
 ```
+
+在只需要刷新当前 checkout 中的 extension artifact、且不希望触发安装步骤时，可用
+`.venv/bin/maturin develop --release --skip-install`。
 
 采样吞吐 benchmark 位于 `benchmarks/sampling_throughput.py`：
 

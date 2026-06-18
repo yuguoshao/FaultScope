@@ -18,10 +18,9 @@ from npsim.core.pauli import (
     symplectic_product,
     xz_to_pauli,
 )
-from npsim.core.stabilizer import BatchStabilizerState, StabilizerState
+from npsim.core.stabilizer import StabilizerState
 
 __all__ = [
-    "BatchStabilizerState",
     "BernoulliPauliNoise",
     "Circuit",
     "MeasurementBitFlip",

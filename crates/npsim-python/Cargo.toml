@@ -1,16 +1,18 @@
 [package]
-name = "npsim-native"
-version = "0.1.0"
-edition = "2021"
+name = "npsim-python"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
 
 [lib]
 name = "_npsim_native"
 crate-type = ["cdylib"]
 
 [dependencies]
+npsim-core = { path = "../npsim-core" }
 pyo3 = { version = "0.23", features = ["extension-module"] }
-rand = { version = "0.9.2", features = ["small_rng"] }
 
 [package.metadata.maturin]
 module-name = "npsim._npsim_native"
-python-source = ".."
+python-source = "../.."

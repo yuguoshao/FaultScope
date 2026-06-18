@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Iterable, Sequence
+from typing import Sequence
+
+from npsim._npsim_native import PauliFrame
 
 
 PAULI_TO_XZ = {
@@ -131,73 +132,3 @@ def sparse_pauli_to_xz(
         xs[qubit] ^= x
         zs[qubit] ^= z
     return xs, zs
-
-
-@dataclass
-class PauliFrame:
-    """Forward Pauli-frame tracker for sampled stochastic errors."""
-
-    x: list[int]
-    z: list[int]
-
-    @classmethod
-    def zero(cls, n_qubits: int) -> "PauliFrame":
-        return cls([0] * n_qubits, [0] * n_qubits)
-
-    @property
-    def n_qubits(self) -> int:
-        return len(self.x)
-
-    def copy(self) -> "PauliFrame":
-        return PauliFrame(self.x.copy(), self.z.copy())
-
-    def apply_pauli(self, qubit: int, pauli: str) -> None:
-        px, pz = pauli_to_xz(pauli)
-        self.x[qubit] ^= px
-        self.z[qubit] ^= pz
-
-    def apply_pauli_string(self, qubits: Sequence[int], paulis: str | Sequence[str]) -> None:
-        if isinstance(paulis, str):
-            pauli_chars = list(paulis)
-        else:
-            pauli_chars = list(paulis)
-        if len(qubits) != len(pauli_chars):
-            raise ValueError("qubits and paulis must have the same length")
-        for qubit, pauli in zip(qubits, pauli_chars):
-            self.apply_pauli(qubit, pauli)
-
-    def apply_h(self, qubit: int) -> None:
-        self.x[qubit], self.z[qubit] = self.z[qubit], self.x[qubit]
-
-    def apply_s(self, qubit: int) -> None:
-        self.z[qubit] ^= self.x[qubit]
-
-    def apply_s_dag(self, qubit: int) -> None:
-        self.apply_s(qubit)
-
-    def apply_cx(self, control: int, target: int) -> None:
-        self.x[target] ^= self.x[control]
-        self.z[control] ^= self.z[target]
-
-    def apply_cz(self, left: int, right: int) -> None:
-        self.apply_h(right)
-        self.apply_cx(left, right)
-        self.apply_h(right)
-
-    def apply_swap(self, left: int, right: int) -> None:
-        if left == right:
-            return
-        self.apply_cx(left, right)
-        self.apply_cx(right, left)
-        self.apply_cx(left, right)
-
-    def reset(self, qubit: int) -> None:
-        self.x[qubit] = 0
-        self.z[qubit] = 0
-
-    def measurement_flip(self, qubits: Sequence[int], paulis: str | Sequence[str]) -> int:
-        px, pz = sparse_pauli_to_xz(self.n_qubits, qubits, paulis)
-        return symplectic_product(self.x, self.z, px, pz)
-
-    def pauli_on(self, qubits: Iterable[int]) -> str:
-        return "".join(xz_to_pauli(self.x[q], self.z[q]) for q in qubits)

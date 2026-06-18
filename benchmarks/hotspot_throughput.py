@@ -107,7 +107,7 @@ def main() -> None:
                 repeats=args.repeats,
             )
 
-            native_batch = native_batch_sampler._engine.run_native_batch(args.shots, 777)
+            native_batch = native_batch_sampler.run_native_batch(args.shots, 777)
             native_corrections = experiment.decoder.decode_batch_masks(native_batch)
             native_loss = logical_residual_loss_mask(
                 native_batch.observables,
@@ -128,7 +128,7 @@ def main() -> None:
             )
 
             native_batch_agg_sps = _median_samples_per_second(
-                lambda seed: native_batch_sampler._engine.estimate_hotspots(
+                lambda seed: native_batch_sampler.estimate_hotspots(
                     native_batch,
                     native_loss,
                     None,
@@ -167,7 +167,7 @@ def main() -> None:
                 repeats=args.repeats,
             )
 
-            native_dem_batch = native_dem_sampler._engine.run_native_batch(args.shots, 888)
+            native_dem_batch = native_dem_sampler.run_native_batch(args.shots, 888)
             native_dem_loss = logical_residual_loss_mask(
                 native_dem_batch.observables,
                 {},
@@ -186,7 +186,7 @@ def main() -> None:
             )
 
             native_dem_agg_sps = _median_samples_per_second(
-                lambda seed: native_dem_sampler._engine.estimate_hotspots(
+                lambda seed: native_dem_sampler.estimate_hotspots(
                     native_dem_batch,
                     native_dem_loss,
                     None,

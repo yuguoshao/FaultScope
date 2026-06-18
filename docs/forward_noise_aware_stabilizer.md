@@ -104,8 +104,9 @@ Pauli twirling 或替换为 stabilizer-compatible stochastic channel。
 
 ## Batch sampler 快速路径
 
-`BatchForwardNoiseAwareSimulator` 的运行时实现由 Rust native runtime 提供；下面描述
-它实现的 bit-packed 数据流。它使用一个共享 Pauli 支撑的理想 stabilizer tableau，
+`BatchForwardNoiseAwareSimulator` 的产品运行时实现由 `npsim-core` Rust core 提供，
+并通过 PyO3 Python API 暴露；下面描述它实现的 bit-packed 数据流。
+它使用一个共享 Pauli 支撑的理想 stabilizer tableau，
 并把 stabilizer generator sign、Pauli frame、measurement record 和 noise event
 都压进 bit mask 中执行多条 trajectory。第 `k` 个 shot 存在整数 mask 的第 `k` 位中：
 
@@ -217,8 +218,9 @@ decoder 从 syndrome 中恢复。
 
 ## DEM hotspot mode
 
-`DemBatchHotspotSimulator` 的运行时实现同样要求 Rust native runtime。它直接在 detector error model 上模拟 hotspot，不执行
-stabilizer 电路，而是把每条 DEM edge 当成独立 Bernoulli error instruction：
+`DemBatchHotspotSimulator` 的产品运行时实现同样在 `npsim-core` Rust core 中。
+它直接在 detector error model 上模拟 hotspot，不执行 stabilizer 电路，
+而是把每条 DEM edge 当成独立 Bernoulli error instruction：
 
 ```text
 f_e ~ Bernoulli(p_e)

@@ -11,17 +11,29 @@ from npsim.dem import (
     DetectorErrorEdge,
     DetectorErrorModel,
     DetectorErrorModelGenerator,
+    DetectorGraphEdgeHotspot,
+    DetectorGraphHotspots,
     LogicalObservable,
 )
-from npsim.dem import DemBatchHotspotSimulator, DemBatchTrajectory
+from npsim.dem import (
+    DemBatchHotspotSimulator,
+    DemBatchTrajectory,
+    DemEdgeHotspotRow,
+    DemHotspotResult,
+    DemLocationHotspotRow,
+    DemLocationMetadata,
+)
 from npsim.core import (
     BernoulliPauliNoise,
     MeasurementBitFlip,
     PauliChannel,
     SingleQubitDepolarizing,
+    TwoQubitDepolarizing,
 )
 from npsim.runtime import (
     UnsupportedNativeCircuitError,
+    NativeDemSampler,
+    NativePackedSampler,
     compile_native_dem_sampler,
     compile_native_sampler,
     generate_native_dem,
@@ -33,7 +45,7 @@ from npsim.decoders import (
 )
 from npsim.experiments import make_repetition_code_experiment
 from npsim.runtime import SimulationResult
-from npsim.core import StabilizerState
+from npsim.core import PauliFrame, StabilizerState
 from npsim.io import StimImportError, parse_stim_circuit
 from npsim.viz import (
     VisualizationUnavailableError,
@@ -67,6 +79,14 @@ def _assert_binomial_count_close(
 
 
 class StabilizerStateTests(unittest.TestCase):
+    def test_pauli_frame_reference_methods(self) -> None:
+        frame = PauliFrame.zero(2)
+        frame.apply_pauli_string((0, 1), "XZ")
+        self.assertEqual(frame.x, [1, 0])
+        self.assertEqual(frame.z, [0, 1])
+        self.assertEqual(frame.pauli_on((0, 1)), "XZ")
+        self.assertEqual(frame.measurement_flip((0,), "Z"), 1)
+
     def test_measurement_after_pauli_error(self) -> None:
         rng = random.Random(1)
         state = StabilizerState.zero(1)
@@ -269,6 +289,195 @@ class NoiseAwareSimulatorTests(unittest.TestCase):
         self.assertEqual(trajectory.detectors, {2: 1})
         self.assertEqual(trajectory.observables, {0: 1})
         self.assertEqual(trajectory.detector_record, {2: 1})
+
+    def test_core_circuit_objects_are_extension_classes(self) -> None:
+        import npsim
+        import npsim.core as core
+        import npsim.decoders as decoders
+        import npsim.dem as dem_module
+        import npsim.io as io
+        import npsim.runtime as runtime_module
+        import npsim.viz as viz
+        import npsim._npsim_native as native
+        from npsim.runtime import HotspotRow
+
+        self.assertNotIn("BatchStabilizerState", core.__all__)
+        self.assertFalse(hasattr(core, "BatchStabilizerState"))
+        self.assertIs(Circuit, native.Circuit)
+        self.assertIs(Operation, native.Operation)
+        self.assertIs(NoiseLocation, native.NoiseLocation)
+        self.assertIs(BernoulliPauliNoise, native.BernoulliPauliNoise)
+        self.assertIs(PauliChannel, native.PauliChannel)
+        self.assertIs(SingleQubitDepolarizing, native.SingleQubitDepolarizing)
+        self.assertIs(TwoQubitDepolarizing, native.TwoQubitDepolarizing)
+        self.assertIs(MeasurementBitFlip, native.MeasurementBitFlip)
+        self.assertIs(PauliFrame, native.PauliFrame)
+        self.assertIs(StabilizerState, native.StabilizerState)
+        self.assertIs(Detector, native.Detector)
+        self.assertIs(LogicalObservable, native.LogicalObservable)
+        self.assertIs(DetectorErrorEdge, native.DetectorErrorEdge)
+        self.assertIs(DetectorErrorModel, native.DetectorErrorModel)
+        self.assertIs(DetectorErrorModelGenerator, native.DetectorErrorModelGenerator)
+        self.assertIs(DetectorGraphEdgeHotspot, native.DetectorGraphEdgeHotspot)
+        self.assertIs(DetectorGraphHotspots, native.DetectorGraphHotspots)
+        self.assertIs(BatchForwardNoiseAwareSimulator, native.BatchForwardNoiseAwareSimulator)
+        self.assertIs(BatchTrajectory, native.BatchTrajectory)
+        self.assertIs(DemBatchTrajectory, native.DemBatchTrajectory)
+        self.assertIs(HotspotRow, native.HotspotRow)
+        self.assertIs(SimulationResult, native.SimulationResult)
+        self.assertIs(DemLocationMetadata, native.DemLocationMetadata)
+        self.assertIs(DemLocationHotspotRow, native.DemLocationHotspotRow)
+        self.assertIs(DemEdgeHotspotRow, native.DemEdgeHotspotRow)
+        self.assertIs(DemHotspotResult, native.DemHotspotResult)
+        self.assertIs(DemBatchHotspotSimulator, native.DemBatchHotspotSimulator)
+        self.assertIs(NativePackedSampler, native.NativePackedSampler)
+        self.assertIs(NativeDemSampler, native.NativeDemSampler)
+        self.assertIs(npsim.Circuit, native.Circuit)
+        self.assertIs(npsim.BatchForwardNoiseAwareSimulator, native.BatchForwardNoiseAwareSimulator)
+        self.assertIs(npsim.DetectorErrorModelGenerator, native.DetectorErrorModelGenerator)
+        self.assertIs(npsim.DemBatchHotspotSimulator, native.DemBatchHotspotSimulator)
+        self.assertIs(core.Circuit, native.Circuit)
+        self.assertIs(runtime_module.BatchForwardNoiseAwareSimulator, native.BatchForwardNoiseAwareSimulator)
+        self.assertIs(dem_module.DetectorErrorModelGenerator, native.DetectorErrorModelGenerator)
+        self.assertIs(dem_module.DemBatchHotspotSimulator, native.DemBatchHotspotSimulator)
+        self.assertTrue(hasattr(io, "parse_stim_circuit"))
+        self.assertTrue(hasattr(decoders, "PyMatchingBatchDecoder"))
+        self.assertTrue(hasattr(viz, "write_repetition_hotspot_heatmap"))
+
+        location = NoiseLocation(
+            id="x0",
+            model=BernoulliPauliNoise("X"),
+            rate=0.2,
+            qubits=(0,),
+            tags={"qubit": 0, "gate": "idle"},
+        )
+        detector = Operation.detector(("m",), detector_id=7, coords=(1.0, 2.0))
+        circuit = Circuit(
+            n_qubits=1,
+            operations=[
+                Operation.noise(location, gate="idle"),
+                Operation.measure(0, key="m", basis="Z", noise=location),
+                detector,
+            ],
+        )
+
+        self.assertEqual(circuit.n_qubits, 1)
+        self.assertEqual(circuit.operations[0].metadata["gate"], "idle")
+        self.assertEqual(detector.metadata["coords"], (1.0, 2.0))
+        self.assertEqual(circuit.noise_locations()["x0"].id, "x0")
+        self.assertEqual(circuit.noise_locations()["x0"].qubits, (0,))
+
+        edge = DetectorErrorEdge(
+            probability=0.125,
+            detectors=(7,),
+            observables=(2,),
+            location_id="x0",
+            event="X",
+            tags={"gate": "idle"},
+        )
+        self.assertEqual(Detector(id=7, measurement_keys=("m",)).measurement_keys, ("m",))
+        self.assertEqual(LogicalObservable(id=2, measurement_keys=("m",)).id, 2)
+        self.assertEqual(edge.to_dem_line(), "error(0.125) D7 L2")
+        self.assertEqual(edge.tags["gate"], "idle")
+
+        observable = LogicalObservable(id=2, measurement_keys=("m",))
+        native_circuit = Circuit(
+            n_qubits=1,
+            operations=[
+                Operation.noise(location, gate="idle"),
+                Operation.measure(0, key="m", basis="Z"),
+                detector,
+            ],
+        )
+        sampler = native.compile_sampler(native_circuit, (observable,))
+        self.assertIsInstance(sampler, native.NativePackedSampler)
+        sample_payload = sampler.sample(8, 123)
+        self.assertIsInstance(sample_payload, BatchTrajectory)
+        self.assertIn("m", sample_payload.measurements)
+
+        native_dem = native.generate_dem(
+            native_circuit,
+            (Detector(id=7, measurement_keys=("m",)),),
+            (observable,),
+        )
+        self.assertIsInstance(native_dem, DetectorErrorModel)
+        self.assertEqual(native_dem.edges[0].location_id, "x0")
+        self.assertEqual(native_dem.edges[0].event, "X")
+        self.assertEqual(native_dem.edges[0].tags["gate"], "idle")
+
+        dem = DetectorErrorModel(
+            detectors=(Detector(id=7, measurement_keys=("m",)),),
+            observables=(observable,),
+            edges=(edge,),
+        )
+        dem_sampler = native.compile_dem_sampler(dem)
+        self.assertIsInstance(dem_sampler, native.NativeDemSampler)
+        self.assertEqual(dem_sampler.edge_count, 1)
+        dem_batch = dem_sampler.run_batch(8, 123, True)
+        self.assertIsInstance(dem_batch, DemBatchTrajectory)
+        self.assertIn(7, dem_batch.detectors)
+        dem_result = dem_sampler.estimate_default(8, 123, None, 1)
+        self.assertIsInstance(dem_result, DemHotspotResult)
+        self.assertIsInstance(dem_result.top_edges(1)[0], DemEdgeHotspotRow)
+
+        with self.assertRaises((TypeError, ValueError)):
+            native.compile_sampler({"n_qubits": 1, "operations": []})
+
+    def test_noise_models_are_extension_classes_with_reference_methods(self) -> None:
+        bernoulli = BernoulliPauliNoise("XZ")
+        self.assertEqual(bernoulli.pauli, "XZ")
+        self.assertEqual(bernoulli.sample(random.Random(1), 1.0), "XZ")
+        self.assertEqual(bernoulli.sample(random.Random(1), 0.0), "II")
+        self.assertAlmostEqual(bernoulli.score("XZ", 0.25), 4.0)
+        self.assertAlmostEqual(bernoulli.score("II", 0.25), -1.0 / 0.75)
+        self.assertIn("BernoulliPauliNoise", repr(bernoulli))
+
+        state = StabilizerState.zero(2)
+        frame = PauliFrame.zero(2)
+        bernoulli.apply("XZ", state, frame, (0, 1))
+        self.assertEqual(frame.pauli_on((0, 1)), "XZ")
+
+        channel = PauliChannel({"X": 1.0, "Y": 3.0})
+        self.assertEqual(channel.weights, {"X": 1.0, "Y": 3.0})
+        self.assertEqual(channel.event_length, 1)
+        self.assertEqual(channel.total_weight, 4.0)
+        self.assertEqual(channel.sample(random.Random(1), 0.0), "I")
+        self.assertAlmostEqual(channel.score("I", 0.2), -1.0 / 0.8)
+        self.assertAlmostEqual(channel.score("Y", 0.2), 5.0)
+        self.assertIn("PauliChannel", repr(channel))
+
+        single = SingleQubitDepolarizing()
+        self.assertEqual(single.sample(random.Random(1), 0.0), "I")
+        state = StabilizerState.zero(1)
+        frame = PauliFrame.zero(1)
+        single.apply("X", state, frame, (0,))
+        self.assertEqual(frame.pauli_on((0,)), "X")
+
+        two = TwoQubitDepolarizing()
+        self.assertIn("IX", two._events)
+        self.assertEqual(two.sample(random.Random(1), 0.0), "II")
+        state = StabilizerState.zero(2)
+        frame = PauliFrame.zero(2)
+        two.apply("YZ", state, frame, (0, 1))
+        self.assertEqual(frame.pauli_on((0, 1)), "YZ")
+
+        mflip = MeasurementBitFlip()
+        self.assertIs(mflip.sample(random.Random(1), 1.0), True)
+        self.assertEqual(mflip.apply_to_bit(0, True), 1)
+        self.assertEqual(mflip.apply_to_bit(1, True), 0)
+        self.assertAlmostEqual(mflip.score(True, 0.2), 5.0)
+        self.assertAlmostEqual(mflip.score(False, 0.2), -1.0 / 0.8)
+
+        with self.assertRaises(ValueError):
+            PauliChannel({})
+        with self.assertRaises(ValueError):
+            PauliChannel({"I": 1.0})
+        with self.assertRaises(ValueError):
+            PauliChannel({"X": -1.0})
+        with self.assertRaises(ValueError):
+            PauliChannel({"X": 0.0})
+        with self.assertRaises(ValueError):
+            PauliChannel({"X": 1.0, "ZZ": 1.0})
 
     def test_repetition_code_experiment_runs_and_aggregates(self) -> None:
         experiment = make_repetition_code_experiment(
@@ -589,7 +798,7 @@ class NativePackedSamplerTests(unittest.TestCase):
             ],
         )
         sampler = self._native_sampler_or_skip(circuit)
-        native_batch = sampler._engine.run_native_batch(17, 11)
+        native_batch = sampler.run_native_batch(17, 11)
 
         self.assertEqual(int(native_batch.x_mask(0)), native_batch.x_frame[0])
         self.assertEqual(int(native_batch.z_mask(0)), native_batch.z_frame[0])
@@ -598,33 +807,28 @@ class NativePackedSamplerTests(unittest.TestCase):
             native_batch.measurements["m"],
         )
 
-    def test_batch_estimate_reuses_compiled_native_sampler(self) -> None:
+    def test_batch_forward_simulator_is_native_and_exposes_metadata(self) -> None:
+        location = NoiseLocation(
+            id="x0",
+            model=BernoulliPauliNoise("X"),
+            rate=0.1,
+            qubits=(0,),
+        )
         circuit = Circuit(
             n_qubits=1,
             operations=[
+                Operation.noise(location),
                 Operation.measure(0, key="m", basis="Z"),
             ],
         )
         engine = BatchForwardNoiseAwareSimulator(circuit)
-        fake_sampler = mock.Mock()
-        fake_sampler.estimate.side_effect = ("first", "second")
 
-        def compile_once(compiled_circuit, *, observables):
-            self.assertIs(compiled_circuit, circuit)
-            self.assertEqual(observables, ())
-            return fake_sampler
+        self.assertIs(engine.circuit, circuit)
+        self.assertEqual(engine.observables, ())
+        self.assertEqual(engine.locations["x0"].id, "x0")
 
-        with mock.patch(
-            "npsim.runtime.native.compile_native_sampler",
-            side_effect=compile_once,
-        ) as patched:
-            first = engine.estimate(shots=1, seed=1, loss_mask_fn=lambda batch: 0)
-            second = engine.estimate(shots=1, seed=2, loss_mask_fn=lambda batch: 0)
-
-        self.assertEqual(first, "first")
-        self.assertEqual(second, "second")
-        self.assertEqual(patched.call_count, 1)
-        self.assertEqual(fake_sampler.estimate.call_count, 2)
+        with self.assertRaises(ValueError):
+            engine.run_batch(shots=4, rng=random.Random(1), seed=1)
 
     def test_surface_code_decoder_loss_matches_native_batch_accessors(self) -> None:
         example = make_large_rotated_surface_code_memory_example(
@@ -636,7 +840,7 @@ class NativePackedSamplerTests(unittest.TestCase):
             example.circuit,
             observables=example.observables,
         )
-        native_batch = sampler._engine.run_native_batch(64, 23)
+        native_batch = sampler.run_native_batch(64, 23)
         converted_batch = sampler.sample(shots=64, seed=23)
         native_corrections = decoder.decode_batch_masks(native_batch)
         converted_corrections = decoder.decode_batch_masks(converted_batch)
@@ -656,7 +860,7 @@ class NativePackedSamplerTests(unittest.TestCase):
             example.circuit,
             observables=example.observables,
         )
-        batch = sampler._engine.run_native_batch(96, 37)
+        batch = sampler.run_native_batch(96, 37)
         corrections = decoder.decode_batch_masks(batch)
         loss_mask = _default_batch_loss(batch, corrections)
 
@@ -686,7 +890,7 @@ class NativePackedSamplerTests(unittest.TestCase):
             decoder=experiment.decoder,
         )
 
-        native_batch = sampler._engine.run_native_batch(256, 49)
+        native_batch = sampler.run_native_batch(256, 49)
         reference_loss = _default_batch_loss(
             native_batch,
             experiment.decoder.decode_batch_masks(native_batch),
@@ -918,7 +1122,7 @@ class NativePackedSamplerTests(unittest.TestCase):
         with self.assertRaises(UnsupportedNativeCircuitError):
             compile_native_sampler(circuit)
 
-        with self.assertRaises(UnsupportedNativeCircuitError):
+        with self.assertRaises(ValueError):
             BatchForwardNoiseAwareSimulator(circuit).estimate(
                 shots=2_000,
                 seed=92,
@@ -1221,7 +1425,7 @@ class DetectorErrorModelTests(unittest.TestCase):
                 Operation.measure(0, key="m", basis="Z"),
             ],
         )
-        with self.assertRaises(UnsupportedNativeCircuitError):
+        with self.assertRaises(ValueError):
             DetectorErrorModelGenerator(
                 circuit,
                 detectors=(Detector(id=0, measurement_keys=("m",)),),
@@ -1299,7 +1503,11 @@ class DetectorErrorModelTests(unittest.TestCase):
                 Operation.observable_include(2, ("m",)),
             ],
         )
-        dem = DetectorErrorModelGenerator(circuit).generate()
+        generator = DetectorErrorModelGenerator(circuit)
+        self.assertIsInstance(generator, DetectorErrorModelGenerator)
+        self.assertEqual(generator.detectors[0].id, 5)
+        self.assertEqual(generator.observables[0].id, 2)
+        dem = generator.generate()
 
         self.assertEqual(len(dem.detectors), 1)
         self.assertEqual(dem.detectors[0].id, 5)
@@ -1342,6 +1550,35 @@ class DemBatchHotspotSimulatorTests(unittest.TestCase):
         self.assertEqual(result.by_round[1], result.hotspots["logical_edge"])
         self.assertEqual(result.by_operation["dem_error"], result.hotspots["logical_edge"])
         self.assertEqual(result.top_edges(1)[0].location_id, "logical_edge")
+
+    def test_native_dem_simulator_run_batch_accepts_python_rng(self) -> None:
+        dem = DetectorErrorModel(
+            detectors=(Detector(id=0, measurement_keys=()),),
+            observables=(),
+            edges=(
+                DetectorErrorEdge(
+                    probability=0.5,
+                    detectors=(0,),
+                    observables=(),
+                    location_id="detector_edge",
+                    event="X",
+                ),
+            ),
+        )
+        simulator = DemBatchHotspotSimulator(dem)
+
+        batch = simulator.run_batch(
+            shots=16,
+            rng=random.Random(123),
+            return_edge_events=False,
+        )
+
+        self.assertIs(simulator.dem, dem)
+        self.assertEqual(batch.shots, 16)
+        self.assertEqual(batch.edge_event_masks, {})
+        self.assertIn(0, batch.detectors)
+        with self.assertRaises(ValueError):
+            simulator.run_batch(shots=16, rng=random.Random(123), seed=1)
 
     def test_dem_decoder_correction_can_remove_logical_failure(self) -> None:
         class CopyDetectorDecoder:

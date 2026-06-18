@@ -57,11 +57,18 @@ dependencies = [
 ]
 
 [[package]]
-name = "npsim-native"
+name = "npsim-core"
 version = "0.1.0"
 dependencies = [
- "pyo3",
  "rand",
+]
+
+[[package]]
+name = "npsim-python"
+version = "0.1.0"
+dependencies = [
+ "npsim-core",
+ "pyo3",
 ]
 
 [[package]]

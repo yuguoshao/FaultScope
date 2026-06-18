@@ -1,11 +1,11 @@
 [build-system]
-requires = ["setuptools>=61"]
-build-backend = "setuptools.build_meta"
+requires = ["maturin>=1.7,<2"]
+build-backend = "maturin"
 
 [project]
 name = "npsim"
 version = "0.1.0"
-description = "Forward noise-aware stabilizer trajectory simulator for QEC hotspot studies"
+description = "Rust-core forward noise-aware stabilizer simulator with a Python API"
 requires-python = ">=3.10"
 readme = "README.md"
 
@@ -26,5 +26,7 @@ native-build = [
     "maturin>=1.7",
 ]
 
-[tool.setuptools.packages.find]
-include = ["npsim*"]
+[tool.maturin]
+manifest-path = "crates/npsim-python/Cargo.toml"
+module-name = "npsim._npsim_native"
+python-source = "."

@@ -18,7 +18,7 @@ from npsim.core import (
 )
 from npsim.core import pauli_to_xz, sparse_pauli_to_xz
 from npsim.runtime import SimulationResult
-from npsim.core import BatchStabilizerState
+from tests.reference.batch_stabilizer import BatchStabilizerState
 
 
 class UnsupportedBatchCircuitError(ValueError):
