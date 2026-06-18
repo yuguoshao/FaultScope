@@ -585,7 +585,54 @@ Pauli measurement 的规则：
 
 ## 8. Detector Error Model 生成
 
-Detector error model 是把局部物理错误事件映射成 detector flips 和 logical observable flips 的稀疏图模型。它不替代 score-function 热点估计，而是新增一个中间表示：
+Detector error model，简称 DEM，是量子纠错电路到经典解码问题之间的中间表示。
+它不再描述完整的量子态、stabilizer tableau 或每一步 gate，而只记录一件事：
+
+```text
+如果某个物理错误事件发生，它会让哪些 syndrome detector 变成 1，
+并且会不会同时翻转某个 logical observable。
+```
+
+所以 DEM 可以看成一张“错误事件查表”：
+
+```text
+physical error event
+    -> detector syndrome pattern
+    -> logical observable flip pattern
+    -> event probability
+```
+
+在 QEC 里，measurement record 本身通常不是 syndrome。一次 syndrome extraction 会产生许多
+测量结果，真正给 decoder 的 syndrome 是这些测量结果的 parity。NPSim 中把这样的
+parity 称为 detector。理想情况下 detector 应该为 0；如果某个错误改变了这个 parity，
+就说这个错误翻转了该 detector。
+
+例如一个 repetition code 或 surface code 中间位置的数据错误，通常会让相邻两个
+check 的 syndrome parity 改变，因此在 DEM 里表现为：
+
+```text
+error(p) D3 D4
+```
+
+边界附近的错误可能只翻转一个 detector：
+
+```text
+error(p) D0
+```
+
+如果错误除了产生 syndrome 之外，还改变了被保护的 logical observable，例如把
+`Z_L` 读数翻转了，就会带上 logical target：
+
+```text
+error(p) D5 L0
+```
+
+这里的 `L0` 不是一个 detector，而是第 0 个 logical observable。它表示：这个错误在
+decoder 修正前，会对该 logical observable 造成真实 logical flip。decoder 的目标是根据
+观测到的 detector pattern 推断应该施加哪些 logical correction，使
+`true_logical_flip xor predicted_correction` 尽量为 0。
+
+因此 DEM 的基本形式是把一个局部噪声位置 `l` 上的非 identity 错误事件 `e` 映射成：
 
 ```math
 (l,e)
@@ -597,7 +644,23 @@ p_l(e),
 \right).
 ```
 
-其中 `l` 是噪声位置，`e` 是该位置的非 identity 错误事件，`\Delta D` 是被翻转的 detector 集合，`\Delta L` 是被翻转的 logical observable 集合。
+其中 `p_l(e)` 是该错误事件概率，`\Delta D(l,e)` 是被翻转的 detector 集合，
+`\Delta L(l,e)` 是被翻转的 logical observable 集合。Stim-like 文本里一条 DEM edge 写作：
+
+```text
+error(p_l(e)) D_i D_j ... L_a ...
+```
+
+这条 edge 的含义是：独立采样这个错误事件时，如果它发生，就把列出的 detector bits 和
+logical observable bits 全部 xor 一次。PyMatching 等 decoder 可以只读取这样的 edge
+集合来构造 matching graph，而不需要重新执行原始 quantum circuit。
+
+DEM 不是 score-function 热点估计的替代品。它在本项目里有三个作用：
+
+- 给 decoder 提供输入：从 DEM 构造校验矩阵和 logical fault 矩阵。
+- 快速采样：在 DEM 层直接采样 edge，而不是每个 shot 都执行完整 stabilizer 电路。
+- 投影热点：把物理 location-level sensitivity 映射到 detector graph edge、detector node
+  和 logical observable 上，方便解释热点来自 syndrome graph 的哪一部分。
 
 Detector 被声明为若干 measurement key 的 parity：
 
@@ -615,12 +678,6 @@ L_a(\tau)
 \left(\bigoplus_{r\in B_a}m_r\right)
 \oplus
 \langle F_\tau, P_a\rangle.
-```
-
-对每个单错误事件，生成 DEM edge：
-
-```text
-error(p_l(e)) D_i D_j ... L_a ...
 ```
 
 **Algorithm 4: Single-Error DEM Construction**
