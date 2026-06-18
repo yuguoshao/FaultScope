@@ -1,5 +1,5 @@
 import unittest
-from typing import Any, Iterable, Mapping, Sequence
+from typing import Any, Sequence
 
 from npsim.runtime import BatchTrajectory
 from npsim.core import Circuit, NoiseLocation, Operation
@@ -8,7 +8,7 @@ from npsim.decoders import (
     PyMatchingUnavailableError,
     UnsupportedPyMatchingDemError,
 )
-from npsim.dem import Detector, DetectorErrorEdge, DetectorErrorModel, LogicalObservable
+from npsim.dem import Detector, LogicalObservable
 from npsim.io import parse_stim_circuit
 from npsim.runtime import UnsupportedNativeCircuitError, compile_native_sampler
 from npsim.runtime import compile_native_dem_sampler, generate_native_dem
@@ -26,6 +26,18 @@ from tests.surface_code_examples import (
     _rotated_surface_code_checks,
     make_large_rotated_surface_code_memory_example,
 )
+from tests.stim_helpers import (
+    dem_batch_from_stim_samples,
+    dense_predictions_to_masks,
+    final_data_measurement_circuit,
+    masks_to_dense_array,
+    measurement_batch_from_stim_samples,
+    npsim_dem_error_edges,
+    stim_dem_error_edges,
+    stim_observable_masks,
+    to_stim_circuit,
+    with_dem_declarations,
+)
 
 
 try:
@@ -42,9 +54,9 @@ except ImportError:  # pragma: no cover - optional test dependency
 class StimSamplingComparisonTests(unittest.TestCase):
     def setUp(self) -> None:
         if stim is None:
-            self.skipTest("Stim is not installed")
+            self.fail("Stim is required for core sampling comparison tests")
         if np is None:
-            self.skipTest("NumPy is not installed")
+            self.fail("NumPy is required for core sampling comparison tests")
 
     def test_basic_clifford_noise_and_reset_sampling_matches_stim(self) -> None:
         mflip = NoiseLocation(
@@ -108,7 +120,7 @@ class StimSamplingComparisonTests(unittest.TestCase):
             data_error_rate={(1, 2): 0.17, (2, 0): 0.09},
             measurement_error_rate=0.035,
         )
-        circuit = _with_final_data_measurements(
+        circuit = final_data_measurement_circuit(
             experiment.circuit,
             experiment.data_qubits,
             basis="Z",
@@ -182,7 +194,7 @@ class StimSamplingComparisonTests(unittest.TestCase):
             ("z_path_x_readout", example.z_logical_qubits, "X"),
         ):
             with self.subTest(prefix=prefix):
-                circuit = _with_final_data_measurements(
+                circuit = final_data_measurement_circuit(
                     example.circuit,
                     qubits,
                     basis=basis,
@@ -221,8 +233,8 @@ class StimSamplingComparisonTests(unittest.TestCase):
             self.skipTest(f"native forward sampler unavailable: {exc}")
 
         observable = LogicalObservable(id=0, measurement_keys=("final_d_0",))
-        declared_circuit = _with_dem_declarations(
-            _with_final_data_measurements(
+        declared_circuit = with_dem_declarations(
+            final_data_measurement_circuit(
                 experiment.circuit,
                 (experiment.data_qubits[0],),
                 basis="Z",
@@ -291,7 +303,7 @@ class StimSamplingComparisonTests(unittest.TestCase):
                 except UnsupportedNativeCircuitError as exc:
                     self.skipTest(f"native forward sampler unavailable: {exc}")
                 except (PyMatchingUnavailableError, UnsupportedPyMatchingDemError) as exc:
-                    self.skipTest(f"PyMatching DEM decoder unavailable: {exc}")
+                    self.fail(f"PyMatching DEM decoder unavailable: {exc}")
 
                 stim_detectors, stim_observables = stim_circuit.compile_detector_sampler(
                     seed=77890,
@@ -299,7 +311,7 @@ class StimSamplingComparisonTests(unittest.TestCase):
                     shots,
                     separate_observables=True,
                 )
-                stim_batch = _stim_dem_batch(
+                stim_batch = dem_batch_from_stim_samples(
                     stim_detectors,
                     stim_observables,
                     detectors=imported.detectors,
@@ -354,10 +366,10 @@ class StimSamplingComparisonTests(unittest.TestCase):
             npsim_dem = generate_native_dem(circuit)
         except UnsupportedNativeCircuitError as exc:
             self.skipTest(f"native DEM generator unavailable: {exc}")
-        stim_circuit, _ = _to_stim_circuit(circuit)
+        stim_circuit, _ = to_stim_circuit(circuit)
         stim_dem = stim_circuit.detector_error_model(decompose_errors=False)
 
-        self.assertEqual(_npsim_dem_error_edges(npsim_dem), _stim_dem_error_edges(stim_dem))
+        self.assertEqual(npsim_dem_error_edges(npsim_dem), stim_dem_error_edges(stim_dem))
 
     def test_native_dem_sampler_matches_stim_dem_sampler(self) -> None:
         experiment = make_repetition_code_experiment(
@@ -366,7 +378,7 @@ class StimSamplingComparisonTests(unittest.TestCase):
             data_error_rate={(0, 1): 0.12, (1, 3): 0.09, (2, 0): 0.07},
             measurement_error_rate={(0, 0): 0.04, (1, 2): 0.06, (2, 3): 0.05},
         )
-        circuit = _with_dem_declarations(
+        circuit = with_dem_declarations(
             experiment.circuit,
             detectors=experiment.detectors,
             observables=(),
@@ -384,7 +396,7 @@ class StimSamplingComparisonTests(unittest.TestCase):
         except UnsupportedNativeCircuitError as exc:
             self.skipTest(f"native DEM mode unavailable: {exc}")
 
-        stim_circuit, _ = _to_stim_circuit(circuit)
+        stim_circuit, _ = to_stim_circuit(circuit)
         stim_dem = stim_circuit.detector_error_model(decompose_errors=False)
         stim_detectors, stim_observables, _ = stim_dem.compile_sampler(seed=13579).sample(
             npsim_batch.shots,
@@ -413,7 +425,7 @@ class StimSamplingComparisonTests(unittest.TestCase):
             measurement_error_rate={(0, 0): 0.04, (1, 2): 0.06, (2, 3): 0.05},
         )
         observable = LogicalObservable(id=0, measurement_keys=("final_d_0",))
-        circuit = _with_final_data_measurements(
+        circuit = final_data_measurement_circuit(
             experiment.circuit,
             (experiment.data_qubits[0],),
             basis="Z",
@@ -434,10 +446,10 @@ class StimSamplingComparisonTests(unittest.TestCase):
         except UnsupportedNativeCircuitError as exc:
             self.skipTest(f"native DEM mode unavailable: {exc}")
         except (PyMatchingUnavailableError, UnsupportedPyMatchingDemError) as exc:
-            self.skipTest(f"PyMatching DEM decoder unavailable: {exc}")
+            self.fail(f"PyMatching DEM decoder unavailable: {exc}")
 
-        stim_circuit, _ = _to_stim_circuit(
-            _with_dem_declarations(
+        stim_circuit, _ = to_stim_circuit(
+            with_dem_declarations(
                 circuit,
                 detectors=experiment.detectors,
                 observables=(observable,),
@@ -447,7 +459,7 @@ class StimSamplingComparisonTests(unittest.TestCase):
         stim_detectors, stim_observables, _ = stim_dem.compile_sampler(seed=13579).sample(
             shots,
         )
-        stim_batch = _stim_dem_batch(
+        stim_batch = dem_batch_from_stim_samples(
             stim_detectors,
             stim_observables,
             detectors=experiment.detectors,
@@ -480,10 +492,10 @@ class StimSamplingComparisonTests(unittest.TestCase):
                 except UnsupportedNativeCircuitError as exc:
                     self.skipTest(f"native DEM mode unavailable: {exc}")
                 except (PyMatchingUnavailableError, UnsupportedPyMatchingDemError) as exc:
-                    self.skipTest(f"PyMatching DEM decoder unavailable: {exc}")
+                    self.fail(f"PyMatching DEM decoder unavailable: {exc}")
 
-                stim_circuit, _ = _to_stim_circuit(
-                    _with_dem_declarations(
+                stim_circuit, _ = to_stim_circuit(
+                    with_dem_declarations(
                         circuit,
                         detectors=detectors,
                         observables=observables,
@@ -494,7 +506,7 @@ class StimSamplingComparisonTests(unittest.TestCase):
                 stim_detectors, stim_observables, _ = stim_dem.compile_sampler(
                     seed=23579,
                 ).sample(shots)
-                stim_batch = _stim_dem_batch(
+                stim_batch = dem_batch_from_stim_samples(
                     stim_detectors,
                     stim_observables,
                     detectors=detectors,
@@ -522,7 +534,7 @@ def _sample_both(
     except UnsupportedNativeCircuitError as exc:
         raise unittest.SkipTest(f"native forward sampler unavailable: {exc}") from exc
     batch = sampler.sample(shots=shots, seed=native_seed)
-    stim_circuit, key_order = _to_stim_circuit(circuit)
+    stim_circuit, key_order = to_stim_circuit(circuit)
     samples = stim_circuit.compile_sampler(seed=stim_seed).sample(shots)
     return batch, samples, key_order
 
@@ -543,13 +555,13 @@ class _StimMatcherBatchDecoder:
         )
 
     def decode_batch_masks(self, batch: BatchTrajectory) -> dict[int, int]:
-        syndromes = _masks_to_dense_array(
+        syndromes = masks_to_dense_array(
             batch.detectors,
             self.detector_ids,
             batch.shots,
         )
         predictions = self.matcher.decode_batch(syndromes)
-        return _dense_predictions_to_masks(
+        return dense_predictions_to_masks(
             predictions,
             self.observable_ids,
             batch.shots,
@@ -560,7 +572,7 @@ def _load_pymatching_or_skip(testcase: unittest.TestCase) -> Any:
     try:
         import pymatching
     except ImportError as exc:
-        testcase.skipTest(f"PyMatching is not installed: {exc}")
+        testcase.fail(f"PyMatching is required for core sampling comparison tests: {exc}")
     return pymatching
 
 
@@ -571,77 +583,16 @@ def _sample_stim_measurements_and_observables(
     shots: int,
     seed: int,
 ) -> tuple[BatchTrajectory, dict[int, int]]:
-    stim_circuit, key_order = _to_stim_circuit(circuit)
+    stim_circuit, key_order = to_stim_circuit(circuit)
     samples = stim_circuit.compile_sampler(seed=seed).sample(shots)
     _, observable_flips = stim_circuit.compile_m2d_converter().convert(
         measurements=samples,
         separate_observables=True,
     )
     return (
-        _measurement_batch_from_stim_samples(samples, key_order),
-        _stim_observable_masks(observable_flips, observables),
+        measurement_batch_from_stim_samples(samples, key_order),
+        stim_observable_masks(observable_flips, observables),
     )
-
-
-def _measurement_batch_from_stim_samples(
-    samples: object,
-    key_order: Sequence[str],
-) -> BatchTrajectory:
-    shots = int(samples.shape[0])
-    return BatchTrajectory(
-        shots=shots,
-        all_mask=(1 << shots) - 1,
-        x_frame=(),
-        z_frame=(),
-        measurements={
-            key: _stim_column_mask(samples, column)
-            for column, key in enumerate(key_order)
-        },
-        detectors={},
-        observables={},
-        noise_event_masks={},
-    )
-
-
-def _stim_dem_batch(
-    stim_detectors: object,
-    stim_observables: object,
-    *,
-    detectors: Sequence[Detector],
-    observables: Sequence[LogicalObservable],
-) -> BatchTrajectory:
-    shots = int(stim_detectors.shape[0])
-    return BatchTrajectory(
-        shots=shots,
-        all_mask=(1 << shots) - 1,
-        x_frame=(),
-        z_frame=(),
-        measurements={},
-        detectors={
-            int(detector.id): _stim_column_mask(stim_detectors, column)
-            for column, detector in enumerate(detectors)
-        },
-        observables=_stim_observable_masks(stim_observables, observables),
-        noise_event_masks={},
-    )
-
-
-def _stim_observable_masks(
-    stim_observables: object,
-    observables: Sequence[LogicalObservable],
-) -> dict[int, int]:
-    return {
-        int(observable.id): _stim_column_mask(stim_observables, int(observable.id))
-        for observable in observables
-    }
-
-
-def _stim_column_mask(samples: object, column: int) -> int:
-    assert np is not None
-    mask = 0
-    for shot in np.flatnonzero(samples[:, column]):
-        mask |= 1 << int(shot)
-    return mask
 
 
 def _residual_rate(observable_mask: int, correction_mask: int, shots: int) -> float:
@@ -671,52 +622,6 @@ def _dem_decoded_loss_rate(
         all_mask=batch.all_mask,
     )
     return loss_mask.bit_count() / batch.shots
-
-
-def _masks_to_dense_array(
-    masks: Mapping[int, int],
-    ids: Sequence[int],
-    shots: int,
-) -> Any:
-    assert np is not None
-    out = np.zeros((shots, len(ids)), dtype=np.uint8)
-    if shots == 0 or not ids:
-        return out
-    byte_count = (shots + 7) // 8
-    all_mask = (1 << shots) - 1
-    for col, item_id in enumerate(ids):
-        mask = int(masks.get(int(item_id), 0)) & all_mask
-        out[:, col] = np.unpackbits(
-            np.frombuffer(mask.to_bytes(byte_count, "little"), dtype=np.uint8),
-            bitorder="little",
-        )[:shots]
-    return out
-
-
-def _dense_predictions_to_masks(
-    predictions: Any,
-    observable_ids: Sequence[int],
-    shots: int,
-) -> dict[int, int]:
-    assert np is not None
-    observable_ids = tuple(int(observable_id) for observable_id in observable_ids)
-    predictions = np.asarray(predictions, dtype=np.uint8)
-    if predictions.ndim == 1:
-        predictions = predictions.reshape((shots, 1))
-    if predictions.ndim != 2 or predictions.shape[0] != shots:
-        raise ValueError(f"unexpected PyMatching prediction shape {predictions.shape}")
-    if predictions.shape[1] != len(observable_ids):
-        raise ValueError("PyMatching prediction length does not match observable count")
-    return {
-        observable_id: int.from_bytes(
-            np.packbits(
-                predictions[:, col].astype(np.uint8),
-                bitorder="little",
-            ).tobytes(),
-            "little",
-        )
-        for col, observable_id in enumerate(observable_ids)
-    }
 
 
 def _deterministic_surface_memory_cases(
@@ -845,234 +750,6 @@ def _path_keys(prefix: str, count: int) -> tuple[str, ...]:
     return tuple(f"{prefix}_{idx}" for idx in range(count))
 
 
-def _to_stim_circuit(circuit: Circuit) -> tuple[object, tuple[str, ...]]:
-    assert stim is not None
-    out = stim.Circuit()
-    measurement_keys: list[str] = []
-    measurement_index_by_key: dict[str, int] = {}
-
-    for operation in circuit.operations:
-        kind = operation.kind
-        if kind in {"h", "s", "s_dag"}:
-            gate = {"h": "H", "s": "S", "s_dag": "S_DAG"}[kind]
-            out.append(gate, operation.qubits)
-        elif kind in {"cx", "cz", "swap"}:
-            gate = {"cx": "CX", "cz": "CZ", "swap": "SWAP"}[kind]
-            out.append(gate, operation.qubits)
-        elif kind == "pauli":
-            if operation.pauli is None:
-                raise ValueError("pauli operation requires a Pauli string")
-            _append_pauli_gate(out, operation.qubits, operation.pauli)
-        elif kind == "noise":
-            if operation.noise_location is None:
-                raise ValueError("noise operation requires a noise location")
-            _append_noise(out, operation.noise_location)
-        elif kind == "measure":
-            basis = operation.basis.upper()
-            gate = {"Z": "M", "X": "MX", "Y": "MY"}[basis]
-            _append_measurement_gate(out, gate, operation.qubits, operation.noise_location)
-            _record_measurement_key(
-                operation.key,
-                measurement_keys,
-                measurement_index_by_key,
-            )
-        elif kind == "measure_pauli":
-            if operation.pauli is None:
-                raise ValueError("measure_pauli operation requires a Pauli string")
-            _append_measurement_gate(
-                out,
-                "MPP",
-                _mpp_targets(operation.qubits, operation.pauli),
-                operation.noise_location,
-            )
-            _record_measurement_key(
-                operation.key,
-                measurement_keys,
-                measurement_index_by_key,
-            )
-        elif kind == "reset":
-            (qubit,) = operation.qubits
-            basis = operation.basis.upper()
-            if operation.key is None:
-                out.append({"Z": "R", "X": "RX", "Y": "RY"}[basis], [qubit])
-            else:
-                out.append({"Z": "MR", "X": "MRX", "Y": "MRY"}[basis], [qubit])
-                _record_measurement_key(
-                    operation.key,
-                    measurement_keys,
-                    measurement_index_by_key,
-                )
-        elif kind == "detector":
-            out.append(
-                "DETECTOR",
-                _rec_targets(operation.measurement_keys, measurement_index_by_key),
-                operation.metadata.get("coords", ()),
-            )
-        elif kind == "observable_include":
-            if operation.observable_id is None:
-                raise ValueError("observable_include requires observable_id")
-            out.append(
-                "OBSERVABLE_INCLUDE",
-                _rec_targets(operation.measurement_keys, measurement_index_by_key),
-                operation.observable_id,
-            )
-        else:
-            raise ValueError(f"unsupported operation kind {kind!r}")
-
-    return out, tuple(measurement_keys)
-
-
-def _append_measurement_gate(
-    circuit: object,
-    gate: str,
-    targets: Sequence[object] | Sequence[int],
-    location: NoiseLocation | None,
-) -> None:
-    if location is None:
-        circuit.append(gate, targets)
-        return
-    if not isinstance(location.model, MeasurementBitFlip):
-        raise ValueError("Stim comparison only supports MeasurementBitFlip on measurements")
-    circuit.append(gate, targets, location.rate)
-
-
-def _append_noise(circuit: object, location: NoiseLocation) -> None:
-    model = location.model
-    if isinstance(model, BernoulliPauliNoise):
-        if len(model.pauli) == 1:
-            gate = {"X": "X_ERROR", "Y": "Y_ERROR", "Z": "Z_ERROR", "I": None}[
-                model.pauli
-            ]
-            if gate is not None:
-                circuit.append(gate, location.qubits, location.rate)
-            return
-        circuit.append("E", _correlated_error_targets(location.qubits, model.pauli), location.rate)
-        return
-    if isinstance(model, SingleQubitDepolarizing):
-        circuit.append("DEPOLARIZE1", location.qubits, location.rate)
-        return
-    if isinstance(model, TwoQubitDepolarizing):
-        circuit.append("DEPOLARIZE2", location.qubits, location.rate)
-        return
-    if isinstance(model, PauliChannel):
-        probabilities = _pauli_channel_probabilities(model, location.rate)
-        if model.event_length == 1:
-            circuit.append(
-                "PAULI_CHANNEL_1",
-                location.qubits,
-                [probabilities.get(pauli, 0.0) for pauli in ("X", "Y", "Z")],
-            )
-            return
-        if model.event_length == 2:
-            events = (
-                "IX",
-                "IY",
-                "IZ",
-                "XI",
-                "XX",
-                "XY",
-                "XZ",
-                "YI",
-                "YX",
-                "YY",
-                "YZ",
-                "ZI",
-                "ZX",
-                "ZY",
-                "ZZ",
-            )
-            circuit.append(
-                "PAULI_CHANNEL_2",
-                location.qubits,
-                [probabilities.get(event, 0.0) for event in events],
-            )
-            return
-    raise ValueError(f"unsupported Stim comparison noise model {type(model).__name__}")
-
-
-def _append_pauli_gate(circuit: object, qubits: Sequence[int], pauli: str) -> None:
-    by_gate: dict[str, list[int]] = {"X": [], "Y": [], "Z": []}
-    for qubit, local_pauli in zip(qubits, pauli):
-        if local_pauli in by_gate:
-            by_gate[local_pauli].append(qubit)
-        elif local_pauli != "I":
-            raise ValueError(f"unsupported Pauli {local_pauli!r}")
-    for gate, targets in by_gate.items():
-        if targets:
-            circuit.append(gate, targets)
-
-
-def _mpp_targets(qubits: Sequence[int], pauli: str) -> list[object]:
-    assert stim is not None
-    factors = _pauli_targets(qubits, pauli)
-    if not factors:
-        raise ValueError("Stim MPP comparison does not support empty Pauli products")
-    targets: list[object] = []
-    for idx, target in enumerate(factors):
-        if idx:
-            targets.append(stim.target_combiner())
-        targets.append(target)
-    return targets
-
-
-def _correlated_error_targets(qubits: Sequence[int], pauli: str) -> list[object]:
-    targets = _pauli_targets(qubits, pauli)
-    if not targets:
-        return []
-    return targets
-
-
-def _pauli_targets(qubits: Sequence[int], pauli: str) -> list[object]:
-    assert stim is not None
-    targets: list[object] = []
-    for qubit, local_pauli in zip(qubits, pauli):
-        if local_pauli == "I":
-            continue
-        if local_pauli == "X":
-            targets.append(stim.target_x(qubit))
-        elif local_pauli == "Y":
-            targets.append(stim.target_y(qubit))
-        elif local_pauli == "Z":
-            targets.append(stim.target_z(qubit))
-        else:
-            raise ValueError(f"unsupported Pauli {local_pauli!r}")
-    return targets
-
-
-def _pauli_channel_probabilities(model: PauliChannel, rate: float) -> dict[str, float]:
-    total_weight = model.total_weight
-    return {
-        event: rate * weight / total_weight
-        for event, weight in model.weights.items()
-        if weight > 0
-    }
-
-
-def _record_measurement_key(
-    key: str | None,
-    measurement_keys: list[str],
-    measurement_index_by_key: dict[str, int],
-) -> None:
-    if key is None:
-        key = f"m{len(measurement_keys)}"
-    if key in measurement_index_by_key:
-        raise ValueError(f"duplicate measurement key {key!r}")
-    measurement_index_by_key[key] = len(measurement_keys)
-    measurement_keys.append(key)
-
-
-def _rec_targets(
-    keys: Sequence[str],
-    measurement_index_by_key: dict[str, int],
-) -> list[object]:
-    assert stim is not None
-    current_index = len(measurement_index_by_key)
-    return [
-        stim.target_rec(measurement_index_by_key[key] - current_index)
-        for key in keys
-    ]
-
-
 def _assert_key_rate_close(
     testcase: unittest.TestCase,
     batch: BatchTrajectory,
@@ -1123,163 +800,11 @@ def _assert_rates_close(
 ) -> None:
     pooled = 0.5 * (npsim_rate + stim_rate)
     sigma = (2.0 * pooled * (1.0 - pooled) / shots) ** 0.5
-    tolerance = max(0.025, 7.0 * sigma, 20.0 / shots)
+    tolerance = max(0.01, 5.0 * sigma, 8.0 / shots)
     testcase.assertLessEqual(
         abs(npsim_rate - stim_rate),
         tolerance,
         f"{label}: NPSim={npsim_rate:.6g}, Stim={stim_rate:.6g}, tolerance={tolerance:.6g}",
-    )
-
-
-def _with_final_data_measurements(
-    circuit: Circuit,
-    qubits: Iterable[int],
-    *,
-    basis: str,
-    prefix: str,
-) -> Circuit:
-    operations = list(circuit.operations)
-    for idx, qubit in enumerate(qubits):
-        operations.append(Operation.measure(int(qubit), key=f"{prefix}_{idx}", basis=basis))
-    return Circuit(n_qubits=circuit.n_qubits, operations=operations)
-
-
-def _with_dem_declarations(
-    circuit: Circuit,
-    *,
-    detectors: Sequence[Detector],
-    observables: Sequence[LogicalObservable],
-) -> Circuit:
-    operations = list(circuit.operations)
-    for detector in detectors:
-        operations.append(
-            Operation.detector(
-                detector.measurement_keys,
-                detector_id=detector.id,
-                coords=detector.coords,
-            )
-        )
-    for observable in observables:
-        if observable.pauli:
-            raise ValueError("Stim comparison needs measurement-only observables")
-        operations.append(
-            Operation.observable_include(
-                observable.id,
-                observable.measurement_keys,
-            )
-        )
-    return Circuit(n_qubits=circuit.n_qubits, operations=operations)
-
-
-def _npsim_dem_error_edges(dem: object) -> tuple[tuple[float, tuple[int, ...], tuple[int, ...]], ...]:
-    return tuple(
-        sorted(
-            (
-                round(float(edge.probability), 12),
-                tuple(int(detector_id) for detector_id in edge.detectors),
-                tuple(int(observable_id) for observable_id in edge.observables),
-            )
-            for edge in dem.edges
-        )
-    )
-
-
-def _stim_dem_error_edges(stim_dem: object) -> tuple[tuple[float, tuple[int, ...], tuple[int, ...]], ...]:
-    edges: list[tuple[float, tuple[int, ...], tuple[int, ...]]] = []
-    for instruction in stim_dem:
-        if instruction.type != "error":
-            continue
-        detectors: list[int] = []
-        observables: list[int] = []
-        for target in instruction.targets_copy():
-            if target.is_relative_detector_id():
-                detectors.append(int(target.val))
-            elif target.is_logical_observable_id():
-                observables.append(int(target.val))
-            elif not target.is_separator():
-                raise ValueError(f"unsupported Stim DEM target {target!r}")
-        edges.append(
-            (
-                round(float(instruction.args_copy()[0]), 12),
-                tuple(detectors),
-                tuple(observables),
-            )
-        )
-    return tuple(sorted(edges))
-
-
-def _npsim_dem_from_stim_dem(stim_dem: object) -> DetectorErrorModel:
-    detectors_by_id: dict[int, Detector] = {}
-    observable_ids: set[int] = set()
-    edges: list[DetectorErrorEdge] = []
-    detector_offset = 0
-
-    for instruction in stim_dem:
-        instruction_type = instruction.type
-        if instruction_type == "error":
-            detectors: list[int] = []
-            observables: list[int] = []
-            for target in instruction.targets_copy():
-                if target.is_relative_detector_id():
-                    detectors.append(detector_offset + int(target.val))
-                elif target.is_logical_observable_id():
-                    observable_id = int(target.val)
-                    observables.append(observable_id)
-                    observable_ids.add(observable_id)
-                elif target.is_separator():
-                    continue
-                else:
-                    raise ValueError(f"unsupported Stim DEM target {target!r}")
-            edge_index = len(edges)
-            edges.append(
-                DetectorErrorEdge(
-                    probability=float(instruction.args_copy()[0]),
-                    detectors=tuple(detectors),
-                    observables=tuple(observables),
-                    location_id=f"stim_dem_edge_{edge_index}",
-                    event=edge_index,
-                    tags={"source": "stim_dem"},
-                )
-            )
-        elif instruction_type == "detector":
-            coords = tuple(float(coord) for coord in instruction.args_copy())
-            for target in instruction.targets_copy():
-                if not target.is_relative_detector_id():
-                    raise ValueError(f"unsupported detector target {target!r}")
-                detector_id = detector_offset + int(target.val)
-                detectors_by_id.setdefault(
-                    detector_id,
-                    Detector(
-                        id=detector_id,
-                        measurement_keys=(),
-                        coords=coords,
-                    ),
-                )
-        elif instruction_type == "shift_detectors":
-            detector_offset += sum(int(target) for target in instruction.targets_copy())
-        elif instruction_type == "logical_observable":
-            for target in instruction.targets_copy():
-                if not target.is_logical_observable_id():
-                    raise ValueError(f"unsupported logical observable target {target!r}")
-                observable_ids.add(int(target.val))
-        else:
-            raise ValueError(f"unsupported Stim DEM instruction {instruction_type!r}")
-
-    for edge in edges:
-        for detector_id in edge.detectors:
-            detectors_by_id.setdefault(
-                detector_id,
-                Detector(id=detector_id, measurement_keys=()),
-            )
-        observable_ids.update(edge.observables)
-
-    return DetectorErrorModel(
-        detectors=tuple(detectors_by_id[key] for key in sorted(detectors_by_id)),
-        observables=tuple(
-            LogicalObservable(id=observable_id)
-            for observable_id in sorted(observable_ids)
-        ),
-        edges=tuple(edges),
     )
 
 

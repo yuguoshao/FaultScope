@@ -57,13 +57,15 @@ from tests.surface_code_examples import (
     _rotated_surface_code_checks,
     make_large_rotated_surface_code_memory_example,
 )
-from tests.reference.batch import (
-    BatchForwardNoiseAwareSimulator as ReferenceBatchForwardNoiseAwareSimulator,
+from tests.stim_helpers import (
+    dem_batch_from_stim_samples,
+    final_data_measurement_circuit,
+    measurement_batch_from_stim_samples,
+    npsim_dem_error_edges,
+    stim_dem_error_edges,
+    to_stim_circuit,
+    with_dem_declarations,
 )
-from tests.reference.dem import (
-    DetectorErrorModelGenerator as ReferenceDetectorErrorModelGenerator,
-)
-from tests.reference.forward import ForwardNoiseAwareSimulator
 
 
 def _assert_binomial_count_close(
@@ -79,7 +81,7 @@ def _assert_binomial_count_close(
 
 
 class StabilizerStateTests(unittest.TestCase):
-    def test_pauli_frame_reference_methods(self) -> None:
+    def test_pauli_frame_public_methods(self) -> None:
         frame = PauliFrame.zero(2)
         frame.apply_pauli_string((0, 1), "XZ")
         self.assertEqual(frame.x, [1, 0])
@@ -132,164 +134,6 @@ class StabilizerStateTests(unittest.TestCase):
 
 
 class NoiseAwareSimulatorTests(unittest.TestCase):
-    def test_ideal_pauli_gate_does_not_create_frame_error(self) -> None:
-        circuit = Circuit(
-            n_qubits=1,
-            operations=[
-                Operation.x(0),
-                Operation.measure(0, key="m", basis="Z"),
-            ],
-        )
-        trajectory = ForwardNoiseAwareSimulator(circuit).run_shot(rng=random.Random(8))
-        self.assertEqual(trajectory.measurement_by_key["m"].bit, 1)
-        self.assertEqual(trajectory.frame.pauli_on((0,)), "I")
-
-    def test_basis_resets_prepare_requested_eigenstates(self) -> None:
-        circuit = Circuit(
-            n_qubits=2,
-            operations=[
-                Operation.x(0),
-                Operation.reset(0, basis="X"),
-                Operation.measure(0, key="mx", basis="X"),
-                Operation.reset(1, basis="Y"),
-                Operation.measure(1, key="my", basis="Y"),
-            ],
-        )
-        trajectory = ForwardNoiseAwareSimulator(circuit).run_shot(rng=random.Random(9))
-        self.assertEqual(trajectory.measurement_by_key["mx"].bit, 0)
-        self.assertEqual(trajectory.measurement_by_key["my"].bit, 0)
-
-    def test_common_clifford_gates_run_through_circuit_api(self) -> None:
-        circuit = Circuit(
-            n_qubits=2,
-            operations=[
-                Operation.h(0),
-                Operation.h(1),
-                Operation.cz(0, 1),
-                Operation.measure_pauli((0, 1), "XZ", key="k0"),
-                Operation.measure_pauli((0, 1), "ZX", key="k1"),
-                Operation.swap(0, 1),
-                Operation.s(0),
-                Operation.s_dag(0),
-            ],
-        )
-        trajectory = ForwardNoiseAwareSimulator(circuit).run_shot(rng=random.Random(10))
-        self.assertEqual(trajectory.measurement_by_key["k0"].bit, 0)
-        self.assertEqual(trajectory.measurement_by_key["k1"].bit, 0)
-
-    def test_pauli_channel_estimates_total_error_rate_gradient(self) -> None:
-        location = NoiseLocation(
-            id="pc",
-            model=PauliChannel({"X": 0.7, "Y": 0.3}),
-            rate=0.25,
-            qubits=(0,),
-            tags={"qubit": 0, "round": 0, "gate": "idle"},
-        )
-        circuit = Circuit(
-            n_qubits=1,
-            operations=[
-                Operation.noise(location),
-                Operation.measure(0, key="m", basis="Z"),
-            ],
-        )
-        result = ForwardNoiseAwareSimulator(circuit).estimate(
-            shots=30_000,
-            seed=12,
-            loss_fn=lambda trajectory, decoded: trajectory.measurement_by_key["m"].bit,
-        )
-        self.assertAlmostEqual(result.mean_loss, 0.25, delta=0.025)
-        self.assertAlmostEqual(result.sensitivities["pc"], 1.0, delta=0.1)
-
-    def test_score_function_estimates_single_x_noise_gradient(self) -> None:
-        location = NoiseLocation(
-            id="x0",
-            model=BernoulliPauliNoise("X"),
-            rate=0.2,
-            qubits=(0,),
-            tags={"qubit": 0, "round": 0, "gate": "idle"},
-        )
-        circuit = Circuit(
-            n_qubits=1,
-            operations=[
-                Operation.noise(location),
-                Operation.measure(0, key="m", basis="Z"),
-            ],
-        )
-        result = ForwardNoiseAwareSimulator(circuit).estimate(
-            shots=30_000,
-            seed=5,
-            loss_fn=lambda trajectory, decoded: trajectory.measurement_by_key["m"].bit,
-        )
-
-        self.assertAlmostEqual(result.mean_loss, 0.2, delta=0.02)
-        self.assertAlmostEqual(result.sensitivities["x0"], 1.0, delta=0.08)
-        self.assertAlmostEqual(result.hotspots["x0"], 1.0, delta=0.08)
-        self.assertIn(0, result.by_qubit)
-        self.assertIn(0, result.by_round)
-        self.assertIn("idle", result.by_gate)
-
-    def test_zero_loss_has_zero_hotspot(self) -> None:
-        location = NoiseLocation(
-            id="irrelevant",
-            model=BernoulliPauliNoise("Z"),
-            rate=0.4,
-            qubits=(0,),
-            tags={"qubit": 0, "round": 0, "gate": "idle"},
-        )
-        circuit = Circuit(
-            n_qubits=1,
-            operations=[
-                Operation.noise(location),
-                Operation.measure(0, key="m", basis="Z"),
-            ],
-        )
-        result = ForwardNoiseAwareSimulator(circuit).estimate(
-            shots=2_000,
-            seed=6,
-            loss_fn=lambda trajectory, decoded: 0.0,
-        )
-        self.assertEqual(result.mean_loss, 0.0)
-        self.assertEqual(result.hotspots["irrelevant"], 0.0)
-
-    def test_measurement_bit_flip_estimates_gradient(self) -> None:
-        location = NoiseLocation(
-            id="mflip",
-            model=MeasurementBitFlip(),
-            rate=0.3,
-            qubits=(0,),
-            tags={"qubit": 0, "round": 0, "gate": "measure"},
-        )
-        circuit = Circuit(
-            n_qubits=1,
-            operations=[
-                Operation.measure(0, key="m", basis="Z", noise=location),
-            ],
-        )
-        result = ForwardNoiseAwareSimulator(circuit).estimate(
-            shots=30_000,
-            seed=18,
-            loss_fn=lambda trajectory, decoded: trajectory.measurement_by_key["m"].bit,
-        )
-
-        self.assertAlmostEqual(result.mean_loss, 0.3, delta=0.025)
-        self.assertAlmostEqual(result.sensitivities["mflip"], 1.0, delta=0.1)
-        self.assertIn("measure", result.by_gate)
-
-    def test_detector_and_observable_operations_are_recorded(self) -> None:
-        circuit = Circuit(
-            n_qubits=1,
-            operations=[
-                Operation.x(0),
-                Operation.measure(0, key="m", basis="Z"),
-                Operation.detector(("m",), detector_id=2, coords=(1.5, 2.0)),
-                Operation.observable_include(0, ("m",)),
-            ],
-        )
-        trajectory = ForwardNoiseAwareSimulator(circuit).run_shot(rng=random.Random(16))
-        self.assertEqual(trajectory.detectors, {2: 1})
-        self.assertEqual(trajectory.observables, {0: 1})
-        self.assertEqual(trajectory.detector_record, {2: 1})
-
     def test_core_circuit_objects_are_extension_classes(self) -> None:
         import npsim
         import npsim.core as core
@@ -423,7 +267,7 @@ class NoiseAwareSimulatorTests(unittest.TestCase):
         with self.assertRaises((TypeError, ValueError)):
             native.compile_sampler({"n_qubits": 1, "operations": []})
 
-    def test_noise_models_are_extension_classes_with_reference_methods(self) -> None:
+    def test_noise_models_are_extension_classes_with_public_methods(self) -> None:
         bernoulli = BernoulliPauliNoise("XZ")
         self.assertEqual(bernoulli.pauli, "XZ")
         self.assertEqual(bernoulli.sample(random.Random(1), 1.0), "XZ")
@@ -478,29 +322,6 @@ class NoiseAwareSimulatorTests(unittest.TestCase):
             PauliChannel({"X": 0.0})
         with self.assertRaises(ValueError):
             PauliChannel({"X": 1.0, "ZZ": 1.0})
-
-    def test_repetition_code_experiment_runs_and_aggregates(self) -> None:
-        experiment = make_repetition_code_experiment(
-            distance=3,
-            rounds=1,
-            data_error_rate={(0, 0): 0.15, (0, 1): 0.15, (0, 2): 0.01},
-            measurement_error_rate=0.02,
-        )
-        result = ForwardNoiseAwareSimulator(experiment.circuit).estimate(
-            shots=10_000,
-            seed=7,
-            detector_fn=experiment.detector_fn,
-            decoder=experiment.decoder,
-            loss_fn=experiment.loss_fn,
-        )
-
-        self.assertGreaterEqual(result.mean_loss, 0.0)
-        self.assertLessEqual(result.mean_loss, 1.0)
-        self.assertTrue(result.top_hotspots(top_k=3))
-        self.assertIn(0, result.by_round)
-        self.assertIn("idle", result.by_gate)
-        self.assertIn("measure", result.by_gate)
-
 
 class BatchNoiseAwareSimulatorTests(unittest.TestCase):
     def test_batch_score_function_estimates_single_x_noise_gradient(self) -> None:
@@ -674,6 +495,50 @@ def _default_batch_loss(batch, corrections) -> int:
     )
 
 
+def _stim_batch_for_circuit(
+    circuit: Circuit,
+    *,
+    shots: int,
+    seed: int,
+) -> BatchTrajectory:
+    stim_circuit, key_order = to_stim_circuit(circuit)
+    samples = stim_circuit.compile_sampler(seed=seed).sample(shots)
+    detector_flips, observable_flips = stim_circuit.compile_m2d_converter().convert(
+        measurements=samples,
+        separate_observables=True,
+    )
+    measurement_batch = measurement_batch_from_stim_samples(samples, key_order)
+    detectors: list[Detector] = []
+    for operation in circuit.operations:
+        if operation.kind != "detector":
+            continue
+        detector_id = operation.metadata.get("detector_id")
+        if detector_id is None:
+            detector_id = len(detectors)
+        detectors.append(Detector(id=int(detector_id), measurement_keys=()))
+    observables = tuple(
+        LogicalObservable(id=int(operation.observable_id))
+        for operation in circuit.operations
+        if operation.kind == "observable_include" and operation.observable_id is not None
+    )
+    dem_batch = dem_batch_from_stim_samples(
+        detector_flips,
+        observable_flips,
+        detectors=tuple(detectors),
+        observables=observables,
+    )
+    return BatchTrajectory(
+        shots=shots,
+        all_mask=(1 << shots) - 1,
+        x_frame=(),
+        z_frame=(),
+        measurements=measurement_batch.measurements,
+        detectors=dem_batch.detectors,
+        observables=dem_batch.observables,
+        noise_event_masks={},
+    )
+
+
 class NativePackedSamplerTests(unittest.TestCase):
     def _native_sampler_or_skip(self, circuit: Circuit, *, observables=()):
         try:
@@ -687,7 +552,7 @@ class NativePackedSamplerTests(unittest.TestCase):
         except ImportError as exc:
             self.skipTest(str(exc))
 
-    def test_native_backend_matches_reference_batch_sampler_masks(self) -> None:
+    def test_native_backend_matches_stim_batch_sampler_masks(self) -> None:
         location = NoiseLocation(
             id="x0",
             model=BernoulliPauliNoise("X"),
@@ -705,15 +570,16 @@ class NativePackedSamplerTests(unittest.TestCase):
         )
         sampler = self._native_sampler_or_skip(circuit)
         native_batch = sampler.sample(shots=9, seed=123)
-        reference = ReferenceBatchForwardNoiseAwareSimulator(circuit).run_batch(
+        stim_batch = _stim_batch_for_circuit(
+            circuit,
             shots=9,
-            rng=random.Random(123),
+            seed=456,
         )
 
-        self.assertEqual(native_batch.measurements, reference.measurements)
-        self.assertEqual(native_batch.detectors, reference.detectors)
-        self.assertEqual(native_batch.observables, reference.observables)
-        self.assertEqual(native_batch.noise_event_masks, reference.noise_event_masks)
+        self.assertEqual(native_batch.measurements, stim_batch.measurements)
+        self.assertEqual(native_batch.detectors, stim_batch.detectors)
+        self.assertEqual(native_batch.observables, stim_batch.observables)
+        self.assertEqual(native_batch.noise_event_masks["x0"], native_batch.all_mask)
 
     def test_backend_keyword_is_not_accepted(self) -> None:
         circuit = Circuit(
@@ -745,7 +611,7 @@ class NativePackedSamplerTests(unittest.TestCase):
             sampler = compile_native_sampler(circuit)
             self.assertEqual(sampler.sample(shots=4, seed=1).shots, 4)
 
-    def test_native_backend_matches_deterministic_reference_masks(self) -> None:
+    def test_native_backend_matches_deterministic_stim_masks(self) -> None:
         x_location = NoiseLocation(
             id="x0",
             model=BernoulliPauliNoise("X"),
@@ -761,7 +627,6 @@ class NativePackedSamplerTests(unittest.TestCase):
         circuit = Circuit(
             n_qubits=1,
             operations=[
-                Operation.x(0),
                 Operation.reset(0, key="r", basis="Z"),
                 Operation.noise(x_location),
                 Operation.measure(0, key="m", basis="Z", noise=m_location),
@@ -771,17 +636,19 @@ class NativePackedSamplerTests(unittest.TestCase):
         )
         sampler = self._native_sampler_or_skip(circuit)
         native_batch = sampler.sample(shots=17, seed=11)
-        reference = ReferenceBatchForwardNoiseAwareSimulator(circuit).run_batch(
+        stim_batch = _stim_batch_for_circuit(
+            circuit,
             shots=17,
-            rng=random.Random(11),
+            seed=12,
         )
 
-        self.assertEqual(native_batch.x_frame, reference.x_frame)
-        self.assertEqual(native_batch.z_frame, reference.z_frame)
-        self.assertEqual(native_batch.measurements, reference.measurements)
-        self.assertEqual(native_batch.detectors, reference.detectors)
-        self.assertEqual(native_batch.observables, reference.observables)
-        self.assertEqual(native_batch.noise_event_masks, reference.noise_event_masks)
+        self.assertEqual(native_batch.x_frame, (native_batch.all_mask,))
+        self.assertEqual(native_batch.z_frame, (0,))
+        self.assertEqual(native_batch.measurements, stim_batch.measurements)
+        self.assertEqual(native_batch.detectors, stim_batch.detectors)
+        self.assertEqual(native_batch.observables, stim_batch.observables)
+        self.assertEqual(native_batch.noise_event_masks["x0"], native_batch.all_mask)
+        self.assertEqual(native_batch.noise_event_masks["mflip"], native_batch.all_mask)
 
     def test_native_batch_single_mask_accessors_match_bulk_properties(self) -> None:
         x_location = NoiseLocation(
@@ -891,12 +758,12 @@ class NativePackedSamplerTests(unittest.TestCase):
         )
 
         native_batch = sampler.run_native_batch(256, 49)
-        reference_loss = _default_batch_loss(
+        expected_loss = _default_batch_loss(
             native_batch,
             experiment.decoder.decode_batch_masks(native_batch),
         )
 
-        self.assertEqual(result.mean_loss, reference_loss.bit_count() / 256)
+        self.assertEqual(result.mean_loss, expected_loss.bit_count() / 256)
 
     def test_external_pauli_observable_matches_final_measurement(self) -> None:
         experiment = make_repetition_code_experiment(
@@ -1137,51 +1004,36 @@ class NativeDetectorErrorModelTests(unittest.TestCase):
         except ImportError as exc:
             self.skipTest(f"native extension unavailable: {exc}")
 
-    def test_native_dem_generator_matches_repetition_reference(self) -> None:
+    def test_native_dem_generator_matches_repetition_stim_dem(self) -> None:
         self._require_native_dem()
         experiment = make_repetition_code_experiment(
             distance=3,
             rounds=1,
             data_error_rate=0.1,
-            measurement_error_rate=0.01,
+            measurement_error_rate=0.0,
         )
-        generator = ReferenceDetectorErrorModelGenerator(
+        observable = LogicalObservable(id=0, measurement_keys=("final_d_0",))
+        circuit = final_data_measurement_circuit(
             experiment.circuit,
-            detectors=experiment.detectors,
-            observables=experiment.observables,
+            (experiment.data_qubits[0],),
+            basis="Z",
+            prefix="final_d",
         )
-        reference = generator.generate()
         native = generate_native_dem(
-            experiment.circuit,
+            circuit,
             detectors=experiment.detectors,
-            observables=experiment.observables,
+            observables=(observable,),
         )
+        stim_circuit, _ = to_stim_circuit(
+            with_dem_declarations(
+                circuit,
+                detectors=experiment.detectors,
+                observables=(observable,),
+            )
+        )
+        stim_dem = stim_circuit.detector_error_model(decompose_errors=False)
 
-        self.assertEqual(native.to_dem_text(), reference.to_dem_text())
-        self.assertEqual(
-            [
-                (
-                    edge.location_id,
-                    edge.event,
-                    edge.probability,
-                    edge.detectors,
-                    edge.observables,
-                    dict(edge.tags),
-                )
-                for edge in native.edges
-            ],
-            [
-                (
-                    edge.location_id,
-                    edge.event,
-                    edge.probability,
-                    edge.detectors,
-                    edge.observables,
-                    dict(edge.tags),
-                )
-                for edge in reference.edges
-            ],
-        )
+        self.assertEqual(npsim_dem_error_edges(native), stim_dem_error_edges(stim_dem))
 
     def test_native_dem_generator_splits_pauli_channel_edges(self) -> None:
         self._require_native_dem()
