@@ -99,6 +99,32 @@ impl ConcreteStabilizer {
         (0..self.n_qubits()).all(|row| symplectic_product(&self.x[row], &self.z[row], x, z) == 0)
     }
 
+    pub(crate) fn is_deterministic_sparse_pauli(
+        &self,
+        qubits: &[usize],
+        pauli: &str,
+    ) -> PyResult<bool> {
+        if qubits.len() != pauli.len() {
+            return Err(PyValueError::new_err(
+                "qubits and paulis must have the same length",
+            ));
+        }
+        let mut local_terms = Vec::with_capacity(qubits.len());
+        for local in pauli.chars() {
+            local_terms.push(pauli_to_xz(local)?);
+        }
+        for row in 0..self.n_qubits() {
+            let mut acc = 0;
+            for (qubit, (x, z)) in qubits.iter().zip(&local_terms) {
+                acc ^= (self.x[row][*qubit] & *z) ^ (self.z[row][*qubit] & *x);
+            }
+            if (acc & 1) != 0 {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
     pub(crate) fn deterministic_measurement_bit(&self, x: &[u8], z: &[u8]) -> PyResult<bool> {
         let rows: Vec<Vec<u64>> = (0..self.n_qubits())
             .map(|row| support_to_words(&self.x[row], &self.z[row]))

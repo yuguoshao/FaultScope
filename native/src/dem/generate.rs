@@ -20,11 +20,17 @@ pub(crate) fn generate_dem_edges(
         observables,
         state.event_words,
     )?;
+    let detector_sensitivities = sorted_sensitivities(detector_sensitivities);
+    let observable_sensitivities = sorted_sensitivities(observable_sensitivities);
+    let detector_flips_by_event =
+        sensitivity_flips_by_event(&detector_sensitivities, events.len());
+    let observable_flips_by_event =
+        sensitivity_flips_by_event(&observable_sensitivities, events.len());
     let mut edges = Vec::new();
 
     for (event_index, event) in events.iter().enumerate() {
-        let detector_flips = sensitive_ids(&detector_sensitivities, event_index);
-        let observable_flips = sensitive_ids(&observable_sensitivities, event_index);
+        let detector_flips = detector_flips_by_event[event_index].clone();
+        let observable_flips = observable_flips_by_event[event_index].clone();
         if detector_flips.is_empty() && observable_flips.is_empty() {
             continue;
         }
@@ -134,7 +140,7 @@ pub(crate) fn apply_sensitivity_operation(
             qubit, key, basis, ..
         } => {
             let qubits = vec![*qubit];
-            deterministic_dem_measurement(&state.reference, &qubits, basis, key.as_deref())?;
+            ensure_deterministic_dem_measurement(&state.reference, &qubits, basis, key.as_deref())?;
             let mut value = sensitivity_frame_measurement_flip(
                 &state.x_frame,
                 &state.z_frame,
@@ -151,7 +157,7 @@ pub(crate) fn apply_sensitivity_operation(
         Op::MeasurePauli {
             qubits, pauli, key, ..
         } => {
-            deterministic_dem_measurement(&state.reference, qubits, pauli, key.as_deref())?;
+            ensure_deterministic_dem_measurement(&state.reference, qubits, pauli, key.as_deref())?;
             let mut value = sensitivity_frame_measurement_flip(
                 &state.x_frame,
                 &state.z_frame,
@@ -168,7 +174,7 @@ pub(crate) fn apply_sensitivity_operation(
         Op::Reset { qubit, key, basis } => {
             let qubits = vec![*qubit];
             if let Some(key) = key {
-                deterministic_dem_measurement(&state.reference, &qubits, basis, Some(key))?;
+                ensure_deterministic_dem_measurement(&state.reference, &qubits, basis, Some(key))?;
                 let value = sensitivity_frame_measurement_flip(
                     &state.x_frame,
                     &state.z_frame,
@@ -346,24 +352,31 @@ pub(crate) fn sensitivity_measurement_parity(
     Ok(parity)
 }
 
-pub(crate) fn sensitive_ids(sensitivities: &HashMap<i64, Mask>, event_index: usize) -> Vec<i64> {
-    let mut ids: Vec<i64> = sensitivities.keys().copied().collect();
-    ids.sort_unstable();
-    ids.into_iter()
-        .filter(|id| {
-            sensitivities
-                .get(id)
-                .map(|mask| mask_has_bit(mask, event_index))
-                .unwrap_or(false)
-        })
-        .collect()
+pub(crate) fn sorted_sensitivities(sensitivities: HashMap<i64, Mask>) -> Vec<(i64, Mask)> {
+    let mut out: Vec<(i64, Mask)> = sensitivities.into_iter().collect();
+    out.sort_by_key(|(id, _)| *id);
+    out
 }
 
-pub(crate) fn mask_has_bit(mask: &Mask, bit_index: usize) -> bool {
-    mask.words
-        .get(bit_index / 64)
-        .map(|word| (word & (1u64 << (bit_index % 64))) != 0)
-        .unwrap_or(false)
+pub(crate) fn sensitivity_flips_by_event(
+    sensitivities: &[(i64, Mask)],
+    event_count: usize,
+) -> Vec<Vec<i64>> {
+    let mut out = vec![Vec::new(); event_count];
+    for (id, mask) in sensitivities {
+        for (word_index, word) in mask.words.iter().enumerate() {
+            let mut remaining = *word;
+            while remaining != 0 {
+                let bit = remaining.trailing_zeros() as usize;
+                let event_index = word_index * 64 + bit;
+                if event_index < event_count {
+                    out[event_index].push(*id);
+                }
+                remaining &= remaining - 1;
+            }
+        }
+    }
+    out
 }
 
 pub(crate) fn collect_noise_occurrences(operations: &[Op]) -> PyResult<Vec<NoiseOccurrence>> {
@@ -459,20 +472,19 @@ pub(crate) fn non_identity_events(location: &NoiseLocationSpec) -> PyResult<Vec<
     }
 }
 
-pub(crate) fn deterministic_dem_measurement(
+pub(crate) fn ensure_deterministic_dem_measurement(
     state: &ConcreteStabilizer,
     qubits: &[usize],
     pauli: &str,
     key: Option<&str>,
-) -> PyResult<bool> {
-    let (x, z) = sparse_pauli_to_xz(state.n_qubits(), qubits, pauli)?;
-    if !state.is_deterministic_pauli(&x, &z) {
+) -> PyResult<()> {
+    if !state.is_deterministic_sparse_pauli(qubits, pauli)? {
         return Err(PyValueError::new_err(format!(
             "measurement {:?} is random in the ideal/single-error circuit",
             key.unwrap_or("measure")
         )));
     }
-    state.deterministic_measurement_bit(&x, &z)
+    Ok(())
 }
 
 pub(crate) fn dem_edges_to_py(py: Python<'_>, edges: &[GeneratedDemEdge]) -> PyResult<PyObject> {
