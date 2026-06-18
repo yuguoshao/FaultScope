@@ -9,8 +9,7 @@ mode:
     .venv/bin/python benchmarks/sampling_throughput.py --family random-clifford \
         --qubits 128 256 512 --depth 20 --noise-rate 0.001
 
-Stim is optional.  When it is not installed, the script reports only NPSim
-throughput and marks the Stim comparison as skipped.
+Stim is required and is used as the external bit-packed sampling baseline.
 """
 
 from __future__ import annotations
@@ -123,7 +122,7 @@ def _run_case(
     case: BenchmarkCase,
     *,
     args: argparse.Namespace,
-    stim_module: Any | None,
+    stim_module: Any,
 ) -> None:
     sampler = compile_native_sampler(case.circuit)
     npsim_sps = _median_samples_per_second(
@@ -132,25 +131,23 @@ def _run_case(
         repeats=args.repeats,
     )
 
-    stim_sps: float | None = None
     ratio = float("nan")
-    status = "stim-skip"
-    if stim_module is not None:
-        try:
-            stim_circuit = stim_module.Circuit(_to_stim_text(case.circuit))
-            stim_sampler = stim_circuit.compile_sampler()
-            stim_sps = _median_samples_per_second(
-                lambda seed: _sample_stim_packed(stim_sampler, args.shots, seed),
-                shots=args.shots,
-                repeats=args.repeats,
-            )
-            ratio = npsim_sps / stim_sps if stim_sps else float("inf")
-            status = "pass" if ratio >= 1.10 else "below-target"
-        except Exception as exc:
-            status = f"stim-error:{type(exc).__name__}"
+    try:
+        stim_circuit = stim_module.Circuit(_to_stim_text(case.circuit))
+        stim_sampler = stim_circuit.compile_sampler()
+        stim_sps = _median_samples_per_second(
+            lambda seed: _sample_stim_packed(stim_sampler, args.shots, seed),
+            shots=args.shots,
+            repeats=args.repeats,
+        )
+        ratio = npsim_sps / stim_sps if stim_sps else float("inf")
+        status = "pass" if ratio >= 1.10 else "below-target"
+    except Exception as exc:
+        stim_sps = float("nan")
+        status = f"stim-error:{type(exc).__name__}"
 
-    stim_cell = f"{stim_sps:.3f}" if stim_sps is not None else "NA"
-    ratio_cell = f"{ratio:.3f}" if stim_sps is not None else "NA"
+    stim_cell = f"{stim_sps:.3f}" if stim_sps == stim_sps else "NA"
+    ratio_cell = f"{ratio:.3f}" if ratio == ratio else "NA"
     depth_cell = str(case.depth) if case.depth is not None else "NA"
     rounds_cell = str(case.rounds) if case.rounds is not None else "NA"
     noise_cell = "circuit" if case.depth is None else _noise_label(args)
@@ -272,11 +269,11 @@ def _median_samples_per_second(fn: Any, *, shots: int, repeats: int) -> float:
     return statistics.median(values)
 
 
-def _load_stim() -> Any | None:
+def _load_stim() -> Any:
     try:
         import stim
-    except ImportError:
-        return None
+    except ImportError as exc:
+        raise SystemExit("Stim is required for sampling_throughput.py") from exc
     return stim
 
 

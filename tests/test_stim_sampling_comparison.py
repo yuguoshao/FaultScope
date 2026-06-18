@@ -42,9 +42,9 @@ except ImportError:  # pragma: no cover - optional test dependency
 class StimSamplingComparisonTests(unittest.TestCase):
     def setUp(self) -> None:
         if stim is None:
-            self.skipTest("Stim is not installed")
+            self.fail("Stim is required for core sampling comparison tests")
         if np is None:
-            self.skipTest("NumPy is not installed")
+            self.fail("NumPy is required for core sampling comparison tests")
 
     def test_basic_clifford_noise_and_reset_sampling_matches_stim(self) -> None:
         mflip = NoiseLocation(
@@ -291,7 +291,7 @@ class StimSamplingComparisonTests(unittest.TestCase):
                 except UnsupportedNativeCircuitError as exc:
                     self.skipTest(f"native forward sampler unavailable: {exc}")
                 except (PyMatchingUnavailableError, UnsupportedPyMatchingDemError) as exc:
-                    self.skipTest(f"PyMatching DEM decoder unavailable: {exc}")
+                    self.fail(f"PyMatching DEM decoder unavailable: {exc}")
 
                 stim_detectors, stim_observables = stim_circuit.compile_detector_sampler(
                     seed=77890,
@@ -434,7 +434,7 @@ class StimSamplingComparisonTests(unittest.TestCase):
         except UnsupportedNativeCircuitError as exc:
             self.skipTest(f"native DEM mode unavailable: {exc}")
         except (PyMatchingUnavailableError, UnsupportedPyMatchingDemError) as exc:
-            self.skipTest(f"PyMatching DEM decoder unavailable: {exc}")
+            self.fail(f"PyMatching DEM decoder unavailable: {exc}")
 
         stim_circuit, _ = _to_stim_circuit(
             _with_dem_declarations(
@@ -480,7 +480,7 @@ class StimSamplingComparisonTests(unittest.TestCase):
                 except UnsupportedNativeCircuitError as exc:
                     self.skipTest(f"native DEM mode unavailable: {exc}")
                 except (PyMatchingUnavailableError, UnsupportedPyMatchingDemError) as exc:
-                    self.skipTest(f"PyMatching DEM decoder unavailable: {exc}")
+                    self.fail(f"PyMatching DEM decoder unavailable: {exc}")
 
                 stim_circuit, _ = _to_stim_circuit(
                     _with_dem_declarations(
@@ -560,7 +560,7 @@ def _load_pymatching_or_skip(testcase: unittest.TestCase) -> Any:
     try:
         import pymatching
     except ImportError as exc:
-        testcase.skipTest(f"PyMatching is not installed: {exc}")
+        testcase.fail(f"PyMatching is required for core sampling comparison tests: {exc}")
     return pymatching
 
 
@@ -1123,7 +1123,7 @@ def _assert_rates_close(
 ) -> None:
     pooled = 0.5 * (npsim_rate + stim_rate)
     sigma = (2.0 * pooled * (1.0 - pooled) / shots) ** 0.5
-    tolerance = max(0.025, 7.0 * sigma, 20.0 / shots)
+    tolerance = max(0.01, 5.0 * sigma, 8.0 / shots)
     testcase.assertLessEqual(
         abs(npsim_rate - stim_rate),
         tolerance,

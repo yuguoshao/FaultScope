@@ -22,6 +22,12 @@ benchmark = [
     "numpy",
     "stim",
 ]
+test = [
+    "numpy",
+    "scipy",
+    "pymatching",
+    "stim",
+]
 native-build = [
     "maturin>=1.7",
 ]

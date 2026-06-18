@@ -530,10 +530,9 @@ sampler = compile_native_sampler(circuit)
 .venv/bin/python benchmarks/hotspot_throughput.py --distances 9 13 21 --rounds 3 --shots 100000
 ```
 
-默认场景是 rotated surface-code memory；`--family random-clifford` 会生成固定种子的随机 Clifford layer circuit，最后测量所有 qubits。random Clifford benchmark 可用 `--noise-rate` 和 `--noise-model depolarizing1|x` 在每层后加入单比特噪声，并用 `--measurement-noise-rate` 加测量 bit-flip。`dem_throughput.py` 比较 native Rust 与 test-only Python reference 的 DEM generation 和默认 DEM hotspot estimate；若安装了 `stim`，也会报告 Stim DEM generation 和 detector bit-packed sampling 基线。若安装了 `stim`，sampling benchmark 会同时报告 Stim bit-packed sampler 吞吐和 NPSim/Stim 比值；未安装时只报告 NPSim 并标记 `stim-skip`。
+默认场景是 rotated surface-code memory；`--family random-clifford` 会生成固定种子的随机 Clifford layer circuit，最后测量所有 qubits。random Clifford benchmark 可用 `--noise-rate` 和 `--noise-model depolarizing1|x` 在每层后加入单比特噪声，并用 `--measurement-noise-rate` 加测量 bit-flip。benchmark 的外部对照统一使用 Stim：`sampling_throughput.py` 报告 Stim bit-packed sampler 吞吐，`dem_throughput.py` 报告 Stim DEM generation 和 detector bit-packed sampling，`hotspot_throughput.py` 报告 native hotspot 路径并附带 Stim raw/DEM sampling 基线。运行这些 benchmark 需要安装 `stim`。
 `hotspot_throughput.py` 同时报告全链路 estimate 和预生成 batch 上的纯 hotspot
-聚合阶段。全链路包含 test-only Python reference 的采样和 loss callback；纯聚合阶段仍包含
-把完整 public result payload 转成 Python mapping 的兼容成本。
+聚合阶段。Stim 不提供等价的 hotspot aggregation，因此这里不报告 Stim hotspot ratio；纯聚合阶段仍包含把完整 public result payload 转成 Python mapping 的兼容成本。
 
 ## 7. Stabilizer 更新规则
 

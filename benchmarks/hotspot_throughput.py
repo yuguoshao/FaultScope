@@ -6,14 +6,13 @@ Run from the repository root after building the native extension:
 
 The benchmark separates sampling, Python loss-callback time, and hotspot
 aggregation time.  The target ratio applies to aggregation, which is the stage
-implemented in Rust for arbitrary Python loss functions.  Python comparisons
-use test-only reference implementations, not runtime fallbacks.
+implemented in Rust for arbitrary Python loss functions.  Stim raw and DEM
+sampling throughput are reported as external baselines.  Stim is required.
 """
 
 from __future__ import annotations
 
 import argparse
-import random
 import statistics
 import sys
 import time
@@ -32,15 +31,7 @@ from npsim.runtime import (
 )
 from npsim.runtime.loss import logical_residual_loss_mask
 from npsim.experiments import make_repetition_code_experiment
-from tests.reference.batch import (
-    BatchForwardNoiseAwareSimulator as ReferenceBatchForwardNoiseAwareSimulator,
-)
-from tests.reference.dem_sampler import (
-    DemBatchHotspotSimulator as ReferenceDemBatchHotspotSimulator,
-    _aggregate_by_tag,
-    _aggregate_detector_hotspots,
-    _edge_sensitivities_to_detector_graph,
-)
+from tests.stim_helpers import to_stim_circuit, with_dem_declarations
 
 
 def main() -> None:
@@ -51,13 +42,13 @@ def main() -> None:
     parser.add_argument("--repeats", type=int, default=5)
     parser.add_argument("--top-k", type=int, default=10)
     args = parser.parse_args()
+    _load_stim()
 
     print(
         "case\tdistance\trounds\tshots\tlocations\tedges\t"
-        "native_batch_full_sps\treference_batch_full_sps\tbatch_full_ratio\t"
-        "native_batch_agg_sps\treference_batch_agg_sps\tbatch_agg_ratio\t"
-        "native_dem_full_sps\treference_dem_full_sps\tdem_full_ratio\t"
-        "native_dem_agg_sps\treference_dem_agg_sps\tdem_agg_ratio\tstatus",
+        "native_batch_full_sps\tnative_batch_agg_sps\t"
+        "native_dem_full_sps\tnative_dem_agg_sps\t"
+        "stim_raw_sps\tstim_dem_sps\tstatus",
         flush=True,
     )
 
@@ -78,26 +69,20 @@ def main() -> None:
                 experiment.circuit,
                 observables=experiment.observables,
             )
-            reference_batch_engine = ReferenceBatchForwardNoiseAwareSimulator(
-                experiment.circuit,
-                observables=experiment.observables,
-            )
             native_dem_sampler = compile_native_dem_sampler(dem)
-            reference_dem_engine = ReferenceDemBatchHotspotSimulator(dem)
+            stim_raw_circuit, _ = to_stim_circuit(experiment.circuit)
+            stim_raw_sampler = stim_raw_circuit.compile_sampler()
+            stim_dem_circuit, _ = to_stim_circuit(
+                with_dem_declarations(
+                    experiment.circuit,
+                    detectors=experiment.detectors,
+                    observables=(),
+                )
+            )
+            stim_dem_sampler = stim_dem_circuit.compile_detector_sampler()
 
             native_batch_full_sps = _median_samples_per_second(
                 lambda seed: native_batch_sampler.estimate(
-                    shots=args.shots,
-                    seed=seed,
-                    decoder=experiment.decoder,
-                    top_k=args.top_k,
-                ),
-                shots=args.shots,
-                repeats=args.repeats,
-            )
-            reference_batch_full_sps = _median_samples_per_second(
-                lambda seed: _reference_batch_estimate(
-                    reference_batch_engine,
                     shots=args.shots,
                     seed=seed,
                     decoder=experiment.decoder,
@@ -114,18 +99,6 @@ def main() -> None:
                 native_corrections,
                 all_mask=native_batch.all_mask,
             )
-            reference_batch = reference_batch_engine.run_batch(
-                shots=args.shots,
-                rng=random.Random(777),
-            )
-            reference_corrections = experiment.decoder.decode_batch_masks(
-                reference_batch
-            )
-            reference_loss = logical_residual_loss_mask(
-                reference_batch.observables,
-                reference_corrections,
-                all_mask=reference_batch.all_mask,
-            )
 
             native_batch_agg_sps = _median_samples_per_second(
                 lambda seed: native_batch_sampler._engine.estimate_hotspots(
@@ -133,16 +106,6 @@ def main() -> None:
                     native_loss,
                     None,
                     args.top_k,
-                ),
-                shots=args.shots,
-                repeats=args.repeats,
-            )
-            reference_batch_agg_sps = _median_samples_per_second(
-                lambda seed: _reference_batch_aggregate(
-                    reference_batch_engine,
-                    reference_batch,
-                    reference_loss,
-                    top_k=args.top_k,
                 ),
                 shots=args.shots,
                 repeats=args.repeats,
@@ -157,15 +120,6 @@ def main() -> None:
                 shots=args.shots,
                 repeats=args.repeats,
             )
-            reference_dem_full_sps = _median_samples_per_second(
-                lambda seed: reference_dem_engine.estimate(
-                    shots=args.shots,
-                    seed=seed,
-                    baseline="mean",
-                ),
-                shots=args.shots,
-                repeats=args.repeats,
-            )
 
             native_dem_batch = native_dem_sampler._engine.run_native_batch(args.shots, 888)
             native_dem_loss = logical_residual_loss_mask(
@@ -173,16 +127,6 @@ def main() -> None:
                 {},
                 observable_ids=(observable.id for observable in dem.observables),
                 all_mask=native_dem_batch.all_mask,
-            )
-            reference_dem_batch = reference_dem_engine.run_batch(
-                shots=args.shots,
-                rng=random.Random(888),
-            )
-            reference_dem_loss = logical_residual_loss_mask(
-                reference_dem_batch.observables,
-                {},
-                observable_ids=(observable.id for observable in dem.observables),
-                all_mask=reference_dem_batch.all_mask,
             )
 
             native_dem_agg_sps = _median_samples_per_second(
@@ -195,40 +139,29 @@ def main() -> None:
                 shots=args.shots,
                 repeats=args.repeats,
             )
-            reference_dem_agg_sps = _median_samples_per_second(
-                lambda seed: _reference_dem_aggregate(
-                    reference_dem_engine,
-                    reference_dem_batch,
-                    reference_dem_loss,
-                    top_k=args.top_k,
-                ),
+            stim_raw_sps = _median_samples_per_second(
+                lambda seed: _sample_stim_raw(stim_raw_sampler, args.shots, seed),
                 shots=args.shots,
                 repeats=args.repeats,
             )
-
-            batch_full_ratio = native_batch_full_sps / reference_batch_full_sps
-            batch_agg_ratio = native_batch_agg_sps / reference_batch_agg_sps
-            dem_full_ratio = native_dem_full_sps / reference_dem_full_sps
-            dem_agg_ratio = native_dem_agg_sps / reference_dem_agg_sps
-            status = (
-                "pass"
-                if batch_agg_ratio >= 5.0 and dem_agg_ratio >= 5.0
-                else "below-target"
+            stim_dem_sps = _median_samples_per_second(
+                lambda seed: _sample_stim_detectors(stim_dem_sampler, args.shots, seed),
+                shots=args.shots,
+                repeats=args.repeats,
             )
             print(
                 f"repetition-d{distance}\t{distance}\t{args.rounds}\t{args.shots}\t"
                 f"{len(experiment.circuit.noise_locations())}\t{len(dem.edges)}\t"
-                f"{native_batch_full_sps:.3f}\t{reference_batch_full_sps:.3f}\t{batch_full_ratio:.3f}\t"
-                f"{native_batch_agg_sps:.3f}\t{reference_batch_agg_sps:.3f}\t{batch_agg_ratio:.3f}\t"
-                f"{native_dem_full_sps:.3f}\t{reference_dem_full_sps:.3f}\t{dem_full_ratio:.3f}\t"
-                f"{native_dem_agg_sps:.3f}\t{reference_dem_agg_sps:.3f}\t{dem_agg_ratio:.3f}\t{status}",
+                f"{native_batch_full_sps:.3f}\t{native_batch_agg_sps:.3f}\t"
+                f"{native_dem_full_sps:.3f}\t{native_dem_agg_sps:.3f}\t"
+                f"{stim_raw_sps:.3f}\t{stim_dem_sps:.3f}\tok",
                 flush=True,
             )
         except UnsupportedNativeCircuitError as exc:
             print(
                 f"repetition-d{distance}\t{distance}\t{args.rounds}\t{args.shots}\t"
                 f"{len(experiment.circuit.noise_locations())}\t{len(dem.edges)}\t"
-                f"NA\tNA\tNA\tNA\tNA\tNA\tNA\tNA\tNA\tNA\tNA\tNA\t"
+                f"NA\tNA\tNA\tNA\tNA\tNA\t"
                 f"native-skip:{type(exc).__name__}",
                 flush=True,
             )
@@ -245,118 +178,28 @@ def _median_samples_per_second(fn: Any, *, shots: int, repeats: int) -> float:
     return statistics.median(values)
 
 
-def _reference_batch_aggregate(
-    engine: ReferenceBatchForwardNoiseAwareSimulator,
-    batch: Any,
-    loss_mask: int,
-    *,
-    top_k: int,
-) -> Any:
-    loss_mask &= batch.all_mask
-    loss_count = loss_mask.bit_count()
-    mean_loss = loss_count / batch.shots
-    sensitivities: dict[str, float] = {}
-    for location_id, location in engine.locations.items():
-        event_mask = batch.noise_event_masks.get(location_id, 0) & batch.all_mask
-        event_count = event_mask.bit_count()
-        loss_event_count = (loss_mask & event_mask).bit_count()
-        loss_no_event_count = loss_count - loss_event_count
-        no_event_count = batch.shots - event_count
-        event_score, no_event_score = _score_pair(location.rate)
-        sum_loss_score = (
-            loss_event_count * event_score + loss_no_event_count * no_event_score
-        )
-        sum_score = event_count * event_score + no_event_count * no_event_score
-        sensitivities[location_id] = (sum_loss_score - mean_loss * sum_score) / batch.shots
-    hotspots = {
-        location_id: abs(sensitivity)
-        for location_id, sensitivity in sensitivities.items()
-    }
-    by_qubit: dict[int, float] = {}
-    by_round: dict[Any, float] = {}
-    by_gate: dict[Any, float] = {}
-    by_operation: dict[Any, float] = {}
-    for location_id, hotspot in hotspots.items():
-        location = engine.locations[location_id]
-        for qubit in location.qubits:
-            by_qubit[qubit] = by_qubit.get(qubit, 0.0) + hotspot
-        for target, tag in (
-            (by_round, "round"),
-            (by_gate, "gate"),
-            (by_operation, "operation"),
-        ):
-            value = location.tags.get(tag)
-            if value is not None:
-                target[value] = target.get(value, 0.0) + hotspot
-    top_hotspots = sorted(hotspots.items(), key=lambda item: item[1], reverse=True)[:top_k]
-    return sensitivities, hotspots, by_qubit, by_round, by_gate, by_operation, top_hotspots
+def _sample_stim_raw(stim_sampler: Any, shots: int, seed: int) -> Any:
+    del seed
+    try:
+        return stim_sampler.sample(shots=shots, bit_packed=True)
+    except TypeError:
+        return stim_sampler.sample(shots, bit_packed=True)
 
 
-def _reference_dem_aggregate(
-    engine: ReferenceDemBatchHotspotSimulator,
-    batch: Any,
-    loss_mask: int,
-    *,
-    top_k: int,
-) -> Any:
-    loss_mask &= batch.all_mask
-    loss_count = loss_mask.bit_count()
-    mean_loss = loss_count / batch.shots
-    edge_sensitivities = engine._estimate_edge_sensitivities(
-        batch,
-        loss_mask,
-        loss_count,
-        mean_loss,
-    )
-    edge_hotspots = {
-        edge_index: abs(sensitivity)
-        for edge_index, sensitivity in edge_sensitivities.items()
-    }
-    sensitivities = engine._aggregate_location_sensitivities(edge_sensitivities)
-    hotspots = {
-        location_id: abs(sensitivity)
-        for location_id, sensitivity in sensitivities.items()
-    }
-    locations = engine._location_metadata()
-    top_edges = sorted(edge_hotspots.items(), key=lambda item: item[1], reverse=True)[:top_k]
-    top_hotspots = sorted(hotspots.items(), key=lambda item: item[1], reverse=True)[:top_k]
-    return (
-        edge_sensitivities,
-        edge_hotspots,
-        sensitivities,
-        hotspots,
-        _aggregate_detector_hotspots(engine.dem, edge_hotspots),
-        _aggregate_by_tag(hotspots, locations, "round"),
-        _aggregate_by_tag(hotspots, locations, "gate"),
-        _aggregate_by_tag(hotspots, locations, "operation"),
-        _edge_sensitivities_to_detector_graph(engine.dem, edge_sensitivities),
-        top_edges,
-        top_hotspots,
-    )
+def _sample_stim_detectors(stim_sampler: Any, shots: int, seed: int) -> Any:
+    del seed
+    try:
+        return stim_sampler.sample(shots=shots, bit_packed=True)
+    except TypeError:
+        return stim_sampler.sample(shots, bit_packed=True)
 
 
-def _score_pair(probability: float) -> tuple[float, float]:
-    p = min(1.0 - 1e-12, max(1e-12, probability))
-    return 1.0 / p, -1.0 / (1.0 - p)
-
-
-def _reference_batch_estimate(
-    engine: ReferenceBatchForwardNoiseAwareSimulator,
-    *,
-    shots: int,
-    seed: int | None,
-    decoder: Any,
-    top_k: int,
-) -> Any:
-    rng = random.Random(seed)
-    batch = engine.run_batch(shots=shots, rng=rng)
-    corrections = decoder.decode_batch_masks(batch)
-    loss_mask = logical_residual_loss_mask(
-        batch.observables,
-        corrections,
-        all_mask=batch.all_mask,
-    )
-    return _reference_batch_aggregate(engine, batch, loss_mask, top_k=top_k)
+def _load_stim() -> Any:
+    try:
+        import stim
+    except ImportError as exc:
+        raise SystemExit("Stim is required for hotspot_throughput.py") from exc
+    return stim
 
 
 if __name__ == "__main__":
