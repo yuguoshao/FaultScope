@@ -78,13 +78,6 @@ pub(crate) struct NoiseOccurrence {
 }
 
 #[derive(Clone)]
-pub(crate) struct DemRunRecord {
-    pub(crate) measurements: HashMap<String, bool>,
-    pub(crate) x_frame: Vec<u8>,
-    pub(crate) z_frame: Vec<u8>,
-}
-
-#[derive(Clone)]
 pub(crate) enum Op {
     H(usize),
     S(usize),

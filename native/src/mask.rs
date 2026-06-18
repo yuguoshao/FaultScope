@@ -74,6 +74,7 @@ pub(crate) struct RuntimeState {
     pub(crate) all_mask: Mask,
     pub(crate) x_frame: Vec<Mask>,
     pub(crate) z_frame: Vec<Mask>,
+    pub(crate) measurement_order: Vec<String>,
     pub(crate) measurements: HashMap<String, Mask>,
     pub(crate) detectors: HashMap<i64, Mask>,
     pub(crate) observables: HashMap<i64, Mask>,
@@ -101,6 +102,7 @@ impl RuntimeState {
             all_mask: all_mask.clone(),
             x_frame: vec![Mask::zero(words); n_qubits],
             z_frame: vec![Mask::zero(words); n_qubits],
+            measurement_order: Vec::new(),
             measurements: HashMap::new(),
             detectors: HashMap::new(),
             observables: HashMap::new(),
@@ -119,6 +121,26 @@ impl RuntimeState {
         out.set_item("detectors", int_map_to_py(py, &self.detectors)?)?;
         out.set_item("observables", int_map_to_py(py, &self.observables)?)?;
         out.set_item("noise_event_masks", map_to_py(py, &self.event_masks)?)?;
+        Ok(out.into())
+    }
+
+    pub(crate) fn measurements_to_packed_py(&self, py: Python<'_>) -> PyResult<PyObject> {
+        let bytes_per_mask = self.all_mask.words.len() * 8;
+        let mut data = Vec::with_capacity(self.measurement_order.len() * bytes_per_mask);
+        for key in &self.measurement_order {
+            let mask = self
+                .measurements
+                .get(key)
+                .ok_or_else(|| PyValueError::new_err(format!("missing measurement key {key:?}")))?;
+            for word in &mask.words {
+                data.extend_from_slice(&word.to_le_bytes());
+            }
+        }
+        let out = PyDict::new(py);
+        out.set_item("shots", self.shots)?;
+        out.set_item("keys", PyTuple::new(py, self.measurement_order.iter())?)?;
+        out.set_item("bytes_per_mask", bytes_per_mask)?;
+        out.set_item("data", PyBytes::new(py, &data))?;
         Ok(out.into())
     }
 }

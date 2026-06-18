@@ -6,7 +6,8 @@ Run from the repository root after building the native extension:
 
 The benchmark compares native Rust DEM generation / default DEM hotspot
 estimation against Stim detector-error-model generation and detector sampling on
-deterministic repetition-code detector error models.  Stim is required.
+deterministic repetition-code and surface-code detector error models.  Stim is
+required.
 """
 
 from __future__ import annotations
@@ -15,6 +16,7 @@ import argparse
 import statistics
 import sys
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -22,7 +24,8 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from npsim.core import Circuit, Operation
+from npsim.core import Circuit, NoiseLocation, Operation
+from npsim.dem import Detector, LogicalObservable
 from npsim.runtime import (
     UnsupportedNativeCircuitError,
     compile_native_dem_sampler,
@@ -30,10 +33,28 @@ from npsim.runtime import (
 )
 from npsim.core import BernoulliPauliNoise, MeasurementBitFlip, PauliChannel
 from npsim.experiments import make_repetition_code_experiment
+from tests.surface_code_examples import _data_index, _rotated_surface_code_checks
+
+
+@dataclass(frozen=True)
+class DemBenchmarkCase:
+    label: str
+    family: str
+    distance: int
+    rounds: int
+    circuit: Circuit
+    detectors: tuple[Detector, ...]
+    observables: tuple[LogicalObservable, ...]
 
 
 def main() -> None:
     parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--family",
+        choices=("all", "repetition", "surface"),
+        default="all",
+        help="Which DEM benchmark family to run.",
+    )
     parser.add_argument("--distances", nargs="+", type=int, default=[9, 13, 21])
     parser.add_argument("--rounds", type=int, default=3)
     parser.add_argument("--shots", type=int, default=100_000)
@@ -47,34 +68,27 @@ def main() -> None:
         "native_det_sps\tstim_det_sps\tdet_ratio\tstatus",
         flush=True,
     )
-    for distance in args.distances:
-        experiment = make_repetition_code_experiment(
-            distance=distance,
-            rounds=args.rounds,
-            data_error_rate=0.025,
-            measurement_error_rate=0.015,
-        )
-
+    for case in _make_cases(args):
         try:
             native_gen_s, native_dem = _time_once(
                 lambda: generate_native_dem(
-                    experiment.circuit,
-                    detectors=experiment.detectors,
-                    observables=experiment.observables,
+                    case.circuit,
+                    detectors=case.detectors,
+                    observables=case.observables,
                 )
             )
             native_sampler = compile_native_dem_sampler(native_dem)
             stim_circuit = stim_module.Circuit(
                 _to_stim_text_with_detectors(
-                    experiment.circuit,
-                    experiment.detectors,
+                    case.circuit,
+                    case.detectors,
                 )
             )
             stim_gen_s, _ = _time_once(stim_circuit.detector_error_model)
             native_detector_gen_s, native_detector_dem = _time_once(
                 lambda: generate_native_dem(
-                    experiment.circuit,
-                    detectors=experiment.detectors,
+                    case.circuit,
+                    detectors=case.detectors,
                     observables=(),
                 )
             )
@@ -108,7 +122,7 @@ def main() -> None:
             stim_gen_ratio = native_detector_gen_s / stim_gen_s if stim_gen_s else float("inf")
             det_ratio = native_det_sps / stim_det_sps if stim_det_sps else float("inf")
             print(
-                f"repetition-d{distance}\t{distance}\t{args.rounds}\t"
+                f"{case.label}\t{case.distance}\t{case.rounds}\t"
                 f"{len(native_dem.edges)}\t{native_gen_s:.6f}\t"
                 f"{native_detector_gen_s:.6f}\t{stim_gen_s:.6f}\t"
                 f"{stim_gen_ratio:.3f}\t{native_est_sps:.3f}\t"
@@ -118,10 +132,170 @@ def main() -> None:
             )
         except UnsupportedNativeCircuitError as exc:
             print(
-                f"repetition-d{distance}\t{distance}\t{args.rounds}\t"
+                f"{case.label}\t{case.distance}\t{case.rounds}\t"
                 f"NA\tNA\tNA\tNA\tNA\tNA\tNA\tNA\tNA\tnative-skip:{type(exc).__name__}",
                 flush=True,
             )
+
+
+def _make_cases(args: argparse.Namespace) -> list[DemBenchmarkCase]:
+    cases: list[DemBenchmarkCase] = []
+    if args.family in {"all", "repetition"}:
+        cases.extend(_make_repetition_cases(args.distances, args.rounds))
+    if args.family in {"all", "surface"}:
+        cases.extend(_make_surface_cases(args.distances, args.rounds))
+    return cases
+
+
+def _make_repetition_cases(distances: list[int], rounds: int) -> list[DemBenchmarkCase]:
+    cases = []
+    for distance in distances:
+        experiment = make_repetition_code_experiment(
+            distance=distance,
+            rounds=rounds,
+            data_error_rate=0.025,
+            measurement_error_rate=0.015,
+        )
+        cases.append(
+            DemBenchmarkCase(
+                label=f"repetition-d{distance}",
+                family="repetition",
+                distance=distance,
+                rounds=rounds,
+                circuit=experiment.circuit,
+                detectors=tuple(experiment.detectors),
+                observables=tuple(experiment.observables),
+            )
+        )
+    return cases
+
+
+def _make_surface_cases(distances: list[int], rounds: int) -> list[DemBenchmarkCase]:
+    cases = []
+    for distance in distances:
+        cases.append(_make_surface_memory_case(distance, rounds, memory="z"))
+        cases.append(_make_surface_memory_case(distance, rounds, memory="x"))
+    return cases
+
+
+def _make_surface_memory_case(distance: int, rounds: int, *, memory: str) -> DemBenchmarkCase:
+    if distance < 3 or distance % 2 != 1:
+        raise ValueError("surface-code distance must be an odd integer >= 3")
+    x_checks, z_checks = _rotated_surface_code_checks(distance)
+    operations: list[Operation] = []
+    if memory == "z":
+        checks = tuple(z_checks)
+        basis = "Z"
+        data_error = "X"
+        logical_qubits = tuple(_data_index(distance, row, 0) for row in range(distance))
+    elif memory == "x":
+        checks = tuple(x_checks)
+        basis = "X"
+        data_error = "Z"
+        logical_qubits = tuple(_data_index(distance, 0, col) for col in range(distance))
+        for qubit in range(distance * distance):
+            operations.append(Operation.h(qubit))
+    else:
+        raise ValueError(f"unknown surface memory {memory!r}")
+
+    _append_surface_memory_checks(
+        operations,
+        distance=distance,
+        round_idx=0,
+        checks=checks,
+        basis=basis,
+        measurement_noise=False,
+    )
+    for round_idx in range(1, rounds + 1):
+        for qubit in range(distance * distance):
+            operations.append(
+                Operation.noise(
+                    NoiseLocation(
+                        id=f"surface_{memory}_data_r{round_idx}_q{qubit}",
+                        model=BernoulliPauliNoise(data_error),
+                        rate=0.025,
+                        qubits=(qubit,),
+                        tags={
+                            "layout": "rotated_surface_code",
+                            "family": f"surface_{memory}_memory",
+                            "round": round_idx,
+                            "qubit": qubit,
+                            "operation": "data_noise",
+                        },
+                    )
+                )
+            )
+        _append_surface_memory_checks(
+            operations,
+            distance=distance,
+            round_idx=round_idx,
+            checks=checks,
+            basis=basis,
+            measurement_noise=True,
+        )
+    for idx, qubit in enumerate(logical_qubits):
+        operations.append(Operation.measure(qubit, key=f"logical_{idx}", basis=basis))
+
+    detectors = tuple(
+        Detector(
+            id=idx,
+            measurement_keys=(f"r{rounds}_{check['id']}", f"r0_{check['id']}"),
+            coords=(float(check["x"]), float(check["y"])),
+        )
+        for idx, check in enumerate(checks)
+    )
+    observables = (
+        LogicalObservable(
+            id=0,
+            measurement_keys=tuple(f"logical_{idx}" for idx in range(len(logical_qubits))),
+        ),
+    )
+    return DemBenchmarkCase(
+        label=f"surface-{memory}-d{distance}",
+        family="surface",
+        distance=distance,
+        rounds=rounds,
+        circuit=Circuit(n_qubits=distance * distance, operations=tuple(operations)),
+        detectors=detectors,
+        observables=observables,
+    )
+
+
+def _append_surface_memory_checks(
+    operations: list[Operation],
+    *,
+    distance: int,
+    round_idx: int,
+    checks: tuple[dict[str, object], ...],
+    basis: str,
+    measurement_noise: bool,
+) -> None:
+    for check in checks:
+        check_id = str(check["id"])
+        qubits = tuple(_data_index(distance, row, col) for row, col in check["data"])
+        location = None
+        if measurement_noise:
+            location = NoiseLocation(
+                id=f"surface_{basis.lower()}_meas_r{round_idx}_{check_id}",
+                model=MeasurementBitFlip(),
+                rate=0.015,
+                qubits=qubits[:1],
+                tags={
+                    "layout": "rotated_surface_code",
+                    "round": round_idx,
+                    "check": check_id,
+                    "basis": basis,
+                    "operation": "measurement_noise",
+                },
+            )
+        operations.append(
+            Operation.measure_pauli(
+                qubits,
+                basis * len(qubits),
+                key=f"r{round_idx}_{check_id}",
+                noise=location,
+            )
+        )
 
 
 def _time_once(fn: Any) -> tuple[float, Any]:

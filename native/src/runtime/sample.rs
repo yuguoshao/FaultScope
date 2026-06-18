@@ -31,25 +31,18 @@ pub(crate) fn apply_operation(
 ) -> PyResult<()> {
     match op {
         RunOp::H(q) => {
-            let old_x = state.x_frame[*q].clone();
-            state.x_frame[*q] = state.z_frame[*q].clone();
-            state.z_frame[*q] = old_x;
+            std::mem::swap(&mut state.x_frame[*q], &mut state.z_frame[*q]);
         }
         RunOp::S(q) | RunOp::SDag(q) => {
-            let x = state.x_frame[*q].clone();
-            state.z_frame[*q].xor_assign(&x);
+            xor_between_frames(&state.x_frame, &mut state.z_frame, *q, *q);
         }
         RunOp::Cx(control, target) => {
-            let x_control = state.x_frame[*control].clone();
-            state.x_frame[*target].xor_assign(&x_control);
-            let z_target = state.z_frame[*target].clone();
-            state.z_frame[*control].xor_assign(&z_target);
+            xor_within_frame(&mut state.x_frame, *target, *control);
+            xor_within_frame(&mut state.z_frame, *control, *target);
         }
         RunOp::Cz(left, right) => {
-            let x_right = state.x_frame[*right].clone();
-            let x_left = state.x_frame[*left].clone();
-            state.z_frame[*left].xor_assign(&x_right);
-            state.z_frame[*right].xor_assign(&x_left);
+            xor_between_frames(&state.x_frame, &mut state.z_frame, *left, *right);
+            xor_between_frames(&state.x_frame, &mut state.z_frame, *right, *left);
         }
         RunOp::Swap(left, right) => {
             state.x_frame.swap(*left, *right);
@@ -75,7 +68,7 @@ pub(crate) fn apply_operation(
             let key = key
                 .clone()
                 .unwrap_or_else(|| format!("m{}", state.measurements.len()));
-            record_measurement(&mut state.measurements, &key, bit)?;
+            record_measurement(state, &key, bit)?;
         }
         RunOp::Reset {
             qubit,
@@ -88,7 +81,7 @@ pub(crate) fn apply_operation(
                 let mut bit = outcome.clone();
                 let flip = frame_measurement_flip(state, &[*qubit], basis)?;
                 bit.xor_assign(&flip);
-                record_measurement(&mut state.measurements, key, bit)?;
+                record_measurement(state, key, bit)?;
             }
             state.x_frame[*qubit] = Mask::zero(state.all_mask.words.len());
             state.z_frame[*qubit] = Mask::zero(state.all_mask.words.len());
@@ -481,18 +474,39 @@ pub(crate) fn frame_measurement_flip(
     Ok(flip)
 }
 
-pub(crate) fn record_measurement(
-    measurements: &mut HashMap<String, Mask>,
-    key: &str,
-    bit: Mask,
-) -> PyResult<()> {
-    if measurements.contains_key(key) {
+pub(crate) fn record_measurement(state: &mut RuntimeState, key: &str, bit: Mask) -> PyResult<()> {
+    if state.measurements.contains_key(key) {
         return Err(PyValueError::new_err(format!(
             "duplicate measurement key {key:?}"
         )));
     }
-    measurements.insert(key.to_string(), bit);
+    state.measurement_order.push(key.to_string());
+    state.measurements.insert(key.to_string(), bit);
     Ok(())
+}
+
+pub(crate) fn xor_within_frame(frame: &mut [Mask], dest: usize, src: usize) {
+    if dest == src {
+        let source = frame[src].clone();
+        frame[dest].xor_assign(&source);
+        return;
+    }
+    if dest < src {
+        let (left, right) = frame.split_at_mut(src);
+        left[dest].xor_assign(&right[0]);
+    } else {
+        let (left, right) = frame.split_at_mut(dest);
+        right[0].xor_assign(&left[src]);
+    }
+}
+
+pub(crate) fn xor_between_frames(
+    src_frame: &[Mask],
+    dest_frame: &mut [Mask],
+    dest: usize,
+    src: usize,
+) {
+    dest_frame[dest].xor_assign(&src_frame[src]);
 }
 
 pub(crate) fn measurement_parity(

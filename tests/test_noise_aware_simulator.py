@@ -425,6 +425,37 @@ class NativePackedSamplerTests(unittest.TestCase):
         self.assertEqual(native_batch.observables, stim_observables)
         self.assertEqual(native_batch.noise_event_masks["x0"], native_batch.all_mask)
 
+    def test_native_packed_measurement_bytes_match_measurement_masks(self) -> None:
+        circuit = Circuit(
+            n_qubits=2,
+            operations=[
+                Operation.h(0),
+                Operation.measure(0, key="m0", basis="Z"),
+                Operation.x(1),
+                Operation.measure(1, key="m1", basis="Z"),
+            ],
+        )
+        sampler = self._native_sampler_or_skip(circuit)
+        shots = 70
+        packed = sampler.sample_measurements_packed(shots=shots, seed=19)
+        masks = sampler.sample_measurements(shots=shots, seed=19)
+
+        self.assertEqual(packed.shots, shots)
+        self.assertEqual(packed.keys, ("m0", "m1"))
+        self.assertEqual(packed.bytes_per_mask, 16)
+        self.assertEqual(len(packed.data), len(packed.keys) * packed.bytes_per_mask)
+        self.assertEqual(packed.masks(), masks)
+        for key in packed.keys:
+            self.assertLess(packed.mask(key), 1 << shots)
+
+        try:
+            array = packed.as_packed_numpy()
+        except ImportError:
+            return
+        self.assertEqual(array.dtype.name, "uint8")
+        self.assertEqual(array.shape, (2, 16))
+        self.assertEqual(bytes(array.reshape(-1)), packed.data)
+
     def test_native_batch_single_mask_accessors_match_bulk_properties(self) -> None:
         x_location = NoiseLocation(
             id="x0",

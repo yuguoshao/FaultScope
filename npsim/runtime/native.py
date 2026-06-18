@@ -29,6 +29,50 @@ class UnsupportedNativeCircuitError(ValueError):
 
 
 @dataclass(frozen=True)
+class PackedMeasurementBytes:
+    """Column-major packed measurement bytes returned by the native sampler.
+
+    ``data[i * bytes_per_mask:(i + 1) * bytes_per_mask]`` is the little-endian
+    bit mask for ``keys[i]``.  The least-significant bit is shot 0.
+    """
+
+    shots: int
+    keys: tuple[str, ...]
+    data: bytes
+    bytes_per_mask: int
+
+    def __post_init__(self) -> None:
+        expected = len(self.keys) * self.bytes_per_mask
+        if len(self.data) != expected:
+            raise ValueError(
+                f"packed measurement data has {len(self.data)} bytes, expected {expected}"
+            )
+        if self.shots <= 0:
+            raise ValueError("shots must be positive")
+        if self.bytes_per_mask != 8 * ((self.shots + 63) // 64):
+            raise ValueError("bytes_per_mask does not match shots")
+
+    def mask(self, key: str) -> int:
+        try:
+            index = self.keys.index(key)
+        except ValueError as exc:
+            raise KeyError(key) from exc
+        start = index * self.bytes_per_mask
+        stop = start + self.bytes_per_mask
+        return int.from_bytes(self.data[start:stop], "little")
+
+    def masks(self) -> dict[str, int]:
+        return {key: self.mask(key) for key in self.keys}
+
+    def as_packed_numpy(self) -> Any:
+        import numpy as np
+
+        return np.frombuffer(self.data, dtype=np.uint8).reshape(
+            (len(self.keys), self.bytes_per_mask)
+        )
+
+
+@dataclass(frozen=True)
 class NativePackedSampler:
     """Compiled native packed sampler wrapper."""
 
@@ -73,6 +117,43 @@ class NativePackedSampler:
             payload = self._engine.sample_measurements(int(shots), seed)
             return {str(key): int(value) for key, value in payload.items()}
         return self.sample(shots=shots, seed=seed).measurements
+
+    def sample_measurements_packed(
+        self,
+        *,
+        shots: int,
+        seed: int | None = None,
+        rng: random.Random | None = None,
+    ) -> PackedMeasurementBytes:
+        """Return measurement masks as one contiguous column-major byte buffer."""
+
+        if shots <= 0:
+            raise ValueError("shots must be positive")
+        if seed is not None and rng is not None:
+            raise ValueError("supply either seed or rng, not both")
+        if rng is not None:
+            raise ValueError("native sampler accepts seed, not a Python rng")
+        if not hasattr(self._engine, "sample_measurements_packed"):
+            measurements = self.sample_measurements(shots=shots, seed=seed)
+            bytes_per_mask = 8 * ((int(shots) + 63) // 64)
+            keys = tuple(measurements)
+            data = b"".join(
+                int(measurements[key]).to_bytes(bytes_per_mask, "little")
+                for key in keys
+            )
+            return PackedMeasurementBytes(
+                shots=int(shots),
+                keys=keys,
+                data=data,
+                bytes_per_mask=bytes_per_mask,
+            )
+        payload = self._engine.sample_measurements_packed(int(shots), seed)
+        return PackedMeasurementBytes(
+            shots=int(payload["shots"]),
+            keys=tuple(str(key) for key in payload["keys"]),
+            data=bytes(payload["data"]),
+            bytes_per_mask=int(payload["bytes_per_mask"]),
+        )
 
     def estimate(
         self,

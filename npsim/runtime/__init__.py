@@ -10,6 +10,7 @@ from npsim.runtime.batch import (
 from npsim.runtime.native import (
     NativeDemSampler,
     NativePackedSampler,
+    PackedMeasurementBytes,
     UnsupportedNativeCircuitError,
     compile_native_dem_sampler,
     compile_native_sampler,
@@ -25,6 +26,7 @@ __all__ = [
     "HotspotRow",
     "NativeDemSampler",
     "NativePackedSampler",
+    "PackedMeasurementBytes",
     "SimulationResult",
     "UnsupportedBatchCircuitError",
     "UnsupportedNativeCircuitError",

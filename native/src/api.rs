@@ -56,6 +56,20 @@ impl NativePackedSampler {
     }
 
     #[pyo3(signature = (shots, seed=None))]
+    pub(crate) fn sample_measurements_packed(
+        &self,
+        py: Python<'_>,
+        shots: usize,
+        seed: Option<u64>,
+    ) -> PyResult<PyObject> {
+        if shots == 0 {
+            return Err(PyValueError::new_err("shots must be positive"));
+        }
+        let state = py.allow_threads(|| run_packed_sample(self, shots, seed, false))?;
+        state.measurements_to_packed_py(py)
+    }
+
+    #[pyo3(signature = (shots, seed=None))]
     pub(crate) fn run_native_batch(
         &self,
         py: Python<'_>,

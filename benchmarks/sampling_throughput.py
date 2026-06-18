@@ -126,7 +126,7 @@ def _run_case(
 ) -> None:
     sampler = compile_native_sampler(case.circuit)
     npsim_sps = _median_samples_per_second(
-        lambda seed: sampler.sample_measurements(shots=args.shots, seed=seed),
+        lambda seed: sampler.sample_measurements_packed(shots=args.shots, seed=seed),
         shots=args.shots,
         repeats=args.repeats,
     )
