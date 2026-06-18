@@ -13,6 +13,7 @@ from npsim.runtime.native import (
     PackedMeasurementBytes,
     UnsupportedNativeCircuitError,
     compile_native_dem_sampler,
+    compile_native_dem_sampler_from_circuit,
     compile_native_sampler,
     generate_native_dem,
 )
@@ -31,6 +32,7 @@ __all__ = [
     "UnsupportedBatchCircuitError",
     "UnsupportedNativeCircuitError",
     "compile_native_dem_sampler",
+    "compile_native_dem_sampler_from_circuit",
     "compile_native_sampler",
     "generate_native_dem",
 ]

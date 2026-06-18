@@ -22,15 +22,15 @@ pub(crate) fn generate_dem_edges(
     )?;
     let detector_sensitivities = sorted_sensitivities(detector_sensitivities);
     let observable_sensitivities = sorted_sensitivities(observable_sensitivities);
-    let detector_flips_by_event =
+    let mut detector_flips_by_event =
         sensitivity_flips_by_event(&detector_sensitivities, events.len());
-    let observable_flips_by_event =
+    let mut observable_flips_by_event =
         sensitivity_flips_by_event(&observable_sensitivities, events.len());
     let mut edges = Vec::new();
 
     for (event_index, event) in events.iter().enumerate() {
-        let detector_flips = detector_flips_by_event[event_index].clone();
-        let observable_flips = observable_flips_by_event[event_index].clone();
+        let detector_flips = std::mem::take(&mut detector_flips_by_event[event_index]);
+        let observable_flips = std::mem::take(&mut observable_flips_by_event[event_index]);
         if detector_flips.is_empty() && observable_flips.is_empty() {
             continue;
         }
@@ -225,13 +225,21 @@ pub(crate) fn apply_sensitivity_pauli_string(
             "event Pauli length does not match qubits",
         ));
     }
-    for (qubit, local) in qubits.iter().zip(pauli.chars()) {
-        let (x, z) = pauli_to_xz(local)?;
-        if x != 0 {
-            set_shot_bit(&mut x_frame[*qubit], event_index);
-        }
-        if z != 0 {
-            set_shot_bit(&mut z_frame[*qubit], event_index);
+    for (qubit, local) in qubits.iter().zip(pauli.bytes()) {
+        match local {
+            b'I' => {}
+            b'X' => set_shot_bit(&mut x_frame[*qubit], event_index),
+            b'Z' => set_shot_bit(&mut z_frame[*qubit], event_index),
+            b'Y' => {
+                set_shot_bit(&mut x_frame[*qubit], event_index);
+                set_shot_bit(&mut z_frame[*qubit], event_index);
+            }
+            _ => {
+                return Err(PyValueError::new_err(format!(
+                    "unsupported Pauli {:?}",
+                    local as char
+                )))
+            }
         }
     }
     Ok(())
@@ -270,13 +278,41 @@ pub(crate) fn sensitivity_frame_measurement_flip(
         ));
     }
     let mut flip = Mask::zero(words);
-    for (qubit, local) in qubits.iter().zip(pauli.chars()) {
-        let (x, z) = pauli_to_xz(local)?;
-        if z != 0 {
+    let pauli_bytes = pauli.as_bytes();
+    if pauli_bytes.iter().all(|local| *local == b'Z') {
+        for qubit in qubits {
             flip.xor_assign(&x_frame[*qubit]);
         }
-        if x != 0 {
+        return Ok(flip);
+    }
+    if pauli_bytes.iter().all(|local| *local == b'X') {
+        for qubit in qubits {
             flip.xor_assign(&z_frame[*qubit]);
+        }
+        return Ok(flip);
+    }
+    if pauli_bytes.iter().all(|local| *local == b'Y') {
+        for qubit in qubits {
+            flip.xor_assign(&x_frame[*qubit]);
+            flip.xor_assign(&z_frame[*qubit]);
+        }
+        return Ok(flip);
+    }
+    for (qubit, local) in qubits.iter().zip(pauli_bytes) {
+        match *local {
+            b'I' => {}
+            b'X' => flip.xor_assign(&z_frame[*qubit]),
+            b'Z' => flip.xor_assign(&x_frame[*qubit]),
+            b'Y' => {
+                flip.xor_assign(&x_frame[*qubit]);
+                flip.xor_assign(&z_frame[*qubit]);
+            }
+            _ => {
+                return Err(PyValueError::new_err(format!(
+                    "unsupported Pauli {:?}",
+                    *local as char
+                )))
+            }
         }
     }
     Ok(flip)

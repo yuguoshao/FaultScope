@@ -405,6 +405,52 @@ pub(crate) fn generate_dem(
 }
 
 #[pyfunction]
+pub(crate) fn generate_and_compile_dem_sampler(
+    py: Python<'_>,
+    spec: &Bound<'_, PyDict>,
+    detectors: &Bound<'_, PyList>,
+    observables: &Bound<'_, PyList>,
+) -> PyResult<PyObject> {
+    let (n_qubits, operations) = parse_circuit_spec(spec)?;
+    let detectors = parse_dem_detectors(detectors)?;
+    let observables = parse_dem_observables(observables)?;
+    let generated_edges = generate_dem_edges(n_qubits, &operations, &detectors, &observables)?;
+    let edge_specs = generated_edges_to_dem_edge_specs(&generated_edges, &operations);
+    let location_groups = build_dem_location_groups(&edge_specs);
+    let sampler = NativeDemSampler {
+        detectors: detectors.iter().map(|detector| detector.id).collect(),
+        observables: observables.iter().map(|observable| observable.id).collect(),
+        edges: edge_specs,
+        location_groups,
+    };
+
+    let out = PyDict::new(py);
+    out.set_item("edges", dem_edges_to_py(py, &generated_edges)?)?;
+    out.set_item("sampler", Py::new(py, sampler)?)?;
+    Ok(out.into())
+}
+
+#[pyfunction]
+pub(crate) fn compile_generated_dem_sampler(
+    spec: &Bound<'_, PyDict>,
+    detectors: &Bound<'_, PyList>,
+    observables: &Bound<'_, PyList>,
+) -> PyResult<NativeDemSampler> {
+    let (n_qubits, operations) = parse_circuit_spec(spec)?;
+    let detectors = parse_dem_detectors(detectors)?;
+    let observables = parse_dem_observables(observables)?;
+    let generated_edges = generate_dem_edges(n_qubits, &operations, &detectors, &observables)?;
+    let edge_specs = generated_edges_to_dem_edge_specs(&generated_edges, &operations);
+    let location_groups = build_dem_location_groups(&edge_specs);
+    Ok(NativeDemSampler {
+        detectors: detectors.iter().map(|detector| detector.id).collect(),
+        observables: observables.iter().map(|observable| observable.id).collect(),
+        edges: edge_specs,
+        location_groups,
+    })
+}
+
+#[pyfunction]
 pub(crate) fn compile_dem_sampler(spec: &Bound<'_, PyDict>) -> PyResult<NativeDemSampler> {
     let detectors = required(spec, "detectors")?
         .downcast::<PyList>()?
@@ -454,6 +500,38 @@ pub(crate) fn compile_dem_sampler(spec: &Bound<'_, PyDict>) -> PyResult<NativeDe
     })
 }
 
+pub(crate) fn generated_edges_to_dem_edge_specs(
+    edges: &[GeneratedDemEdge],
+    operations: &[Op],
+) -> Vec<DemEdgeSpec> {
+    let tags_by_location = noise_location_tags_by_id(operations);
+    edges
+        .iter()
+        .map(|edge| DemEdgeSpec {
+            probability: edge.probability,
+            detectors: edge.detectors.clone(),
+            observables: edge.observables.clone(),
+            location_id: edge.location_id.clone(),
+            tags: tags_by_location
+                .get(&edge.location_id)
+                .cloned()
+                .unwrap_or_default(),
+        })
+        .collect()
+}
+
+pub(crate) fn noise_location_tags_by_id(
+    operations: &[Op],
+) -> HashMap<String, HashMap<String, TagValue>> {
+    let mut out = HashMap::new();
+    for operation in operations {
+        for location in operation.noise_locations() {
+            out.insert(location.id.clone(), location.tags.clone());
+        }
+    }
+    out
+}
+
 #[pymodule]
 pub(crate) fn _npsim_native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add("__version__", NATIVE_KERNEL_VERSION)?;
@@ -463,6 +541,8 @@ pub(crate) fn _npsim_native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<NativeDemBatch>()?;
     module.add_function(wrap_pyfunction!(compile_sampler, module)?)?;
     module.add_function(wrap_pyfunction!(generate_dem, module)?)?;
+    module.add_function(wrap_pyfunction!(generate_and_compile_dem_sampler, module)?)?;
+    module.add_function(wrap_pyfunction!(compile_generated_dem_sampler, module)?)?;
     module.add_function(wrap_pyfunction!(compile_dem_sampler, module)?)?;
     Ok(())
 }

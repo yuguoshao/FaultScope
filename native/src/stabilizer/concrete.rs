@@ -104,19 +104,63 @@ impl ConcreteStabilizer {
         qubits: &[usize],
         pauli: &str,
     ) -> PyResult<bool> {
-        if qubits.len() != pauli.len() {
+        let pauli_bytes = pauli.as_bytes();
+        if qubits.len() != pauli_bytes.len() {
             return Err(PyValueError::new_err(
                 "qubits and paulis must have the same length",
             ));
         }
-        let mut local_terms = Vec::with_capacity(qubits.len());
-        for local in pauli.chars() {
-            local_terms.push(pauli_to_xz(local)?);
+        if pauli_bytes.iter().all(|local| *local == b'Z') {
+            for row in 0..self.n_qubits() {
+                let mut acc = 0;
+                for qubit in qubits {
+                    acc ^= self.x[row][*qubit];
+                }
+                if (acc & 1) != 0 {
+                    return Ok(false);
+                }
+            }
+            return Ok(true);
+        }
+        if pauli_bytes.iter().all(|local| *local == b'X') {
+            for row in 0..self.n_qubits() {
+                let mut acc = 0;
+                for qubit in qubits {
+                    acc ^= self.z[row][*qubit];
+                }
+                if (acc & 1) != 0 {
+                    return Ok(false);
+                }
+            }
+            return Ok(true);
+        }
+        if pauli_bytes.iter().all(|local| *local == b'Y') {
+            for row in 0..self.n_qubits() {
+                let mut acc = 0;
+                for qubit in qubits {
+                    acc ^= self.x[row][*qubit] ^ self.z[row][*qubit];
+                }
+                if (acc & 1) != 0 {
+                    return Ok(false);
+                }
+            }
+            return Ok(true);
         }
         for row in 0..self.n_qubits() {
             let mut acc = 0;
-            for (qubit, (x, z)) in qubits.iter().zip(&local_terms) {
-                acc ^= (self.x[row][*qubit] & *z) ^ (self.z[row][*qubit] & *x);
+            for (qubit, local) in qubits.iter().zip(pauli_bytes) {
+                match *local {
+                    b'I' => {}
+                    b'X' => acc ^= self.z[row][*qubit],
+                    b'Z' => acc ^= self.x[row][*qubit],
+                    b'Y' => acc ^= self.x[row][*qubit] ^ self.z[row][*qubit],
+                    _ => {
+                        return Err(PyValueError::new_err(format!(
+                            "unsupported Pauli {:?}",
+                            *local as char
+                        )))
+                    }
+                }
             }
             if (acc & 1) != 0 {
                 return Ok(false);

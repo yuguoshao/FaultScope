@@ -29,6 +29,7 @@ from npsim.dem import Detector, LogicalObservable
 from npsim.runtime import (
     UnsupportedNativeCircuitError,
     compile_native_dem_sampler,
+    compile_native_dem_sampler_from_circuit,
     generate_native_dem,
 )
 from npsim.core import BernoulliPauliNoise, MeasurementBitFlip, PauliChannel
@@ -64,7 +65,7 @@ def main() -> None:
     stim_module = _load_stim()
     print(
         "case\tdistance\trounds\tedges\tnative_gen_s\tnative_det_gen_s\t"
-        "stim_gen_s\tstim_gen_ratio\tnative_est_sps\t"
+        "native_det_compile_s\tstim_gen_s\tstim_gen_ratio\tnative_est_sps\t"
         "native_det_sps\tstim_det_sps\tdet_ratio\tstatus",
         flush=True,
     )
@@ -92,7 +93,14 @@ def main() -> None:
                     observables=(),
                 )
             )
-            native_detector_sampler = compile_native_dem_sampler(native_detector_dem)
+            native_detector_compile_s, native_detector_sampler = _time_once(
+                lambda: compile_native_dem_sampler_from_circuit(
+                    case.circuit,
+                    detectors=case.detectors,
+                    observables=(),
+                    materialize_dem=False,
+                )
+            )
             stim_sampler = stim_circuit.compile_detector_sampler()
             native_det_sps = _median_samples_per_second(
                 lambda seed: native_detector_sampler.run_batch(
@@ -124,7 +132,8 @@ def main() -> None:
             print(
                 f"{case.label}\t{case.distance}\t{case.rounds}\t"
                 f"{len(native_dem.edges)}\t{native_gen_s:.6f}\t"
-                f"{native_detector_gen_s:.6f}\t{stim_gen_s:.6f}\t"
+                f"{native_detector_gen_s:.6f}\t{native_detector_compile_s:.6f}\t"
+                f"{stim_gen_s:.6f}\t"
                 f"{stim_gen_ratio:.3f}\t{native_est_sps:.3f}\t"
                 f"{native_det_sps:.3f}\t{stim_det_sps:.3f}\t"
                 f"{det_ratio:.3f}\tok",
@@ -133,7 +142,7 @@ def main() -> None:
         except UnsupportedNativeCircuitError as exc:
             print(
                 f"{case.label}\t{case.distance}\t{case.rounds}\t"
-                f"NA\tNA\tNA\tNA\tNA\tNA\tNA\tNA\tNA\tnative-skip:{type(exc).__name__}",
+                f"NA\tNA\tNA\tNA\tNA\tNA\tNA\tNA\tNA\tNA\tnative-skip:{type(exc).__name__}",
                 flush=True,
             )
 

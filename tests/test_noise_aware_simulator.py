@@ -23,6 +23,7 @@ from npsim.core import (
 from npsim.runtime import (
     UnsupportedNativeCircuitError,
     compile_native_dem_sampler,
+    compile_native_dem_sampler_from_circuit,
     compile_native_sampler,
     generate_native_dem,
 )
@@ -924,6 +925,63 @@ class NativeDetectorErrorModelTests(unittest.TestCase):
         self.assertEqual(compact_batch.edge_event_masks, {})
         self.assertEqual(compact_batch.detectors[0], all_mask)
         self.assertEqual(compact_batch.observables[0], all_mask)
+
+    def test_native_dem_sampler_compiles_directly_from_circuit(self) -> None:
+        self._require_native_dem()
+        location = NoiseLocation(
+            id="x0",
+            model=BernoulliPauliNoise("X"),
+            rate=0.25,
+            qubits=(0,),
+            tags={"round": 1},
+        )
+        circuit = Circuit(
+            n_qubits=1,
+            operations=[
+                Operation.noise(location),
+                Operation.measure(0, key="m", basis="Z"),
+                Operation.detector(("m",), detector_id=0),
+                Operation.observable_include(0, ("m",)),
+            ],
+        )
+        dem = generate_native_dem(circuit)
+        regular_sampler = compile_native_dem_sampler(dem)
+        direct_sampler = compile_native_dem_sampler_from_circuit(circuit)
+        direct_light_sampler = compile_native_dem_sampler_from_circuit(
+            circuit,
+            materialize_dem=False,
+        )
+
+        def edge_rows(model: DetectorErrorModel) -> list[tuple[object, ...]]:
+            return [
+                (
+                    edge.probability,
+                    edge.detectors,
+                    edge.observables,
+                    edge.location_id,
+                    edge.tags,
+                )
+                for edge in model.edges
+            ]
+
+        self.assertEqual(edge_rows(direct_sampler.dem), edge_rows(dem))
+
+        regular_batch = regular_sampler.run_batch(shots=256, seed=123)
+        direct_batch = direct_sampler.run_batch(shots=256, seed=123)
+        self.assertEqual(direct_batch.detectors, regular_batch.detectors)
+        self.assertEqual(direct_batch.observables, regular_batch.observables)
+        self.assertEqual(direct_batch.edge_event_masks, regular_batch.edge_event_masks)
+
+        direct_light_batch = direct_light_sampler.run_batch(shots=256, seed=123)
+        self.assertEqual(direct_light_batch.detectors, regular_batch.detectors)
+        self.assertEqual(direct_light_batch.observables, regular_batch.observables)
+        self.assertEqual(direct_light_batch.edge_event_masks, regular_batch.edge_event_masks)
+        with self.assertRaises(ValueError):
+            direct_light_sampler.estimate_default(shots=256, seed=123)
+
+        direct_result = direct_sampler.estimate_default(shots=256, seed=123)
+        self.assertEqual(direct_result.dem.edges[0].location_id, "x0")
+        self.assertEqual(dict(direct_result.dem.edges[0].tags), {"round": 1})
 
     def test_native_dem_sampler_edge_counts_are_statistical(self) -> None:
         self._require_native_dem()

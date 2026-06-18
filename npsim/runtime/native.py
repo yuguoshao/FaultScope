@@ -233,6 +233,7 @@ class NativeDemSampler:
     ) -> Any:
         if shots <= 0:
             raise ValueError("shots must be positive")
+        self._require_dem_metadata()
         native_baseline = _native_baseline_value(baseline)
         payload = self._engine.estimate_default(
             int(shots),
@@ -255,6 +256,7 @@ class NativeDemSampler:
     ) -> Any:
         if shots <= 0:
             raise ValueError("shots must be positive")
+        self._require_dem_metadata()
         if decoder is not None and correction_mask_fn is not None:
             raise ValueError("supply either decoder or correction_mask_fn, not both")
         native_baseline = _native_baseline_value(baseline)
@@ -293,6 +295,12 @@ class NativeDemSampler:
             int(top_k),
         )
         return _payload_to_dem_hotspot_result(self.dem, payload)
+
+    def _require_dem_metadata(self) -> None:
+        if self.dem is None:
+            raise ValueError(
+                "this native DEM sampler was compiled without Python DEM metadata"
+            )
 
 
 def compile_native_sampler(
@@ -344,6 +352,49 @@ def generate_native_dem(
             detectors,
             observables,
             payload,
+        )
+    except Exception as exc:
+        raise UnsupportedNativeCircuitError(str(exc)) from exc
+
+
+def compile_native_dem_sampler_from_circuit(
+    circuit: Circuit,
+    *,
+    detectors: Any | None = None,
+    observables: Any | None = None,
+    materialize_dem: bool = True,
+) -> NativeDemSampler:
+    """Generate and compile a native DEM sampler in a single native call."""
+
+    detectors, observables = _coerce_dem_declarations(circuit, detectors, observables)
+
+    try:
+        spec = _serialize_circuit(circuit)
+        native_mod = importlib.import_module("npsim._npsim_native")
+        if not materialize_dem:
+            engine = native_mod.compile_generated_dem_sampler(
+                spec,
+                [_serialize_dem_detector(detector) for detector in detectors],
+                [_serialize_dem_observable(observable) for observable in observables],
+            )
+            return NativeDemSampler(
+                dem=None,
+                _engine=engine,
+            )
+        payload = native_mod.generate_and_compile_dem_sampler(
+            spec,
+            [_serialize_dem_detector(detector) for detector in detectors],
+            [_serialize_dem_observable(observable) for observable in observables],
+        )
+        dem = _payload_to_detector_error_model(
+            circuit,
+            detectors,
+            observables,
+            payload["edges"],
+        )
+        return NativeDemSampler(
+            dem=dem,
+            _engine=payload["sampler"],
         )
     except Exception as exc:
         raise UnsupportedNativeCircuitError(str(exc)) from exc
@@ -820,6 +871,7 @@ __all__ = [
     "NativePackedSampler",
     "UnsupportedNativeCircuitError",
     "compile_native_dem_sampler",
+    "compile_native_dem_sampler_from_circuit",
     "compile_native_sampler",
     "generate_native_dem",
 ]
