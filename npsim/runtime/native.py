@@ -9,6 +9,8 @@ from __future__ import annotations
 import importlib
 import inspect
 import random
+import weakref
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any, Mapping
 
@@ -23,9 +25,103 @@ from npsim.core import (
     TwoQubitDepolarizing,
 )
 
+_NATIVE_OP_KIND = {
+    "h": 0,
+    "s": 1,
+    "s_dag": 2,
+    "cx": 3,
+    "cz": 4,
+    "swap": 5,
+    "pauli": 6,
+    "noise": 7,
+    "measure": 8,
+    "measure_pauli": 9,
+    "reset": 10,
+    "detector": 11,
+    "observable_include": 12,
+}
+
+_NATIVE_NOISE_MODEL = {
+    "bernoulli_pauli": 0,
+    "measurement_bit_flip": 1,
+    "single_qubit_depolarizing": 2,
+    "two_qubit_depolarizing": 3,
+    "pauli_channel": 4,
+}
+
+_DEM_LIGHT_SAMPLER_CACHE: dict[
+    int,
+    tuple[
+        weakref.ReferenceType[Circuit],
+        dict[
+            tuple[int, int, object],
+            tuple[tuple[Any, ...], tuple[Any, ...], "NativeDemSampler"],
+        ],
+    ],
+] = {}
+_DEM_LIGHT_SAMPLER_OPERATIONS_CACHE: dict[
+    int,
+    tuple[
+        object,
+        dict[
+            tuple[
+                int,
+                int,
+                int,
+                object,
+            ],
+            tuple[tuple[Any, ...], tuple[Any, ...], "NativeDemSampler"],
+        ],
+    ],
+] = {}
+_DEM_LIGHT_SAMPLER_OPERATIONS_CACHE_MAX = 64
+_DEM_LIGHT_SAMPLER_OPERATION_SEQUENCE_CACHE: dict[
+    tuple[int, object, int, int],
+    tuple[
+        tuple[Operation, ...],
+        tuple[Any, ...],
+        tuple[Any, ...],
+        "NativeDemSampler",
+    ],
+] = {}
+_DEM_LIGHT_SAMPLER_OPERATION_SEQUENCE_CACHE_MAX = 32
+_DEM_GENERATOR_CACHE: dict[
+    int,
+    tuple[
+        weakref.ReferenceType[Circuit],
+        dict[tuple[int, int, object], "NativeDemGenerator"],
+    ],
+] = {}
+
 
 class UnsupportedNativeCircuitError(ValueError):
     """Raised when a circuit cannot be compiled by the native sampler."""
+
+
+class _NativeDemEdgeSequence(Sequence):
+    """Lazily materialized Python view of native-owned DEM edges."""
+
+    def __init__(self, circuit: Circuit, native_dem: Any):
+        self._circuit = circuit
+        self._native_dem = native_dem
+        self._edges: tuple[Any, ...] | None = None
+
+    def __len__(self) -> int:
+        return int(self._native_dem.edge_count)
+
+    def __getitem__(self, index: int | slice) -> Any:
+        return self._materialize()[index]
+
+    def __iter__(self):
+        return iter(self._materialize())
+
+    def _materialize(self) -> tuple[Any, ...]:
+        if self._edges is None:
+            self._edges = _payload_to_detector_error_edges(
+                self._circuit,
+                self._native_dem.to_rows(),
+            )
+        return self._edges
 
 
 @dataclass(frozen=True)
@@ -303,6 +399,48 @@ class NativeDemSampler:
             )
 
 
+@dataclass(frozen=True)
+class NativeDemGenerator:
+    """Compiled native DEM generator wrapper."""
+
+    circuit: Circuit
+    detectors: tuple[Any, ...]
+    observables: tuple[Any, ...]
+    _engine: Any
+
+    def generate_native_dem(self) -> Any:
+        """Generate a native-owned detector error model object."""
+
+        return self._engine.generate_native_dem()
+
+    def generate_dem(self) -> Any:
+        native_dem = self._engine.generate_native_dem()
+        return _native_generated_dem_to_detector_error_model(
+            self.circuit,
+            self.detectors,
+            self.observables,
+            native_dem,
+        )
+
+    def compile_sampler(self, *, materialize_dem: bool = True) -> NativeDemSampler:
+        if not materialize_dem:
+            return NativeDemSampler(
+                dem=None,
+                _engine=self._engine.compile_sampler(),
+            )
+        native_dem = self._engine.generate_native_dem()
+        dem = _native_generated_dem_to_detector_error_model(
+            self.circuit,
+            self.detectors,
+            self.observables,
+            native_dem,
+        )
+        return NativeDemSampler(
+            dem=dem,
+            _engine=self._engine.compile_sampler(),
+        )
+
+
 def compile_native_sampler(
     circuit: Circuit,
     *,
@@ -337,22 +475,63 @@ def generate_native_dem(
 ) -> Any:
     """Generate a detector error model through the native extension."""
 
+    generator = compile_native_dem_generator(
+        circuit,
+        detectors=detectors,
+        observables=observables,
+    )
+    return generator.generate_dem()
+
+
+def compile_native_dem_generator(
+    circuit: Circuit,
+    *,
+    detectors: Any | None = None,
+    observables: Any | None = None,
+) -> NativeDemGenerator:
+    """Compile a circuit into a reusable native DEM generator."""
+
     detectors, observables = _coerce_dem_declarations(circuit, detectors, observables)
+    cached = _native_dem_generator_cache_get(circuit, detectors, observables)
+    if cached is not None:
+        return cached
 
     try:
-        spec = _serialize_circuit(circuit)
         native_mod = importlib.import_module("npsim._npsim_native")
-        payload = native_mod.generate_dem(
-            spec,
-            [_serialize_dem_detector(detector) for detector in detectors],
-            [_serialize_dem_observable(observable) for observable in observables],
+        serialized_detectors = [_serialize_dem_detector(detector) for detector in detectors]
+        serialized_observables = [
+            _serialize_dem_observable(observable) for observable in observables
+        ]
+        direct_compile = getattr(native_mod, "compile_dem_generator_from_circuit", None)
+        if direct_compile is not None:
+            try:
+                engine = direct_compile(
+                    circuit,
+                    serialized_detectors,
+                    serialized_observables,
+                )
+            except Exception:
+                spec = _serialize_circuit(circuit)
+                engine = native_mod.compile_dem_generator(
+                    spec,
+                    serialized_detectors,
+                    serialized_observables,
+                )
+        else:
+            spec = _serialize_circuit(circuit)
+            engine = native_mod.compile_dem_generator(
+                spec,
+                serialized_detectors,
+                serialized_observables,
+            )
+        generator = NativeDemGenerator(
+            circuit=circuit,
+            detectors=detectors,
+            observables=observables,
+            _engine=engine,
         )
-        return _payload_to_detector_error_model(
-            circuit,
-            detectors,
-            observables,
-            payload,
-        )
+        _native_dem_generator_cache_put(circuit, detectors, observables, generator)
+        return generator
     except Exception as exc:
         raise UnsupportedNativeCircuitError(str(exc)) from exc
 
@@ -366,38 +545,324 @@ def compile_native_dem_sampler_from_circuit(
 ) -> NativeDemSampler:
     """Generate and compile a native DEM sampler in a single native call."""
 
-    detectors, observables = _coerce_dem_declarations(circuit, detectors, observables)
-
-    try:
-        spec = _serialize_circuit(circuit)
-        native_mod = importlib.import_module("npsim._npsim_native")
-        if not materialize_dem:
-            engine = native_mod.compile_generated_dem_sampler(
-                spec,
-                [_serialize_dem_detector(detector) for detector in detectors],
-                [_serialize_dem_observable(observable) for observable in observables],
-            )
-            return NativeDemSampler(
-                dem=None,
-                _engine=engine,
-            )
-        payload = native_mod.generate_and_compile_dem_sampler(
-            spec,
-            [_serialize_dem_detector(detector) for detector in detectors],
-            [_serialize_dem_observable(observable) for observable in observables],
-        )
-        dem = _payload_to_detector_error_model(
+    if not materialize_dem:
+        detectors, observables = _coerce_dem_declarations(circuit, detectors, observables)
+        cache_key = _native_dem_light_sampler_cache_key(
             circuit,
             detectors,
             observables,
-            payload["edges"],
         )
-        return NativeDemSampler(
-            dem=dem,
-            _engine=payload["sampler"],
+        cache = _native_dem_light_sampler_cache(circuit) if cache_key is not None else None
+        if cache_key is not None:
+            cached_entry = cache.get(cache_key) if cache is not None else None
+            if (
+                cached_entry is not None
+                and cached_entry[0] is detectors
+                and cached_entry[1] is observables
+            ):
+                return cached_entry[2]
+            cached = _native_dem_light_sampler_operations_cache_get(
+                circuit,
+                detectors,
+                observables,
+                cache_key[2],
+            )
+            if cached is not None:
+                if cache is not None:
+                    cache[cache_key] = (detectors, observables, cached)
+                    _native_dem_light_sampler_operations_cache_put(
+                        circuit,
+                        detectors,
+                        observables,
+                        cache_key[2],
+                        cached,
+                    )
+                return cached
+            cached = _native_dem_light_sampler_sequence_cache_get(
+                circuit,
+                detectors,
+                observables,
+            )
+            if cached is not None:
+                if cache is not None:
+                    cache[cache_key] = (detectors, observables, cached)
+                    _native_dem_light_sampler_operations_cache_put(
+                        circuit,
+                        detectors,
+                        observables,
+                        cache_key[2],
+                        cached,
+                    )
+                return cached
+        try:
+            native_mod = importlib.import_module("npsim._npsim_native")
+            serialized_detectors = [_serialize_dem_detector(detector) for detector in detectors]
+            serialized_observables = [
+                _serialize_dem_observable(observable) for observable in observables
+            ]
+            direct_compile = getattr(
+                native_mod, "compile_generated_dem_sampler_from_circuit", None
+            )
+            if direct_compile is not None:
+                try:
+                    engine = direct_compile(
+                        circuit,
+                        serialized_detectors,
+                        serialized_observables,
+                    )
+                except Exception:
+                    spec = _serialize_circuit(circuit, include_tags=False)
+                    engine = native_mod.compile_generated_dem_sampler(
+                        spec,
+                        serialized_detectors,
+                        serialized_observables,
+                    )
+            else:
+                spec = _serialize_circuit(circuit, include_tags=False)
+                engine = native_mod.compile_generated_dem_sampler(
+                    spec,
+                    serialized_detectors,
+                    serialized_observables,
+                )
+            sampler = NativeDemSampler(dem=None, _engine=engine)
+            if cache_key is not None and cache is not None:
+                cache[cache_key] = (detectors, observables, sampler)
+                _native_dem_light_sampler_operations_cache_put(
+                    circuit,
+                    detectors,
+                    observables,
+                    cache_key[2],
+                    sampler,
+                )
+                _native_dem_light_sampler_sequence_cache_put(
+                    circuit,
+                    detectors,
+                    observables,
+                    sampler,
+                )
+            return sampler
+        except Exception as exc:
+            raise UnsupportedNativeCircuitError(str(exc)) from exc
+
+    generator = compile_native_dem_generator(
+        circuit,
+        detectors=detectors,
+        observables=observables,
+    )
+    return generator.compile_sampler(materialize_dem=materialize_dem)
+
+
+def _native_dem_light_sampler_cache_key(
+    circuit: Circuit,
+    detectors: tuple[Any, ...],
+    observables: tuple[Any, ...],
+) -> tuple[int, int, object] | None:
+    if isinstance(circuit.operations, tuple):
+        operations_key = None
+    elif isinstance(circuit.operations, list):
+        operations_key = _operation_sequence_identity_key(circuit.operations)
+    else:
+        return None
+    return id(detectors), id(observables), operations_key
+
+
+def _operation_sequence_identity_key(operations: Any) -> object:
+    try:
+        native_mod = importlib.import_module("npsim._npsim_native")
+        key_fn = getattr(native_mod, "operation_sequence_identity_key", None)
+        if key_fn is not None:
+            return key_fn(operations)
+    except Exception:
+        pass
+    return tuple(id(operation) for operation in operations)
+
+
+def _native_dem_generator_cache_get(
+    circuit: Circuit,
+    detectors: tuple[Any, ...],
+    observables: tuple[Any, ...],
+) -> NativeDemGenerator | None:
+    cache_key = _native_dem_generator_cache_key(circuit, detectors, observables)
+    if cache_key is None:
+        return None
+    entry = _DEM_GENERATOR_CACHE.get(id(circuit))
+    if entry is None:
+        return None
+    circuit_ref, cache = entry
+    if circuit_ref() is not circuit:
+        _DEM_GENERATOR_CACHE.pop(id(circuit), None)
+        return None
+    return cache.get(cache_key)
+
+
+def _native_dem_generator_cache_put(
+    circuit: Circuit,
+    detectors: tuple[Any, ...],
+    observables: tuple[Any, ...],
+    generator: NativeDemGenerator,
+) -> None:
+    cache_key = _native_dem_generator_cache_key(circuit, detectors, observables)
+    if cache_key is None:
+        return
+    cache_id = id(circuit)
+    entry = _DEM_GENERATOR_CACHE.get(cache_id)
+    if entry is None or entry[0]() is not circuit:
+        def cleanup(
+            _ref: weakref.ReferenceType[Circuit],
+            *,
+            cache_id: int = cache_id,
+        ) -> None:
+            _DEM_GENERATOR_CACHE.pop(cache_id, None)
+
+        try:
+            circuit_ref = weakref.ref(circuit, cleanup)
+        except TypeError:
+            return
+        cache: dict[tuple[int, int, object], NativeDemGenerator] = {}
+        _DEM_GENERATOR_CACHE[cache_id] = (circuit_ref, cache)
+    else:
+        cache = entry[1]
+    cache[cache_key] = generator
+
+
+def _native_dem_generator_cache_key(
+    circuit: Circuit,
+    detectors: tuple[Any, ...],
+    observables: tuple[Any, ...],
+) -> tuple[int, int, object] | None:
+    if isinstance(circuit.operations, tuple):
+        operations_key = None
+    elif isinstance(circuit.operations, list):
+        operations_key = _operation_sequence_identity_key(circuit.operations)
+    else:
+        return None
+    return id(detectors), id(observables), operations_key
+
+
+def _native_dem_light_sampler_cache(
+    circuit: Circuit,
+) -> dict[
+    tuple[int, int, tuple[int, ...] | None],
+    tuple[tuple[Any, ...], tuple[Any, ...], NativeDemSampler],
+] | None:
+    cache_id = id(circuit)
+    entry = _DEM_LIGHT_SAMPLER_CACHE.get(cache_id)
+    if entry is not None:
+        ref, cache = entry
+        if ref() is circuit:
+            return cache
+        _DEM_LIGHT_SAMPLER_CACHE.pop(cache_id, None)
+
+    def cleanup(_ref: weakref.ReferenceType[Circuit], *, cache_id: int = cache_id) -> None:
+        _DEM_LIGHT_SAMPLER_CACHE.pop(cache_id, None)
+
+    try:
+        ref = weakref.ref(circuit, cleanup)
+    except TypeError:
+        return None
+    cache: dict[
+        tuple[int, int, tuple[int, ...] | None],
+        tuple[tuple[Any, ...], tuple[Any, ...], NativeDemSampler],
+    ] = {}
+    _DEM_LIGHT_SAMPLER_CACHE[cache_id] = (ref, cache)
+    return cache
+
+
+def _native_dem_light_sampler_operations_cache_get(
+    circuit: Circuit,
+    detectors: tuple[Any, ...],
+    observables: tuple[Any, ...],
+    operations_key: object,
+) -> NativeDemSampler | None:
+    entry = _DEM_LIGHT_SAMPLER_OPERATIONS_CACHE.get(id(circuit.operations))
+    if entry is None:
+        return None
+    operations, cache = entry
+    if operations is not circuit.operations:
+        _DEM_LIGHT_SAMPLER_OPERATIONS_CACHE.pop(id(circuit.operations), None)
+        return None
+    key = (int(circuit.n_qubits), id(detectors), id(observables), operations_key)
+    entry = cache.get(key)
+    if entry is None or entry[0] is not detectors or entry[1] is not observables:
+        return None
+    return entry[2]
+
+
+def _native_dem_light_sampler_operations_cache_put(
+    circuit: Circuit,
+    detectors: tuple[Any, ...],
+    observables: tuple[Any, ...],
+    operations_key: object,
+    sampler: NativeDemSampler,
+) -> None:
+    if len(_DEM_LIGHT_SAMPLER_OPERATIONS_CACHE) >= _DEM_LIGHT_SAMPLER_OPERATIONS_CACHE_MAX:
+        _DEM_LIGHT_SAMPLER_OPERATIONS_CACHE.pop(
+            next(iter(_DEM_LIGHT_SAMPLER_OPERATIONS_CACHE)),
+            None,
         )
-    except Exception as exc:
-        raise UnsupportedNativeCircuitError(str(exc)) from exc
+    entry = _DEM_LIGHT_SAMPLER_OPERATIONS_CACHE.setdefault(
+        id(circuit.operations),
+        (circuit.operations, {}),
+    )
+    operations, cache = entry
+    if operations is not circuit.operations:
+        cache = {}
+        _DEM_LIGHT_SAMPLER_OPERATIONS_CACHE[id(circuit.operations)] = (
+            circuit.operations,
+            cache,
+        )
+    key = (int(circuit.n_qubits), id(detectors), id(observables), operations_key)
+    cache[key] = (detectors, observables, sampler)
+
+
+def _native_dem_light_sampler_sequence_cache_get(
+    circuit: Circuit,
+    detectors: tuple[Any, ...],
+    observables: tuple[Any, ...],
+) -> NativeDemSampler | None:
+    key = (
+        int(circuit.n_qubits),
+        _operation_sequence_identity_key(circuit.operations),
+        id(detectors),
+        id(observables),
+    )
+    entry = _DEM_LIGHT_SAMPLER_OPERATION_SEQUENCE_CACHE.get(key)
+    if entry is None:
+        return None
+    _cached_operations, cached_detectors, cached_observables, sampler = entry
+    if cached_detectors is detectors and cached_observables is observables:
+        return sampler
+    _DEM_LIGHT_SAMPLER_OPERATION_SEQUENCE_CACHE.pop(key, None)
+    return None
+
+
+def _native_dem_light_sampler_sequence_cache_put(
+    circuit: Circuit,
+    detectors: tuple[Any, ...],
+    observables: tuple[Any, ...],
+    sampler: NativeDemSampler,
+) -> None:
+    if (
+        len(_DEM_LIGHT_SAMPLER_OPERATION_SEQUENCE_CACHE)
+        >= _DEM_LIGHT_SAMPLER_OPERATION_SEQUENCE_CACHE_MAX
+    ):
+        _DEM_LIGHT_SAMPLER_OPERATION_SEQUENCE_CACHE.pop(
+            next(iter(_DEM_LIGHT_SAMPLER_OPERATION_SEQUENCE_CACHE)),
+            None,
+        )
+    operations = tuple(circuit.operations)
+    key = (
+        int(circuit.n_qubits),
+        _operation_sequence_identity_key(operations),
+        id(detectors),
+        id(observables),
+    )
+    _DEM_LIGHT_SAMPLER_OPERATION_SEQUENCE_CACHE[key] = (
+        operations,
+        detectors,
+        observables,
+        sampler,
+    )
 
 
 def compile_native_dem_sampler(
@@ -422,11 +887,13 @@ def _serialize_circuit(
     circuit: Circuit,
     *,
     observables: tuple[Any, ...] = (),
+    include_tags: bool = True,
 ) -> dict[str, Any]:
     return {
+        "format": "compact_v1",
         "n_qubits": int(circuit.n_qubits),
         "operations": [
-            _serialize_operation(operation)
+            _serialize_operation_compact(operation, include_tags=include_tags)
             for operation in circuit.operations
         ],
         "observables": [
@@ -434,6 +901,40 @@ def _serialize_circuit(
             for observable in observables
         ],
     }
+
+
+def _serialize_operation_compact(
+    operation: Operation,
+    *,
+    include_tags: bool = True,
+) -> tuple[Any, ...]:
+    try:
+        kind = _NATIVE_OP_KIND[operation.kind]
+    except KeyError as exc:
+        raise UnsupportedNativeCircuitError(
+            f"unsupported native operation kind {operation.kind!r}"
+        ) from exc
+    detector_id = None
+    if operation.kind == "detector":
+        detector_id = operation.metadata.get("detector_id")
+    return (
+        kind,
+        tuple(int(qubit) for qubit in operation.qubits),
+        operation.key,
+        operation.basis,
+        operation.pauli,
+        tuple(operation.measurement_keys),
+        operation.observable_id,
+        (
+            _serialize_noise_location_compact(
+                operation.noise_location,
+                include_tags=include_tags,
+            )
+            if operation.noise_location is not None
+            else None
+        ),
+        detector_id,
+    )
 
 
 def _serialize_operation(operation: Operation) -> dict[str, Any]:
@@ -455,6 +956,20 @@ def _serialize_operation(operation: Operation) -> dict[str, Any]:
     return out
 
 
+def _serialize_noise_location_compact(
+    location: NoiseLocation,
+    *,
+    include_tags: bool = True,
+) -> tuple[Any, ...]:
+    return (
+        location.id,
+        float(location.rate),
+        tuple(int(qubit) for qubit in location.qubits),
+        dict(location.tags) if include_tags else {},
+        _serialize_noise_model_compact(location.model),
+    )
+
+
 def _serialize_noise_location(location: NoiseLocation) -> dict[str, Any]:
     return {
         "id": location.id,
@@ -463,6 +978,26 @@ def _serialize_noise_location(location: NoiseLocation) -> dict[str, Any]:
         "tags": dict(location.tags),
         "model": _serialize_noise_model(location.model),
     }
+
+
+def _serialize_noise_model_compact(model: object) -> tuple[Any, ...]:
+    if isinstance(model, BernoulliPauliNoise):
+        return (_NATIVE_NOISE_MODEL["bernoulli_pauli"], model.pauli, ())
+    if isinstance(model, MeasurementBitFlip):
+        return (_NATIVE_NOISE_MODEL["measurement_bit_flip"], None, ())
+    if isinstance(model, SingleQubitDepolarizing):
+        return (_NATIVE_NOISE_MODEL["single_qubit_depolarizing"], None, ())
+    if isinstance(model, TwoQubitDepolarizing):
+        return (_NATIVE_NOISE_MODEL["two_qubit_depolarizing"], None, ())
+    if isinstance(model, PauliChannel):
+        return (
+            _NATIVE_NOISE_MODEL["pauli_channel"],
+            None,
+            tuple((pauli, float(weight)) for pauli, weight in model.weights.items()),
+        )
+    raise UnsupportedNativeCircuitError(
+        f"unsupported native noise model {type(model).__name__}"
+    )
 
 
 def _serialize_noise_model(model: object) -> dict[str, Any]:
@@ -492,6 +1027,8 @@ def _coerce_dem_declarations(
     detectors: Any | None,
     observables: Any | None,
 ) -> tuple[tuple[Any, ...], tuple[Any, ...]]:
+    if detectors is not None and observables is not None:
+        return tuple(detectors), tuple(observables)
     from npsim.dem.model import _detectors_from_circuit, _observables_from_circuit
 
     return (
@@ -546,28 +1083,66 @@ def _payload_to_detector_error_model(
     observables: tuple[Any, ...],
     payload: Any,
 ) -> Any:
-    from npsim.dem.model import DetectorErrorEdge, DetectorErrorModel
+    from npsim.dem.model import DetectorErrorModel
+
+    return DetectorErrorModel(
+        detectors=tuple(detectors),
+        observables=tuple(observables),
+        edges=_payload_to_detector_error_edges(circuit, payload),
+    )
+
+
+def _native_generated_dem_to_detector_error_model(
+    circuit: Circuit,
+    detectors: tuple[Any, ...],
+    observables: tuple[Any, ...],
+    native_dem: Any,
+) -> Any:
+    from npsim.dem.model import DetectorErrorModel
+
+    return DetectorErrorModel(
+        detectors=tuple(detectors),
+        observables=tuple(observables),
+        edges=_NativeDemEdgeSequence(circuit, native_dem),
+    )
+
+
+def _payload_to_detector_error_edges(
+    circuit: Circuit,
+    payload: Any,
+) -> tuple[Any, ...]:
+    from npsim.dem.model import DetectorErrorEdge
 
     locations = circuit.noise_locations()
     edges = []
     for item in payload:
-        location_id = str(item["location_id"])
+        if hasattr(item, "keys"):
+            probability = item["probability"]
+            detectors_payload = item["detectors"]
+            observables_payload = item["observables"]
+            location_id = str(item["location_id"])
+            event = item["event"]
+        else:
+            (
+                probability,
+                detectors_payload,
+                observables_payload,
+                location_id,
+                event,
+            ) = item
+            location_id = str(location_id)
         location = locations.get(location_id)
         edges.append(
             DetectorErrorEdge(
-                probability=float(item["probability"]),
-                detectors=tuple(int(value) for value in item["detectors"]),
-                observables=tuple(int(value) for value in item["observables"]),
+                probability=float(probability),
+                detectors=tuple(int(value) for value in detectors_payload),
+                observables=tuple(int(value) for value in observables_payload),
                 location_id=location_id,
-                event=item["event"],
+                event=event,
                 tags=dict(location.tags) if location is not None else {},
             )
         )
-    return DetectorErrorModel(
-        detectors=tuple(detectors),
-        observables=tuple(observables),
-        edges=tuple(edges),
-    )
+    return tuple(edges)
 
 
 def _payload_to_dem_batch(payload: Mapping[str, Any]) -> Any:
@@ -867,9 +1442,12 @@ def _payload_to_batch_trajectory(payload: Mapping[str, Any]) -> BatchTrajectory:
 
 
 __all__ = [
+    "NativeDemGenerator",
     "NativeDemSampler",
     "NativePackedSampler",
+    "PackedMeasurementBytes",
     "UnsupportedNativeCircuitError",
+    "compile_native_dem_generator",
     "compile_native_dem_sampler",
     "compile_native_dem_sampler_from_circuit",
     "compile_native_sampler",

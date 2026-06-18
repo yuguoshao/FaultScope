@@ -218,12 +218,30 @@ impl NativePackedBatch {
     }
 }
 
+#[derive(Clone)]
 #[pyclass]
 pub(crate) struct NativeDemSampler {
-    pub(crate) detectors: Vec<i64>,
-    pub(crate) observables: Vec<i64>,
-    pub(crate) edges: Vec<DemEdgeSpec>,
-    pub(crate) location_groups: Vec<DemLocationGroup>,
+    pub(crate) detectors: Arc<Vec<i64>>,
+    pub(crate) observables: Arc<Vec<i64>>,
+    pub(crate) edges: Arc<Vec<DemEdgeSpec>>,
+    pub(crate) location_groups: Arc<Vec<DemLocationGroup>>,
+}
+
+#[pyclass]
+pub(crate) struct NativeDemGenerator {
+    pub(crate) n_qubits: usize,
+    pub(crate) operations: Vec<Op>,
+    pub(crate) detectors: Vec<DemDetectorSpec>,
+    pub(crate) observables: Vec<DemObservableSpec>,
+    pub(crate) measurement_plan: DemMeasurementPlan,
+    pub(crate) event_plan: DemEventPlan,
+    pub(crate) sampling_sampler: NativeDemSampler,
+    pub(crate) use_product_fast_path: bool,
+}
+
+#[pyclass]
+pub(crate) struct NativeGeneratedDem {
+    pub(crate) edges: Vec<GeneratedDemEdge>,
 }
 
 #[pyclass]
@@ -313,6 +331,74 @@ impl NativeDemSampler {
 }
 
 #[pymethods]
+impl NativeDemGenerator {
+    #[pyo3(signature = ())]
+    pub(crate) fn generate_native_dem(&self, py: Python<'_>) -> PyResult<NativeGeneratedDem> {
+        let edges = py.allow_threads(|| self.generate_edges())?;
+        Ok(NativeGeneratedDem { edges })
+    }
+
+    #[pyo3(signature = ())]
+    pub(crate) fn generate_dem(&self, py: Python<'_>) -> PyResult<PyObject> {
+        let edges = py.allow_threads(|| self.generate_edges())?;
+        dem_edges_to_py(py, &edges)
+    }
+
+    #[pyo3(signature = ())]
+    pub(crate) fn compile_sampler(&self, py: Python<'_>) -> PyResult<NativeDemSampler> {
+        py.allow_threads(|| Ok(self.sampling_sampler.clone()))
+    }
+
+    #[pyo3(signature = ())]
+    pub(crate) fn generate_and_compile_sampler(&self, py: Python<'_>) -> PyResult<PyObject> {
+        let edges = py.allow_threads(|| self.generate_edges())?;
+        let sampler = generated_edges_to_native_dem_sampler(
+            &edges,
+            &self.operations,
+            &self.detectors,
+            &self.observables,
+            true,
+        );
+        let out = PyDict::new(py);
+        out.set_item("edges", dem_edges_to_py(py, &edges)?)?;
+        out.set_item("sampler", Py::new(py, sampler)?)?;
+        Ok(out.into())
+    }
+}
+
+impl NativeDemGenerator {
+    pub(crate) fn generate_edges(&self) -> PyResult<Vec<GeneratedDemEdge>> {
+        if self.use_product_fast_path {
+            generate_indexed_product_dem_edges_from_plan(
+                self.n_qubits,
+                &self.operations,
+                &self.measurement_plan,
+                &self.event_plan,
+            )
+        } else {
+            generate_dem_edges(
+                self.n_qubits,
+                &self.operations,
+                &self.detectors,
+                &self.observables,
+            )
+        }
+    }
+}
+
+#[pymethods]
+impl NativeGeneratedDem {
+    #[getter]
+    pub(crate) fn edge_count(&self) -> usize {
+        self.edges.len()
+    }
+
+    pub(crate) fn to_rows(&self, py: Python<'_>) -> PyResult<PyObject> {
+        dem_edges_to_py(py, &self.edges)
+    }
+}
+
+#[pymethods]
 impl NativeDemBatch {
     #[getter]
     pub(crate) fn shots(&self) -> usize {
@@ -391,6 +477,34 @@ pub(crate) fn compile_sampler(spec: &Bound<'_, PyDict>) -> PyResult<NativePacked
 }
 
 #[pyfunction]
+pub(crate) fn operation_sequence_identity_key(
+    py: Python<'_>,
+    operations: &Bound<'_, PyAny>,
+) -> PyResult<PyObject> {
+    let len = if let Ok(items) = operations.downcast::<PyTuple>() {
+        items.len()
+    } else if let Ok(items) = operations.downcast::<PyList>() {
+        items.len()
+    } else {
+        return Err(PyValueError::new_err(
+            "operation sequence identity key requires a list or tuple",
+        ));
+    };
+    let mut out = Vec::with_capacity(len * std::mem::size_of::<usize>());
+    if let Ok(items) = operations.downcast::<PyTuple>() {
+        for item in items.iter() {
+            out.extend_from_slice(&(item.as_ptr() as usize).to_ne_bytes());
+        }
+    } else {
+        let items = operations.downcast::<PyList>()?;
+        for item in items.iter() {
+            out.extend_from_slice(&(item.as_ptr() as usize).to_ne_bytes());
+        }
+    }
+    Ok(PyBytes::new(py, &out).into())
+}
+
+#[pyfunction]
 pub(crate) fn generate_dem(
     py: Python<'_>,
     spec: &Bound<'_, PyDict>,
@@ -418,10 +532,10 @@ pub(crate) fn generate_and_compile_dem_sampler(
     let edge_specs = generated_edges_to_dem_edge_specs(&generated_edges, &operations);
     let location_groups = build_dem_location_groups(&edge_specs);
     let sampler = NativeDemSampler {
-        detectors: detectors.iter().map(|detector| detector.id).collect(),
-        observables: observables.iter().map(|observable| observable.id).collect(),
-        edges: edge_specs,
-        location_groups,
+        detectors: Arc::new(detectors.iter().map(|detector| detector.id).collect()),
+        observables: Arc::new(observables.iter().map(|observable| observable.id).collect()),
+        edges: Arc::new(edge_specs),
+        location_groups: Arc::new(location_groups),
     };
 
     let out = PyDict::new(py);
@@ -439,14 +553,127 @@ pub(crate) fn compile_generated_dem_sampler(
     let (n_qubits, operations) = parse_circuit_spec(spec)?;
     let detectors = parse_dem_detectors(detectors)?;
     let observables = parse_dem_observables(observables)?;
-    let generated_edges = generate_dem_edges(n_qubits, &operations, &detectors, &observables)?;
-    let edge_specs = generated_edges_to_dem_edge_specs(&generated_edges, &operations);
-    let location_groups = build_dem_location_groups(&edge_specs);
-    Ok(NativeDemSampler {
-        detectors: detectors.iter().map(|detector| detector.id).collect(),
-        observables: observables.iter().map(|observable| observable.id).collect(),
-        edges: edge_specs,
-        location_groups,
+    let edge_specs = if supports_product_reference_fast_path(&operations) {
+        let measurement_plan = compile_dem_measurement_plan(&operations, &detectors, &observables)?;
+        let event_plan = collect_dem_event_plan(&operations)?;
+        generate_indexed_product_sampling_dem_edge_specs_from_plan(
+            n_qubits,
+            &operations,
+            &measurement_plan,
+            &event_plan,
+        )?
+    } else {
+        generate_sampling_dem_edge_specs(n_qubits, &operations, &detectors, &observables)?
+    };
+    Ok(sampling_edge_specs_to_native_dem_sampler(
+        edge_specs,
+        &detectors,
+        &observables,
+    ))
+}
+
+#[pyfunction]
+pub(crate) fn compile_generated_dem_sampler_from_circuit(
+    circuit: &Bound<'_, PyAny>,
+    detectors: &Bound<'_, PyList>,
+    observables: &Bound<'_, PyList>,
+) -> PyResult<NativeDemSampler> {
+    let (n_qubits, operations) = parse_circuit_object(circuit, false)?;
+    let detectors = parse_dem_detectors(detectors)?;
+    let observables = parse_dem_observables(observables)?;
+    let edge_specs = if supports_product_reference_fast_path(&operations) {
+        let measurement_plan = compile_dem_measurement_plan(&operations, &detectors, &observables)?;
+        let event_plan = collect_dem_event_plan(&operations)?;
+        generate_indexed_product_sampling_dem_edge_specs_from_plan(
+            n_qubits,
+            &operations,
+            &measurement_plan,
+            &event_plan,
+        )?
+    } else {
+        generate_sampling_dem_edge_specs(n_qubits, &operations, &detectors, &observables)?
+    };
+    Ok(sampling_edge_specs_to_native_dem_sampler(
+        edge_specs,
+        &detectors,
+        &observables,
+    ))
+}
+
+#[pyfunction]
+pub(crate) fn generate_native_dem_from_circuit(
+    py: Python<'_>,
+    circuit: &Bound<'_, PyAny>,
+    detectors: &Bound<'_, PyList>,
+    observables: &Bound<'_, PyList>,
+) -> PyResult<NativeGeneratedDem> {
+    let (n_qubits, operations) = parse_circuit_object(circuit, true)?;
+    let detector_specs = parse_dem_detectors(detectors)?;
+    let observable_specs = parse_dem_observables(observables)?;
+    let edges = py.allow_threads(|| {
+        generate_dem_edges(n_qubits, &operations, &detector_specs, &observable_specs)
+    })?;
+    Ok(NativeGeneratedDem { edges })
+}
+
+#[pyfunction]
+pub(crate) fn compile_dem_generator_from_circuit(
+    circuit: &Bound<'_, PyAny>,
+    detectors: &Bound<'_, PyList>,
+    observables: &Bound<'_, PyList>,
+) -> PyResult<NativeDemGenerator> {
+    let (n_qubits, operations) = parse_circuit_object(circuit, true)?;
+    compile_dem_generator_from_parts(n_qubits, operations, detectors, observables)
+}
+
+#[pyfunction]
+pub(crate) fn compile_dem_generator(
+    spec: &Bound<'_, PyDict>,
+    detectors: &Bound<'_, PyList>,
+    observables: &Bound<'_, PyList>,
+) -> PyResult<NativeDemGenerator> {
+    let (n_qubits, operations) = parse_circuit_spec(spec)?;
+    compile_dem_generator_from_parts(n_qubits, operations, detectors, observables)
+}
+
+pub(crate) fn compile_dem_generator_from_parts(
+    n_qubits: usize,
+    operations: Vec<Op>,
+    detectors: &Bound<'_, PyList>,
+    observables: &Bound<'_, PyList>,
+) -> PyResult<NativeDemGenerator> {
+    let detectors = parse_dem_detectors(detectors)?;
+    let observables = parse_dem_observables(observables)?;
+    let measurement_plan = compile_dem_measurement_plan(&operations, &detectors, &observables)?;
+    let event_plan = collect_dem_event_plan(&operations)?;
+    let use_product_fast_path = supports_product_reference_fast_path(&operations);
+    let sampling_edge_specs = if use_product_fast_path {
+        generate_indexed_product_sampling_dem_edge_specs_from_plan(
+            n_qubits,
+            &operations,
+            &measurement_plan,
+            &event_plan,
+        )?
+    } else {
+        generate_sampling_dem_edge_specs_from_plan(
+            n_qubits,
+            &operations,
+            &detectors,
+            &observables,
+            &event_plan,
+        )?
+    };
+    let sampling_sampler =
+        sampling_edge_specs_to_native_dem_sampler(sampling_edge_specs, &detectors, &observables);
+    Ok(NativeDemGenerator {
+        n_qubits,
+        operations,
+        detectors,
+        observables,
+        measurement_plan,
+        event_plan,
+        sampling_sampler,
+        use_product_fast_path,
     })
 }
 
@@ -493,10 +720,10 @@ pub(crate) fn compile_dem_sampler(spec: &Bound<'_, PyDict>) -> PyResult<NativeDe
     }
     let location_groups = build_dem_location_groups(&edges);
     Ok(NativeDemSampler {
-        detectors,
-        observables,
-        edges,
-        location_groups,
+        detectors: Arc::new(detectors),
+        observables: Arc::new(observables),
+        edges: Arc::new(edges),
+        location_groups: Arc::new(location_groups),
     })
 }
 
@@ -520,6 +747,62 @@ pub(crate) fn generated_edges_to_dem_edge_specs(
         .collect()
 }
 
+pub(crate) fn generated_edges_to_native_dem_sampler(
+    edges: &[GeneratedDemEdge],
+    operations: &[Op],
+    detectors: &[DemDetectorSpec],
+    observables: &[DemObservableSpec],
+    include_tags: bool,
+) -> NativeDemSampler {
+    if !include_tags {
+        return generated_edges_to_sampling_dem_sampler(edges, detectors, observables);
+    }
+    let edge_specs = generated_edges_to_dem_edge_specs(edges, operations);
+    let location_groups = build_dem_location_groups(&edge_specs);
+    NativeDemSampler {
+        detectors: Arc::new(detectors.iter().map(|detector| detector.id).collect()),
+        observables: Arc::new(observables.iter().map(|observable| observable.id).collect()),
+        edges: Arc::new(edge_specs),
+        location_groups: Arc::new(location_groups),
+    }
+}
+
+pub(crate) fn generated_edges_to_sampling_dem_sampler(
+    edges: &[GeneratedDemEdge],
+    detectors: &[DemDetectorSpec],
+    observables: &[DemObservableSpec],
+) -> NativeDemSampler {
+    let edge_specs: Vec<DemEdgeSpec> = edges
+        .iter()
+        .map(|edge| DemEdgeSpec {
+            probability: edge.probability,
+            detectors: edge.detectors.clone(),
+            observables: edge.observables.clone(),
+            location_id: String::new(),
+            tags: HashMap::new(),
+        })
+        .collect();
+    NativeDemSampler {
+        detectors: Arc::new(detectors.iter().map(|detector| detector.id).collect()),
+        observables: Arc::new(observables.iter().map(|observable| observable.id).collect()),
+        edges: Arc::new(edge_specs),
+        location_groups: Arc::new(Vec::new()),
+    }
+}
+
+pub(crate) fn sampling_edge_specs_to_native_dem_sampler(
+    edge_specs: Vec<DemEdgeSpec>,
+    detectors: &[DemDetectorSpec],
+    observables: &[DemObservableSpec],
+) -> NativeDemSampler {
+    NativeDemSampler {
+        detectors: Arc::new(detectors.iter().map(|detector| detector.id).collect()),
+        observables: Arc::new(observables.iter().map(|observable| observable.id).collect()),
+        edges: Arc::new(edge_specs),
+        location_groups: Arc::new(Vec::new()),
+    }
+}
+
 pub(crate) fn noise_location_tags_by_id(
     operations: &[Op],
 ) -> HashMap<String, HashMap<String, TagValue>> {
@@ -538,11 +821,24 @@ pub(crate) fn _npsim_native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<NativePackedSampler>()?;
     module.add_class::<NativePackedBatch>()?;
     module.add_class::<NativeDemSampler>()?;
+    module.add_class::<NativeDemGenerator>()?;
+    module.add_class::<NativeGeneratedDem>()?;
     module.add_class::<NativeDemBatch>()?;
     module.add_function(wrap_pyfunction!(compile_sampler, module)?)?;
+    module.add_function(wrap_pyfunction!(operation_sequence_identity_key, module)?)?;
     module.add_function(wrap_pyfunction!(generate_dem, module)?)?;
     module.add_function(wrap_pyfunction!(generate_and_compile_dem_sampler, module)?)?;
     module.add_function(wrap_pyfunction!(compile_generated_dem_sampler, module)?)?;
+    module.add_function(wrap_pyfunction!(
+        compile_generated_dem_sampler_from_circuit,
+        module
+    )?)?;
+    module.add_function(wrap_pyfunction!(generate_native_dem_from_circuit, module)?)?;
+    module.add_function(wrap_pyfunction!(
+        compile_dem_generator_from_circuit,
+        module
+    )?)?;
+    module.add_function(wrap_pyfunction!(compile_dem_generator, module)?)?;
     module.add_function(wrap_pyfunction!(compile_dem_sampler, module)?)?;
     Ok(())
 }

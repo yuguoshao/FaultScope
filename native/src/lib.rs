@@ -6,6 +6,7 @@ pub(crate) use pyo3::types::{
 pub(crate) use rand::rngs::SmallRng as RandSmallRng;
 pub(crate) use rand::{RngCore, SeedableRng};
 pub(crate) use std::collections::{HashMap, HashSet};
+pub(crate) use std::sync::Arc;
 
 pub(crate) const NATIVE_KERNEL_VERSION: &str = "0.1.0";
 

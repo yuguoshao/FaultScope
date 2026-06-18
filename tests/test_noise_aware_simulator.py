@@ -22,6 +22,7 @@ from npsim.core import (
 )
 from npsim.runtime import (
     UnsupportedNativeCircuitError,
+    compile_native_dem_generator,
     compile_native_dem_sampler,
     compile_native_dem_sampler_from_circuit,
     compile_native_sampler,
@@ -946,6 +947,7 @@ class NativeDetectorErrorModelTests(unittest.TestCase):
         )
         dem = generate_native_dem(circuit)
         regular_sampler = compile_native_dem_sampler(dem)
+        generator = compile_native_dem_generator(circuit)
         direct_sampler = compile_native_dem_sampler_from_circuit(circuit)
         direct_light_sampler = compile_native_dem_sampler_from_circuit(
             circuit,
@@ -965,6 +967,7 @@ class NativeDetectorErrorModelTests(unittest.TestCase):
             ]
 
         self.assertEqual(edge_rows(direct_sampler.dem), edge_rows(dem))
+        self.assertEqual(edge_rows(generator.generate_dem()), edge_rows(dem))
 
         regular_batch = regular_sampler.run_batch(shots=256, seed=123)
         direct_batch = direct_sampler.run_batch(shots=256, seed=123)
@@ -976,12 +979,71 @@ class NativeDetectorErrorModelTests(unittest.TestCase):
         self.assertEqual(direct_light_batch.detectors, regular_batch.detectors)
         self.assertEqual(direct_light_batch.observables, regular_batch.observables)
         self.assertEqual(direct_light_batch.edge_event_masks, regular_batch.edge_event_masks)
+        generator_light_batch = generator.compile_sampler(
+            materialize_dem=False,
+        ).run_batch(shots=256, seed=123)
+        self.assertEqual(generator_light_batch.detectors, regular_batch.detectors)
+        self.assertEqual(generator_light_batch.observables, regular_batch.observables)
+        self.assertEqual(generator_light_batch.edge_event_masks, regular_batch.edge_event_masks)
         with self.assertRaises(ValueError):
             direct_light_sampler.estimate_default(shots=256, seed=123)
 
         direct_result = direct_sampler.estimate_default(shots=256, seed=123)
         self.assertEqual(direct_result.dem.edges[0].location_id, "x0")
         self.assertEqual(dict(direct_result.dem.edges[0].tags), {"round": 1})
+
+    def test_native_light_dem_sampler_cache_tracks_list_operation_changes(self) -> None:
+        self._require_native_dem()
+        location_a = NoiseLocation(
+            id="x0",
+            model=BernoulliPauliNoise("X"),
+            rate=0.25,
+            qubits=(0,),
+        )
+        location_b = NoiseLocation(
+            id="x1",
+            model=BernoulliPauliNoise("X"),
+            rate=0.125,
+            qubits=(0,),
+        )
+        operations = [
+            Operation.noise(location_a),
+            Operation.measure(0, key="m", basis="Z"),
+        ]
+        circuit = Circuit(n_qubits=1, operations=operations)
+        detectors = (Detector(id=0, measurement_keys=("m",)),)
+
+        first = compile_native_dem_sampler_from_circuit(
+            circuit,
+            detectors=detectors,
+            observables=(),
+            materialize_dem=False,
+        )
+        second = compile_native_dem_sampler_from_circuit(
+            circuit,
+            detectors=detectors,
+            observables=(),
+            materialize_dem=False,
+        )
+        wrapped_same_operations = compile_native_dem_sampler_from_circuit(
+            Circuit(n_qubits=1, operations=operations),
+            detectors=detectors,
+            observables=(),
+            materialize_dem=False,
+        )
+        self.assertIs(first, second)
+        self.assertIs(first, wrapped_same_operations)
+        self.assertEqual(first._engine.edge_count, 1)
+
+        operations.insert(1, Operation.noise(location_b))
+        updated = compile_native_dem_sampler_from_circuit(
+            circuit,
+            detectors=detectors,
+            observables=(),
+            materialize_dem=False,
+        )
+        self.assertIsNot(updated, first)
+        self.assertEqual(updated._engine.edge_count, 2)
 
     def test_native_dem_sampler_edge_counts_are_statistical(self) -> None:
         self._require_native_dem()

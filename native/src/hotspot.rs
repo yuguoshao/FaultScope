@@ -65,11 +65,11 @@ pub(crate) fn run_dem_batch(
     let words = word_count(shots);
     let all_mask = Mask::all(shots);
     let mut detectors = HashMap::new();
-    for detector_id in &sampler.detectors {
+    for detector_id in sampler.detectors.iter() {
         detectors.insert(*detector_id, Mask::zero(words));
     }
     let mut observables = HashMap::new();
-    for observable_id in &sampler.observables {
+    for observable_id in sampler.observables.iter() {
         observables.insert(*observable_id, Mask::zero(words));
     }
     let mut edge_event_masks = if return_edge_events {
@@ -78,7 +78,7 @@ pub(crate) fn run_dem_batch(
         Vec::new()
     };
 
-    for edge in &sampler.edges {
+    for edge in sampler.edges.iter() {
         let event_mask = bernoulli_mask(rng, shots, edge.probability);
         if !event_mask.is_zero() {
             for detector_id in &edge.detectors {
@@ -500,7 +500,7 @@ pub(crate) fn aggregate_dem_location_sensitivities(
     edge_sensitivities: &[f64],
 ) -> HashMap<String, f64> {
     let mut out = HashMap::new();
-    for group in &sampler.location_groups {
+    for group in sampler.location_groups.iter() {
         let mut value = 0.0;
         for edge_index in &group.edge_indices {
             let weight = if group.total_probability > 0.0 {
@@ -560,7 +560,7 @@ pub(crate) fn aggregate_dem_tag_hotspots(
     tag: &str,
 ) -> HashMap<TagValue, f64> {
     let mut by_location: HashMap<String, &HashMap<String, TagValue>> = HashMap::new();
-    for edge in &sampler.edges {
+    for edge in sampler.edges.iter() {
         by_location
             .entry(edge.location_id.clone())
             .or_insert(&edge.tags);

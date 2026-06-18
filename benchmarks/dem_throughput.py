@@ -28,6 +28,7 @@ from npsim.core import Circuit, NoiseLocation, Operation
 from npsim.dem import Detector, LogicalObservable
 from npsim.runtime import (
     UnsupportedNativeCircuitError,
+    compile_native_dem_generator,
     compile_native_dem_sampler,
     compile_native_dem_sampler_from_circuit,
     generate_native_dem,
@@ -65,18 +66,25 @@ def main() -> None:
     stim_module = _load_stim()
     print(
         "case\tdistance\trounds\tedges\tnative_gen_s\tnative_det_gen_s\t"
-        "native_det_compile_s\tstim_gen_s\tstim_gen_ratio\tnative_est_sps\t"
+        "native_det_generator_compile_s\tnative_det_compiled_gen_s\t"
+        "native_det_native_gen_s\t"
+        "native_det_compile_s\tnative_det_direct_fresh_s\t"
+        "native_det_direct_shared_s\t"
+        "native_det_direct_cached_s\t"
+        "stim_gen_s\tstim_det_compile_s\t"
+        "stim_gen_ratio\tnative_est_sps\t"
         "native_det_sps\tstim_det_sps\tdet_ratio\tstatus",
         flush=True,
     )
     for case in _make_cases(args):
         try:
-            native_gen_s, native_dem = _time_once(
+            native_gen_s, native_dem = _median_time(
                 lambda: generate_native_dem(
                     case.circuit,
                     detectors=case.detectors,
                     observables=case.observables,
-                )
+                ),
+                repeats=args.repeats,
             )
             native_sampler = compile_native_dem_sampler(native_dem)
             stim_circuit = stim_module.Circuit(
@@ -85,23 +93,61 @@ def main() -> None:
                     case.detectors,
                 )
             )
-            stim_gen_s, _ = _time_once(stim_circuit.detector_error_model)
-            native_detector_gen_s, native_detector_dem = _time_once(
+            stim_gen_s, _ = _median_time(
+                stim_circuit.detector_error_model,
+                repeats=args.repeats,
+            )
+            native_detector_gen_s, native_detector_dem = _median_time(
                 lambda: generate_native_dem(
                     case.circuit,
                     detectors=case.detectors,
                     observables=(),
-                )
+                ),
+                repeats=args.repeats,
             )
-            native_detector_compile_s, native_detector_sampler = _time_once(
+            native_detector_generator_compile_s, native_detector_generator = _median_time(
+                lambda: compile_native_dem_generator(
+                    case.circuit,
+                    detectors=case.detectors,
+                    observables=(),
+                ),
+                repeats=args.repeats,
+            )
+            native_detector_compiled_gen_s, _ = _median_time(
+                native_detector_generator.generate_dem,
+                repeats=args.repeats,
+            )
+            native_detector_native_gen_s, _ = _median_time(
+                native_detector_generator.generate_native_dem,
+                repeats=args.repeats,
+            )
+            native_detector_compile_s, native_detector_sampler = _median_time(
+                lambda: native_detector_generator.compile_sampler(
+                    materialize_dem=False,
+                ),
+                repeats=args.repeats,
+            )
+            native_detector_direct_fresh_s, _ = _median_direct_fresh_compile(
+                case,
+                repeats=args.repeats,
+            )
+            native_detector_direct_shared_s, _ = _median_direct_shared_compile(
+                case,
+                repeats=args.repeats,
+            )
+            native_detector_direct_cached_s, _ = _median_time(
                 lambda: compile_native_dem_sampler_from_circuit(
                     case.circuit,
                     detectors=case.detectors,
                     observables=(),
                     materialize_dem=False,
-                )
+                ),
+                repeats=args.repeats,
             )
-            stim_sampler = stim_circuit.compile_detector_sampler()
+            stim_det_compile_s, stim_sampler = _median_time(
+                stim_circuit.compile_detector_sampler,
+                repeats=args.repeats,
+            )
             native_det_sps = _median_samples_per_second(
                 lambda seed: native_detector_sampler.run_batch(
                     shots=args.shots,
@@ -132,17 +178,26 @@ def main() -> None:
             print(
                 f"{case.label}\t{case.distance}\t{case.rounds}\t"
                 f"{len(native_dem.edges)}\t{native_gen_s:.6f}\t"
-                f"{native_detector_gen_s:.6f}\t{native_detector_compile_s:.6f}\t"
+                f"{native_detector_gen_s:.6f}\t"
+                f"{native_detector_generator_compile_s:.6f}\t"
+                f"{native_detector_compiled_gen_s:.6f}\t"
+                f"{native_detector_native_gen_s:.6f}\t"
+                f"{native_detector_compile_s:.6f}\t"
+                f"{native_detector_direct_fresh_s:.6f}\t"
+                f"{native_detector_direct_shared_s:.6f}\t"
+                f"{native_detector_direct_cached_s:.6f}\t"
                 f"{stim_gen_s:.6f}\t"
+                f"{stim_det_compile_s:.6f}\t"
                 f"{stim_gen_ratio:.3f}\t{native_est_sps:.3f}\t"
                 f"{native_det_sps:.3f}\t{stim_det_sps:.3f}\t"
                 f"{det_ratio:.3f}\tok",
                 flush=True,
             )
         except UnsupportedNativeCircuitError as exc:
+            na_columns = "\t".join(["NA"] * 17)
             print(
                 f"{case.label}\t{case.distance}\t{case.rounds}\t"
-                f"NA\tNA\tNA\tNA\tNA\tNA\tNA\tNA\tNA\tNA\tnative-skip:{type(exc).__name__}",
+                f"{na_columns}\tnative-skip:{type(exc).__name__}",
                 flush=True,
             )
 
@@ -307,11 +362,62 @@ def _append_surface_memory_checks(
         )
 
 
-def _time_once(fn: Any) -> tuple[float, Any]:
-    start = time.perf_counter()
-    value = fn()
-    elapsed = time.perf_counter() - start
-    return elapsed, value
+def _median_time(fn: Any, *, repeats: int) -> tuple[float, Any]:
+    values: list[float] = []
+    result = None
+    for _ in range(max(1, repeats)):
+        start = time.perf_counter()
+        result = fn()
+        values.append(time.perf_counter() - start)
+    return statistics.median(values), result
+
+
+def _median_direct_fresh_compile(
+    case: DemBenchmarkCase,
+    *,
+    repeats: int,
+) -> tuple[float, Any]:
+    values: list[float] = []
+    result = None
+    for _ in range(max(1, repeats)):
+        operations = (
+            list(case.circuit.operations)
+            if isinstance(case.circuit.operations, list)
+            else tuple(list(case.circuit.operations))
+        )
+        circuit = Circuit(n_qubits=case.circuit.n_qubits, operations=operations)
+        start = time.perf_counter()
+        result = compile_native_dem_sampler_from_circuit(
+            circuit,
+            detectors=case.detectors,
+            observables=(),
+            materialize_dem=False,
+        )
+        values.append(time.perf_counter() - start)
+    return statistics.median(values), result
+
+
+def _median_direct_shared_compile(
+    case: DemBenchmarkCase,
+    *,
+    repeats: int,
+) -> tuple[float, Any]:
+    values: list[float] = []
+    result = None
+    for _ in range(max(1, repeats)):
+        circuit = Circuit(
+            n_qubits=case.circuit.n_qubits,
+            operations=case.circuit.operations,
+        )
+        start = time.perf_counter()
+        result = compile_native_dem_sampler_from_circuit(
+            circuit,
+            detectors=case.detectors,
+            observables=(),
+            materialize_dem=False,
+        )
+        values.append(time.perf_counter() - start)
+    return statistics.median(values), result
 
 
 def _median_samples_per_second(fn: Any, *, shots: int, repeats: int) -> float:
