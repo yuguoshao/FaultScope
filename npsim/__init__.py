@@ -32,9 +32,13 @@ from npsim.core import (
     TwoQubitDepolarizing,
 )
 from npsim.runtime import (
+    NativeDemSampler,
     NativePackedSampler,
     UnsupportedNativeCircuitError,
+    compile_native_dem_sampler,
+    compile_native_dem_sampler_from_circuit,
     compile_native_sampler,
+    generate_native_dem,
 )
 from npsim.decoders import (
     PyMatchingBatchDecoder,
@@ -70,6 +74,7 @@ __all__ = [
     "HotspotRow",
     "LogicalObservable",
     "MeasurementBitFlip",
+    "NativeDemSampler",
     "NativePackedSampler",
     "NoiseLocation",
     "Operation",
@@ -86,7 +91,10 @@ __all__ = [
     "UnsupportedNativeCircuitError",
     "UnsupportedPyMatchingDemError",
     "VisualizationUnavailableError",
+    "compile_native_dem_sampler",
+    "compile_native_dem_sampler_from_circuit",
     "compile_native_sampler",
+    "generate_native_dem",
     "load_stim_file",
     "parse_stim_circuit",
     "write_rotated_surface_code_spatial_hotspot_map",

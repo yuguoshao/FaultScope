@@ -290,6 +290,7 @@ pub struct DemSamplerEdge {
     pub detectors: Vec<i64>,
     pub observables: Vec<i64>,
     pub location_id: String,
+    pub event: DemEvent,
     pub tags: HashMap<String, TagValue>,
 }
 

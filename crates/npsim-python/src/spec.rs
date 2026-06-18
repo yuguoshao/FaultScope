@@ -338,11 +338,24 @@ pub(crate) fn parse_dem_sampler_edge_object(value: &Bound<'_, PyAny>) -> PyResul
             .extract::<Vec<i64>>()?,
         location_id: required_attr(value, "location_id", "DetectorErrorEdge")?
             .extract::<String>()?,
+        event: parse_dem_event(required_attr(value, "event", "DetectorErrorEdge")?)?,
         tags: parse_optional_tags_attr(value, "tags")?,
     };
     edge.validate()
         .map_err(|err| PyValueError::new_err(err.to_string()))?;
     Ok(edge)
+}
+
+fn parse_dem_event(value: Bound<'_, PyAny>) -> PyResult<npsim_core::DemEvent> {
+    if value.is_instance_of::<PyBool>() {
+        return Ok(npsim_core::DemEvent::Bool(value.extract::<bool>()?));
+    }
+    if value.is_instance_of::<PyString>() {
+        return Ok(npsim_core::DemEvent::Pauli(value.extract::<String>()?));
+    }
+    Err(PyValueError::new_err(
+        "DetectorErrorEdge.event must be a Pauli/event string or bool",
+    ))
 }
 
 pub(crate) fn required_attr<'py>(

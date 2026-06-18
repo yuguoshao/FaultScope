@@ -1,10 +1,9 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::{
-    frame_apply_cx, frame_apply_cz, frame_apply_h, frame_apply_pauli_string, frame_apply_s,
-    frame_apply_swap, frame_measurement_flip_bits, sparse_pauli_to_xz, Circuit, ConcreteStabilizer,
-    DemEvent, Detector, DetectorErrorEdge, DetectorErrorModel, LogicalObservable, NoiseLocation,
-    NoiseModel, NpError, NpResult, Operation,
+    sparse_pauli_to_xz, word_count, Circuit, ConcreteStabilizer, DemEvent, Detector,
+    DetectorErrorEdge, DetectorErrorModel, LogicalObservable, Mask, NoiseLocation, NoiseModel,
+    NpError, NpResult, Operation,
 };
 
 /// Detector error model generator based on single-error propagation.
@@ -160,10 +159,33 @@ struct NoiseOccurrence {
     location: NoiseLocation,
 }
 
-struct DemRunRecord {
-    measurements: HashMap<String, bool>,
-    x_frame: Vec<u8>,
-    z_frame: Vec<u8>,
+#[derive(Clone)]
+struct SensitivityEvent {
+    location_id: String,
+    qubits: Vec<usize>,
+    event: DemEvent,
+    probability: f64,
+}
+
+struct DemSensitivityState {
+    reference: ConcreteStabilizer,
+    x_frame: Vec<Mask>,
+    z_frame: Vec<Mask>,
+    measurements: HashMap<String, Mask>,
+    event_words: usize,
+}
+
+impl DemSensitivityState {
+    fn new(n_qubits: usize, event_count: usize) -> Self {
+        let event_words = word_count(event_count);
+        Self {
+            reference: ConcreteStabilizer::zero(n_qubits),
+            x_frame: vec![Mask::zero(event_words); n_qubits],
+            z_frame: vec![Mask::zero(event_words); n_qubits],
+            measurements: HashMap::new(),
+            event_words,
+        }
+    }
 }
 
 pub fn generate_dem_edges(
@@ -172,41 +194,64 @@ pub fn generate_dem_edges(
     detectors: &[Detector],
     observables: &[LogicalObservable],
 ) -> NpResult<Vec<GeneratedDemEdge>> {
-    let occurrences = collect_noise_occurrences(operations)?;
-    let reference = run_dem_with_injection(n_qubits, operations, None, None)?;
-    let reference_detectors = evaluate_dem_detectors(&reference, detectors)?;
-    let reference_observables = evaluate_dem_observables(&reference, observables)?;
+    let (events, events_by_op) = collect_sensitivity_events(operations)?;
+    let mut state = DemSensitivityState::new(n_qubits, events.len());
+    for (op_index, operation) in operations.iter().enumerate() {
+        apply_sensitivity_operation(operation, op_index, &events, &events_by_op, &mut state)?;
+    }
+    let detector_sensitivities =
+        evaluate_sensitivity_detectors(&state.measurements, detectors, state.event_words)?;
+    let observable_sensitivities = evaluate_sensitivity_observables(
+        &state.measurements,
+        &state.x_frame,
+        &state.z_frame,
+        observables,
+        state.event_words,
+    )?;
+    let detector_sensitivities = sorted_sensitivities(detector_sensitivities);
+    let observable_sensitivities = sorted_sensitivities(observable_sensitivities);
+    let mut detector_flips_by_event =
+        sensitivity_flips_by_event(&detector_sensitivities, events.len());
+    let mut observable_flips_by_event =
+        sensitivity_flips_by_event(&observable_sensitivities, events.len());
     let mut edges = Vec::new();
 
-    for occurrence in occurrences {
-        for (event, probability) in non_identity_events(&occurrence.location)? {
-            let injected = run_dem_with_injection(
-                n_qubits,
-                operations,
-                Some(occurrence.op_index),
-                Some(&event),
-            )?;
-            let detector_flips = flipped_ids(
-                &reference_detectors,
-                &evaluate_dem_detectors(&injected, detectors)?,
-            );
-            let observable_flips = flipped_ids(
-                &reference_observables,
-                &evaluate_dem_observables(&injected, observables)?,
-            );
-            if detector_flips.is_empty() && observable_flips.is_empty() {
-                continue;
-            }
-            edges.push(GeneratedDemEdge {
-                probability,
-                detectors: detector_flips,
-                observables: observable_flips,
-                location_id: occurrence.location.id.clone(),
-                event,
-            });
+    for (event_index, event) in events.iter().enumerate() {
+        let detector_flips = std::mem::take(&mut detector_flips_by_event[event_index]);
+        let observable_flips = std::mem::take(&mut observable_flips_by_event[event_index]);
+        if detector_flips.is_empty() && observable_flips.is_empty() {
+            continue;
         }
+        edges.push(GeneratedDemEdge {
+            probability: event.probability,
+            detectors: detector_flips,
+            observables: observable_flips,
+            location_id: event.location_id.clone(),
+            event: event.event.clone(),
+        });
     }
     Ok(edges)
+}
+
+fn collect_sensitivity_events(
+    operations: &[Operation],
+) -> NpResult<(Vec<SensitivityEvent>, Vec<Vec<usize>>)> {
+    let occurrences = collect_noise_occurrences(operations)?;
+    let mut events = Vec::new();
+    let mut events_by_op = vec![Vec::new(); operations.len()];
+    for occurrence in occurrences {
+        for (event, probability) in non_identity_events(&occurrence.location)? {
+            let event_index = events.len();
+            events.push(SensitivityEvent {
+                location_id: occurrence.location.id.clone(),
+                qubits: occurrence.location.qubits.clone(),
+                event,
+                probability,
+            });
+            events_by_op[occurrence.op_index].push(event_index);
+        }
+    }
+    Ok((events, events_by_op))
 }
 
 fn collect_noise_occurrences(operations: &[Operation]) -> NpResult<Vec<NoiseOccurrence>> {
@@ -303,264 +348,347 @@ fn non_identity_events(location: &NoiseLocation) -> NpResult<Vec<(DemEvent, f64)
     }
 }
 
-fn run_dem_with_injection(
-    n_qubits: usize,
-    operations: &[Operation],
-    injected_op_index: Option<usize>,
-    injected_event: Option<&DemEvent>,
-) -> NpResult<DemRunRecord> {
-    let mut state = ConcreteStabilizer::zero(n_qubits);
-    let mut x_frame = vec![0; n_qubits];
-    let mut z_frame = vec![0; n_qubits];
-    let mut measurements = HashMap::new();
-    for (op_index, operation) in operations.iter().enumerate() {
-        let mut context = DemOperationContext {
-            op_index,
-            injected_op_index,
-            injected_event,
-            state: &mut state,
-            x_frame: &mut x_frame,
-            z_frame: &mut z_frame,
-            measurements: &mut measurements,
-        };
-        apply_dem_operation(operation, &mut context)?;
-    }
-    Ok(DemRunRecord {
-        measurements,
-        x_frame,
-        z_frame,
-    })
-}
-
-struct DemOperationContext<'a> {
-    op_index: usize,
-    injected_op_index: Option<usize>,
-    injected_event: Option<&'a DemEvent>,
-    state: &'a mut ConcreteStabilizer,
-    x_frame: &'a mut [u8],
-    z_frame: &'a mut [u8],
-    measurements: &'a mut HashMap<String, bool>,
-}
-
-fn apply_dem_operation(
+fn apply_sensitivity_operation(
     operation: &Operation,
-    context: &mut DemOperationContext<'_>,
+    op_index: usize,
+    events: &[SensitivityEvent],
+    events_by_op: &[Vec<usize>],
+    state: &mut DemSensitivityState,
 ) -> NpResult<()> {
     match operation {
         Operation::H(q) => {
-            context.state.apply_h(*q);
-            frame_apply_h(context.x_frame, context.z_frame, *q);
+            state.reference.apply_h(*q);
+            std::mem::swap(&mut state.x_frame[*q], &mut state.z_frame[*q]);
         }
         Operation::S(q) => {
-            context.state.apply_s(*q);
-            frame_apply_s(context.x_frame, context.z_frame, *q);
+            state.reference.apply_s(*q);
+            xor_between_frames(&state.x_frame, &mut state.z_frame, *q, *q);
         }
         Operation::SDag(q) => {
-            context.state.apply_s_dag(*q);
-            frame_apply_s(context.x_frame, context.z_frame, *q);
+            state.reference.apply_s_dag(*q);
+            xor_between_frames(&state.x_frame, &mut state.z_frame, *q, *q);
         }
         Operation::Cx(control, target) => {
-            context.state.apply_cx(*control, *target);
-            frame_apply_cx(context.x_frame, context.z_frame, *control, *target);
+            state.reference.apply_cx(*control, *target);
+            xor_within_frame(&mut state.x_frame, *target, *control);
+            xor_within_frame(&mut state.z_frame, *control, *target);
         }
         Operation::Cz(left, right) => {
-            context.state.apply_cz(*left, *right);
-            frame_apply_cz(context.x_frame, context.z_frame, *left, *right);
+            state.reference.apply_cz(*left, *right);
+            xor_between_frames(&state.x_frame, &mut state.z_frame, *left, *right);
+            xor_between_frames(&state.x_frame, &mut state.z_frame, *right, *left);
         }
         Operation::Swap(left, right) => {
-            context.state.apply_swap(*left, *right);
-            frame_apply_swap(context.x_frame, context.z_frame, *left, *right);
+            state.reference.apply_swap(*left, *right);
+            state.x_frame.swap(*left, *right);
+            state.z_frame.swap(*left, *right);
         }
         Operation::Pauli { qubits, pauli } => {
-            let (x, z) = sparse_pauli_to_xz(context.state.n_qubits(), qubits, pauli)?;
-            context.state.apply_pauli_string(&x, &z);
+            let (x, z) = sparse_pauli_to_xz(state.reference.n_qubits(), qubits, pauli)?;
+            state.reference.apply_pauli_string(&x, &z);
         }
-        Operation::Noise(location) => {
-            if Some(context.op_index) == context.injected_op_index {
-                let event = context.injected_event.ok_or_else(|| {
-                    NpError::new("missing injected DEM event for noise operation")
-                })?;
-                apply_dem_noise_event(
-                    location,
-                    event,
-                    context.state,
-                    context.x_frame,
-                    context.z_frame,
-                )?;
-            }
+        Operation::Noise(_) => {
+            apply_sensitivity_events(events, events_by_op, op_index, state)?;
         }
         Operation::Measure {
             qubit, key, basis, ..
         } => {
             let qubits = vec![*qubit];
-            let bit = deterministic_dem_measurement(context.state, &qubits, basis, key.as_deref())?;
-            let bit = maybe_flip_measurement_bit(
-                bit,
-                context.op_index,
-                context.injected_op_index,
-                context.injected_event,
+            ensure_deterministic_dem_measurement(&state.reference, &qubits, basis, key.as_deref())?;
+            let mut value = sensitivity_frame_measurement_flip(
+                &state.x_frame,
+                &state.z_frame,
+                &qubits,
+                basis,
+                state.event_words,
             )?;
+            xor_measurement_noise_events(&mut value, events, events_by_op, op_index)?;
             let key = key
                 .clone()
-                .unwrap_or_else(|| format!("m{}", context.measurements.len()));
-            record_dem_measurement(context.measurements, &key, bit)?;
+                .unwrap_or_else(|| format!("m{}", state.measurements.len()));
+            record_sensitivity_measurement(&mut state.measurements, &key, value)?;
         }
         Operation::MeasurePauli {
             qubits, pauli, key, ..
         } => {
-            let bit = deterministic_dem_measurement(context.state, qubits, pauli, key.as_deref())?;
-            let bit = maybe_flip_measurement_bit(
-                bit,
-                context.op_index,
-                context.injected_op_index,
-                context.injected_event,
+            ensure_deterministic_dem_measurement(&state.reference, qubits, pauli, key.as_deref())?;
+            let mut value = sensitivity_frame_measurement_flip(
+                &state.x_frame,
+                &state.z_frame,
+                qubits,
+                pauli,
+                state.event_words,
             )?;
+            xor_measurement_noise_events(&mut value, events, events_by_op, op_index)?;
             let key = key
                 .clone()
-                .unwrap_or_else(|| format!("m{}", context.measurements.len()));
-            record_dem_measurement(context.measurements, &key, bit)?;
+                .unwrap_or_else(|| format!("m{}", state.measurements.len()));
+            record_sensitivity_measurement(&mut state.measurements, &key, value)?;
         }
         Operation::Reset { qubit, key, basis } => {
             let qubits = vec![*qubit];
             if let Some(key) = key {
-                let bit = deterministic_dem_measurement(context.state, &qubits, basis, Some(key))?;
-                record_dem_measurement(context.measurements, key, bit)?;
+                ensure_deterministic_dem_measurement(&state.reference, &qubits, basis, Some(key))?;
+                let value = sensitivity_frame_measurement_flip(
+                    &state.x_frame,
+                    &state.z_frame,
+                    &qubits,
+                    basis,
+                    state.event_words,
+                )?;
+                record_sensitivity_measurement(&mut state.measurements, key, value)?;
             }
-            context.state.reset_prepare(*qubit, basis)?;
-            context.x_frame[*qubit] = 0;
-            context.z_frame[*qubit] = 0;
+            state.reference.reset_prepare(*qubit, basis)?;
+            state.x_frame[*qubit] = Mask::zero(state.event_words);
+            state.z_frame[*qubit] = Mask::zero(state.event_words);
         }
         Operation::Detector { .. } | Operation::ObservableInclude { .. } => {}
     }
     Ok(())
 }
 
-fn deterministic_dem_measurement(
+fn apply_sensitivity_events(
+    events: &[SensitivityEvent],
+    events_by_op: &[Vec<usize>],
+    op_index: usize,
+    state: &mut DemSensitivityState,
+) -> NpResult<()> {
+    for event_index in &events_by_op[op_index] {
+        if let DemEvent::Pauli(pauli) = &events[*event_index].event {
+            apply_sensitivity_pauli_string(
+                &mut state.x_frame,
+                &mut state.z_frame,
+                &events[*event_index].qubits,
+                pauli,
+                *event_index,
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn apply_sensitivity_pauli_string(
+    x_frame: &mut [Mask],
+    z_frame: &mut [Mask],
+    qubits: &[usize],
+    pauli: &str,
+    event_index: usize,
+) -> NpResult<()> {
+    if qubits.len() != pauli.len() {
+        return Err(NpError::new("event Pauli length does not match qubits"));
+    }
+    for (qubit, local) in qubits.iter().zip(pauli.bytes()) {
+        match local {
+            b'I' => {}
+            b'X' => set_event_bit(&mut x_frame[*qubit], event_index),
+            b'Z' => set_event_bit(&mut z_frame[*qubit], event_index),
+            b'Y' => {
+                set_event_bit(&mut x_frame[*qubit], event_index);
+                set_event_bit(&mut z_frame[*qubit], event_index);
+            }
+            _ => {
+                return Err(NpError::new(format!(
+                    "unsupported Pauli {:?}",
+                    local as char
+                )))
+            }
+        }
+    }
+    Ok(())
+}
+
+fn xor_measurement_noise_events(
+    value: &mut Mask,
+    events: &[SensitivityEvent],
+    events_by_op: &[Vec<usize>],
+    op_index: usize,
+) -> NpResult<()> {
+    for event_index in &events_by_op[op_index] {
+        match &events[*event_index].event {
+            DemEvent::Bool(true) => set_event_bit(value, *event_index),
+            DemEvent::Bool(false) => {}
+            DemEvent::Pauli(_) => {
+                return Err(NpError::new("measurement noise event must be boolean"));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn sensitivity_frame_measurement_flip(
+    x_frame: &[Mask],
+    z_frame: &[Mask],
+    qubits: &[usize],
+    pauli: &str,
+    words: usize,
+) -> NpResult<Mask> {
+    if qubits.len() != pauli.len() {
+        return Err(NpError::new("qubits and pauli must have the same length"));
+    }
+    let mut flip = Mask::zero(words);
+    let pauli_bytes = pauli.as_bytes();
+    if pauli_bytes.iter().all(|local| *local == b'Z') {
+        for qubit in qubits {
+            flip.xor_assign(&x_frame[*qubit]);
+        }
+        return Ok(flip);
+    }
+    if pauli_bytes.iter().all(|local| *local == b'X') {
+        for qubit in qubits {
+            flip.xor_assign(&z_frame[*qubit]);
+        }
+        return Ok(flip);
+    }
+    if pauli_bytes.iter().all(|local| *local == b'Y') {
+        for qubit in qubits {
+            flip.xor_assign(&x_frame[*qubit]);
+            flip.xor_assign(&z_frame[*qubit]);
+        }
+        return Ok(flip);
+    }
+    for (qubit, local) in qubits.iter().zip(pauli_bytes) {
+        match *local {
+            b'I' => {}
+            b'X' => flip.xor_assign(&z_frame[*qubit]),
+            b'Z' => flip.xor_assign(&x_frame[*qubit]),
+            b'Y' => {
+                flip.xor_assign(&x_frame[*qubit]);
+                flip.xor_assign(&z_frame[*qubit]);
+            }
+            _ => {
+                return Err(NpError::new(format!(
+                    "unsupported Pauli {:?}",
+                    *local as char
+                )))
+            }
+        }
+    }
+    Ok(flip)
+}
+
+fn ensure_deterministic_dem_measurement(
     state: &ConcreteStabilizer,
     qubits: &[usize],
     pauli: &str,
     key: Option<&str>,
-) -> NpResult<bool> {
-    let (x, z) = sparse_pauli_to_xz(state.n_qubits(), qubits, pauli)?;
-    if !state.is_deterministic_pauli(&x, &z) {
+) -> NpResult<()> {
+    if !state.is_deterministic_sparse_pauli(qubits, pauli)? {
         return Err(NpError::new(format!(
             "measurement {:?} is random in the ideal/single-error circuit",
             key.unwrap_or("measure")
         )));
     }
-    state.deterministic_measurement_bit(&x, &z)
+    Ok(())
 }
 
-fn maybe_flip_measurement_bit(
-    bit: bool,
-    op_index: usize,
-    injected_op_index: Option<usize>,
-    injected_event: Option<&DemEvent>,
-) -> NpResult<bool> {
-    if Some(op_index) != injected_op_index {
-        return Ok(bit);
-    }
-    match injected_event {
-        Some(DemEvent::Bool(value)) => Ok(bit ^ *value),
-        Some(DemEvent::Pauli(_)) => Err(NpError::new(
-            "measurement injection requires a boolean event",
-        )),
-        None => Err(NpError::new(
-            "missing injected DEM event for measurement operation",
-        )),
-    }
-}
-
-fn apply_dem_noise_event(
-    location: &NoiseLocation,
-    event: &DemEvent,
-    state: &mut ConcreteStabilizer,
-    x_frame: &mut [u8],
-    z_frame: &mut [u8],
-) -> NpResult<()> {
-    match event {
-        DemEvent::Bool(_) => {
-            if matches!(location.model, NoiseModel::MeasurementBitFlip) {
-                Ok(())
-            } else {
-                Err(NpError::new(
-                    "non-measurement DEM noise event must be a Pauli string",
-                ))
-            }
-        }
-        DemEvent::Pauli(pauli) => {
-            let (x, z) = sparse_pauli_to_xz(state.n_qubits(), &location.qubits, pauli)?;
-            state.apply_pauli_string(&x, &z);
-            frame_apply_pauli_string(x_frame, z_frame, &location.qubits, pauli)
-        }
-    }
-}
-
-fn evaluate_dem_detectors(
-    run: &DemRunRecord,
+fn evaluate_sensitivity_detectors(
+    measurements: &HashMap<String, Mask>,
     detectors: &[Detector],
-) -> NpResult<HashMap<i64, bool>> {
+    words: usize,
+) -> NpResult<HashMap<i64, Mask>> {
     let mut out = HashMap::new();
     for detector in detectors {
         out.insert(
             detector.id,
-            dem_measurement_parity(&run.measurements, &detector.measurement_keys)?,
+            sensitivity_measurement_parity(measurements, &detector.measurement_keys, words)?,
         );
     }
     Ok(out)
 }
 
-fn evaluate_dem_observables(
-    run: &DemRunRecord,
+fn evaluate_sensitivity_observables(
+    measurements: &HashMap<String, Mask>,
+    x_frame: &[Mask],
+    z_frame: &[Mask],
     observables: &[LogicalObservable],
-) -> NpResult<HashMap<i64, bool>> {
+    words: usize,
+) -> NpResult<HashMap<i64, Mask>> {
     let mut out = HashMap::new();
     for observable in observables {
-        let mut value = dem_measurement_parity(&run.measurements, &observable.measurement_keys)?;
+        let mut value =
+            sensitivity_measurement_parity(measurements, &observable.measurement_keys, words)?;
         if !observable.pauli.is_empty() {
-            value ^= frame_measurement_flip_bits(
-                &run.x_frame,
-                &run.z_frame,
+            let flip = sensitivity_frame_measurement_flip(
+                x_frame,
+                z_frame,
                 &observable.pauli_qubits,
                 &observable.pauli,
+                words,
             )?;
+            value.xor_assign(&flip);
         }
         out.insert(observable.id, value);
     }
     Ok(out)
 }
 
-fn dem_measurement_parity(measurements: &HashMap<String, bool>, keys: &[String]) -> NpResult<bool> {
-    let mut parity = false;
+fn sensitivity_measurement_parity(
+    measurements: &HashMap<String, Mask>,
+    keys: &[String],
+    words: usize,
+) -> NpResult<Mask> {
+    let mut parity = Mask::zero(words);
     for key in keys {
         let value = measurements
             .get(key)
             .ok_or_else(|| NpError::new(format!("unknown measurement key {key:?}")))?;
-        parity ^= *value;
+        parity.xor_assign(value);
     }
     Ok(parity)
 }
 
-fn record_dem_measurement(
-    measurements: &mut HashMap<String, bool>,
+fn record_sensitivity_measurement(
+    measurements: &mut HashMap<String, Mask>,
     key: &str,
-    bit: bool,
+    value: Mask,
 ) -> NpResult<()> {
     if measurements.contains_key(key) {
         return Err(NpError::new(format!("duplicate measurement key {key:?}")));
     }
-    measurements.insert(key.to_string(), bit);
+    measurements.insert(key.to_string(), value);
     Ok(())
 }
 
-fn flipped_ids(reference: &HashMap<i64, bool>, injected: &HashMap<i64, bool>) -> Vec<i64> {
-    let mut ids: Vec<i64> = reference.keys().copied().collect();
-    ids.sort_unstable();
-    ids.into_iter()
-        .filter(|id| {
-            reference.get(id).copied().unwrap_or(false) ^ injected.get(id).copied().unwrap_or(false)
-        })
-        .collect()
+fn sorted_sensitivities(sensitivities: HashMap<i64, Mask>) -> Vec<(i64, Mask)> {
+    let mut out: Vec<(i64, Mask)> = sensitivities.into_iter().collect();
+    out.sort_by_key(|(id, _)| *id);
+    out
+}
+
+fn sensitivity_flips_by_event(sensitivities: &[(i64, Mask)], event_count: usize) -> Vec<Vec<i64>> {
+    let mut out = vec![Vec::new(); event_count];
+    for (id, mask) in sensitivities {
+        for (word_index, word) in mask.words.iter().enumerate() {
+            let mut remaining = *word;
+            while remaining != 0 {
+                let bit = remaining.trailing_zeros() as usize;
+                let event_index = word_index * 64 + bit;
+                if event_index < event_count {
+                    out[event_index].push(*id);
+                }
+                remaining &= remaining - 1;
+            }
+        }
+    }
+    out
+}
+
+fn xor_within_frame(frame: &mut [Mask], target: usize, source: usize) {
+    let source_mask = frame[source].clone();
+    frame[target].xor_assign(&source_mask);
+}
+
+fn xor_between_frames(source: &[Mask], target: &mut [Mask], source_idx: usize, target_idx: usize) {
+    let source_mask = source[source_idx].clone();
+    target[target_idx].xor_assign(&source_mask);
+}
+
+fn set_event_bit(mask: &mut Mask, event_index: usize) {
+    let word_index = event_index / 64;
+    let bit_index = event_index % 64;
+    if let Some(word) = mask.words.get_mut(word_index) {
+        *word |= 1u64 << bit_index;
+    }
 }
 
 #[cfg(test)]

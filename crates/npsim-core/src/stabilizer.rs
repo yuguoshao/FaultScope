@@ -126,6 +126,70 @@ impl ConcreteStabilizer {
         (0..self.n_qubits()).all(|row| symplectic_product(&self.x[row], &self.z[row], x, z) == 0)
     }
 
+    pub fn is_deterministic_sparse_pauli(&self, qubits: &[usize], pauli: &str) -> NpResult<bool> {
+        let pauli_bytes = pauli.as_bytes();
+        if qubits.len() != pauli_bytes.len() {
+            return Err(NpError::new("qubits and paulis must have the same length"));
+        }
+        if pauli_bytes.iter().all(|local| *local == b'Z') {
+            for row in 0..self.n_qubits() {
+                let mut acc = 0;
+                for qubit in qubits {
+                    acc ^= self.x[row][*qubit];
+                }
+                if (acc & 1) != 0 {
+                    return Ok(false);
+                }
+            }
+            return Ok(true);
+        }
+        if pauli_bytes.iter().all(|local| *local == b'X') {
+            for row in 0..self.n_qubits() {
+                let mut acc = 0;
+                for qubit in qubits {
+                    acc ^= self.z[row][*qubit];
+                }
+                if (acc & 1) != 0 {
+                    return Ok(false);
+                }
+            }
+            return Ok(true);
+        }
+        if pauli_bytes.iter().all(|local| *local == b'Y') {
+            for row in 0..self.n_qubits() {
+                let mut acc = 0;
+                for qubit in qubits {
+                    acc ^= self.x[row][*qubit] ^ self.z[row][*qubit];
+                }
+                if (acc & 1) != 0 {
+                    return Ok(false);
+                }
+            }
+            return Ok(true);
+        }
+        for row in 0..self.n_qubits() {
+            let mut acc = 0;
+            for (qubit, local) in qubits.iter().zip(pauli_bytes) {
+                match *local {
+                    b'I' => {}
+                    b'X' => acc ^= self.z[row][*qubit],
+                    b'Z' => acc ^= self.x[row][*qubit],
+                    b'Y' => acc ^= self.x[row][*qubit] ^ self.z[row][*qubit],
+                    _ => {
+                        return Err(NpError::new(format!(
+                            "unsupported Pauli {:?}",
+                            *local as char
+                        )))
+                    }
+                }
+            }
+            if (acc & 1) != 0 {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
     pub fn deterministic_measurement_bit(&self, x: &[u8], z: &[u8]) -> NpResult<bool> {
         let rows: Vec<Vec<u64>> = (0..self.n_qubits())
             .map(|row| support_to_words(&self.x[row], &self.z[row]))

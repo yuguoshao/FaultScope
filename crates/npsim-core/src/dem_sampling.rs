@@ -35,6 +35,7 @@ impl DemBatchHotspotSimulator {
                 detectors: edge.detectors,
                 observables: edge.observables,
                 location_id: edge.location_id,
+                event: edge.event,
                 tags: edge.tags,
             })
             .collect();
@@ -217,6 +218,7 @@ mod tests {
                 detectors: vec![0],
                 observables: Vec::new(),
                 location_id: "a".to_string(),
+                event: crate::DemEvent::Pauli("X".to_string()),
                 tags: HashMap::new(),
             },
             DemSamplerEdge {
@@ -224,6 +226,7 @@ mod tests {
                 detectors: vec![1],
                 observables: Vec::new(),
                 location_id: "a".to_string(),
+                event: crate::DemEvent::Pauli("Z".to_string()),
                 tags: HashMap::new(),
             },
         ];
@@ -245,6 +248,7 @@ mod tests {
                 detectors: Vec::new(),
                 observables: vec![0],
                 location_id: "logical".to_string(),
+                event: crate::DemEvent::Pauli("L".to_string()),
                 tags: HashMap::new(),
             }],
         )
@@ -268,6 +272,7 @@ mod tests {
                 detectors: Vec::new(),
                 observables: Vec::new(),
                 location_id: "bad".to_string(),
+                event: crate::DemEvent::Pauli("X".to_string()),
                 tags: HashMap::new(),
             }],
         )

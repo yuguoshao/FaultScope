@@ -391,7 +391,7 @@ pub(crate) struct NativeDemSampler {
     pub(crate) observables: Vec<i64>,
     pub(crate) edges: Vec<DemEdgeSpec>,
     pub(crate) simulator: CoreDemBatchHotspotSimulator,
-    pub(crate) py_dem: Py<PyAny>,
+    pub(crate) py_dem: Option<Py<PyAny>>,
 }
 
 #[pyclass]
@@ -408,7 +408,10 @@ pub(crate) struct PyDemBatchHotspotSimulator {
 impl NativeDemSampler {
     #[getter]
     pub(crate) fn dem(&self, py: Python<'_>) -> PyObject {
-        self.py_dem.clone_ref(py)
+        match &self.py_dem {
+            Some(dem) => dem.clone_ref(py),
+            None => py.None(),
+        }
     }
 
     #[getter]
@@ -567,7 +570,7 @@ impl PyDemBatchHotspotSimulator {
 
     #[getter]
     pub(crate) fn dem(&self, py: Python<'_>) -> PyObject {
-        self.sampler.py_dem.clone_ref(py)
+        self.sampler.dem(py)
     }
 
     #[pyo3(signature = (*, shots, rng=None, seed=None, return_edge_events=true))]
@@ -619,10 +622,11 @@ impl PyDemBatchHotspotSimulator {
     }
 
     pub(crate) fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
-        Ok(format!(
-            "DemBatchHotspotSimulator(dem={})",
-            self.sampler.py_dem.bind(py).repr()?,
-        ))
+        let dem_repr = match &self.sampler.py_dem {
+            Some(dem) => dem.bind(py).repr()?.to_str()?.to_string(),
+            None => "None".to_string(),
+        };
+        Ok(format!("DemBatchHotspotSimulator(dem={})", dem_repr,))
     }
 }
 
@@ -988,8 +992,106 @@ pub(crate) fn generate_dem(
 }
 
 #[pyfunction]
+#[pyo3(signature = (circuit, detectors=None, observables=None))]
+pub(crate) fn generate_and_compile_dem_sampler(
+    py: Python<'_>,
+    circuit: &Bound<'_, PyAny>,
+    detectors: Option<&Bound<'_, PyAny>>,
+    observables: Option<&Bound<'_, PyAny>>,
+) -> PyResult<PyObject> {
+    let sampler = native_dem_sampler_from_circuit(py, circuit, detectors, observables, true)?;
+    let dem = sampler
+        .py_dem
+        .as_ref()
+        .ok_or_else(|| PyValueError::new_err("missing generated DEM metadata"))?
+        .clone_ref(py);
+    let out = PyDict::new(py);
+    out.set_item("dem", dem)?;
+    out.set_item("sampler", Py::new(py, sampler)?)?;
+    Ok(out.into())
+}
+
+#[pyfunction]
+#[pyo3(signature = (circuit, detectors=None, observables=None))]
+pub(crate) fn compile_generated_dem_sampler(
+    py: Python<'_>,
+    circuit: &Bound<'_, PyAny>,
+    detectors: Option<&Bound<'_, PyAny>>,
+    observables: Option<&Bound<'_, PyAny>>,
+) -> PyResult<NativeDemSampler> {
+    native_dem_sampler_from_circuit(py, circuit, detectors, observables, false)
+}
+
+#[pyfunction]
 pub(crate) fn compile_dem_sampler(dem: &Bound<'_, PyAny>) -> PyResult<NativeDemSampler> {
     native_dem_sampler_from_dem(dem)
+}
+
+fn native_dem_sampler_from_circuit(
+    py: Python<'_>,
+    circuit: &Bound<'_, PyAny>,
+    detectors: Option<&Bound<'_, PyAny>>,
+    observables: Option<&Bound<'_, PyAny>>,
+    materialize_dem: bool,
+) -> PyResult<NativeDemSampler> {
+    let core_circuit = parse_core_circuit_object(circuit)?;
+    let detector_specs = match detectors {
+        Some(items) if !items.is_none() => Some(parse_dem_detector_sequence(items)?),
+        _ => None,
+    };
+    let observable_specs = match observables {
+        Some(items) if !items.is_none() => Some(parse_dem_observable_sequence(items)?),
+        _ => None,
+    };
+    let generator =
+        CoreDetectorErrorModelGenerator::new(core_circuit, detector_specs, observable_specs)
+            .map_err(|err| PyValueError::new_err(err.to_string()))?;
+    let dem = generator
+        .generate()
+        .map_err(|err| PyValueError::new_err(err.to_string()))?;
+    native_dem_sampler_from_core_dem(py, dem, materialize_dem)
+}
+
+fn native_dem_sampler_from_core_dem(
+    py: Python<'_>,
+    dem: npsim_core::DetectorErrorModel,
+    materialize_dem: bool,
+) -> PyResult<NativeDemSampler> {
+    let detectors: Vec<i64> = dem.detectors.iter().map(|detector| detector.id).collect();
+    let observables: Vec<i64> = dem
+        .observables
+        .iter()
+        .map(|observable| observable.id)
+        .collect();
+    let edges: Vec<DemEdgeSpec> = dem
+        .edges
+        .iter()
+        .map(|edge| DemEdgeSpec {
+            probability: edge.probability,
+            detectors: edge.detectors.clone(),
+            observables: edge.observables.clone(),
+            location_id: edge.location_id.clone(),
+            event: edge.event.clone(),
+            tags: edge.tags.clone(),
+        })
+        .collect();
+    let simulator = CoreDemBatchHotspotSimulator::from_parts(
+        detectors.clone(),
+        observables.clone(),
+        edges.clone(),
+    )
+    .map_err(|err| PyValueError::new_err(err.to_string()))?;
+    let py_dem = if materialize_dem {
+        Some(Py::new(py, detector_error_model_to_py(py, &dem)?)?.into_any())
+    } else {
+        None
+    };
+    Ok(NativeDemSampler {
+        observables,
+        edges,
+        simulator,
+        py_dem,
+    })
 }
 
 fn native_dem_sampler_from_dem(dem: &Bound<'_, PyAny>) -> PyResult<NativeDemSampler> {
@@ -1013,7 +1115,7 @@ fn native_dem_sampler_from_dem(dem: &Bound<'_, PyAny>) -> PyResult<NativeDemSamp
         observables,
         edges,
         simulator,
-        py_dem: dem.clone().unbind(),
+        py_dem: Some(dem.clone().unbind()),
     })
 }
 
@@ -1053,6 +1155,8 @@ pub(crate) fn _npsim_native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<PyDemBatchHotspotSimulator>()?;
     module.add_function(wrap_pyfunction!(compile_sampler, module)?)?;
     module.add_function(wrap_pyfunction!(generate_dem, module)?)?;
+    module.add_function(wrap_pyfunction!(generate_and_compile_dem_sampler, module)?)?;
+    module.add_function(wrap_pyfunction!(compile_generated_dem_sampler, module)?)?;
     module.add_function(wrap_pyfunction!(compile_dem_sampler, module)?)?;
     Ok(())
 }

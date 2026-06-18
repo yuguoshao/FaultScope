@@ -73,11 +73,45 @@ def compile_native_dem_sampler(
         raise UnsupportedNativeCircuitError(str(exc)) from exc
 
 
+def compile_native_dem_sampler_from_circuit(
+    circuit: Circuit,
+    *,
+    detectors: Any | None = None,
+    observables: Any | None = None,
+    materialize_dem: bool = True,
+) -> NativeDemSampler:
+    """Generate and compile a native DEM sampler directly from ``circuit``.
+
+    ``materialize_dem=False`` skips constructing the Python ``DetectorErrorModel``
+    object while keeping Rust-side edge metadata for sampling and hotspot
+    results. In that mode, ``sampler.dem`` and hotspot ``result.dem`` are
+    ``None``.
+    """
+
+    try:
+        native_mod = importlib.import_module("npsim._npsim_native")
+        if materialize_dem:
+            payload = native_mod.generate_and_compile_dem_sampler(
+                circuit,
+                detectors,
+                observables,
+            )
+            return payload["sampler"]
+        return native_mod.compile_generated_dem_sampler(
+            circuit,
+            detectors,
+            observables,
+        )
+    except Exception as exc:
+        raise UnsupportedNativeCircuitError(str(exc)) from exc
+
+
 __all__ = [
     "NativeDemSampler",
     "NativePackedSampler",
     "UnsupportedNativeCircuitError",
     "compile_native_dem_sampler",
+    "compile_native_dem_sampler_from_circuit",
     "compile_native_sampler",
     "generate_native_dem",
 ]

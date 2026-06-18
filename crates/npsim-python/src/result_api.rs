@@ -1224,30 +1224,53 @@ impl PyDemHotspotResult {
         }
 
         let mut rows: Vec<(f64, Py<PyDemEdgeHotspotRow>)> = Vec::new();
-        let edges = self.dem.bind(py).getattr("edges")?;
-        for (edge_index, edge) in edges.try_iter()?.enumerate() {
-            let edge = edge?;
-            let sensitivity = self
-                .edge_sensitivities
+        let dem = self.dem.bind(py);
+        if dem.is_none() {
+            let graph_edges = self
+                .detector_graph_hotspots
                 .bind(py)
-                .get_item(edge_index)?
-                .extract::<f64>()?;
-            let hotspot = self
-                .edge_hotspots
-                .bind(py)
-                .get_item(edge_index)?
-                .extract::<f64>()?;
-            let row = PyDemEdgeHotspotRow {
-                edge_index,
-                location_id: edge.getattr("location_id")?.extract::<String>()?,
-                event: edge.getattr("event")?.into(),
-                probability: edge.getattr("probability")?.extract::<f64>()?,
-                detectors: edge.getattr("detectors")?.into(),
-                observables: edge.getattr("observables")?.into(),
-                sensitivity,
-                hotspot,
-            };
-            rows.push((hotspot, Py::new(py, row)?));
+                .getattr("edge_hotspots")?;
+            for item in graph_edges.try_iter()? {
+                let item = item?;
+                let hotspot = item.getattr("hotspot")?.extract::<f64>()?;
+                let row = PyDemEdgeHotspotRow {
+                    edge_index: item.getattr("edge_index")?.extract::<usize>()?,
+                    location_id: item.getattr("location_id")?.extract::<String>()?,
+                    event: item.getattr("event")?.into(),
+                    probability: item.getattr("probability")?.extract::<f64>()?,
+                    detectors: item.getattr("detectors")?.into(),
+                    observables: item.getattr("observables")?.into(),
+                    sensitivity: item.getattr("sensitivity")?.extract::<f64>()?,
+                    hotspot,
+                };
+                rows.push((hotspot, Py::new(py, row)?));
+            }
+        } else {
+            let edges = dem.getattr("edges")?;
+            for (edge_index, edge) in edges.try_iter()?.enumerate() {
+                let edge = edge?;
+                let sensitivity = self
+                    .edge_sensitivities
+                    .bind(py)
+                    .get_item(edge_index)?
+                    .extract::<f64>()?;
+                let hotspot = self
+                    .edge_hotspots
+                    .bind(py)
+                    .get_item(edge_index)?
+                    .extract::<f64>()?;
+                let row = PyDemEdgeHotspotRow {
+                    edge_index,
+                    location_id: edge.getattr("location_id")?.extract::<String>()?,
+                    event: edge.getattr("event")?.into(),
+                    probability: edge.getattr("probability")?.extract::<f64>()?,
+                    detectors: edge.getattr("detectors")?.into(),
+                    observables: edge.getattr("observables")?.into(),
+                    sensitivity,
+                    hotspot,
+                };
+                rows.push((hotspot, Py::new(py, row)?));
+            }
         }
         rows.sort_by(|left, right| {
             right
@@ -1437,7 +1460,11 @@ pub(crate) fn dem_hotspot_result_from_estimate(
     }
 
     Ok(PyDemHotspotResult {
-        dem: sampler.py_dem.clone_ref(py),
+        dem: sampler
+            .py_dem
+            .as_ref()
+            .map(|py_dem| py_dem.clone_ref(py))
+            .unwrap_or_else(|| py.None()),
         shots: estimate.shots,
         mean_loss: estimate.mean_loss,
         baseline: estimate.baseline,
@@ -1474,15 +1501,10 @@ fn dem_edge_hotspot_row(
         .edges
         .get(edge_index)
         .ok_or_else(|| PyValueError::new_err(format!("unknown DEM edge index {edge_index}")))?;
-    let py_edge = sampler
-        .py_dem
-        .bind(py)
-        .getattr("edges")?
-        .get_item(edge_index)?;
     Ok(PyDemEdgeHotspotRow {
         edge_index,
         location_id: edge.location_id.clone(),
-        event: py_edge.getattr("event")?.into(),
+        event: dem_event_to_py(py, &edge.event)?,
         probability: edge.probability,
         detectors: PyTuple::new(py, edge.detectors.iter().copied())?.into(),
         observables: PyTuple::new(py, edge.observables.iter().copied())?.into(),
