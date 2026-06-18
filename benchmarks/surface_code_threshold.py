@@ -354,7 +354,7 @@ def stim_dem_to_npsim_dem(stim_dem: Any) -> DetectorErrorModel:
                     detectors=tuple(detectors),
                     observables=tuple(observables),
                     location_id=f"stim_dem_edge_{edge_index}",
-                    event=edge_index,
+                    event=f"stim_dem_edge_{edge_index}",
                     tags={"source": "stim_dem"},
                 )
             )
