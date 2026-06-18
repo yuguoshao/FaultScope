@@ -264,10 +264,7 @@ def timed_npsim_forward_logical_failure(
     seed: int,
 ) -> TimedLogicalFailureStats:
     started = time.perf_counter()
-    sampler = compile_native_sampler(
-        imported.circuit,
-        backend="native",
-    )
+    sampler = compile_native_sampler(imported.circuit)
     compile_s = time.perf_counter() - started
     started = time.perf_counter()
     batch = sampler.sample(shots=shots, seed=seed)
@@ -299,10 +296,7 @@ def timed_npsim_dem_logical_failure(
     seed: int,
 ) -> TimedLogicalFailureStats:
     started = time.perf_counter()
-    sampler = compile_native_dem_sampler(
-        npsim_dem,
-        backend="native",
-    )
+    sampler = compile_native_dem_sampler(npsim_dem)
     compile_s = time.perf_counter() - started
     started = time.perf_counter()
     batch = sampler.run_batch(

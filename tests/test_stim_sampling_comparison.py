@@ -212,7 +212,6 @@ class StimSamplingComparisonTests(unittest.TestCase):
             npsim_result = compile_native_sampler(
                 experiment.circuit,
                 observables=experiment.observables,
-                backend="native",
             ).estimate(
                 shots=shots,
                 seed=12345,
@@ -284,7 +283,6 @@ class StimSamplingComparisonTests(unittest.TestCase):
                     )
                     npsim_result = compile_native_sampler(
                         imported.circuit,
-                        backend="native",
                     ).estimate(
                         shots=shots,
                         seed=22345,
@@ -353,7 +351,7 @@ class StimSamplingComparisonTests(unittest.TestCase):
         )
 
         try:
-            npsim_dem = generate_native_dem(circuit, backend="native")
+            npsim_dem = generate_native_dem(circuit)
         except UnsupportedNativeCircuitError as exc:
             self.skipTest(f"native DEM generator unavailable: {exc}")
         stim_circuit, _ = _to_stim_circuit(circuit)
@@ -378,12 +376,11 @@ class StimSamplingComparisonTests(unittest.TestCase):
                 experiment.circuit,
                 detectors=experiment.detectors,
                 observables=(),
-                backend="native",
             )
-            npsim_batch = compile_native_dem_sampler(
-                npsim_dem,
-                backend="native",
-            ).run_batch(shots=45_000, seed=24680)
+            npsim_batch = compile_native_dem_sampler(npsim_dem).run_batch(
+                shots=45_000,
+                seed=24680,
+            )
         except UnsupportedNativeCircuitError as exc:
             self.skipTest(f"native DEM mode unavailable: {exc}")
 
@@ -428,13 +425,12 @@ class StimSamplingComparisonTests(unittest.TestCase):
                 circuit,
                 detectors=experiment.detectors,
                 observables=(observable,),
-                backend="native",
             )
             decoder = PyMatchingBatchDecoder.from_dem(npsim_dem)
-            npsim_batch = compile_native_dem_sampler(
-                npsim_dem,
-                backend="native",
-            ).run_batch(shots=shots, seed=24680)
+            npsim_batch = compile_native_dem_sampler(npsim_dem).run_batch(
+                shots=shots,
+                seed=24680,
+            )
         except UnsupportedNativeCircuitError as exc:
             self.skipTest(f"native DEM mode unavailable: {exc}")
         except (PyMatchingUnavailableError, UnsupportedPyMatchingDemError) as exc:
@@ -475,13 +471,12 @@ class StimSamplingComparisonTests(unittest.TestCase):
                         circuit,
                         detectors=detectors,
                         observables=observables,
-                        backend="native",
                     )
                     decoder = PyMatchingBatchDecoder.from_dem(npsim_dem)
-                    npsim_batch = compile_native_dem_sampler(
-                        npsim_dem,
-                        backend="native",
-                    ).run_batch(shots=shots, seed=34680)
+                    npsim_batch = compile_native_dem_sampler(npsim_dem).run_batch(
+                        shots=shots,
+                        seed=34680,
+                    )
                 except UnsupportedNativeCircuitError as exc:
                     self.skipTest(f"native DEM mode unavailable: {exc}")
                 except (PyMatchingUnavailableError, UnsupportedPyMatchingDemError) as exc:
@@ -523,7 +518,7 @@ def _sample_both(
     stim_seed: int = 67890,
 ) -> tuple[BatchTrajectory, object, tuple[str, ...]]:
     try:
-        sampler = compile_native_sampler(circuit, backend="native")
+        sampler = compile_native_sampler(circuit)
     except UnsupportedNativeCircuitError as exc:
         raise unittest.SkipTest(f"native forward sampler unavailable: {exc}") from exc
     batch = sampler.sample(shots=shots, seed=native_seed)

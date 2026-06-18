@@ -1,9 +1,7 @@
 """Native packed sampler API.
 
-The Rust extension is the only runtime backend for packed batch sampling and
-detector-error-model sampling.  ``backend="auto"`` is kept for API
-compatibility, but it now requires the native extension to import and compile
-successfully.
+The Rust extension is the only runtime for packed batch sampling and
+detector-error-model sampling.
 """
 
 from __future__ import annotations
@@ -32,19 +30,11 @@ class UnsupportedNativeCircuitError(ValueError):
 
 @dataclass(frozen=True)
 class NativePackedSampler:
-    """Compiled packed sampler wrapper.
-
-    ``backend_name`` is always ``"native"``.
-    """
+    """Compiled native packed sampler wrapper."""
 
     circuit: Circuit
-    backend_name: str
     _engine: Any
     observables: tuple[Any, ...] = ()
-
-    @property
-    def is_native(self) -> bool:
-        return self.backend_name == "native"
 
     def sample(
         self,
@@ -129,12 +119,7 @@ class NativeDemSampler:
     """Compiled native DEM sampler wrapper."""
 
     dem: Any
-    backend_name: str
     _engine: Any
-
-    @property
-    def is_native(self) -> bool:
-        return self.backend_name == "native"
 
     def run_batch(
         self,
@@ -233,25 +218,8 @@ def compile_native_sampler(
     circuit: Circuit,
     *,
     observables: Any | None = None,
-    backend: str = "auto",
-    strict: bool = False,
 ) -> NativePackedSampler:
-    """Compile ``circuit`` into a packed sampler.
-
-    Parameters
-    ----------
-    backend:
-        ``"auto"`` and ``"native"`` both require the Rust extension.
-        ``"python"`` is no longer supported.
-    strict:
-        Kept for compatibility. Native compile/import failures are always
-        surfaced.
-    """
-
-    if backend not in {"auto", "native", "python"}:
-        raise ValueError("backend must be 'auto', 'native', or 'python'")
-    if backend == "python":
-        raise UnsupportedNativeCircuitError("Python backend is no longer supported")
+    """Compile ``circuit`` into a native packed sampler."""
 
     observables_tuple = tuple(observables) if observables is not None else ()
 
@@ -267,7 +235,6 @@ def compile_native_sampler(
 
     return NativePackedSampler(
         circuit=circuit,
-        backend_name="native",
         _engine=engine,
         observables=observables_tuple,
     )
@@ -278,16 +245,10 @@ def generate_native_dem(
     *,
     detectors: Any | None = None,
     observables: Any | None = None,
-    backend: str = "auto",
-    strict: bool = False,
 ) -> Any:
     """Generate a detector error model through the native extension."""
 
-    if backend not in {"auto", "native", "python"}:
-        raise ValueError("backend must be 'auto', 'native', or 'python'")
     detectors, observables = _coerce_dem_declarations(circuit, detectors, observables)
-    if backend == "python":
-        raise UnsupportedNativeCircuitError("Python backend is no longer supported")
 
     try:
         spec = _serialize_circuit(circuit)
@@ -309,16 +270,8 @@ def generate_native_dem(
 
 def compile_native_dem_sampler(
     dem: Any,
-    *,
-    backend: str = "auto",
-    strict: bool = False,
 ) -> NativeDemSampler:
     """Compile a detector error model into a packed native DEM sampler."""
-
-    if backend not in {"auto", "native", "python"}:
-        raise ValueError("backend must be 'auto', 'native', or 'python'")
-    if backend == "python":
-        raise UnsupportedNativeCircuitError("Python backend is no longer supported")
 
     try:
         spec = _serialize_dem(dem)
@@ -329,7 +282,6 @@ def compile_native_dem_sampler(
 
     return NativeDemSampler(
         dem=dem,
-        backend_name="native",
         _engine=engine,
     )
 

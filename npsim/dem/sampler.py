@@ -167,10 +167,7 @@ class DemBatchHotspotSimulator:
             seed = rng.getrandbits(64)
         from npsim.runtime.native import compile_native_dem_sampler
 
-        return compile_native_dem_sampler(
-            self.dem,
-            backend="native",
-        ).run_batch(
+        return compile_native_dem_sampler(self.dem).run_batch(
             shots=shots,
             seed=seed,
             return_edge_events=return_edge_events,
@@ -191,10 +188,7 @@ class DemBatchHotspotSimulator:
             raise ValueError("supply either decoder or correction_mask_fn, not both")
         from npsim.runtime.native import compile_native_dem_sampler
 
-        return compile_native_dem_sampler(
-            self.dem,
-            backend="native",
-        ).estimate(
+        return compile_native_dem_sampler(self.dem).estimate(
             shots=shots,
             seed=seed,
             decoder=decoder,
@@ -223,4 +217,3 @@ def _default_loss_mask(
         corrections,
         observable_ids=(observable.id for observable in dem.observables),
     )
-

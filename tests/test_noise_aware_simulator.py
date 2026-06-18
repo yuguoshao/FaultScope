@@ -468,11 +468,7 @@ def _default_batch_loss(batch, corrections) -> int:
 class NativePackedSamplerTests(unittest.TestCase):
     def _native_sampler_or_skip(self, circuit: Circuit, *, observables=()):
         try:
-            return compile_native_sampler(
-                circuit,
-                observables=observables,
-                backend="native",
-            )
+            return compile_native_sampler(circuit, observables=observables)
         except UnsupportedNativeCircuitError as exc:
             self.skipTest(f"native extension unavailable: {exc}")
 
@@ -505,32 +501,26 @@ class NativePackedSamplerTests(unittest.TestCase):
             rng=random.Random(123),
         )
 
-        self.assertEqual(sampler.backend_name, "native")
         self.assertEqual(native_batch.measurements, reference.measurements)
         self.assertEqual(native_batch.detectors, reference.detectors)
         self.assertEqual(native_batch.observables, reference.observables)
         self.assertEqual(native_batch.noise_event_masks, reference.noise_event_masks)
 
-    def test_auto_backend_requires_native_extension(self) -> None:
+    def test_backend_keyword_is_not_accepted(self) -> None:
         circuit = Circuit(
             n_qubits=1,
             operations=[Operation.measure(0, key="m", basis="Z")],
         )
-        sampler = compile_native_sampler(circuit, backend="auto")
-        batch = sampler.sample(shots=4, seed=1)
+        dem = DetectorErrorModel(detectors=(), observables=(), edges=())
 
-        self.assertEqual(sampler.backend_name, "native")
-        self.assertEqual(batch.shots, 4)
-        self.assertIn("m", batch.measurements)
-
-    def test_auto_backend_raises_when_native_extension_is_missing(self) -> None:
-        circuit = Circuit(
-            n_qubits=1,
-            operations=[Operation.measure(0, key="m", basis="Z")],
-        )
-        with mock.patch("importlib.import_module", side_effect=ImportError("missing")):
-            with self.assertRaises(UnsupportedNativeCircuitError):
-                compile_native_sampler(circuit, backend="auto")
+        with self.assertRaises(TypeError):
+            compile_native_sampler(circuit, backend="native")
+        with self.assertRaises(TypeError):
+            generate_native_dem(circuit, backend="native")
+        with self.assertRaises(TypeError):
+            compile_native_dem_sampler(dem, backend="native")
+        with self.assertRaises(TypeError):
+            compile_native_sampler(circuit, strict=True)
 
     def test_native_backend_reports_missing_or_unsupported_extension(self) -> None:
         circuit = Circuit(
@@ -541,19 +531,10 @@ class NativePackedSamplerTests(unittest.TestCase):
             __import__("npsim._npsim_native")
         except ImportError:
             with self.assertRaises(UnsupportedNativeCircuitError):
-                compile_native_sampler(circuit, backend="native")
+                compile_native_sampler(circuit)
         else:
-            sampler = compile_native_sampler(circuit, backend="native")
-            self.assertTrue(sampler.is_native)
-
-    def test_rejects_unknown_backend(self) -> None:
-        with self.assertRaises(ValueError):
-            compile_native_sampler(Circuit(n_qubits=0, operations=[]), backend="gpu")
-
-    def test_python_backend_is_no_longer_supported(self) -> None:
-        circuit = Circuit(n_qubits=1, operations=[Operation.measure(0, key="m")])
-        with self.assertRaises(UnsupportedNativeCircuitError):
-            compile_native_sampler(circuit, backend="python")
+            sampler = compile_native_sampler(circuit)
+            self.assertEqual(sampler.sample(shots=4, seed=1).shots, 4)
 
     def test_native_backend_matches_deterministic_reference_masks(self) -> None:
         x_location = NoiseLocation(
@@ -628,10 +609,9 @@ class NativePackedSamplerTests(unittest.TestCase):
         fake_sampler = mock.Mock()
         fake_sampler.estimate.side_effect = ("first", "second")
 
-        def compile_once(compiled_circuit, *, observables, backend):
+        def compile_once(compiled_circuit, *, observables):
             self.assertIs(compiled_circuit, circuit)
             self.assertEqual(observables, ())
-            self.assertEqual(backend, "native")
             return fake_sampler
 
         with mock.patch(
@@ -829,7 +809,7 @@ class NativePackedSamplerTests(unittest.TestCase):
                 Operation.measure(0, key="m", basis="Z"),
             ],
         )
-        sampler = compile_native_sampler(circuit, backend="auto")
+        sampler = compile_native_sampler(circuit)
         measurements = sampler.sample_measurements(shots=6, seed=14)
         batch = sampler.sample(shots=6, seed=14)
 
@@ -936,10 +916,7 @@ class NativePackedSamplerTests(unittest.TestCase):
         )
 
         with self.assertRaises(UnsupportedNativeCircuitError):
-            compile_native_sampler(circuit, backend="native")
-
-        with self.assertRaises(UnsupportedNativeCircuitError):
-            compile_native_sampler(circuit, backend="auto")
+            compile_native_sampler(circuit)
 
         with self.assertRaises(UnsupportedNativeCircuitError):
             BatchForwardNoiseAwareSimulator(circuit).estimate(
@@ -974,7 +951,6 @@ class NativeDetectorErrorModelTests(unittest.TestCase):
             experiment.circuit,
             detectors=experiment.detectors,
             observables=experiment.observables,
-            backend="native",
         )
 
         self.assertEqual(native.to_dem_text(), reference.to_dem_text())
@@ -1021,7 +997,7 @@ class NativeDetectorErrorModelTests(unittest.TestCase):
             ],
         )
 
-        native = generate_native_dem(circuit, backend="native")
+        native = generate_native_dem(circuit)
         by_event = {edge.event: edge for edge in native.edges}
 
         self.assertEqual(set(by_event), {"X", "Y"})
@@ -1030,26 +1006,14 @@ class NativeDetectorErrorModelTests(unittest.TestCase):
         self.assertEqual(by_event["Y"].detectors, (0,))
         self.assertEqual(dict(by_event["Y"].tags), {"gate": "channel"})
 
-    def test_native_dem_python_backend_is_no_longer_supported(self) -> None:
-        dem = DetectorErrorModel(
-            detectors=(),
-            observables=(),
-            edges=(),
-        )
-        circuit = Circuit(n_qubits=0, operations=[])
-        with self.assertRaises(UnsupportedNativeCircuitError):
-            generate_native_dem(circuit, backend="python")
-        with self.assertRaises(UnsupportedNativeCircuitError):
-            compile_native_dem_sampler(dem, backend="python")
-
-    def test_native_dem_auto_backend_raises_when_extension_is_missing(self) -> None:
+    def test_native_dem_reports_missing_extension(self) -> None:
         dem = DetectorErrorModel(detectors=(), observables=(), edges=())
         circuit = Circuit(n_qubits=0, operations=[])
         with mock.patch("importlib.import_module", side_effect=ImportError("missing")):
             with self.assertRaises(UnsupportedNativeCircuitError):
-                generate_native_dem(circuit, backend="auto")
+                generate_native_dem(circuit)
             with self.assertRaises(UnsupportedNativeCircuitError):
-                compile_native_dem_sampler(dem, backend="auto")
+                compile_native_dem_sampler(dem)
 
     def test_native_dem_sampler_samples_packed_masks(self) -> None:
         self._require_native_dem()
@@ -1073,7 +1037,7 @@ class NativeDetectorErrorModelTests(unittest.TestCase):
                 ),
             ),
         )
-        sampler = compile_native_dem_sampler(dem, backend="native")
+        sampler = compile_native_dem_sampler(dem)
         batch = sampler.run_batch(shots=9, seed=123)
 
         all_mask = (1 << 9) - 1
@@ -1111,7 +1075,7 @@ class NativeDetectorErrorModelTests(unittest.TestCase):
                 for index, probability in enumerate(probabilities)
             ),
         )
-        sampler = compile_native_dem_sampler(dem, backend="native")
+        sampler = compile_native_dem_sampler(dem)
         shots = 50_000
         batch = sampler.run_batch(shots=shots, seed=57)
 
@@ -1140,7 +1104,7 @@ class NativeDetectorErrorModelTests(unittest.TestCase):
                 ),
             ),
         )
-        sampler = compile_native_dem_sampler(dem, backend="native")
+        sampler = compile_native_dem_sampler(dem)
         result = sampler.estimate_default(shots=40_000, seed=54)
 
         self.assertAlmostEqual(result.mean_loss, 0.2, delta=0.02)
@@ -1166,7 +1130,7 @@ class NativeDetectorErrorModelTests(unittest.TestCase):
                 ),
             ),
         )
-        sampler = compile_native_dem_sampler(dem, backend="native")
+        sampler = compile_native_dem_sampler(dem)
         result = sampler.estimate(
             shots=40_000,
             seed=58,
@@ -1193,7 +1157,6 @@ class NativeDetectorErrorModelTests(unittest.TestCase):
             generate_native_dem(
                 circuit,
                 detectors=(Detector(id=0, measurement_keys=("m",)),),
-                backend="native",
             )
 
 

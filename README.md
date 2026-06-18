@@ -486,7 +486,7 @@ batch/DEM/hotspot 的运行时快速路径现在要求 `npsim._npsim_native` 可
 ```python
 from npsim.runtime import compile_native_sampler
 
-sampler = compile_native_sampler(circuit, backend="auto")
+sampler = compile_native_sampler(circuit)
 batch = sampler.sample(shots=100_000, seed=1)
 ```
 
@@ -504,14 +504,14 @@ packed words 中，Python loss/decoder 回调只读取按需暴露的 bit helper
 和 top-k cache。没有 native 扩展或 native 不支持该电路时会抛
 `UnsupportedNativeCircuitError`，不再回退到 Python reference。
 
-`backend="auto"` 和 `backend="native"` 都要求 native 成功；保留 `"auto"` 只是为了
-兼容旧调用。`backend="python"` 不再支持。向 `BatchForwardNoiseAwareSimulator.run_batch()`
-或 `DemBatchHotspotSimulator.run_batch()` 传入 Python `rng` 时，运行时会用
-`rng.getrandbits(64)` 派生 native seed；这只保持随机分布，不保证旧 Python 路径的
-bit-for-bit 序列一致。
+运行时不再暴露 backend 选择参数；Rust native 扩展是唯一执行路径。向
+`BatchForwardNoiseAwareSimulator.run_batch()` 或
+`DemBatchHotspotSimulator.run_batch()` 传入 Python `rng` 时，运行时会用
+`rng.getrandbits(64)` 派生 native seed；这只保持随机分布，不保证旧 Python
+reference 路径的 bit-for-bit 序列一致。
 
 ```python
-sampler = compile_native_sampler(circuit, backend="native")
+sampler = compile_native_sampler(circuit)
 ```
 
 原生扩展源码位于 `native/`，使用 PyO3/maturin：

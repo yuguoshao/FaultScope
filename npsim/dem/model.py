@@ -284,7 +284,6 @@ class DetectorErrorModelGenerator:
             self.circuit,
             detectors=self.detectors,
             observables=self.observables,
-            backend="native",
         )
 
     def _validate_declarations(self) -> None:

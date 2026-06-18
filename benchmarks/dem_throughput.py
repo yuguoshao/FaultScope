@@ -74,11 +74,10 @@ def main() -> None:
                     experiment.circuit,
                     detectors=experiment.detectors,
                     observables=experiment.observables,
-                    backend="native",
                 )
             )
             reference_gen_s, reference_dem = _time_once(reference_generator.generate)
-            native_sampler = compile_native_dem_sampler(native_dem, backend="native")
+            native_sampler = compile_native_dem_sampler(native_dem)
             reference_sampler = ReferenceDemBatchHotspotSimulator(reference_dem)
             stim_gen_s: float | None = None
             native_vs_stim_gen = float("nan")
@@ -99,13 +98,9 @@ def main() -> None:
                         experiment.circuit,
                         detectors=experiment.detectors,
                         observables=(),
-                        backend="native",
                     )
                 )
-                native_detector_sampler = compile_native_dem_sampler(
-                    native_detector_dem,
-                    backend="native",
-                )
+                native_detector_sampler = compile_native_dem_sampler(native_detector_dem)
                 stim_sampler = stim_circuit.compile_detector_sampler()
                 native_det_sps = _median_samples_per_second(
                     lambda seed: native_detector_sampler.run_batch(
