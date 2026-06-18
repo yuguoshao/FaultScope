@@ -40,6 +40,7 @@ class NativePackedSampler:
     circuit: Circuit
     backend_name: str
     _engine: Any
+    observables: tuple[Any, ...] = ()
 
     @property
     def is_native(self) -> bool:
@@ -59,7 +60,9 @@ class NativePackedSampler:
         if rng is not None:
             raise ValueError("native sampler accepts seed, not a Python rng")
         payload = self._engine.sample(int(shots), seed)
-        return _payload_to_batch_trajectory(payload)
+        batch = _payload_to_batch_trajectory(payload)
+        _validate_declared_observables(batch.observables, self.observables)
+        return batch
 
     def sample_measurements(
         self,
@@ -104,7 +107,11 @@ class NativePackedSampler:
             correction_mask_fn,
         )
         if loss_mask_fn is None:
-            loss_mask = _forward_default_loss_mask(batch, corrections)
+            loss_mask = _forward_default_loss_mask(
+                batch,
+                corrections,
+                observables=self.observables,
+            )
         else:
             loss_mask = _call_forward_loss_mask_fn(loss_mask_fn, batch, corrections)
         loss_mask &= int(batch.all_mask)
@@ -246,10 +253,12 @@ def compile_native_sampler(
     if backend == "python":
         raise UnsupportedNativeCircuitError("Python backend is no longer supported")
 
+    observables_tuple = tuple(observables) if observables is not None else ()
+
     try:
         spec = _serialize_circuit(
             circuit,
-            observables=tuple(observables) if observables is not None else (),
+            observables=observables_tuple,
         )
         native_mod = importlib.import_module("npsim._npsim_native")
         engine = native_mod.compile_sampler(spec)
@@ -260,6 +269,7 @@ def compile_native_sampler(
         circuit=circuit,
         backend_name="native",
         _engine=engine,
+        observables=observables_tuple,
     )
 
 
@@ -695,12 +705,36 @@ def _forward_correction_masks(
 def _forward_default_loss_mask(
     batch: Any,
     corrections: Mapping[Any, int],
+    *,
+    observables: tuple[Any, ...] = (),
 ) -> int:
+    _validate_declared_observables(batch.observables, observables)
     return logical_residual_loss_mask(
         batch.observables,
         corrections,
+        observable_ids=_observable_ids(observables),
         all_mask=batch.all_mask,
     )
+
+
+def _observable_ids(observables: tuple[Any, ...]) -> tuple[int, ...]:
+    return tuple(int(observable.id) for observable in observables)
+
+
+def _validate_declared_observables(
+    observed: Mapping[Any, int],
+    declared: tuple[Any, ...],
+) -> None:
+    missing = [
+        observable_id
+        for observable_id in _observable_ids(declared)
+        if observable_id not in observed
+    ]
+    if missing:
+        raise UnsupportedNativeCircuitError(
+            "native batch did not return declared logical observables: "
+            + ", ".join(str(observable_id) for observable_id in missing)
+        )
 
 
 def _call_forward_loss_mask_fn(

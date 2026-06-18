@@ -714,6 +714,33 @@ class NativePackedSamplerTests(unittest.TestCase):
 
         self.assertEqual(result.mean_loss, reference_loss.bit_count() / 256)
 
+    def test_external_pauli_observable_matches_final_measurement(self) -> None:
+        experiment = make_repetition_code_experiment(
+            distance=5,
+            rounds=3,
+            data_error_rate={(1, 2): 0.17, (2, 0): 0.09},
+            measurement_error_rate=0.035,
+        )
+        circuit = Circuit(
+            n_qubits=experiment.circuit.n_qubits,
+            operations=[
+                *experiment.circuit.operations,
+                Operation.measure(
+                    experiment.data_qubits[0],
+                    key="final_d_0",
+                    basis="Z",
+                ),
+            ],
+        )
+        sampler = self._native_sampler_or_skip(
+            circuit,
+            observables=experiment.observables,
+        )
+        batch = sampler.sample(shots=512, seed=12345)
+
+        self.assertIn(0, batch.observables)
+        self.assertEqual(batch.observables[0], batch.measurements["final_d_0"])
+
     def test_forward_estimate_uses_pymatching_batch_decoder(self) -> None:
         try:
             decoder = PyMatchingBatchDecoder.from_dem(
