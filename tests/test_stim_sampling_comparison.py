@@ -800,7 +800,7 @@ def _assert_rates_close(
 ) -> None:
     pooled = 0.5 * (npsim_rate + stim_rate)
     sigma = (2.0 * pooled * (1.0 - pooled) / shots) ** 0.5
-    tolerance = max(0.01, 5.0 * sigma, 8.0 / shots)
+    tolerance = max(0.003, 3.0 * sigma, 3.0 / shots)
     testcase.assertLessEqual(
         abs(npsim_rate - stim_rate),
         tolerance,

@@ -7,6 +7,8 @@ Run from the repository root after building the native extension:
 The benchmark compares native Rust DEM generation / default DEM hotspot
 estimation against Stim detector-error-model generation and detector sampling on
 deterministic repetition-code and rotated surface-code detector error models.
+The status column checks canonical native-vs-Stim DEM equality and detector
+sample rate agreement.
 Stim is required.
 """
 
@@ -38,7 +40,12 @@ from npsim.runtime import (
     compile_native_dem_sampler,
     generate_native_dem,
 )
-from tests.stim_helpers import to_stim_circuit, with_dem_declarations
+from tests.stim_helpers import (
+    npsim_dem_error_edges,
+    stim_dem_error_edges,
+    to_stim_circuit,
+    with_dem_declarations,
+)
 from tests.surface_code_examples import _data_index, _rotated_surface_code_checks
 
 
@@ -61,6 +68,8 @@ def main() -> None:
     args = parser.parse_args()
 
     _validate_distances(args.distances)
+    _validate_positive("shots", args.shots)
+    _validate_positive("repeats", args.repeats)
     _load_stim()
     print(
         "case\tdistance\trounds\tedges\tnative_gen_s\tnative_det_gen_s\t"
@@ -88,6 +97,11 @@ def _validate_distances(distances: list[int]) -> None:
             "surface-code DEM benchmark distances must be odd integers >= 3; "
             f"got {values}"
         )
+
+
+def _validate_positive(name: str, value: int) -> None:
+    if value <= 0:
+        raise SystemExit(f"{name} must be a positive integer; got {value}")
 
 
 def _make_repetition_case(distance: int, rounds: int) -> BenchmarkCase:
@@ -124,7 +138,7 @@ def _run_case(case: BenchmarkCase, *, shots: int, repeats: int) -> None:
                 observables=(),
             )
         )
-        stim_gen_s, _ = _time_once(stim_circuit.detector_error_model)
+        stim_gen_s, stim_dem = _time_once(stim_circuit.detector_error_model)
         native_detector_gen_s, native_detector_dem = _time_once(
             lambda: generate_native_dem(
                 case.circuit,
@@ -133,7 +147,14 @@ def _run_case(case: BenchmarkCase, *, shots: int, repeats: int) -> None:
             )
         )
         native_detector_sampler = compile_native_dem_sampler(native_detector_dem)
-        stim_sampler = stim_circuit.compile_detector_sampler()
+        stim_sampler = stim_dem.compile_sampler(seed=30_000)
+        status = _consistency_status(
+            native_detector_dem=native_detector_dem,
+            native_detector_sampler=native_detector_sampler,
+            stim_dem=stim_dem,
+            detectors=case.detectors,
+            shots=shots,
+        )
         native_det_sps = _median_samples_per_second(
             lambda seed: native_detector_sampler.run_batch(
                 shots=shots,
@@ -167,7 +188,7 @@ def _run_case(case: BenchmarkCase, *, shots: int, repeats: int) -> None:
             f"{native_detector_gen_s:.6f}\t{stim_gen_s:.6f}\t"
             f"{stim_gen_ratio:.3f}\t{native_est_sps:.3f}\t"
             f"{native_det_sps:.3f}\t{stim_det_sps:.3f}\t"
-            f"{det_ratio:.3f}\tok",
+            f"{det_ratio:.3f}\t{status}",
             flush=True,
         )
     except UnsupportedNativeCircuitError as exc:
@@ -310,6 +331,84 @@ def _time_once(fn: Any) -> tuple[float, Any]:
     value = fn()
     elapsed = time.perf_counter() - start
     return elapsed, value
+
+
+def _consistency_status(
+    *,
+    native_detector_dem: Any,
+    native_detector_sampler: Any,
+    stim_dem: Any,
+    detectors: tuple[Detector, ...],
+    shots: int,
+) -> str:
+    native_edges = _canonical_dem_error_edges(npsim_dem_error_edges(native_detector_dem))
+    stim_edges = _canonical_dem_error_edges(stim_dem_error_edges(stim_dem))
+    if native_edges != stim_edges:
+        return f"dem-mismatch:native={len(native_edges)},stim={len(stim_edges)}"
+    return _detector_sampling_status(
+        native_detector_sampler=native_detector_sampler,
+        stim_dem=stim_dem,
+        detectors=detectors,
+        shots=shots,
+    )
+
+
+def _canonical_dem_error_edges(
+    edges: tuple[tuple[float, tuple[int, ...], tuple[int, ...]], ...],
+) -> tuple[tuple[float, tuple[int, ...], tuple[int, ...]], ...]:
+    probabilities: dict[tuple[tuple[int, ...], tuple[int, ...]], float] = {}
+    for probability, detector_ids, observable_ids in edges:
+        key = (detector_ids, observable_ids)
+        current = probabilities.get(key, 0.0)
+        probabilities[key] = current + probability - 2.0 * current * probability
+    return tuple(
+        sorted(
+            (
+                round(probability, 12),
+                detector_ids,
+                observable_ids,
+            )
+            for (detector_ids, observable_ids), probability in probabilities.items()
+            if round(probability, 12) > 0.0
+        )
+    )
+
+
+def _detector_sampling_status(
+    *,
+    native_detector_sampler: Any,
+    stim_dem: Any,
+    detectors: tuple[Detector, ...],
+    shots: int,
+) -> str:
+    native_batch = native_detector_sampler.run_batch(shots=shots, seed=40_000)
+    stim_detectors, stim_observables, _ = stim_dem.compile_sampler(seed=40_001).sample(shots)
+    if stim_observables.shape[1] != 0:
+        return f"stim-observable-mismatch:{stim_observables.shape[1]}"
+    for column, detector in enumerate(detectors):
+        native_rate = _mask_rate(native_batch.detectors.get(int(detector.id), 0), shots)
+        stim_rate = float(stim_detectors[:, column].mean())
+        tolerance = _rate_tolerance(native_rate, stim_rate, shots)
+        if abs(native_rate - stim_rate) > tolerance:
+            return (
+                f"det-mismatch:d{int(detector.id)}:"
+                f"native={native_rate:.4g},stim={stim_rate:.4g},tol={tolerance:.4g}"
+            )
+    return "ok"
+
+
+def _mask_rate(mask: int, shots: int) -> float:
+    if shots <= 0:
+        return 0.0
+    return (int(mask) & ((1 << shots) - 1)).bit_count() / shots
+
+
+def _rate_tolerance(native_rate: float, stim_rate: float, shots: int) -> float:
+    if shots <= 0:
+        return 0.0
+    pooled = 0.5 * (native_rate + stim_rate)
+    sigma = (2.0 * pooled * (1.0 - pooled) / shots) ** 0.5
+    return max(0.003, 3.0 * sigma, 3.0 / shots)
 
 
 def _median_samples_per_second(fn: Any, *, shots: int, repeats: int) -> float:
