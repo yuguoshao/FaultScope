@@ -69,12 +69,11 @@ def main() -> None:
     parser.add_argument("--shots", type=int, default=20_000)
     parser.add_argument("--repeats", type=int, default=5)
     parser.add_argument("--seed", type=int, default=1234)
-    parser.add_argument("--backend", choices=("auto", "native"), default="auto")
     args = parser.parse_args()
 
     stim_module = _load_stim()
     print(
-        "case\tqubits\tdepth\trounds\tnoise\tmeas_noise\tshots\tbackend\t"
+        "case\tqubits\tdepth\trounds\tnoise\tmeas_noise\tshots\t"
         "npsim_sps\tstim_sps\tratio\tstatus",
         flush=True,
     )
@@ -126,7 +125,7 @@ def _run_case(
     args: argparse.Namespace,
     stim_module: Any | None,
 ) -> None:
-    sampler = compile_native_sampler(case.circuit, backend=args.backend)
+    sampler = compile_native_sampler(case.circuit)
     npsim_sps = _median_samples_per_second(
         lambda seed: sampler.sample_measurements(shots=args.shots, seed=seed),
         shots=args.shots,
@@ -158,7 +157,7 @@ def _run_case(
     print(
         f"{case.label}\t{case.qubits}\t{depth_cell}\t{rounds_cell}\t"
         f"{noise_cell}\t{args.measurement_noise_rate:.17g}\t"
-        f"{args.shots}\t{sampler.backend_name}\t{npsim_sps:.3f}\t"
+        f"{args.shots}\t{npsim_sps:.3f}\t"
         f"{stim_cell}\t{ratio_cell}\t{status}",
         flush=True,
     )

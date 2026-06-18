@@ -87,7 +87,6 @@ class BatchForwardNoiseAwareSimulator:
             self._native_sampler_cache = compile_native_sampler(
                 self.circuit,
                 observables=self.observables,
-                backend="native",
             )
         return self._native_sampler_cache
 

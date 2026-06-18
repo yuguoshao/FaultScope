@@ -77,13 +77,12 @@ def main() -> None:
             native_batch_sampler = compile_native_sampler(
                 experiment.circuit,
                 observables=experiment.observables,
-                backend="native",
             )
             reference_batch_engine = ReferenceBatchForwardNoiseAwareSimulator(
                 experiment.circuit,
                 observables=experiment.observables,
             )
-            native_dem_sampler = compile_native_dem_sampler(dem, backend="native")
+            native_dem_sampler = compile_native_dem_sampler(dem)
             reference_dem_engine = ReferenceDemBatchHotspotSimulator(dem)
 
             native_batch_full_sps = _median_samples_per_second(

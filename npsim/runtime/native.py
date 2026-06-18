@@ -1,9 +1,7 @@
 """Native packed sampler API.
 
-The Rust extension is the only runtime backend for packed batch sampling and
-detector-error-model sampling.  ``backend="auto"`` is kept for API
-compatibility, but it now requires the native extension to import and compile
-successfully.
+The Rust extension is the only runtime for packed batch sampling and
+detector-error-model sampling.
 """
 
 from __future__ import annotations
@@ -32,18 +30,11 @@ class UnsupportedNativeCircuitError(ValueError):
 
 @dataclass(frozen=True)
 class NativePackedSampler:
-    """Compiled packed sampler wrapper.
-
-    ``backend_name`` is always ``"native"``.
-    """
+    """Compiled native packed sampler wrapper."""
 
     circuit: Circuit
-    backend_name: str
     _engine: Any
-
-    @property
-    def is_native(self) -> bool:
-        return self.backend_name == "native"
+    observables: tuple[Any, ...] = ()
 
     def sample(
         self,
@@ -59,7 +50,9 @@ class NativePackedSampler:
         if rng is not None:
             raise ValueError("native sampler accepts seed, not a Python rng")
         payload = self._engine.sample(int(shots), seed)
-        return _payload_to_batch_trajectory(payload)
+        batch = _payload_to_batch_trajectory(payload)
+        _validate_declared_observables(batch.observables, self.observables)
+        return batch
 
     def sample_measurements(
         self,
@@ -104,7 +97,11 @@ class NativePackedSampler:
             correction_mask_fn,
         )
         if loss_mask_fn is None:
-            loss_mask = _forward_default_loss_mask(batch, corrections)
+            loss_mask = _forward_default_loss_mask(
+                batch,
+                corrections,
+                observables=self.observables,
+            )
         else:
             loss_mask = _call_forward_loss_mask_fn(loss_mask_fn, batch, corrections)
         loss_mask &= int(batch.all_mask)
@@ -122,12 +119,7 @@ class NativeDemSampler:
     """Compiled native DEM sampler wrapper."""
 
     dem: Any
-    backend_name: str
     _engine: Any
-
-    @property
-    def is_native(self) -> bool:
-        return self.backend_name == "native"
 
     def run_batch(
         self,
@@ -226,30 +218,15 @@ def compile_native_sampler(
     circuit: Circuit,
     *,
     observables: Any | None = None,
-    backend: str = "auto",
-    strict: bool = False,
 ) -> NativePackedSampler:
-    """Compile ``circuit`` into a packed sampler.
+    """Compile ``circuit`` into a native packed sampler."""
 
-    Parameters
-    ----------
-    backend:
-        ``"auto"`` and ``"native"`` both require the Rust extension.
-        ``"python"`` is no longer supported.
-    strict:
-        Kept for compatibility. Native compile/import failures are always
-        surfaced.
-    """
-
-    if backend not in {"auto", "native", "python"}:
-        raise ValueError("backend must be 'auto', 'native', or 'python'")
-    if backend == "python":
-        raise UnsupportedNativeCircuitError("Python backend is no longer supported")
+    observables_tuple = tuple(observables) if observables is not None else ()
 
     try:
         spec = _serialize_circuit(
             circuit,
-            observables=tuple(observables) if observables is not None else (),
+            observables=observables_tuple,
         )
         native_mod = importlib.import_module("npsim._npsim_native")
         engine = native_mod.compile_sampler(spec)
@@ -258,8 +235,8 @@ def compile_native_sampler(
 
     return NativePackedSampler(
         circuit=circuit,
-        backend_name="native",
         _engine=engine,
+        observables=observables_tuple,
     )
 
 
@@ -268,16 +245,10 @@ def generate_native_dem(
     *,
     detectors: Any | None = None,
     observables: Any | None = None,
-    backend: str = "auto",
-    strict: bool = False,
 ) -> Any:
     """Generate a detector error model through the native extension."""
 
-    if backend not in {"auto", "native", "python"}:
-        raise ValueError("backend must be 'auto', 'native', or 'python'")
     detectors, observables = _coerce_dem_declarations(circuit, detectors, observables)
-    if backend == "python":
-        raise UnsupportedNativeCircuitError("Python backend is no longer supported")
 
     try:
         spec = _serialize_circuit(circuit)
@@ -299,16 +270,8 @@ def generate_native_dem(
 
 def compile_native_dem_sampler(
     dem: Any,
-    *,
-    backend: str = "auto",
-    strict: bool = False,
 ) -> NativeDemSampler:
     """Compile a detector error model into a packed native DEM sampler."""
-
-    if backend not in {"auto", "native", "python"}:
-        raise ValueError("backend must be 'auto', 'native', or 'python'")
-    if backend == "python":
-        raise UnsupportedNativeCircuitError("Python backend is no longer supported")
 
     try:
         spec = _serialize_dem(dem)
@@ -319,7 +282,6 @@ def compile_native_dem_sampler(
 
     return NativeDemSampler(
         dem=dem,
-        backend_name="native",
         _engine=engine,
     )
 
@@ -695,12 +657,36 @@ def _forward_correction_masks(
 def _forward_default_loss_mask(
     batch: Any,
     corrections: Mapping[Any, int],
+    *,
+    observables: tuple[Any, ...] = (),
 ) -> int:
+    _validate_declared_observables(batch.observables, observables)
     return logical_residual_loss_mask(
         batch.observables,
         corrections,
+        observable_ids=_observable_ids(observables),
         all_mask=batch.all_mask,
     )
+
+
+def _observable_ids(observables: tuple[Any, ...]) -> tuple[int, ...]:
+    return tuple(int(observable.id) for observable in observables)
+
+
+def _validate_declared_observables(
+    observed: Mapping[Any, int],
+    declared: tuple[Any, ...],
+) -> None:
+    missing = [
+        observable_id
+        for observable_id in _observable_ids(declared)
+        if observable_id not in observed
+    ]
+    if missing:
+        raise UnsupportedNativeCircuitError(
+            "native batch did not return declared logical observables: "
+            + ", ".join(str(observable_id) for observable_id in missing)
+        )
 
 
 def _call_forward_loss_mask_fn(
