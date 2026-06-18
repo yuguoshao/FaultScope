@@ -8,7 +8,8 @@
 - `crates/npsim-python`：PyO3 binding crate，构建 Python 模块 `npsim._npsim_native`。
 - `npsim/`：轻量 Python package surface，保留 re-export、typing helper、PyMatching/Stim/Pillow adapters、benchmark 和 reference-test 入口。
 
-英文用户文档见 [NPSim User Guide](docs/user_guide.md)，接口文档见
+英文文档站点见 [NPSim Documentation](https://yuguoshao.github.io/NPSim/)。
+本地文档见 [NPSim User Guide](docs/user_guide.md) 和
 [NPSim API Reference](docs/api_reference.md)。
 
 核心目标是估计每个局部噪声位置 `l` 对纠错协议 logical failure probability 的边际影响：

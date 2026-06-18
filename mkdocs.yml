@@ -1,0 +1,27 @@
+site_name: NPSim Documentation
+site_description: Rust-core forward noise-aware stabilizer simulator with a Python API
+site_url: https://yuguoshao.github.io/NPSim/
+repo_url: https://github.com/yuguoshao/NPSim
+repo_name: yuguoshao/NPSim
+
+theme:
+  name: material
+  features:
+    - navigation.sections
+    - navigation.top
+    - search.suggest
+    - content.code.copy
+
+nav:
+  - Home: index.md
+  - User Guide: user_guide.md
+  - API Reference: api_reference.md
+  - Theory: forward_noise_aware_stabilizer.md
+
+markdown_extensions:
+  - admonition
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.superfences
+  - pymdownx.highlight
