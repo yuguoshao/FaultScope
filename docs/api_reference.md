@@ -230,23 +230,36 @@ preserving the public Python error boundary:
 ```python
 compile_native_sampler(circuit, *, observables=None) -> NativePackedSampler
 generate_native_dem(circuit, *, detectors=None, observables=None) -> DetectorErrorModel
+compile_native_dem_generator(circuit, *, detectors=None, observables=None) -> NativeDemGenerator
 compile_native_dem_sampler(dem) -> NativeDemSampler
+compile_native_dem_sampler_from_circuit(
+    circuit,
+    *,
+    detectors=None,
+    observables=None,
+    materialize_dem=True,
+) -> NativeDemSampler
 ```
 
 These functions always use the Rust native path. They raise
 `UnsupportedNativeCircuitError` when the extension cannot be imported, the
 circuit cannot be compiled, DEM generation fails, or sampling is unsupported.
 
-`NativePackedSampler` and `NativeDemSampler` are advanced handles used by the
-public simulator facades. They expose packed batch and hotspot methods similar
-to the facade classes, including `run_native_batch(...)` and
-`estimate_hotspots(...)`.
+`NativePackedSampler`, `NativeDemGenerator`, and `NativeDemSampler` are
+advanced handles used by the public simulator facades. `NativeDemGenerator`
+reuses the compiled native DEM event plan: `generate_dem()` returns a full
+`DetectorErrorModel`, while `compile_sampler(materialize_dem=False)` compiles
+a sampler from native edge specs without constructing a Python DEM. In that
+light mode, `sampler.dem` is `None` and APIs requiring full DEM metadata raise
+`ValueError`.
 
 Example:
 
 ```python
 from npsim.runtime import (
+    compile_native_dem_generator,
     compile_native_dem_sampler,
+    compile_native_dem_sampler_from_circuit,
     compile_native_sampler,
     generate_native_dem,
 )
@@ -257,6 +270,16 @@ trajectory = sampler.sample(1024, seed=7)
 dem = generate_native_dem(circuit)
 dem_sampler = compile_native_dem_sampler(dem)
 dem_result = dem_sampler.estimate_default(4096, seed=7, top_k=5)
+
+generator = compile_native_dem_generator(circuit)
+detector_dem = generator.generate_dem()
+light_sampler = generator.compile_sampler(materialize_dem=False)
+assert light_sampler.dem is None
+
+direct_light_sampler = compile_native_dem_sampler_from_circuit(
+    circuit,
+    materialize_dem=False,
+)
 ```
 
 ### Detector Error Models

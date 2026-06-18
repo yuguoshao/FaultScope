@@ -719,6 +719,13 @@ require `numpy`, `scipy`, `pymatching`, and `stim`.
 
 Benchmark output is tab-separated. Use the `status` column to distinguish
 successful comparisons from optional dependency skips.
+`dem_throughput.py` reports native full DEM generation, native detector-only
+DEM generation, reusable native generator compile time, compiled-generator DEM
+generation time, light sampler compile time, Stim DEM generation, and detector
+sampling throughput. The light sampler column uses `materialize_dem=False`;
+that path is intended for detector/observable sampling throughput and returns
+a sampler with `dem is None`, so APIs that need full DEM metadata reject it
+with `ValueError`.
 
 ## Rust Core Usage
 
