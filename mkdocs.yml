@@ -21,10 +21,19 @@ nav:
   - Theory: theory.md
   - Implementation Overview: implementation_overview.md
 
+extra_javascript:
+  - javascripts/mathjax.js
+  - https://unpkg.com/mathjax@3/es5/tex-mml-chtml.js
+
+extra_css:
+  - stylesheets/math.css
+
 markdown_extensions:
   - admonition
   - tables
   - toc:
       permalink: true
+  - pymdownx.arithmatex:
+      generic: true
   - pymdownx.superfences
   - pymdownx.highlight

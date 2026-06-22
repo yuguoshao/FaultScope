@@ -8,41 +8,52 @@ DEM 生成与 DEM hotspot 计算。它描述的是当前公开 runtime 的理论
 
 ## 符号与对象
 
-一次 Monte Carlo batch 有 `N` 个 shots。第 `k` 个 shot 对应一个概念上的前向采样路径：
+一次 Monte Carlo batch 有 \(N\) 个 shots。第 \(k\) 个 shot 对应一个概念上的前向采样路径：
 
-```text
-tau_k = (e_{k,1}, ..., e_{k,M}, m_{k,1}, ..., m_{k,R}, D_k, L_k)
-```
+\[
+\tau_k =
+\left(
+e_{k,1}, \ldots, e_{k,M},
+m_{k,1}, \ldots, m_{k,R},
+D_k,
+L_k
+\right).
+\]
 
 主要符号：
 
-- `l`: 一个物理 noise location，带有 id、qubits、rate 和 tags。
-- `lambda_l`: noise location `l` 的事件发生率。
-- `e_{k,l}`: shot `k` 在 location `l` 的 sampled event。
-- `E_l`: packed event mask；第 `k` 位为 1 表示 shot `k` 在 `l` 发生非 identity/flip event。
-- `m_{k,r}`: 第 `r` 个 measurement 在 shot `k` 的 classical bit。
-- `M_key`: packed measurement mask；第 `k` 位为 measurement key 在 shot `k` 的值。
-- `D_i`: detector `i` 的 packed detector mask。
-- `O_a`: logical observable `a` 的 packed observable mask。
-- `C_a`: decoder 预测的 logical correction mask。
-- `F`: loss mask；第 `k` 位为 1 表示 shot `k` 贡献 loss。
-- `A`: all-shot mask，低 `N` 位为 1，用来裁剪未使用 bit。
+- \(l\)：一个物理 noise location，带有 id、qubits、rate 和 tags。
+- \(\lambda_l\)：noise location \(l\) 的事件发生率。
+- \(e_{k,l}\)：shot \(k\) 在 location \(l\) 的 sampled event。
+- \(E_l\)：packed event mask；第 \(k\) 位为 1 表示 shot \(k\) 在 \(l\) 发生非 identity/flip event。
+- \(m_{k,r}\)：第 \(r\) 个 measurement 在 shot \(k\) 的 classical bit。
+- \(M_{\text{key}}\)：packed measurement mask；第 \(k\) 位为 measurement key 在 shot \(k\) 的值。
+- \(D_i\)：detector \(i\) 的 packed detector mask。
+- \(O_a\)：logical observable \(a\) 的 packed observable mask。
+- \(C_a\)：decoder 预测的 logical correction mask。
+- \(F\)：loss mask；第 \(k\) 位为 1 表示 shot \(k\) 贡献 loss。
+- \(A\)：all-shot mask，低 \(N\) 位为 1，用来裁剪未使用 bit。
 
 NPSim 的 batch representation 把每个 boolean shot value 存成一个 Python integer 或 Rust
 `Mask`。因此：
 
-```text
-bit_k(X) = (X >> k) & 1
-popcount(X) = number of set bits in X
-```
+\[
+\operatorname{bit}_k(X) = (X \gg k) \mathbin{\&} 1,
+\qquad
+\operatorname{popcount}(X) = \text{number of set bits in } X.
+\]
 
 ## 前向目标函数
 
-给定所有 noise rates `lambda = {lambda_l}`，目标函数是 shot-level loss 的期望：
+给定所有 noise rates \(\lambda = \{\lambda_l\}\)，目标函数是 shot-level loss 的期望：
 
-```text
-J(lambda) = E_{tau ~ P_lambda}[L_loss(tau)]
-```
+\[
+J(\lambda) =
+\mathbb{E}_{\tau \sim P_\lambda}
+\left[
+L_{\mathrm{loss}}(\tau)
+\right].
+\]
 
 在 batch API 中，loss 由 packed mask 表示：
 
@@ -53,79 +64,116 @@ F = loss_mask_fn(batch, corrections)
 
 默认 logical loss 使用 declared logical observables 和 decoder correction：
 
-```text
-R_a = O_a xor C_a
-F = OR_a R_a
-```
+\[
+R_a = O_a \oplus C_a,
+\qquad
+F = \bigvee_a R_a.
+\]
 
-如果没有 decoder，correction map 为空，相当于所有 `C_a = 0`。因此默认 loss 是“任一 residual
+如果没有 decoder，correction map 为空，相当于所有 \(C_a = 0\)。因此默认 loss 是“任一 residual
 logical observable 为 1”的 indicator。
 
 batch 中的经验 loss 为：
 
-```text
-loss_count = popcount(F & A)
-mean_loss = loss_count / N
-```
+\[
+\operatorname{loss\_count}
+= \operatorname{popcount}(F \mathbin{\&} A),
+\qquad
+\operatorname{mean\_loss}
+= \frac{\operatorname{loss\_count}}{N}.
+\]
 
 ## Score-function 推导
 
-对某个 location `l`，事件分布为：
+对某个 location \(l\)，事件分布为：
 
-```text
-e_l ~ p_l(e; lambda_l)
-```
+\[
+e_l \sim p_l(e;\lambda_l).
+\]
 
 score 定义为：
 
-```text
-s_l(tau) = d log p_l(e_l; lambda_l) / d lambda_l
-```
+\[
+s_l(\tau)
+=
+\frac{\partial \log p_l(e_l;\lambda_l)}
+{\partial \lambda_l}.
+\]
 
 对目标函数求导：
 
-```text
-dJ / d lambda_l
-  = d / d lambda_l sum_tau P_lambda(tau) L_loss(tau)
-  = sum_tau P_lambda(tau) L_loss(tau) d log P_lambda(tau) / d lambda_l
-```
+\[
+\frac{\partial J}{\partial \lambda_l}
+=
+\frac{\partial}{\partial \lambda_l}
+\sum_\tau P_\lambda(\tau)L_{\mathrm{loss}}(\tau)
+=
+\sum_\tau
+P_\lambda(\tau)L_{\mathrm{loss}}(\tau)
+\frac{\partial \log P_\lambda(\tau)}{\partial \lambda_l}.
+\]
 
 NPSim 的 stochastic noise locations 独立采样，且 measurement 随机性在给定噪声事件后不显式依赖
-`lambda_l`。因此：
+\(\lambda_l\)。因此：
 
-```text
-d log P_lambda(tau) / d lambda_l = d log p_l(e_l; lambda_l) / d lambda_l = s_l(tau)
-```
+\[
+\frac{\partial \log P_\lambda(\tau)}{\partial \lambda_l}
+=
+\frac{\partial \log p_l(e_l;\lambda_l)}{\partial \lambda_l}
+=
+s_l(\tau).
+\]
 
 于是：
 
-```text
-dJ / d lambda_l = E[L_loss(tau) s_l(tau)]
-```
+\[
+\frac{\partial J}{\partial \lambda_l}
+=
+\mathbb{E}
+\left[
+L_{\mathrm{loss}}(\tau)s_l(\tau)
+\right].
+\]
 
-加入 baseline `b`：
+加入 baseline \(b\)：
 
-```text
-E[(L_loss(tau) - b) s_l(tau)]
-  = E[L_loss(tau) s_l(tau)] - b E[s_l(tau)]
-```
+\[
+\mathbb{E}
+\left[
+\left(L_{\mathrm{loss}}(\tau)-b\right)s_l(\tau)
+\right]
+=
+\mathbb{E}
+\left[
+L_{\mathrm{loss}}(\tau)s_l(\tau)
+\right]
+-
+b\,\mathbb{E}[s_l(\tau)].
+\]
 
 而：
 
-```text
-E[s_l]
-  = sum_e p_l(e; lambda_l) d log p_l(e; lambda_l) / d lambda_l
-  = sum_e d p_l(e; lambda_l) / d lambda_l
-  = d / d lambda_l sum_e p_l(e; lambda_l)
-  = d(1) / d lambda_l
-  = 0
-```
+\[
+\mathbb{E}[s_l]
+=
+\sum_e
+p_l(e;\lambda_l)
+\frac{\partial \log p_l(e;\lambda_l)}{\partial \lambda_l}
+=
+\sum_e
+\frac{\partial p_l(e;\lambda_l)}{\partial \lambda_l}
+=
+\frac{\partial}{\partial \lambda_l}
+\sum_e p_l(e;\lambda_l)
+=
+0.
+\]
 
 所以 baseline 不改变真实期望，只影响有限样本估计的方差。当前实现默认：
 
-```text
-b = mean_loss
-```
+\[
+b = \operatorname{mean\_loss}.
+\]
 
 也可以显式传入 numeric baseline。
 
@@ -136,43 +184,53 @@ b = mean_loss
 
 实现中使用裁剪后的概率：
 
-```text
-p = clamp(rate, 1e-12, 1 - 1e-12)
-score_event = 1 / p
-score_no_event = -1 / (1 - p)
-```
+\[
+p = \operatorname{clamp}(\lambda, 10^{-12}, 1-10^{-12}),
+\qquad
+s_{\mathrm{event}} = \frac{1}{p},
+\qquad
+s_{\mathrm{no\ event}} = -\frac{1}{1-p}.
+\]
 
 ### Bernoulli Pauli
 
 `BernoulliPauliNoise(P)`:
 
-```text
-Pr(I) = 1 - lambda
-Pr(P) = lambda
-```
+\[
+\Pr(I)=1-\lambda,
+\qquad
+\Pr(P)=\lambda.
+\]
 
 score:
 
-```text
-s =  1 / lambda       if P occurred
-s = -1 / (1-lambda)   if I occurred
-```
+\[
+s =
+\begin{cases}
+\frac{1}{\lambda}, & \text{if } P \text{ occurred},\\
+-\frac{1}{1-\lambda}, & \text{if } I \text{ occurred}.
+\end{cases}
+\]
 
 ### Measurement Bit Flip
 
 `MeasurementBitFlip()` attached to a measurement:
 
-```text
-Pr(no flip) = 1 - lambda
-Pr(flip) = lambda
-```
+\[
+\Pr(\text{no flip})=1-\lambda,
+\qquad
+\Pr(\text{flip})=\lambda.
+\]
 
 score:
 
-```text
-s =  1 / lambda       if flip occurred
-s = -1 / (1-lambda)   otherwise
-```
+\[
+s =
+\begin{cases}
+\frac{1}{\lambda}, & \text{if flip occurred},\\
+-\frac{1}{1-\lambda}, & \text{otherwise}.
+\end{cases}
+\]
 
 The event mask records flip occurrence.
 
@@ -180,129 +238,183 @@ The event mask records flip occurrence.
 
 `SingleQubitDepolarizing()`:
 
-```text
-Pr(I) = 1 - lambda
-Pr(X) = lambda / 3
-Pr(Y) = lambda / 3
-Pr(Z) = lambda / 3
-```
+\[
+\Pr(I)=1-\lambda,
+\qquad
+\Pr(X)=\Pr(Y)=\Pr(Z)=\frac{\lambda}{3}.
+\]
 
-NPSim records one event bit for `X`/`Y`/`Z` occurrence:
+NPSim records one event bit for \(X/Y/Z\) occurrence:
 
-```text
-s =  1 / lambda       if event in {X, Y, Z}
-s = -1 / (1-lambda)   if event is I
-```
+\[
+s =
+\begin{cases}
+\frac{1}{\lambda}, & \text{if event is in } \{X,Y,Z\},\\
+-\frac{1}{1-\lambda}, & \text{if event is } I.
+\end{cases}
+\]
 
 ### Two-qubit Depolarizing
 
 `TwoQubitDepolarizing()` samples one of the 15 non-identity two-qubit Paulis when an event occurs:
 
-```text
-Pr(II) = 1 - lambda
-Pr(P) = lambda / 15   for P in {IX, IY, ..., ZZ}
-```
+\[
+\Pr(II)=1-\lambda,
+\qquad
+\Pr(P)=\frac{\lambda}{15}
+\quad
+\text{for } P\in\{IX,IY,\ldots,ZZ\}.
+\]
 
 score:
 
-```text
-s =  1 / lambda       if P != II
-s = -1 / (1-lambda)   if P = II
-```
+\[
+s =
+\begin{cases}
+\frac{1}{\lambda}, & \text{if } P \ne II,\\
+-\frac{1}{1-\lambda}, & \text{if } P=II.
+\end{cases}
+\]
 
 ### Pauli Channel
 
 `PauliChannel({P_i: w_i})`:
 
-```text
-Pr(I...I) = 1 - lambda
-Pr(P_i) = lambda * w_i / sum_j w_j
-```
+\[
+\Pr(I\cdots I)=1-\lambda,
+\qquad
+\Pr(P_i)=
+\lambda
+\frac{w_i}{\sum_j w_j}.
+\]
 
 score for rate sensitivity:
 
-```text
-s =  1 / lambda       if any non-identity channel event occurred
-s = -1 / (1-lambda)   otherwise
-```
+\[
+s =
+\begin{cases}
+\frac{1}{\lambda}, & \text{if any non-identity channel event occurred},\\
+-\frac{1}{1-\lambda}, & \text{otherwise}.
+\end{cases}
+\]
 
-The derivative is with respect to `lambda`, not `w_i`.
+The derivative is with respect to \(\lambda\), not \(w_i\).
 
 ## Packed Forward 计数公式
 
 Forward hotspot aggregation in `compute_packed_estimate` uses only packed counts.
 
-For a location `l`:
+For a location \(l\):
 
-```text
-event_mask = E_l
-loss = F & A
-loss_count = popcount(loss)
-event_count = popcount(event_mask)
-no_event_count = N - event_count
-loss_event_count = popcount(loss & event_mask)
-loss_no_event_count = loss_count - loss_event_count
-```
+\[
+\begin{aligned}
+E &= E_l,\\
+F_A &= F \mathbin{\&} A,\\
+\operatorname{loss\_count} &= \operatorname{popcount}(F_A),\\
+\operatorname{event\_count} &= \operatorname{popcount}(E),\\
+\operatorname{no\_event\_count} &= N-\operatorname{event\_count},\\
+\operatorname{loss\_event\_count} &= \operatorname{popcount}(F_A \mathbin{\&} E),\\
+\operatorname{loss\_no\_event\_count}
+&=
+\operatorname{loss\_count}
+-
+\operatorname{loss\_event\_count}.
+\end{aligned}
+\]
 
 Scores:
 
-```text
-p = clamp(lambda_l, 1e-12, 1 - 1e-12)
-event_score = 1 / p
-no_event_score = -1 / (1 - p)
-```
+\[
+p = \operatorname{clamp}(\lambda_l, 10^{-12}, 1-10^{-12}),
+\qquad
+s_1 = \frac{1}{p},
+\qquad
+s_0 = -\frac{1}{1-p}.
+\]
 
 The summed score over loss shots:
 
-```text
-sum_loss_score =
-    loss_event_count * event_score
-  + loss_no_event_count * no_event_score
-```
+\[
+\operatorname{sum\_loss\_score}
+=
+\operatorname{loss\_event\_count}\,s_1
++
+\operatorname{loss\_no\_event\_count}\,s_0.
+\]
 
 The summed score over all shots:
 
-```text
-sum_score =
-    event_count * event_score
-  + no_event_count * no_event_score
-```
+\[
+\operatorname{sum\_score}
+=
+\operatorname{event\_count}\,s_1
++
+\operatorname{no\_event\_count}\,s_0.
+\]
 
-With baseline `b`:
+With baseline \(b\):
 
-```text
-sensitivity_l = (sum_loss_score - b * sum_score) / N
-hotspot_l = abs(sensitivity_l)
-```
+\[
+\operatorname{sensitivity}_l
+=
+\frac{
+\operatorname{sum\_loss\_score}
+-
+b\,\operatorname{sum\_score}
+}{N},
+\qquad
+\operatorname{hotspot}_l
+=
+\left|\operatorname{sensitivity}_l\right|.
+\]
 
 This is exactly the finite-sample estimator:
 
-```text
-sensitivity_l = (1/N) sum_k (F_k - b) s_{k,l}
-```
-
-where `F_k` is the kth bit of the clipped loss mask.
+\[
+\operatorname{sensitivity}_l
+=
+\frac{1}{N}
+\sum_{k=0}^{N-1}
+(F_k-b)s_{k,l},
+\qquad
+F_k=\operatorname{bit}_k(F_A).
+\]
 
 ## Tag 聚合
 
 Forward result location hotspots are aggregated by metadata tags:
 
-```text
-by_qubit[q] = sum_{l: q in location.qubits} hotspot_l
-by_round[r] = sum_{l: location.tags["round"] == r} hotspot_l
-by_gate[g] = sum_{l: location.tags["gate"] == g} hotspot_l
-by_operation[o] = sum_{l: location.tags["operation"] == o} hotspot_l
-```
+\[
+\begin{aligned}
+\operatorname{by\_qubit}[q]
+&=
+\sum_{l:\ q\in\operatorname{qubits}(l)}
+\operatorname{hotspot}_l,\\
+\operatorname{by\_round}[r]
+&=
+\sum_{l:\ \operatorname{tags}(l)[\text{"round"}]=r}
+\operatorname{hotspot}_l,\\
+\operatorname{by\_gate}[g]
+&=
+\sum_{l:\ \operatorname{tags}(l)[\text{"gate"}]=g}
+\operatorname{hotspot}_l,\\
+\operatorname{by\_operation}[o]
+&=
+\sum_{l:\ \operatorname{tags}(l)[\text{"operation"}]=o}
+\operatorname{hotspot}_l.
+\end{aligned}
+\]
 
 These aggregations use absolute hotspot values, not signed sensitivities.
 
 ## Detector Error Model 语义
 
-DEM 将物理 noise event 映射到 detector flips 和 logical observable flips：
+DEM 将物理 noise event 映射到 detector flips 和 logical observable flips。每条 edge 记录：
 
-```text
-edge e = (p_e, DeltaD_e, DeltaL_e, location_id, event_label, tags)
-```
+\[
+e =
+(p_e,\Delta D_e,\Delta L_e,\operatorname{location\_id},\operatorname{event\_label},\operatorname{tags}).
+\]
 
 Stim-like text:
 
@@ -310,7 +422,7 @@ Stim-like text:
 error(p_e) D0 D3 L0
 ```
 
-含义：当 edge `e` 发生时，把列出的 detector bits 和 logical observable bits 全部 xor 一次。
+含义：当 edge \(e\) 发生时，把列出的 detector bits 和 logical observable bits 全部 xor 一次。
 
 ## 单错误传播生成 DEM
 
@@ -340,81 +452,107 @@ detector/observable effects 在 reference 和 injected run 中可确定；随机
 `DemBatchHotspotSimulator` 不执行原始 stabilizer circuit，而是把每条 DEM edge 作为独立 Bernoulli
 instruction：
 
-```text
-f_e ~ Bernoulli(p_e)
-D_i = xor_{e: i in DeltaD_e} f_e
-O_a = xor_{e: a in DeltaL_e} f_e
-```
+\[
+f_e \sim \operatorname{Bernoulli}(p_e),
+\qquad
+D_i = \bigoplus_{e:\ i\in\Delta D_e} f_e,
+\qquad
+O_a = \bigoplus_{e:\ a\in\Delta L_e} f_e.
+\]
 
 默认 DEM loss：
 
-```text
-R_a = O_a xor C_a
-F = OR_a R_a
-```
+\[
+R_a = O_a \oplus C_a,
+\qquad
+F = \bigvee_a R_a.
+\]
 
-如果没有 decoder/correction，`C_a = 0`。
+如果没有 decoder/correction，\(C_a=0\)。
 
 注意：DEM sampling 的多个 edges 独立采样；它符合普通 DEM 语义，但不保留同一 physical
 location 下多个 Pauli events 在 forward trajectory 中的互斥 categorical 关系。
 
 ## DEM hotspot 公式
 
-DEM edge-level sensitivity 对 edge probability `p_e` 求导。实现使用与 forward path 相同的 packed
+DEM edge-level sensitivity 对 edge probability \(p_e\) 求导。实现使用与 forward path 相同的 packed
 counting formula，只是把 `event_mask` 换成 `edge_event_masks[e]`，把 rate 换成 edge probability：
 
-```text
-p = clamp(p_e, 1e-12, 1 - 1e-12)
-event_score = 1 / p
-no_event_score = -1 / (1 - p)
-
-sensitivity_e =
-  (sum_loss_score_e - b * sum_score_e) / N
-
-hotspot_e = abs(sensitivity_e)
-```
+\[
+\begin{aligned}
+p &= \operatorname{clamp}(p_e, 10^{-12}, 1-10^{-12}),\\
+s_1 &= \frac{1}{p},\\
+s_0 &= -\frac{1}{1-p},\\
+\operatorname{sensitivity}_e
+&=
+\frac{
+\operatorname{sum\_loss\_score}_e
+-
+b\,\operatorname{sum\_score}_e
+}{N},\\
+\operatorname{hotspot}_e
+&=
+\left|\operatorname{sensitivity}_e\right|.
+\end{aligned}
+\]
 
 其中：
 
-```text
-sum_loss_score_e =
-    popcount(F & E_e) * event_score
-  + (popcount(F) - popcount(F & E_e)) * no_event_score
-
-sum_score_e =
-    popcount(E_e) * event_score
-  + (N - popcount(E_e)) * no_event_score
-```
+\[
+\begin{aligned}
+\operatorname{sum\_loss\_score}_e
+&=
+\operatorname{popcount}(F_A \mathbin{\&} E_e)\,s_1
++
+\left(
+\operatorname{popcount}(F_A)
+-
+\operatorname{popcount}(F_A \mathbin{\&} E_e)
+\right)s_0,\\
+\operatorname{sum\_score}_e
+&=
+\operatorname{popcount}(E_e)\,s_1
++
+\left(N-\operatorname{popcount}(E_e)\right)s_0.
+\end{aligned}
+\]
 
 ## DEM location 聚合
 
-同一 `location_id` 的 DEM edges 被聚合成 location-level sensitivity。设 location `l` 对应 edge
-集合 `G_l`：
+同一 `location_id` 的 DEM edges 被聚合成 location-level sensitivity。设 location \(l\) 对应 edge
+集合 \(G_l\)：
 
-```text
-P_l = sum_{e in G_l} p_e
-```
+\[
+P_l = \sum_{e\in G_l} p_e.
+\]
 
-若 `P_l > 0`：
+若 \(P_l>0\)：
 
-```text
-weight_e = p_e / P_l
-```
+\[
+\operatorname{weight}_e = \frac{p_e}{P_l}.
+\]
 
-若 `P_l = 0`，实现使用均匀权重：
+若 \(P_l=0\)，实现使用均匀权重：
 
-```text
-weight_e = 1 / |G_l|
-```
+\[
+\operatorname{weight}_e = \frac{1}{|G_l|}.
+\]
 
 location sensitivity:
 
-```text
-sensitivity_l = sum_{e in G_l} weight_e * sensitivity_e
-hotspot_l = abs(sensitivity_l)
-```
+\[
+\operatorname{sensitivity}_l
+=
+\sum_{e\in G_l}
+\operatorname{weight}_e\,
+\operatorname{sensitivity}_e,
+\qquad
+\operatorname{hotspot}_l
+=
+\left|\operatorname{sensitivity}_l\right|.
+\]
 
-DEM tag aggregations按 `location_id` 聚合后的 `hotspot_l` 计算。
+DEM tag aggregations 按 `location_id` 聚合后的 \(\operatorname{hotspot}_l\) 计算。
 
 ## Detector graph 投影
 
@@ -423,9 +561,9 @@ DEM tag aggregations按 `location_id` 聚合后的 `hotspot_l` 计算。
 
 每条 DEM edge 有 key：
 
-```text
-(detector_tuple, observable_tuple)
-```
+\[
+(\operatorname{detector\_tuple},\operatorname{observable\_tuple}).
+\]
 
 例如：
 
@@ -447,25 +585,32 @@ DEM tag aggregations按 `location_id` 聚合后的 `hotspot_l` 计算。
 
 ## PyMatching 数学接口
 
-PyMatching decoder 从 graphlike DEM 构造 matching problem。给定 edges `e = 0..E-1`：
+PyMatching decoder 从 graphlike DEM 构造 matching problem。给定 edges \(e=0,\ldots,E-1\)，
+check matrix 为：
 
-check matrix:
+\[
+H_{i,e} =
+\begin{cases}
+1, & \text{if detector } D_i \text{ is flipped by edge } e,\\
+0, & \text{otherwise}.
+\end{cases}
+\]
 
-```text
-H[i, e] = 1 iff detector D_i is flipped by edge e
-```
+fault matrix 为：
 
-fault matrix:
-
-```text
-F[a, e] = 1 iff logical observable L_a is flipped by edge e
-```
+\[
+F_{a,e} =
+\begin{cases}
+1, & \text{if logical observable } L_a \text{ is flipped by edge } e,\\
+0, & \text{otherwise}.
+\end{cases}
+\]
 
 edge weight:
 
-```text
-w_e = log((1 - p_e) / p_e)
-```
+\[
+w_e = \log \frac{1-p_e}{p_e}.
+\]
 
 PyMatching 输入 detector syndrome，输出 predicted logical correction masks：
 

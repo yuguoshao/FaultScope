@@ -1,0 +1,8 @@
+.md-typeset div.arithmatex {
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+
+.md-typeset .arithmatex mjx-container[display="true"] {
+  margin: 1em 0;
+}
