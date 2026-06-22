@@ -412,6 +412,23 @@ circuit_with_declarations = Circuit(
 dem = generate_native_dem(circuit_with_declarations)
 ```
 
+For repeated DEM generation or direct DEM-sampler compilation from the same
+circuit, compile a reusable native generator:
+
+```python
+from npsim.runtime import compile_native_dem_generator
+
+generator = compile_native_dem_generator(circuit_with_declarations)
+
+dem = generator.generate_dem()
+another_dem = generator.generate()
+light_sampler = generator.compile_sampler(materialize_dem=False)
+```
+
+The returned `DetectorErrorModel` behaves like a full DEM. Native generation
+may defer Python edge object construction until `.edges`, `to_dem_text()`, or
+`edges_by_location()` is accessed.
+
 Use DEM generation when:
 
 - You want a compact detector-level representation.
@@ -456,6 +473,26 @@ Use DEM sampling when:
 DEM estimates support the same decoder and callback shape as forward
 estimates, but batch objects contain detector, observable, and edge-event masks
 instead of full circuit measurement/frame state.
+
+For maximum sampling throughput when you do not need DEM metadata, compile a
+light native DEM sampler directly from the circuit:
+
+```python
+from npsim.runtime import compile_native_dem_sampler_from_circuit
+
+light_sampler = compile_native_dem_sampler_from_circuit(
+    circuit_with_declarations,
+    materialize_dem=False,
+)
+
+assert light_sampler.dem is None
+batch = light_sampler.run_batch(shots=4096, seed=7)
+```
+
+Choose the full path, `compile_native_dem_sampler(dem)` or
+`materialize_dem=True`, when you need location ids, events, tags, hotspot
+tables, or result objects that reference DEM metadata. The light path is for
+detector, observable, and edge-event masks.
 
 ## Workflow: PyMatching Decoding
 
@@ -721,11 +758,12 @@ Benchmark output is tab-separated. Use the `status` column to distinguish
 successful comparisons from optional dependency skips.
 `dem_throughput.py` reports native full DEM generation, native detector-only
 DEM generation, reusable native generator compile time, compiled-generator DEM
-generation time, light sampler compile time, Stim DEM generation, and detector
-sampling throughput. The light sampler column uses `materialize_dem=False`;
-that path is intended for detector/observable sampling throughput and returns
-a sampler with `dem is None`, so APIs that need full DEM metadata reject it
-with `ValueError`.
+generation time, light sampler compile time, Stim DEM generation, native and
+Stim detector sampling throughput, throughput ratios, and a `status` check for
+DEM/sample-rate consistency. The light sampler column uses
+`materialize_dem=False`; that path is intended for detector/observable
+sampling throughput and returns a sampler with `dem is None`, so APIs that need
+full DEM metadata reject it with `ValueError`.
 
 ## Rust Core Usage
 
@@ -831,6 +869,18 @@ rerunning with independent seeds.
 
 Default logical loss requires observable masks in the batch. Construct the
 simulator with observables or supply `loss_mask_fn` explicitly.
+
+### I Mutated A Python Operation-Like Object; Will Native DEM See It?
+
+Native `Operation`, `NoiseLocation`, and `Circuit` objects are frozen and are
+the recommended high-performance path. Duck-typed Python objects with the same
+attributes are accepted for compatibility, but they are treated as mutable and
+reparsed from their current attributes instead of using native cache state.
+For performance-critical loops, build circuits with native constructors such
+as `Operation.noise(...)` and `NoiseLocation(...)`.
+
+`NoiseLocation.tags` returns a shallow copy. Add tags at construction time; do
+not rely on mutating the returned dict to change stored metadata.
 
 ### Should I Use `rng` Or `seed`?
 

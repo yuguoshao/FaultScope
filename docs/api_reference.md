@@ -62,6 +62,14 @@ Read-only attributes:
 - `qubits: tuple[int, ...]`
 - `tags: dict[str, object]`
 
+`NoiseLocation` is a frozen native object. The constructor copies `tags`, and
+the `tags` getter returns a shallow copy, so mutating `location.tags` does not
+change the stored noise metadata. Native `Circuit`, `Operation`, and
+`NoiseLocation` objects are the recommended fast path. Duck-typed Python
+objects with the same attributes are still accepted by native parsers for
+compatibility, but they are reparsed from their current attributes instead of
+participating in native cache fast paths.
+
 `Operation` can be constructed directly, but most code should use the static
 constructors:
 
@@ -152,8 +160,8 @@ multiply_pauli_rows(left_x, left_z, right_x, right_z)
 ```
 
 `PauliFrame` and `StabilizerState` are PyO3-backed Python classes used by the
-runtime and by reference tests. They expose forward Clifford, Pauli, reset, and
-measurement helpers for source-level Python workflows.
+runtime and compatibility tests. They expose forward Clifford, Pauli, reset,
+and measurement helpers for source-level Python workflows.
 
 ### Forward Runtime
 
@@ -247,11 +255,29 @@ circuit cannot be compiled, DEM generation fails, or sampling is unsupported.
 
 `NativePackedSampler`, `NativeDemGenerator`, and `NativeDemSampler` are
 advanced handles used by the public simulator facades. `NativeDemGenerator`
-reuses the compiled native DEM event plan: `generate_dem()` returns a full
-`DetectorErrorModel`, while `compile_sampler(materialize_dem=False)` compiles
-a sampler from native edge specs without constructing a Python DEM. In that
-light mode, `sampler.dem` is `None` and APIs requiring full DEM metadata raise
-`ValueError`.
+reuses native DEM compilation state across calls.
+
+`NativeDemGenerator` methods:
+
+```python
+generate_dem() -> DetectorErrorModel
+generate() -> DetectorErrorModel
+compile_sampler(*, materialize_dem=True) -> NativeDemSampler
+```
+
+`generate_native_dem(...)`, `NativeDemGenerator.generate_dem()`, and
+`DetectorErrorModelGenerator.generate()` all return a full public
+`DetectorErrorModel`. Internally, native-generated DEMs may defer Python edge
+object construction until metadata is accessed, but public methods such as
+`.edges`, `to_dem_text()`, and `edges_by_location()` keep the same behavior.
+
+`compile_sampler(materialize_dem=False)` and
+`compile_native_dem_sampler_from_circuit(..., materialize_dem=False)` compile a
+sampler from native edge specs without constructing a Python
+`DetectorErrorModel`. In that light mode, `sampler.dem is None`; the sampler is
+intended for detector, observable, and edge-event sampling. APIs that require
+full DEM metadata, such as location/tag-aware estimate and hotspot reporting,
+raise `ValueError`.
 
 Example:
 
@@ -273,6 +299,7 @@ dem_result = dem_sampler.estimate_default(4096, seed=7, top_k=5)
 
 generator = compile_native_dem_generator(circuit)
 detector_dem = generator.generate_dem()
+same_generator_dem = generator.generate()
 light_sampler = generator.compile_sampler(materialize_dem=False)
 assert light_sampler.dem is None
 
@@ -307,7 +334,9 @@ Methods:
 - `to_dem_line() -> str`
 
 `DetectorErrorModel(detectors, observables, edges)` stores a typed detector
-error model.
+error model. Native-generated models may keep the core representation lazily
+until you inspect edge metadata; this is an implementation detail and does not
+change the public interface.
 
 Methods:
 

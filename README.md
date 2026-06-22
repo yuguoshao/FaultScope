@@ -6,7 +6,7 @@
 
 - `crates/npsim-core`：Python 无关的 typed Rust core，承载 circuit/DEM 数据模型、batch sampling、DEM generation、hotspot 估计等主体逻辑。
 - `crates/npsim-python`：PyO3 binding crate，构建 Python 模块 `npsim._npsim_native`。
-- `npsim/`：轻量 Python package surface，保留 re-export、typing helper、PyMatching/Stim/Pillow adapters、benchmark 和 reference-test 入口。
+- `npsim/`：轻量 Python package surface，保留 re-export、typing helper、PyMatching/Stim/Pillow adapters 和 benchmark 入口；测试中的外部对照主要通过 Stim helper 完成。
 
 英文文档站点见 [NPSim Documentation](https://yuguoshao.github.io/NPSim/)。
 本地文档见 [NPSim User Guide](docs/user_guide.md) 和
@@ -500,6 +500,37 @@ sampler = compile_native_sampler(circuit)
 batch = sampler.sample(shots=100_000, seed=1)
 ```
 
+DEM 路径也有可复用 native generator。`generate_native_dem()` 返回完整
+`DetectorErrorModel`；如果同一个 circuit 要反复生成 DEM 或直接编译 DEM sampler，
+可以先编译 generator：
+
+```python
+from npsim.runtime import (
+    compile_native_dem_generator,
+    compile_native_dem_sampler_from_circuit,
+    generate_native_dem,
+)
+
+dem = generate_native_dem(circuit)
+
+generator = compile_native_dem_generator(circuit)
+same_dem = generator.generate_dem()
+light_sampler = generator.compile_sampler(materialize_dem=False)
+
+direct_light_sampler = compile_native_dem_sampler_from_circuit(
+    circuit,
+    materialize_dem=False,
+)
+```
+
+`materialize_dem=False` 是轻量采样路径：它直接生成 sampler edge specs，不构造
+Python `DetectorErrorModel`。返回 sampler 的 `dem` 为 `None`，适合 detector /
+observable / edge-event mask 采样；需要完整 DEM metadata 的 estimate/hotspot
+结果接口会抛出 `ValueError`。native `Operation`、`NoiseLocation`、`Circuit`
+是推荐高性能路径；兼容的 duck-typed Python 对象仍可被解析，但会按当前属性重读，
+不进入 native cache fast path。`NoiseLocation.tags` 返回 shallow copy，tags 应在
+构造时设置。
+
 普通采样吞吐基准使用 measurement-only fast path，避免为 hotspot 额外生成
 `noise_event_masks` 和 final Pauli frame：
 
@@ -582,7 +613,7 @@ cargo test --workspace
 .venv/bin/python benchmarks/hotspot_throughput.py --distances 9 13 21 --rounds 3 --shots 100000
 ```
 
-默认场景是 rotated surface-code memory；`--family random-clifford` 会生成固定种子的随机 Clifford layer circuit，最后测量所有 qubits。random Clifford benchmark 可用 `--noise-rate` 和 `--noise-model depolarizing1|x` 在每层后加入单比特噪声，并用 `--measurement-noise-rate` 加测量 bit-flip。benchmark 的外部对照统一使用 Stim：`sampling_throughput.py` 报告 Stim bit-packed sampler 吞吐，`dem_throughput.py` 默认同时报告 repetition code 和 rotated surface-code 的 Stim DEM generation 与 DEM detector sampling，并把 native detector-only DEM 路径拆成 `native_det_generator_compile_s`、`native_det_compiled_gen_s` 和 `native_det_light_compile_s`。其中 light compile 对应 `materialize_dem=False`，会直接生成 sampler edge specs 而不构造 Python `DetectorErrorModel`；返回的 `sampler.dem` 为 `None`，需要完整 DEM metadata 的 estimate/hotspot API 会抛出 `ValueError`。`status` 列检查 native/Stim DEM 与 detector sample rate 是否一致，`hotspot_throughput.py` 报告 native hotspot 路径并附带 Stim raw/DEM sampling 基线。运行这些 benchmark 需要安装 `stim`。
+默认场景是 rotated surface-code memory；`--family random-clifford` 会生成固定种子的随机 Clifford layer circuit，最后测量所有 qubits。random Clifford benchmark 可用 `--noise-rate` 和 `--noise-model depolarizing1|x` 在每层后加入单比特噪声，并用 `--measurement-noise-rate` 加测量 bit-flip。benchmark 的外部对照统一使用 Stim：`sampling_throughput.py` 报告 Stim bit-packed sampler 吞吐，`dem_throughput.py` 默认同时报告 repetition code 和 rotated surface-code 的 Stim DEM generation 与 DEM detector sampling，并拆分 native full DEM generation、native detector-only DEM generation、reusable generator compile、compiled-generator generation、light sampler compile、native/Stim detector sampling throughput 和 ratio。light compile 对应 `materialize_dem=False`，会直接生成 sampler edge specs 而不构造 Python `DetectorErrorModel`；返回的 `sampler.dem` 为 `None`，需要完整 DEM metadata 的 estimate/hotspot API 会抛出 `ValueError`。`status` 列检查 native/Stim DEM 与 detector sample rate 是否一致，`hotspot_throughput.py` 报告 native hotspot 路径并附带 Stim raw/DEM sampling 基线。运行这些 benchmark 需要安装 `stim`。
 `hotspot_throughput.py` 同时报告全链路 estimate 和预生成 batch 上的纯 hotspot
 聚合阶段。Stim 不提供等价的 hotspot aggregation，因此这里不报告 Stim hotspot ratio；纯聚合阶段仍包含把完整 public result payload 转成 Python mapping 的兼容成本。
 
