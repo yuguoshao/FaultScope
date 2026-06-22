@@ -60,6 +60,23 @@ impl DemBatchHotspotSimulator {
         })
     }
 
+    /// Build a simulator for sampling only, without hotspot location metadata.
+    pub fn from_sampling_parts(
+        detector_ids: Vec<i64>,
+        observable_ids: Vec<i64>,
+        edges: Vec<DemSamplerEdge>,
+    ) -> NpResult<Self> {
+        for edge in &edges {
+            edge.validate()?;
+        }
+        Ok(Self {
+            detector_ids,
+            observable_ids,
+            edges,
+            location_groups: Vec::new(),
+        })
+    }
+
     /// Run DEM sampling for `shots`.
     pub fn run_batch(
         &self,

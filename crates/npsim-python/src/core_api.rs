@@ -2,11 +2,12 @@ use crate::*;
 
 #[pyclass(name = "NoiseLocation", module = "npsim._npsim_native", frozen)]
 pub(crate) struct PyNoiseLocation {
-    id: String,
-    model: Py<PyAny>,
-    rate: f64,
-    qubits: Vec<usize>,
-    tags: Py<PyAny>,
+    pub(crate) id: String,
+    pub(crate) model: Py<PyAny>,
+    pub(crate) rate: f64,
+    pub(crate) qubits: Vec<usize>,
+    pub(crate) tags: Py<PyAny>,
+    pub(crate) core_tags: Option<HashMap<String, TagValue>>,
 }
 
 #[pymethods]
@@ -26,12 +27,15 @@ impl PyNoiseLocation {
                 "noise rate must be in [0, 1], got {rate}"
             )));
         }
+        let tags = mapping_to_dict(py, tags)?;
+        let core_tags = parse_tags_mapping(tags.bind(py)).ok();
         Ok(Self {
             id,
             model,
             rate,
             qubits,
-            tags: mapping_to_dict(py, tags)?,
+            tags,
+            core_tags,
         })
     }
 
@@ -77,15 +81,16 @@ impl PyNoiseLocation {
 
 #[pyclass(name = "Operation", module = "npsim._npsim_native", frozen)]
 pub(crate) struct PyOperation {
-    kind: String,
-    qubits: Vec<usize>,
-    key: Option<String>,
-    basis: String,
-    pauli: Option<String>,
-    measurement_keys: Vec<String>,
-    observable_id: Option<i64>,
-    noise_location: Option<Py<PyAny>>,
-    metadata: Py<PyAny>,
+    pub(crate) kind: String,
+    pub(crate) qubits: Vec<usize>,
+    pub(crate) key: Option<String>,
+    pub(crate) basis: String,
+    pub(crate) pauli: Option<String>,
+    pub(crate) measurement_keys: Vec<String>,
+    pub(crate) observable_id: Option<i64>,
+    pub(crate) noise_location: Option<Py<PyAny>>,
+    pub(crate) metadata: Py<PyAny>,
+    pub(crate) core_op: Option<npsim_core::Operation>,
 }
 
 #[pymethods]
@@ -125,6 +130,7 @@ impl PyOperation {
             observable_id,
             noise_location,
             metadata: mapping_to_dict(py, metadata)?,
+            core_op: None,
         })
     }
 
@@ -231,14 +237,15 @@ impl PyOperation {
     ) -> PyResult<Self> {
         Ok(Self {
             kind: "pauli".to_string(),
-            qubits,
+            qubits: qubits.clone(),
             key: None,
             basis: "Z".to_string(),
-            pauli: Some(pauli),
+            pauli: Some(pauli.clone()),
             measurement_keys: Vec::new(),
             observable_id: None,
             noise_location: None,
             metadata: kwargs_to_dict(py, metadata)?.into(),
+            core_op: Some(npsim_core::Operation::Pauli { qubits, pauli }),
         })
     }
 
@@ -249,10 +256,14 @@ impl PyOperation {
         location: Py<PyAny>,
         metadata: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Self> {
-        let qubits = location
-            .bind(py)
-            .getattr("qubits")?
-            .extract::<Vec<usize>>()?;
+        let core_location = parse_noise_location_object(location.bind(py)).ok();
+        let qubits = match &core_location {
+            Some(location) => location.qubits.clone(),
+            None => location
+                .bind(py)
+                .getattr("qubits")?
+                .extract::<Vec<usize>>()?,
+        };
         Ok(Self {
             kind: "noise".to_string(),
             qubits,
@@ -263,6 +274,7 @@ impl PyOperation {
             observable_id: None,
             noise_location: Some(location),
             metadata: kwargs_to_dict(py, metadata)?.into(),
+            core_op: core_location.map(npsim_core::Operation::Noise),
         })
     }
 
@@ -276,16 +288,25 @@ impl PyOperation {
         noise: Option<Py<PyAny>>,
         metadata: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Self> {
+        let core_op = optional_native_noise_location(py, &noise)
+            .ok()
+            .map(|core_noise| npsim_core::Operation::Measure {
+                qubit,
+                key: key.clone(),
+                basis: basis.to_uppercase(),
+                noise: core_noise,
+            });
         Ok(Self {
             kind: "measure".to_string(),
             qubits: vec![qubit],
-            key,
+            key: key.clone(),
             basis: basis.to_string(),
             pauli: None,
             measurement_keys: Vec::new(),
             observable_id: None,
             noise_location: noise,
             metadata: kwargs_to_dict(py, metadata)?.into(),
+            core_op,
         })
     }
 
@@ -299,16 +320,25 @@ impl PyOperation {
         noise: Option<Py<PyAny>>,
         metadata: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Self> {
+        let core_op = optional_native_noise_location(py, &noise)
+            .ok()
+            .map(|core_noise| npsim_core::Operation::MeasurePauli {
+                qubits: qubits.clone(),
+                pauli: pauli.clone(),
+                key: key.clone(),
+                noise: core_noise,
+            });
         Ok(Self {
             kind: "measure_pauli".to_string(),
-            qubits,
-            key,
+            qubits: qubits.clone(),
+            key: key.clone(),
             basis: "Z".to_string(),
-            pauli: Some(pauli),
+            pauli: Some(pauli.clone()),
             measurement_keys: Vec::new(),
             observable_id: None,
             noise_location: noise,
             metadata: kwargs_to_dict(py, metadata)?.into(),
+            core_op,
         })
     }
 
@@ -324,13 +354,18 @@ impl PyOperation {
         Ok(Self {
             kind: "reset".to_string(),
             qubits: vec![qubit],
-            key,
+            key: key.clone(),
             basis: basis.to_string(),
             pauli: None,
             measurement_keys: Vec::new(),
             observable_id: None,
             noise_location: None,
             metadata: kwargs_to_dict(py, metadata)?.into(),
+            core_op: Some(npsim_core::Operation::Reset {
+                qubit,
+                key,
+                basis: basis.to_uppercase(),
+            }),
         })
     }
 
@@ -348,17 +383,23 @@ impl PyOperation {
             Some(detector_id) => metadata.set_item("detector_id", detector_id)?,
             None => metadata.set_item("detector_id", py.None())?,
         }
-        metadata.set_item("coords", PyTuple::new(py, coords.unwrap_or_default())?)?;
+        let coords = coords.unwrap_or_default();
+        metadata.set_item("coords", PyTuple::new(py, &coords)?)?;
         Ok(Self {
             kind: "detector".to_string(),
             qubits: Vec::new(),
             key: None,
             basis: "Z".to_string(),
             pauli: None,
-            measurement_keys,
+            measurement_keys: measurement_keys.clone(),
             observable_id: None,
             noise_location: None,
             metadata: metadata.into(),
+            core_op: Some(npsim_core::Operation::Detector {
+                detector_id,
+                measurement_keys,
+                coords,
+            }),
         })
     }
 
@@ -376,10 +417,14 @@ impl PyOperation {
             key: None,
             basis: "Z".to_string(),
             pauli: None,
-            measurement_keys,
+            measurement_keys: measurement_keys.clone(),
             observable_id: Some(observable_id),
             noise_location: None,
             metadata: kwargs_to_dict(py, metadata)?.into(),
+            core_op: Some(npsim_core::Operation::ObservableInclude {
+                observable_id,
+                measurement_keys,
+            }),
         })
     }
 
@@ -475,6 +520,15 @@ impl PyOperation {
         qubits: Vec<usize>,
         metadata: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Self> {
+        let core_op = match kind {
+            "h" => Some(npsim_core::Operation::H(qubits[0])),
+            "s" => Some(npsim_core::Operation::S(qubits[0])),
+            "s_dag" => Some(npsim_core::Operation::SDag(qubits[0])),
+            "cx" => Some(npsim_core::Operation::Cx(qubits[0], qubits[1])),
+            "cz" => Some(npsim_core::Operation::Cz(qubits[0], qubits[1])),
+            "swap" => Some(npsim_core::Operation::Swap(qubits[0], qubits[1])),
+            _ => None,
+        };
         Ok(Self {
             kind: kind.to_string(),
             qubits,
@@ -485,24 +539,45 @@ impl PyOperation {
             observable_id: None,
             noise_location: None,
             metadata: kwargs_to_dict(py, metadata)?.into(),
+            core_op,
         })
     }
 }
 
 #[pyclass(name = "Circuit", module = "npsim._npsim_native", frozen)]
 pub(crate) struct PyCircuit {
-    n_qubits: usize,
-    operations: Vec<Py<PyAny>>,
+    pub(crate) n_qubits: usize,
+    pub(crate) operations: Vec<Py<PyAny>>,
+    pub(crate) core_circuit: Option<std::sync::Arc<npsim_core::Circuit>>,
+    pub(crate) core_event_plan: Option<std::sync::Arc<npsim_core::DemEventPlan>>,
 }
 
 #[pymethods]
 impl PyCircuit {
     #[new]
     #[pyo3(signature = (n_qubits, operations))]
-    pub(crate) fn new(n_qubits: usize, operations: Vec<Py<PyAny>>) -> Self {
+    pub(crate) fn new(py: Python<'_>, n_qubits: usize, operations: Vec<Py<PyAny>>) -> Self {
+        let core_operations = operations
+            .iter()
+            .map(|operation| parse_operation_object(operation.bind(py)))
+            .collect::<PyResult<Vec<_>>>()
+            .ok();
+        let core_circuit = core_operations.map(|operations| {
+            std::sync::Arc::new(npsim_core::Circuit {
+                n_qubits,
+                operations,
+            })
+        });
+        let core_event_plan = core_circuit.as_ref().and_then(|circuit| {
+            npsim_core::collect_dem_event_plan(&circuit.operations)
+                .ok()
+                .map(std::sync::Arc::new)
+        });
         Self {
             n_qubits,
             operations,
+            core_circuit,
+            core_event_plan,
         }
     }
 
@@ -683,6 +758,26 @@ pub(crate) struct PyDetectorErrorEdge {
     tags: Py<PyAny>,
 }
 
+impl PyDetectorErrorEdge {
+    pub(crate) fn from_core_parts(
+        probability: f64,
+        detectors: Vec<i64>,
+        observables: Vec<i64>,
+        location_id: String,
+        event: Py<PyAny>,
+        tags: Py<PyAny>,
+    ) -> Self {
+        Self {
+            probability,
+            detectors,
+            observables,
+            location_id,
+            event,
+            tags,
+        }
+    }
+}
+
 #[pymethods]
 impl PyDetectorErrorEdge {
     #[new]
@@ -784,6 +879,8 @@ impl PyDetectorErrorEdge {
 
 #[pyclass(name = "DetectorErrorModel", module = "npsim._npsim_native", frozen)]
 pub(crate) struct PyDetectorErrorModel {
+    core_dem: Option<npsim_core::DetectorErrorModel>,
+    core_lazy_dem: Option<npsim_core::LazyDetectorErrorModel>,
     detectors: Vec<Py<PyAny>>,
     observables: Vec<Py<PyAny>>,
     edges: Vec<Py<PyAny>>,
@@ -807,6 +904,8 @@ impl PyDetectorErrorModel {
         edges: Vec<Py<PyAny>>,
     ) -> Self {
         Self {
+            core_dem: None,
+            core_lazy_dem: None,
             detectors,
             observables,
             edges,
@@ -815,6 +914,18 @@ impl PyDetectorErrorModel {
 
     #[getter]
     pub(crate) fn detectors(&self, py: Python<'_>) -> PyResult<PyObject> {
+        if let Some(dem) = &self.core_dem {
+            let detectors = detectors_to_py_objects(py, &dem.detectors)?;
+            return Ok(
+                PyTuple::new(py, detectors.iter().map(|detector| detector.clone_ref(py)))?.into(),
+            );
+        }
+        if let Some(dem) = &self.core_lazy_dem {
+            let detectors = detectors_to_py_objects(py, &dem.detectors)?;
+            return Ok(
+                PyTuple::new(py, detectors.iter().map(|detector| detector.clone_ref(py)))?.into(),
+            );
+        }
         Ok(PyTuple::new(
             py,
             self.detectors.iter().map(|detector| detector.clone_ref(py)),
@@ -824,6 +935,26 @@ impl PyDetectorErrorModel {
 
     #[getter]
     pub(crate) fn observables(&self, py: Python<'_>) -> PyResult<PyObject> {
+        if let Some(dem) = &self.core_dem {
+            let observables = observables_to_py_objects(py, &dem.observables)?;
+            return Ok(PyTuple::new(
+                py,
+                observables
+                    .iter()
+                    .map(|observable| observable.clone_ref(py)),
+            )?
+            .into());
+        }
+        if let Some(dem) = &self.core_lazy_dem {
+            let observables = observables_to_py_objects(py, &dem.observables)?;
+            return Ok(PyTuple::new(
+                py,
+                observables
+                    .iter()
+                    .map(|observable| observable.clone_ref(py)),
+            )?
+            .into());
+        }
         Ok(PyTuple::new(
             py,
             self.observables
@@ -835,6 +966,15 @@ impl PyDetectorErrorModel {
 
     #[getter]
     pub(crate) fn edges(&self, py: Python<'_>) -> PyResult<PyObject> {
+        if let Some(dem) = &self.core_dem {
+            let edges = edges_to_py_objects(py, &dem.edges)?;
+            return Ok(PyTuple::new(py, edges.iter().map(|edge| edge.clone_ref(py)))?.into());
+        }
+        if let Some(dem) = &self.core_lazy_dem {
+            let dem = dem.materialize();
+            let edges = edges_to_py_objects(py, &dem.edges)?;
+            return Ok(PyTuple::new(py, edges.iter().map(|edge| edge.clone_ref(py)))?.into());
+        }
         Ok(PyTuple::new(py, self.edges.iter().map(|edge| edge.clone_ref(py)))?.into())
     }
 
@@ -846,34 +986,77 @@ impl PyDetectorErrorModel {
     ) -> PyResult<String> {
         let mut lines = Vec::<String>::new();
         if include_detector_coords {
-            for detector in &self.detectors {
-                let detector = detector.bind(py);
-                let detector_id = detector.getattr("id")?.extract::<i64>()?;
-                let coords = detector.getattr("coords")?.extract::<Vec<f64>>()?;
-                if coords.is_empty() {
-                    lines.push(format!("detector D{detector_id}"));
-                } else {
-                    let coords = coords
-                        .iter()
-                        .map(|coord| py_format_float(py, *coord, ".17g"))
-                        .collect::<PyResult<Vec<_>>>()?
-                        .join(", ");
-                    lines.push(format!("detector({coords}) D{detector_id}"));
+            if let Some(dem) = &self.core_dem {
+                for detector in &dem.detectors {
+                    lines.push(detector_dem_line(py, detector.id, &detector.coords)?);
+                }
+            } else if let Some(dem) = &self.core_lazy_dem {
+                for detector in &dem.detectors {
+                    lines.push(detector_dem_line(py, detector.id, &detector.coords)?);
+                }
+            } else {
+                for detector in &self.detectors {
+                    let detector = detector.bind(py);
+                    let detector_id = detector.getattr("id")?.extract::<i64>()?;
+                    let coords = detector.getattr("coords")?.extract::<Vec<f64>>()?;
+                    lines.push(detector_dem_line(py, detector_id, &coords)?);
                 }
             }
         }
-        for edge in &self.edges {
-            lines.push(
-                edge.bind(py)
-                    .call_method0("to_dem_line")?
-                    .extract::<String>()?,
-            );
+        if let Some(dem) = &self.core_dem {
+            for edge in &dem.edges {
+                lines.push(core_edge_dem_line(py, edge)?);
+            }
+        } else if let Some(dem) = &self.core_lazy_dem {
+            let dem = dem.materialize();
+            for edge in &dem.edges {
+                lines.push(core_edge_dem_line(py, edge)?);
+            }
+        } else {
+            for edge in &self.edges {
+                lines.push(
+                    edge.bind(py)
+                        .call_method0("to_dem_line")?
+                        .extract::<String>()?,
+                );
+            }
         }
         Ok(lines.join("\n"))
     }
 
     pub(crate) fn edges_by_location(&self, py: Python<'_>) -> PyResult<PyObject> {
         let out = PyDict::new(py);
+        if let Some(dem) = &self.core_dem {
+            let edges = edges_to_py_objects(py, &dem.edges)?;
+            for (core_edge, edge) in dem.edges.iter().zip(edges.iter()) {
+                let list = match out.get_item(core_edge.location_id.as_str())? {
+                    Some(list) => list.downcast::<PyList>()?.clone(),
+                    None => {
+                        let list = PyList::empty(py);
+                        out.set_item(core_edge.location_id.as_str(), &list)?;
+                        list
+                    }
+                };
+                list.append(edge.clone_ref(py))?;
+            }
+            return Ok(out.into());
+        }
+        if let Some(dem) = &self.core_lazy_dem {
+            let dem = dem.materialize();
+            let edges = edges_to_py_objects(py, &dem.edges)?;
+            for (core_edge, edge) in dem.edges.iter().zip(edges.iter()) {
+                let list = match out.get_item(core_edge.location_id.as_str())? {
+                    Some(list) => list.downcast::<PyList>()?.clone(),
+                    None => {
+                        let list = PyList::empty(py);
+                        out.set_item(core_edge.location_id.as_str(), &list)?;
+                        list
+                    }
+                };
+                list.append(edge.clone_ref(py))?;
+            }
+            return Ok(out.into());
+        }
         for edge in &self.edges {
             let edge = edge.bind(py);
             let location_id = edge.getattr("location_id")?.extract::<String>()?;
@@ -1048,7 +1231,58 @@ impl PyDetectorErrorModel {
 }
 
 impl PyDetectorErrorModel {
+    pub(crate) fn from_core_dem(dem: npsim_core::DetectorErrorModel) -> Self {
+        Self {
+            core_dem: Some(dem),
+            core_lazy_dem: None,
+            detectors: Vec::new(),
+            observables: Vec::new(),
+            edges: Vec::new(),
+        }
+    }
+
+    pub(crate) fn from_core_lazy_dem(dem: npsim_core::LazyDetectorErrorModel) -> Self {
+        Self {
+            core_dem: None,
+            core_lazy_dem: Some(dem),
+            detectors: Vec::new(),
+            observables: Vec::new(),
+            edges: Vec::new(),
+        }
+    }
+
     fn edge_views(&self, py: Python<'_>) -> PyResult<Vec<PyDemEdgeView>> {
+        if let Some(dem) = &self.core_dem {
+            return Ok(dem
+                .edges
+                .iter()
+                .map(|edge| {
+                    Ok(PyDemEdgeView {
+                        location_id: edge.location_id.clone(),
+                        event: dem_event_to_py(py, &edge.event)?,
+                        probability: edge.probability,
+                        detectors: edge.detectors.clone(),
+                        observables: edge.observables.clone(),
+                    })
+                })
+                .collect::<PyResult<Vec<_>>>()?);
+        }
+        if let Some(dem) = &self.core_lazy_dem {
+            let dem = dem.materialize();
+            return Ok(dem
+                .edges
+                .iter()
+                .map(|edge| {
+                    Ok(PyDemEdgeView {
+                        location_id: edge.location_id.clone(),
+                        event: dem_event_to_py(py, &edge.event)?,
+                        probability: edge.probability,
+                        detectors: edge.detectors.clone(),
+                        observables: edge.observables.clone(),
+                    })
+                })
+                .collect::<PyResult<Vec<_>>>()?);
+        }
         let mut out = Vec::with_capacity(self.edges.len());
         for edge in &self.edges {
             let edge = edge.bind(py);
@@ -1061,6 +1295,38 @@ impl PyDetectorErrorModel {
             });
         }
         Ok(out)
+    }
+}
+
+fn detector_dem_line(py: Python<'_>, detector_id: i64, coords: &[f64]) -> PyResult<String> {
+    if coords.is_empty() {
+        Ok(format!("detector D{detector_id}"))
+    } else {
+        let coords = coords
+            .iter()
+            .map(|coord| py_format_float(py, *coord, ".17g"))
+            .collect::<PyResult<Vec<_>>>()?
+            .join(", ");
+        Ok(format!("detector({coords}) D{detector_id}"))
+    }
+}
+
+fn core_edge_dem_line(py: Python<'_>, edge: &npsim_core::DetectorErrorEdge) -> PyResult<String> {
+    let mut targets: Vec<String> = edge
+        .detectors
+        .iter()
+        .map(|detector_id| format!("D{detector_id}"))
+        .collect();
+    targets.extend(
+        edge.observables
+            .iter()
+            .map(|observable_id| format!("L{observable_id}")),
+    );
+    let probability = py_format_float(py, edge.probability, ".17g")?;
+    if targets.is_empty() {
+        Ok(format!("error({probability})"))
+    } else {
+        Ok(format!("error({probability}) {}", targets.join(" ")))
     }
 }
 

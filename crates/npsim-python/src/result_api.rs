@@ -1412,7 +1412,7 @@ pub(crate) fn dem_hotspot_result_from_estimate(
 ) -> PyResult<PyDemHotspotResult> {
     let locations = PyDict::new(py);
     let mut location_ids = HashSet::<String>::new();
-    for edge in &sampler.edges {
+    for edge in &sampler.simulator.edges {
         if !location_ids.insert(edge.location_id.clone()) {
             continue;
         }
@@ -1498,6 +1498,7 @@ fn dem_edge_hotspot_row(
     edge_index: usize,
 ) -> PyResult<PyDemEdgeHotspotRow> {
     let edge = sampler
+        .simulator
         .edges
         .get(edge_index)
         .ok_or_else(|| PyValueError::new_err(format!("unknown DEM edge index {edge_index}")))?;

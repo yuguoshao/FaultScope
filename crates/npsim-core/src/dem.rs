@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use crate::{
     sparse_pauli_to_xz, word_count, Circuit, ConcreteStabilizer, DemEvent, DemSamplerEdge,
@@ -13,10 +14,11 @@ use crate::{
 /// caller.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DetectorErrorModelGenerator {
-    pub circuit: Circuit,
+    pub circuit: Arc<Circuit>,
     pub detectors: Vec<Detector>,
     pub observables: Vec<LogicalObservable>,
-    event_plan: DemEventPlan,
+    event_plan: Arc<DemEventPlan>,
+    measurement_plan: Option<DemMeasurementPlan>,
 }
 
 impl DetectorErrorModelGenerator {
@@ -32,88 +34,142 @@ impl DetectorErrorModelGenerator {
     ) -> NpResult<Self> {
         let detectors = detectors.unwrap_or_else(|| detectors_from_circuit(&circuit));
         let observables = observables.unwrap_or_else(|| observables_from_circuit(&circuit));
+        let event_plan = collect_dem_event_plan(&circuit.operations)?;
+        Self::new_with_event_plan(circuit, detectors, observables, event_plan)
+    }
+
+    /// Create a generator using a precompiled event plan for this circuit.
+    pub fn new_with_event_plan(
+        circuit: Circuit,
+        detectors: Vec<Detector>,
+        observables: Vec<LogicalObservable>,
+        event_plan: DemEventPlan,
+    ) -> NpResult<Self> {
+        Self::new_with_shared_event_plan(
+            Arc::new(circuit),
+            detectors,
+            observables,
+            Arc::new(event_plan),
+        )
+    }
+
+    /// Create a generator using shared circuit and event-plan ownership.
+    pub fn new_with_shared_event_plan(
+        circuit: Arc<Circuit>,
+        detectors: Vec<Detector>,
+        observables: Vec<LogicalObservable>,
+        event_plan: Arc<DemEventPlan>,
+    ) -> NpResult<Self> {
         validate_detector_ids(&detectors)?;
         validate_observable_ids(&observables)?;
         for observable in &observables {
             observable.validate()?;
         }
-        let event_plan = collect_dem_event_plan(&circuit.operations)?;
+        let measurement_plan =
+            if supports_product_reference_fast_path(circuit.n_qubits, &circuit.operations) {
+                Some(compile_dem_measurement_plan(
+                    &circuit.operations,
+                    &detectors,
+                    &observables,
+                )?)
+            } else {
+                None
+            };
         Ok(Self {
             circuit,
             detectors,
             observables,
             event_plan,
+            measurement_plan,
         })
     }
 
     /// Generate a typed detector error model.
     pub fn generate(&self) -> NpResult<DetectorErrorModel> {
-        let generated_edges = generate_dem_edges_from_plan(
+        Ok(self.generate_lazy()?.materialize())
+    }
+
+    /// Generate detector/observable edge structure while deferring metadata clones.
+    pub fn generate_lazy(&self) -> NpResult<LazyDetectorErrorModel> {
+        let edges = self.generate_edge_refs()?;
+        Ok(LazyDetectorErrorModel {
+            detectors: self.detectors.clone(),
+            observables: self.observables.clone(),
+            event_plan: self.event_plan.clone(),
+            edges,
+        })
+    }
+
+    fn generate_edges(&self) -> NpResult<Vec<GeneratedDemEdge>> {
+        if let Some(measurement_plan) = &self.measurement_plan {
+            return generate_indexed_product_dem_edges_from_plan(
+                self.circuit.n_qubits,
+                &self.circuit.operations,
+                measurement_plan,
+                &self.event_plan,
+            );
+        }
+        generate_dem_edges_from_plan(
             self.circuit.n_qubits,
             &self.circuit.operations,
             &self.detectors,
             &self.observables,
             &self.event_plan,
-        )?;
-        Ok(DetectorErrorModel {
-            detectors: self.detectors.clone(),
-            observables: self.observables.clone(),
-            edges: generated_edges_to_detector_edges(&self.circuit, generated_edges),
-        })
+        )
+    }
+
+    fn generate_edge_refs(&self) -> NpResult<Vec<GeneratedDemEdgeRef>> {
+        if let Some(measurement_plan) = &self.measurement_plan {
+            return generate_indexed_product_dem_edge_refs_from_plan(
+                self.circuit.n_qubits,
+                &self.circuit.operations,
+                measurement_plan,
+                &self.event_plan,
+            );
+        }
+        generate_dem_edge_refs_from_plan(
+            self.circuit.n_qubits,
+            &self.circuit.operations,
+            &self.detectors,
+            &self.observables,
+            &self.event_plan,
+        )
     }
 
     /// Generate only the edge metadata required by the native DEM sampler.
     pub fn generate_sampler_edges(&self) -> NpResult<Vec<DemSamplerEdge>> {
-        let generated_edges = generate_dem_edges_from_plan(
+        let generated_edges = self.generate_edges()?;
+        Ok(generated_edges_to_sampler_edges(generated_edges))
+    }
+
+    /// Generate sampling-only edges without location/event/tag metadata.
+    pub fn generate_sampling_edges(&self) -> NpResult<Vec<DemSamplerEdge>> {
+        if let Some(measurement_plan) = &self.measurement_plan {
+            return generate_indexed_product_sampling_edges_from_plan(
+                self.circuit.n_qubits,
+                &self.circuit.operations,
+                measurement_plan,
+                &self.event_plan,
+            );
+        }
+        generate_sampling_edges_from_plan(
             self.circuit.n_qubits,
             &self.circuit.operations,
             &self.detectors,
             &self.observables,
             &self.event_plan,
-        )?;
-        Ok(generated_edges_to_sampler_edges(
-            &self.circuit,
-            generated_edges,
-        ))
+        )
     }
 }
 
-fn generated_edges_to_detector_edges(
-    circuit: &Circuit,
-    generated_edges: Vec<GeneratedDemEdge>,
-) -> Vec<DetectorErrorEdge> {
-    let noise_locations = circuit.noise_locations();
-    generated_edges
-        .into_iter()
-        .map(|edge| DetectorErrorEdge {
-            probability: edge.probability,
-            detectors: edge.detectors,
-            observables: edge.observables,
-            tags: noise_locations
-                .get(&edge.location_id)
-                .map(|location| location.tags.clone())
-                .unwrap_or_default(),
-            location_id: edge.location_id,
-            event: edge.event,
-        })
-        .collect()
-}
-
-fn generated_edges_to_sampler_edges(
-    circuit: &Circuit,
-    generated_edges: Vec<GeneratedDemEdge>,
-) -> Vec<DemSamplerEdge> {
-    let noise_locations = circuit.noise_locations();
+fn generated_edges_to_sampler_edges(generated_edges: Vec<GeneratedDemEdge>) -> Vec<DemSamplerEdge> {
     generated_edges
         .into_iter()
         .map(|edge| DemSamplerEdge {
             probability: edge.probability,
             detectors: edge.detectors,
             observables: edge.observables,
-            tags: noise_locations
-                .get(&edge.location_id)
-                .map(|location| location.tags.clone())
-                .unwrap_or_default(),
+            tags: edge.tags,
             location_id: edge.location_id,
             event: edge.event,
         })
@@ -151,6 +207,15 @@ pub fn generate_dem_edges_from_plan(
     observables: &[LogicalObservable],
     event_plan: &DemEventPlan,
 ) -> NpResult<Vec<GeneratedDemEdge>> {
+    if supports_product_reference_fast_path(n_qubits, operations) {
+        let measurement_plan = compile_dem_measurement_plan(operations, detectors, observables)?;
+        return generate_indexed_product_dem_edges_from_plan(
+            n_qubits,
+            operations,
+            &measurement_plan,
+            event_plan,
+        );
+    }
     let events = &event_plan.events;
     let events_by_op = &event_plan.events_by_op;
     let mut state = DemSensitivityState::new(n_qubits, events.len());
@@ -173,6 +238,82 @@ pub fn generate_dem_edges_from_plan(
     ))
 }
 
+fn generate_dem_edge_refs_from_plan(
+    n_qubits: usize,
+    operations: &[Operation],
+    detectors: &[Detector],
+    observables: &[LogicalObservable],
+    event_plan: &DemEventPlan,
+) -> NpResult<Vec<GeneratedDemEdgeRef>> {
+    if supports_product_reference_fast_path(n_qubits, operations) {
+        let measurement_plan = compile_dem_measurement_plan(operations, detectors, observables)?;
+        return generate_indexed_product_dem_edge_refs_from_plan(
+            n_qubits,
+            operations,
+            &measurement_plan,
+            event_plan,
+        );
+    }
+    let events = &event_plan.events;
+    let events_by_op = &event_plan.events_by_op;
+    let mut state = DemSensitivityState::new(n_qubits, events.len());
+    for (op_index, operation) in operations.iter().enumerate() {
+        apply_sensitivity_operation(operation, op_index, events, events_by_op, &mut state)?;
+    }
+    let detector_sensitivities =
+        evaluate_sensitivity_detectors(&state.measurements, detectors, state.event_words)?;
+    let observable_sensitivities = evaluate_sensitivity_observables(
+        &state.measurements,
+        &state.x_frame,
+        &state.z_frame,
+        observables,
+        state.event_words,
+    )?;
+    Ok(assemble_dem_edge_refs(
+        events.len(),
+        detector_sensitivities,
+        observable_sensitivities,
+    ))
+}
+
+fn generate_sampling_edges_from_plan(
+    n_qubits: usize,
+    operations: &[Operation],
+    detectors: &[Detector],
+    observables: &[LogicalObservable],
+    event_plan: &DemEventPlan,
+) -> NpResult<Vec<DemSamplerEdge>> {
+    if supports_product_reference_fast_path(n_qubits, operations) {
+        let measurement_plan = compile_dem_measurement_plan(operations, detectors, observables)?;
+        return generate_indexed_product_sampling_edges_from_plan(
+            n_qubits,
+            operations,
+            &measurement_plan,
+            event_plan,
+        );
+    }
+    let events = &event_plan.events;
+    let events_by_op = &event_plan.events_by_op;
+    let mut state = DemSensitivityState::new(n_qubits, events.len());
+    for (op_index, operation) in operations.iter().enumerate() {
+        apply_sensitivity_operation(operation, op_index, events, events_by_op, &mut state)?;
+    }
+    let detector_sensitivities =
+        evaluate_sensitivity_detectors(&state.measurements, detectors, state.event_words)?;
+    let observable_sensitivities = evaluate_sensitivity_observables(
+        &state.measurements,
+        &state.x_frame,
+        &state.z_frame,
+        observables,
+        state.event_words,
+    )?;
+    Ok(assemble_sampling_edges(
+        events,
+        detector_sensitivities,
+        observable_sensitivities,
+    ))
+}
+
 fn assemble_generated_dem_edges(
     events: &[SensitivityEvent],
     detector_sensitivities: HashMap<i64, Mask>,
@@ -180,6 +321,18 @@ fn assemble_generated_dem_edges(
 ) -> Vec<GeneratedDemEdge> {
     let detector_sensitivities = sorted_sensitivities(detector_sensitivities);
     let observable_sensitivities = sorted_sensitivities(observable_sensitivities);
+    assemble_generated_dem_edges_from_sensitivities(
+        events,
+        detector_sensitivities,
+        observable_sensitivities,
+    )
+}
+
+fn assemble_generated_dem_edges_from_sensitivities(
+    events: &[SensitivityEvent],
+    detector_sensitivities: Vec<(i64, Mask)>,
+    observable_sensitivities: Vec<(i64, Mask)>,
+) -> Vec<GeneratedDemEdge> {
     let mut detector_flips_by_event =
         sensitivity_flips_by_event(&detector_sensitivities, events.len());
     let mut observable_flips_by_event =
@@ -198,6 +351,174 @@ fn assemble_generated_dem_edges(
             observables: observable_flips,
             location_id: event.location_id.clone(),
             event: event.event.clone(),
+            tags: event.tags.clone(),
+        });
+    }
+    edges
+}
+
+fn assemble_generated_dem_edges_from_flat_sensitivities(
+    events: &[SensitivityEvent],
+    detector_sensitivities: Vec<(i64, Vec<u64>)>,
+    observable_sensitivities: Vec<(i64, Vec<u64>)>,
+) -> Vec<GeneratedDemEdge> {
+    let mut detector_flips_by_event =
+        flat_sensitivity_flips_by_event(&detector_sensitivities, events.len());
+    let mut observable_flips_by_event =
+        flat_sensitivity_flips_by_event(&observable_sensitivities, events.len());
+    let mut edges = Vec::new();
+
+    for (event_index, event) in events.iter().enumerate() {
+        let detector_flips = std::mem::take(&mut detector_flips_by_event[event_index]);
+        let observable_flips = std::mem::take(&mut observable_flips_by_event[event_index]);
+        if detector_flips.is_empty() && observable_flips.is_empty() {
+            continue;
+        }
+        edges.push(GeneratedDemEdge {
+            probability: event.probability,
+            detectors: detector_flips,
+            observables: observable_flips,
+            location_id: event.location_id.clone(),
+            event: event.event.clone(),
+            tags: event.tags.clone(),
+        });
+    }
+    edges
+}
+
+fn assemble_dem_edge_refs(
+    event_count: usize,
+    detector_sensitivities: HashMap<i64, Mask>,
+    observable_sensitivities: HashMap<i64, Mask>,
+) -> Vec<GeneratedDemEdgeRef> {
+    let detector_sensitivities = sorted_sensitivities(detector_sensitivities);
+    let observable_sensitivities = sorted_sensitivities(observable_sensitivities);
+    assemble_dem_edge_refs_from_sensitivities(
+        event_count,
+        detector_sensitivities,
+        observable_sensitivities,
+    )
+}
+
+fn assemble_dem_edge_refs_from_sensitivities(
+    event_count: usize,
+    detector_sensitivities: Vec<(i64, Mask)>,
+    observable_sensitivities: Vec<(i64, Mask)>,
+) -> Vec<GeneratedDemEdgeRef> {
+    let mut detector_flips_by_event =
+        sensitivity_flips_by_event(&detector_sensitivities, event_count);
+    let mut observable_flips_by_event =
+        sensitivity_flips_by_event(&observable_sensitivities, event_count);
+    let mut edges = Vec::new();
+
+    for event_index in 0..event_count {
+        let detector_flips = std::mem::take(&mut detector_flips_by_event[event_index]);
+        let observable_flips = std::mem::take(&mut observable_flips_by_event[event_index]);
+        if detector_flips.is_empty() && observable_flips.is_empty() {
+            continue;
+        }
+        edges.push(GeneratedDemEdgeRef {
+            event_index,
+            detectors: detector_flips,
+            observables: observable_flips,
+        });
+    }
+    edges
+}
+
+fn assemble_dem_edge_refs_from_flat_sensitivities(
+    event_count: usize,
+    detector_sensitivities: Vec<(i64, Vec<u64>)>,
+    observable_sensitivities: Vec<(i64, Vec<u64>)>,
+) -> Vec<GeneratedDemEdgeRef> {
+    let mut detector_flips_by_event =
+        flat_sensitivity_flips_by_event(&detector_sensitivities, event_count);
+    let mut observable_flips_by_event =
+        flat_sensitivity_flips_by_event(&observable_sensitivities, event_count);
+    let mut edges = Vec::new();
+
+    for event_index in 0..event_count {
+        let detector_flips = std::mem::take(&mut detector_flips_by_event[event_index]);
+        let observable_flips = std::mem::take(&mut observable_flips_by_event[event_index]);
+        if detector_flips.is_empty() && observable_flips.is_empty() {
+            continue;
+        }
+        edges.push(GeneratedDemEdgeRef {
+            event_index,
+            detectors: detector_flips,
+            observables: observable_flips,
+        });
+    }
+    edges
+}
+
+fn assemble_sampling_edges(
+    events: &[SensitivityEvent],
+    detector_sensitivities: HashMap<i64, Mask>,
+    observable_sensitivities: HashMap<i64, Mask>,
+) -> Vec<DemSamplerEdge> {
+    let detector_sensitivities = sorted_sensitivities(detector_sensitivities);
+    let observable_sensitivities = sorted_sensitivities(observable_sensitivities);
+    assemble_sampling_edges_from_sensitivities(
+        events,
+        detector_sensitivities,
+        observable_sensitivities,
+    )
+}
+
+fn assemble_sampling_edges_from_sensitivities(
+    events: &[SensitivityEvent],
+    detector_sensitivities: Vec<(i64, Mask)>,
+    observable_sensitivities: Vec<(i64, Mask)>,
+) -> Vec<DemSamplerEdge> {
+    let mut detector_flips_by_event =
+        sensitivity_flips_by_event(&detector_sensitivities, events.len());
+    let mut observable_flips_by_event =
+        sensitivity_flips_by_event(&observable_sensitivities, events.len());
+    let mut edges = Vec::new();
+
+    for (event_index, event) in events.iter().enumerate() {
+        let detector_flips = std::mem::take(&mut detector_flips_by_event[event_index]);
+        let observable_flips = std::mem::take(&mut observable_flips_by_event[event_index]);
+        if detector_flips.is_empty() && observable_flips.is_empty() {
+            continue;
+        }
+        edges.push(DemSamplerEdge {
+            probability: event.probability,
+            detectors: detector_flips,
+            observables: observable_flips,
+            location_id: String::new(),
+            event: DemEvent::Bool(false),
+            tags: HashMap::new(),
+        });
+    }
+    edges
+}
+
+fn assemble_sampling_edges_from_flat_sensitivities(
+    events: &[SensitivityEvent],
+    detector_sensitivities: Vec<(i64, Vec<u64>)>,
+    observable_sensitivities: Vec<(i64, Vec<u64>)>,
+) -> Vec<DemSamplerEdge> {
+    let mut detector_flips_by_event =
+        flat_sensitivity_flips_by_event(&detector_sensitivities, events.len());
+    let mut observable_flips_by_event =
+        flat_sensitivity_flips_by_event(&observable_sensitivities, events.len());
+    let mut edges = Vec::new();
+
+    for (event_index, event) in events.iter().enumerate() {
+        let detector_flips = std::mem::take(&mut detector_flips_by_event[event_index]);
+        let observable_flips = std::mem::take(&mut observable_flips_by_event[event_index]);
+        if detector_flips.is_empty() && observable_flips.is_empty() {
+            continue;
+        }
+        edges.push(DemSamplerEdge {
+            probability: event.probability,
+            detectors: detector_flips,
+            observables: observable_flips,
+            location_id: String::new(),
+            event: DemEvent::Bool(false),
+            tags: HashMap::new(),
         });
     }
     edges
@@ -280,12 +601,46 @@ pub struct GeneratedDemEdge {
     pub observables: Vec<i64>,
     pub location_id: String,
     pub event: DemEvent,
+    pub tags: HashMap<String, crate::TagValue>,
 }
 
-#[derive(Clone)]
-struct NoiseOccurrence {
-    op_index: usize,
-    location: NoiseLocation,
+#[derive(Debug, Clone, PartialEq)]
+pub struct GeneratedDemEdgeRef {
+    pub event_index: usize,
+    pub detectors: Vec<i64>,
+    pub observables: Vec<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct LazyDetectorErrorModel {
+    pub detectors: Vec<Detector>,
+    pub observables: Vec<LogicalObservable>,
+    pub event_plan: Arc<DemEventPlan>,
+    pub edges: Vec<GeneratedDemEdgeRef>,
+}
+
+impl LazyDetectorErrorModel {
+    pub fn materialize(&self) -> DetectorErrorModel {
+        DetectorErrorModel {
+            detectors: self.detectors.clone(),
+            observables: self.observables.clone(),
+            edges: self
+                .edges
+                .iter()
+                .map(|edge| {
+                    let event = &self.event_plan.events[edge.event_index];
+                    DetectorErrorEdge {
+                        probability: event.probability,
+                        detectors: edge.detectors.clone(),
+                        observables: edge.observables.clone(),
+                        location_id: event.location_id.clone(),
+                        event: event.event.clone(),
+                        tags: event.tags.clone(),
+                    }
+                })
+                .collect(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -294,6 +649,7 @@ struct SensitivityEvent {
     qubits: Vec<usize>,
     event: DemEvent,
     probability: f64,
+    tags: HashMap<String, crate::TagValue>,
 }
 
 struct DemSensitivityState {
@@ -317,34 +673,92 @@ impl DemSensitivityState {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ProductAxis {
+    X,
+    Y,
+    Z,
+}
+
+impl ProductAxis {
+    fn apply_h(self) -> Self {
+        match self {
+            Self::X => Self::Z,
+            Self::Y => Self::Y,
+            Self::Z => Self::X,
+        }
+    }
+
+    fn apply_s_ignoring_sign(self) -> Self {
+        match self {
+            Self::X => Self::Y,
+            Self::Y => Self::X,
+            Self::Z => Self::Z,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct IndexedDemDetector {
+    id: i64,
+    measurement_indices: Vec<usize>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct IndexedDemObservable {
+    id: i64,
+    measurement_indices: Vec<usize>,
+    pauli_qubits: Vec<usize>,
+    pauli: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct DemMeasurementPlan {
+    measurement_count: usize,
+    measurement_indices_by_op: Vec<Option<usize>>,
+    detectors: Vec<IndexedDemDetector>,
+    observables: Vec<IndexedDemObservable>,
+}
+
+struct IndexedProductSensitivityState {
+    basis: Vec<ProductAxis>,
+    x_frame: Vec<u64>,
+    z_frame: Vec<u64>,
+    measurements: Vec<u64>,
+    measurement_recorded: Vec<bool>,
+    event_words: usize,
+}
+
+impl IndexedProductSensitivityState {
+    fn new(n_qubits: usize, event_count: usize, measurement_count: usize) -> Self {
+        let event_words = word_count(event_count);
+        Self {
+            basis: vec![ProductAxis::Z; n_qubits],
+            x_frame: vec![0; n_qubits * event_words],
+            z_frame: vec![0; n_qubits * event_words],
+            measurements: vec![0; measurement_count * event_words],
+            measurement_recorded: vec![false; measurement_count],
+            event_words,
+        }
+    }
+}
+
 fn collect_sensitivity_events(
     operations: &[Operation],
 ) -> NpResult<(Vec<SensitivityEvent>, Vec<Vec<usize>>)> {
-    let occurrences = collect_noise_occurrences(operations)?;
     let mut events = Vec::new();
     let mut events_by_op = vec![Vec::new(); operations.len()];
-    for occurrence in occurrences {
-        for (event, probability) in non_identity_events(&occurrence.location)? {
-            let event_index = events.len();
-            events.push(SensitivityEvent {
-                location_id: occurrence.location.id.clone(),
-                qubits: occurrence.location.qubits.clone(),
-                event,
-                probability,
-            });
-            events_by_op[occurrence.op_index].push(event_index);
-        }
-    }
-    Ok((events, events_by_op))
-}
-
-fn collect_noise_occurrences(operations: &[Operation]) -> NpResult<Vec<NoiseOccurrence>> {
-    let mut out = Vec::new();
     let mut seen = HashSet::new();
     for (op_index, operation) in operations.iter().enumerate() {
         match operation {
             Operation::Noise(location) => {
-                collect_noise_occurrence(&mut out, &mut seen, op_index, location)?;
+                collect_sensitivity_events_for_location(
+                    &mut events,
+                    &mut events_by_op,
+                    &mut seen,
+                    op_index,
+                    location,
+                )?;
             }
             Operation::Measure {
                 noise: Some(location),
@@ -359,16 +773,23 @@ fn collect_noise_occurrences(operations: &[Operation]) -> NpResult<Vec<NoiseOccu
                         "DEM generation currently supports MeasurementBitFlip on measurement operations",
                     ));
                 }
-                collect_noise_occurrence(&mut out, &mut seen, op_index, location)?;
+                collect_sensitivity_events_for_location(
+                    &mut events,
+                    &mut events_by_op,
+                    &mut seen,
+                    op_index,
+                    location,
+                )?;
             }
             _ => {}
         }
     }
-    Ok(out)
+    Ok((events, events_by_op))
 }
 
-fn collect_noise_occurrence(
-    out: &mut Vec<NoiseOccurrence>,
+fn collect_sensitivity_events_for_location(
+    events: &mut Vec<SensitivityEvent>,
+    events_by_op: &mut [Vec<usize>],
     seen: &mut HashSet<String>,
     op_index: usize,
     location: &NoiseLocation,
@@ -379,10 +800,17 @@ fn collect_noise_occurrence(
             location.id
         )));
     }
-    out.push(NoiseOccurrence {
-        op_index,
-        location: location.clone(),
-    });
+    for (event, probability) in non_identity_events(location)? {
+        let event_index = events.len();
+        events.push(SensitivityEvent {
+            location_id: location.id.clone(),
+            qubits: location.qubits.clone(),
+            event,
+            probability,
+            tags: location.tags.clone(),
+        });
+        events_by_op[op_index].push(event_index);
+    }
     Ok(())
 }
 
@@ -429,6 +857,656 @@ fn non_identity_events(location: &NoiseLocation) -> NpResult<Vec<(DemEvent, f64)
                 })
                 .collect())
         }
+    }
+}
+
+fn supports_product_reference_fast_path(n_qubits: usize, operations: &[Operation]) -> bool {
+    let mut basis = vec![ProductAxis::Z; n_qubits];
+    for operation in operations {
+        match operation {
+            Operation::H(q) => {
+                let Some(axis) = basis.get_mut(*q) else {
+                    return false;
+                };
+                *axis = axis.apply_h();
+            }
+            Operation::S(q) | Operation::SDag(q) => {
+                let Some(axis) = basis.get_mut(*q) else {
+                    return false;
+                };
+                *axis = axis.apply_s_ignoring_sign();
+            }
+            Operation::Swap(left, right) => {
+                if *left >= basis.len() || *right >= basis.len() {
+                    return false;
+                }
+                basis.swap(*left, *right);
+            }
+            Operation::Reset {
+                qubit,
+                basis: reset_basis,
+                ..
+            } => {
+                if *qubit >= basis.len() {
+                    return false;
+                }
+                let Ok(axis) = product_axis_from_pauli_bytes(reset_basis.as_bytes()) else {
+                    return false;
+                };
+                basis[*qubit] = axis;
+            }
+            Operation::Cx(control, target) => {
+                if !z_product_pair(&basis, *control, *target) {
+                    return false;
+                }
+            }
+            Operation::Cz(left, right) => {
+                if !z_product_pair(&basis, *left, *right) {
+                    return false;
+                }
+            }
+            Operation::Pauli { .. }
+            | Operation::Noise(_)
+            | Operation::Measure { .. }
+            | Operation::MeasurePauli { .. }
+            | Operation::Detector { .. }
+            | Operation::ObservableInclude { .. } => {}
+        }
+    }
+    true
+}
+
+fn z_product_pair(basis: &[ProductAxis], left: usize, right: usize) -> bool {
+    matches!(
+        (basis.get(left), basis.get(right)),
+        (Some(ProductAxis::Z), Some(ProductAxis::Z))
+    )
+}
+
+fn compile_dem_measurement_plan(
+    operations: &[Operation],
+    detectors: &[Detector],
+    observables: &[LogicalObservable],
+) -> NpResult<DemMeasurementPlan> {
+    let required_keys = required_measurement_keys(detectors, observables);
+    let mut measurement_indices_by_op = vec![None; operations.len()];
+    let mut measurement_index_by_key = HashMap::<String, usize>::new();
+    let mut seen_measurement_keys = HashSet::<String>::new();
+    let mut operation_measurement_count = 0usize;
+    let mut indexed_measurement_count = 0usize;
+
+    for (op_index, operation) in operations.iter().enumerate() {
+        let key = match operation {
+            Operation::Measure { key, .. } | Operation::MeasurePauli { key, .. } => key
+                .clone()
+                .unwrap_or_else(|| format!("m{operation_measurement_count}")),
+            Operation::Reset { key: Some(key), .. } => key.clone(),
+            _ => continue,
+        };
+        operation_measurement_count += 1;
+        if !seen_measurement_keys.insert(key.clone()) {
+            return Err(NpError::new(format!("duplicate measurement key {key:?}")));
+        }
+        if required_keys.contains(&key) {
+            let measurement_index = indexed_measurement_count;
+            indexed_measurement_count += 1;
+            measurement_index_by_key.insert(key, measurement_index);
+            measurement_indices_by_op[op_index] = Some(measurement_index);
+        }
+    }
+
+    let mut indexed_detectors = detectors
+        .iter()
+        .map(|detector| {
+            Ok(IndexedDemDetector {
+                id: detector.id,
+                measurement_indices: measurement_indices_for_keys(
+                    &measurement_index_by_key,
+                    &detector.measurement_keys,
+                )?,
+            })
+        })
+        .collect::<NpResult<Vec<_>>>()?;
+    indexed_detectors.sort_by_key(|detector| detector.id);
+
+    let mut indexed_observables = observables
+        .iter()
+        .map(|observable| {
+            Ok(IndexedDemObservable {
+                id: observable.id,
+                measurement_indices: measurement_indices_for_keys(
+                    &measurement_index_by_key,
+                    &observable.measurement_keys,
+                )?,
+                pauli_qubits: observable.pauli_qubits.clone(),
+                pauli: observable.pauli.clone(),
+            })
+        })
+        .collect::<NpResult<Vec<_>>>()?;
+    indexed_observables.sort_by_key(|observable| observable.id);
+
+    Ok(DemMeasurementPlan {
+        measurement_count: indexed_measurement_count,
+        measurement_indices_by_op,
+        detectors: indexed_detectors,
+        observables: indexed_observables,
+    })
+}
+
+fn required_measurement_keys(
+    detectors: &[Detector],
+    observables: &[LogicalObservable],
+) -> HashSet<String> {
+    let mut keys = HashSet::new();
+    for detector in detectors {
+        keys.extend(detector.measurement_keys.iter().cloned());
+    }
+    for observable in observables {
+        keys.extend(observable.measurement_keys.iter().cloned());
+    }
+    keys
+}
+
+fn measurement_indices_for_keys(
+    measurement_index_by_key: &HashMap<String, usize>,
+    keys: &[String],
+) -> NpResult<Vec<usize>> {
+    keys.iter()
+        .map(|key| {
+            measurement_index_by_key
+                .get(key)
+                .copied()
+                .ok_or_else(|| NpError::new(format!("unknown measurement key {key:?}")))
+        })
+        .collect()
+}
+
+fn generate_indexed_product_dem_edges_from_plan(
+    n_qubits: usize,
+    operations: &[Operation],
+    measurement_plan: &DemMeasurementPlan,
+    event_plan: &DemEventPlan,
+) -> NpResult<Vec<GeneratedDemEdge>> {
+    let mut state = IndexedProductSensitivityState::new(
+        n_qubits,
+        event_plan.events.len(),
+        measurement_plan.measurement_count,
+    );
+    for (op_index, operation) in operations.iter().enumerate() {
+        apply_indexed_product_sensitivity_operation(
+            operation,
+            op_index,
+            &event_plan.events,
+            &event_plan.events_by_op,
+            measurement_plan,
+            &mut state,
+        )?;
+    }
+    let detector_sensitivities = evaluate_indexed_sensitivity_detectors(
+        &state.measurements,
+        &measurement_plan.detectors,
+        state.event_words,
+    )?;
+    let observable_sensitivities = evaluate_indexed_sensitivity_observables(
+        &state.measurements,
+        &state.x_frame,
+        &state.z_frame,
+        &measurement_plan.observables,
+        state.event_words,
+    )?;
+    Ok(assemble_generated_dem_edges_from_flat_sensitivities(
+        &event_plan.events,
+        detector_sensitivities,
+        observable_sensitivities,
+    ))
+}
+
+fn generate_indexed_product_dem_edge_refs_from_plan(
+    n_qubits: usize,
+    operations: &[Operation],
+    measurement_plan: &DemMeasurementPlan,
+    event_plan: &DemEventPlan,
+) -> NpResult<Vec<GeneratedDemEdgeRef>> {
+    let mut state = IndexedProductSensitivityState::new(
+        n_qubits,
+        event_plan.events.len(),
+        measurement_plan.measurement_count,
+    );
+    for (op_index, operation) in operations.iter().enumerate() {
+        apply_indexed_product_sensitivity_operation(
+            operation,
+            op_index,
+            &event_plan.events,
+            &event_plan.events_by_op,
+            measurement_plan,
+            &mut state,
+        )?;
+    }
+    let detector_sensitivities = evaluate_indexed_sensitivity_detectors(
+        &state.measurements,
+        &measurement_plan.detectors,
+        state.event_words,
+    )?;
+    let observable_sensitivities = evaluate_indexed_sensitivity_observables(
+        &state.measurements,
+        &state.x_frame,
+        &state.z_frame,
+        &measurement_plan.observables,
+        state.event_words,
+    )?;
+    Ok(assemble_dem_edge_refs_from_flat_sensitivities(
+        event_plan.events.len(),
+        detector_sensitivities,
+        observable_sensitivities,
+    ))
+}
+
+fn generate_indexed_product_sampling_edges_from_plan(
+    n_qubits: usize,
+    operations: &[Operation],
+    measurement_plan: &DemMeasurementPlan,
+    event_plan: &DemEventPlan,
+) -> NpResult<Vec<DemSamplerEdge>> {
+    let mut state = IndexedProductSensitivityState::new(
+        n_qubits,
+        event_plan.events.len(),
+        measurement_plan.measurement_count,
+    );
+    for (op_index, operation) in operations.iter().enumerate() {
+        apply_indexed_product_sensitivity_operation(
+            operation,
+            op_index,
+            &event_plan.events,
+            &event_plan.events_by_op,
+            measurement_plan,
+            &mut state,
+        )?;
+    }
+    let detector_sensitivities = evaluate_indexed_sensitivity_detectors(
+        &state.measurements,
+        &measurement_plan.detectors,
+        state.event_words,
+    )?;
+    let observable_sensitivities = evaluate_indexed_sensitivity_observables(
+        &state.measurements,
+        &state.x_frame,
+        &state.z_frame,
+        &measurement_plan.observables,
+        state.event_words,
+    )?;
+    Ok(assemble_sampling_edges_from_flat_sensitivities(
+        &event_plan.events,
+        detector_sensitivities,
+        observable_sensitivities,
+    ))
+}
+
+fn apply_indexed_product_sensitivity_operation(
+    operation: &Operation,
+    op_index: usize,
+    events: &[SensitivityEvent],
+    events_by_op: &[Vec<usize>],
+    measurement_plan: &DemMeasurementPlan,
+    state: &mut IndexedProductSensitivityState,
+) -> NpResult<()> {
+    match operation {
+        Operation::H(q) => {
+            state.basis[*q] = state.basis[*q].apply_h();
+            swap_flat_rows_between_frames(
+                &mut state.x_frame,
+                &mut state.z_frame,
+                *q,
+                state.event_words,
+            );
+        }
+        Operation::S(q) | Operation::SDag(q) => {
+            state.basis[*q] = state.basis[*q].apply_s_ignoring_sign();
+            xor_between_flat_frames(
+                &state.x_frame,
+                &mut state.z_frame,
+                *q,
+                *q,
+                state.event_words,
+            );
+        }
+        Operation::Swap(left, right) => {
+            state.basis.swap(*left, *right);
+            swap_flat_rows(&mut state.x_frame, *left, *right, state.event_words);
+            swap_flat_rows(&mut state.z_frame, *left, *right, state.event_words);
+        }
+        Operation::Cx(control, target) => {
+            if !z_product_pair(&state.basis, *control, *target) {
+                return Err(NpError::new(
+                    "product fast path received a Cx that entangles the reference state",
+                ));
+            }
+            xor_within_flat_frame(&mut state.x_frame, *target, *control, state.event_words);
+            xor_within_flat_frame(&mut state.z_frame, *control, *target, state.event_words);
+        }
+        Operation::Cz(left, right) => {
+            if !z_product_pair(&state.basis, *left, *right) {
+                return Err(NpError::new(
+                    "product fast path received a Cz that entangles the reference state",
+                ));
+            }
+            xor_between_flat_frames(
+                &state.x_frame,
+                &mut state.z_frame,
+                *left,
+                *right,
+                state.event_words,
+            );
+            xor_between_flat_frames(
+                &state.x_frame,
+                &mut state.z_frame,
+                *right,
+                *left,
+                state.event_words,
+            );
+        }
+        Operation::Pauli { .. } => {}
+        Operation::Noise(_) => {
+            apply_sensitivity_events_to_flat_frames(
+                events,
+                events_by_op,
+                op_index,
+                &mut state.x_frame,
+                &mut state.z_frame,
+                state.event_words,
+            )?;
+        }
+        Operation::Measure {
+            qubit, key, basis, ..
+        } => {
+            let qubits = [*qubit];
+            ensure_product_deterministic_measurement(&state.basis, &qubits, basis, key.as_deref())?;
+            if let Some(measurement_index) =
+                optional_indexed_measurement_op(measurement_plan, op_index)
+            {
+                record_flat_sensitivity_measurement(
+                    state,
+                    measurement_index,
+                    &qubits,
+                    basis,
+                    events,
+                    events_by_op,
+                    op_index,
+                )?;
+            }
+        }
+        Operation::MeasurePauli {
+            qubits, pauli, key, ..
+        } => {
+            ensure_product_deterministic_measurement(&state.basis, qubits, pauli, key.as_deref())?;
+            if let Some(measurement_index) =
+                optional_indexed_measurement_op(measurement_plan, op_index)
+            {
+                record_flat_sensitivity_measurement(
+                    state,
+                    measurement_index,
+                    qubits,
+                    pauli,
+                    events,
+                    events_by_op,
+                    op_index,
+                )?;
+            }
+        }
+        Operation::Reset { qubit, key, basis } => {
+            let qubits = [*qubit];
+            if key.is_some() {
+                ensure_product_deterministic_measurement(
+                    &state.basis,
+                    &qubits,
+                    basis,
+                    key.as_deref(),
+                )?;
+                if let Some(measurement_index) =
+                    optional_indexed_measurement_op(measurement_plan, op_index)
+                {
+                    record_flat_sensitivity_measurement(
+                        state,
+                        measurement_index,
+                        &qubits,
+                        basis,
+                        events,
+                        events_by_op,
+                        op_index,
+                    )?;
+                }
+            }
+            state.basis[*qubit] = product_axis_from_pauli_bytes(basis.as_bytes())?;
+            zero_flat_row(&mut state.x_frame, *qubit, state.event_words);
+            zero_flat_row(&mut state.z_frame, *qubit, state.event_words);
+        }
+        Operation::Detector { .. } | Operation::ObservableInclude { .. } => {}
+    }
+    Ok(())
+}
+
+fn optional_indexed_measurement_op(
+    measurement_plan: &DemMeasurementPlan,
+    op_index: usize,
+) -> Option<usize> {
+    measurement_plan
+        .measurement_indices_by_op
+        .get(op_index)
+        .and_then(|index| *index)
+}
+
+fn record_flat_sensitivity_measurement(
+    state: &mut IndexedProductSensitivityState,
+    measurement_index: usize,
+    qubits: &[usize],
+    pauli: &str,
+    events: &[SensitivityEvent],
+    events_by_op: &[Vec<usize>],
+    op_index: usize,
+) -> NpResult<()> {
+    if measurement_index >= state.measurement_recorded.len() {
+        return Err(NpError::new(format!(
+            "internal DEM measurement index {measurement_index} is out of range"
+        )));
+    }
+    if state.measurement_recorded[measurement_index] {
+        return Err(NpError::new(format!(
+            "duplicate DEM measurement index {measurement_index}"
+        )));
+    }
+    let range = flat_range(measurement_index, state.event_words);
+    state.measurements[range.clone()].fill(0);
+    xor_flat_frame_measurement_flip_into(
+        &mut state.measurements[range],
+        &state.x_frame,
+        &state.z_frame,
+        qubits,
+        pauli,
+        state.event_words,
+    )?;
+    xor_flat_measurement_noise_events(
+        &mut state.measurements[flat_range(measurement_index, state.event_words)],
+        events,
+        events_by_op,
+        op_index,
+    )?;
+    state.measurement_recorded[measurement_index] = true;
+    Ok(())
+}
+
+fn flat_range(index: usize, words: usize) -> std::ops::Range<usize> {
+    let start = index * words;
+    start..start + words
+}
+
+fn xor_word_slices(target: &mut [u64], source: &[u64]) {
+    for (left, right) in target.iter_mut().zip(source) {
+        *left ^= *right;
+    }
+}
+
+fn xor_within_flat_frame(frame: &mut [u64], target: usize, source: usize, words: usize) {
+    let target_start = target * words;
+    let source_start = source * words;
+    for word in 0..words {
+        let value = frame[source_start + word];
+        frame[target_start + word] ^= value;
+    }
+}
+
+fn xor_between_flat_frames(
+    source: &[u64],
+    target: &mut [u64],
+    source_index: usize,
+    target_index: usize,
+    words: usize,
+) {
+    let source_range = flat_range(source_index, words);
+    let target_range = flat_range(target_index, words);
+    xor_word_slices(&mut target[target_range], &source[source_range]);
+}
+
+fn swap_flat_rows(frame: &mut [u64], left: usize, right: usize, words: usize) {
+    if left == right {
+        return;
+    }
+    let left_start = left * words;
+    let right_start = right * words;
+    for word in 0..words {
+        frame.swap(left_start + word, right_start + word);
+    }
+}
+
+fn swap_flat_rows_between_frames(left: &mut [u64], right: &mut [u64], index: usize, words: usize) {
+    let range = flat_range(index, words);
+    for offset in range {
+        std::mem::swap(&mut left[offset], &mut right[offset]);
+    }
+}
+
+fn zero_flat_row(frame: &mut [u64], index: usize, words: usize) {
+    frame[flat_range(index, words)].fill(0);
+}
+
+fn apply_sensitivity_events_to_flat_frames(
+    events: &[SensitivityEvent],
+    events_by_op: &[Vec<usize>],
+    op_index: usize,
+    x_frame: &mut [u64],
+    z_frame: &mut [u64],
+    words: usize,
+) -> NpResult<()> {
+    for event_index in &events_by_op[op_index] {
+        if let DemEvent::Pauli(pauli) = &events[*event_index].event {
+            apply_sensitivity_pauli_string_to_flat_frames(
+                x_frame,
+                z_frame,
+                words,
+                &events[*event_index].qubits,
+                pauli,
+                *event_index,
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn apply_sensitivity_pauli_string_to_flat_frames(
+    x_frame: &mut [u64],
+    z_frame: &mut [u64],
+    words: usize,
+    qubits: &[usize],
+    pauli: &str,
+    event_index: usize,
+) -> NpResult<()> {
+    if qubits.len() != pauli.len() {
+        return Err(NpError::new("event Pauli length does not match qubits"));
+    }
+    for (qubit, local) in qubits.iter().zip(pauli.bytes()) {
+        match local {
+            b'I' => {}
+            b'X' => set_flat_event_bit(x_frame, *qubit, words, event_index),
+            b'Z' => set_flat_event_bit(z_frame, *qubit, words, event_index),
+            b'Y' => {
+                set_flat_event_bit(x_frame, *qubit, words, event_index);
+                set_flat_event_bit(z_frame, *qubit, words, event_index);
+            }
+            _ => {
+                return Err(NpError::new(format!(
+                    "unsupported Pauli {:?}",
+                    local as char
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn xor_flat_measurement_noise_events(
+    value: &mut [u64],
+    events: &[SensitivityEvent],
+    events_by_op: &[Vec<usize>],
+    op_index: usize,
+) -> NpResult<()> {
+    for event_index in &events_by_op[op_index] {
+        match &events[*event_index].event {
+            DemEvent::Bool(true) => set_event_bit_in_words(value, *event_index),
+            DemEvent::Bool(false) => {}
+            DemEvent::Pauli(_) => {
+                return Err(NpError::new("measurement noise event must be boolean"));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn xor_flat_frame_measurement_flip_into(
+    out: &mut [u64],
+    x_frame: &[u64],
+    z_frame: &[u64],
+    qubits: &[usize],
+    pauli: &str,
+    words: usize,
+) -> NpResult<()> {
+    if qubits.len() != pauli.len() {
+        return Err(NpError::new("qubits and pauli must have the same length"));
+    }
+    for (qubit, local) in qubits.iter().zip(pauli.as_bytes()) {
+        match *local {
+            b'I' => {}
+            b'X' => xor_word_slices(out, &z_frame[flat_range(*qubit, words)]),
+            b'Z' => xor_word_slices(out, &x_frame[flat_range(*qubit, words)]),
+            b'Y' => {
+                xor_word_slices(out, &x_frame[flat_range(*qubit, words)]);
+                xor_word_slices(out, &z_frame[flat_range(*qubit, words)]);
+            }
+            _ => {
+                return Err(NpError::new(format!(
+                    "unsupported Pauli {:?}",
+                    *local as char
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn set_flat_event_bit(frame: &mut [u64], row: usize, words: usize, event_index: usize) {
+    let word_index = event_index / 64;
+    if word_index >= words {
+        return;
+    }
+    let bit_index = event_index % 64;
+    let offset = row * words + word_index;
+    if let Some(word) = frame.get_mut(offset) {
+        *word |= 1u64 << bit_index;
+    }
+}
+
+fn set_event_bit_in_words(words: &mut [u64], event_index: usize) {
+    let word_index = event_index / 64;
+    let bit_index = event_index % 64;
+    if let Some(word) = words.get_mut(word_index) {
+        *word |= 1u64 << bit_index;
     }
 }
 
@@ -537,11 +1615,27 @@ fn apply_sensitivity_events(
     op_index: usize,
     state: &mut DemSensitivityState,
 ) -> NpResult<()> {
+    apply_sensitivity_events_to_frames(
+        events,
+        events_by_op,
+        op_index,
+        &mut state.x_frame,
+        &mut state.z_frame,
+    )
+}
+
+fn apply_sensitivity_events_to_frames(
+    events: &[SensitivityEvent],
+    events_by_op: &[Vec<usize>],
+    op_index: usize,
+    x_frame: &mut [Mask],
+    z_frame: &mut [Mask],
+) -> NpResult<()> {
     for event_index in &events_by_op[op_index] {
         if let DemEvent::Pauli(pauli) = &events[*event_index].event {
             apply_sensitivity_pauli_string(
-                &mut state.x_frame,
-                &mut state.z_frame,
+                x_frame,
+                z_frame,
                 &events[*event_index].qubits,
                 pauli,
                 *event_index,
@@ -549,6 +1643,51 @@ fn apply_sensitivity_events(
         }
     }
     Ok(())
+}
+
+fn ensure_product_deterministic_measurement(
+    basis: &[ProductAxis],
+    qubits: &[usize],
+    pauli: &str,
+    key: Option<&str>,
+) -> NpResult<()> {
+    if qubits.len() != pauli.len() {
+        return Err(NpError::new("qubits and pauli must have the same length"));
+    }
+    for (qubit, local) in qubits.iter().zip(pauli.as_bytes()) {
+        if *local == b'I' {
+            continue;
+        }
+        if product_axis_from_pauli_byte(*local)? != basis[*qubit] {
+            return Err(NpError::new(format!(
+                "measurement {:?} is random in the ideal/single-error circuit",
+                key.unwrap_or("measure")
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn product_axis_from_pauli_bytes(pauli: &[u8]) -> NpResult<ProductAxis> {
+    if pauli.len() != 1 {
+        return Err(NpError::new(format!(
+            "product reset basis must be a single-qubit Pauli, got {:?}",
+            String::from_utf8_lossy(pauli)
+        )));
+    }
+    product_axis_from_pauli_byte(pauli[0])
+}
+
+fn product_axis_from_pauli_byte(pauli: u8) -> NpResult<ProductAxis> {
+    match pauli {
+        b'X' => Ok(ProductAxis::X),
+        b'Y' => Ok(ProductAxis::Y),
+        b'Z' => Ok(ProductAxis::Z),
+        _ => Err(NpError::new(format!(
+            "unsupported Pauli {:?}",
+            pauli as char
+        ))),
+    }
 }
 
 fn apply_sensitivity_pauli_string(
@@ -706,6 +1845,54 @@ fn evaluate_sensitivity_observables(
     Ok(out)
 }
 
+fn evaluate_indexed_sensitivity_detectors(
+    measurements: &[u64],
+    detectors: &[IndexedDemDetector],
+    words: usize,
+) -> NpResult<Vec<(i64, Vec<u64>)>> {
+    let mut out = Vec::with_capacity(detectors.len());
+    for detector in detectors {
+        out.push((
+            detector.id,
+            sensitivity_measurement_index_parity(
+                measurements,
+                &detector.measurement_indices,
+                words,
+            )?,
+        ));
+    }
+    Ok(out)
+}
+
+fn evaluate_indexed_sensitivity_observables(
+    measurements: &[u64],
+    x_frame: &[u64],
+    z_frame: &[u64],
+    observables: &[IndexedDemObservable],
+    words: usize,
+) -> NpResult<Vec<(i64, Vec<u64>)>> {
+    let mut out = Vec::with_capacity(observables.len());
+    for observable in observables {
+        let mut value = sensitivity_measurement_index_parity(
+            measurements,
+            &observable.measurement_indices,
+            words,
+        )?;
+        if !observable.pauli.is_empty() {
+            xor_flat_frame_measurement_flip_into(
+                &mut value,
+                x_frame,
+                z_frame,
+                &observable.pauli_qubits,
+                &observable.pauli,
+                words,
+            )?;
+        }
+        out.push((observable.id, value));
+    }
+    Ok(out)
+}
+
 fn sensitivity_measurement_parity(
     measurements: &HashMap<String, Mask>,
     keys: &[String],
@@ -717,6 +1904,22 @@ fn sensitivity_measurement_parity(
             .get(key)
             .ok_or_else(|| NpError::new(format!("unknown measurement key {key:?}")))?;
         parity.xor_assign(value);
+    }
+    Ok(parity)
+}
+
+fn sensitivity_measurement_index_parity(
+    measurements: &[u64],
+    indices: &[usize],
+    words: usize,
+) -> NpResult<Vec<u64>> {
+    let mut parity = vec![0; words];
+    for index in indices {
+        let range = flat_range(*index, words);
+        let value = measurements
+            .get(range)
+            .ok_or_else(|| NpError::new(format!("unknown measurement index {index}")))?;
+        xor_word_slices(&mut parity, value);
     }
     Ok(parity)
 }
@@ -743,6 +1946,27 @@ fn sensitivity_flips_by_event(sensitivities: &[(i64, Mask)], event_count: usize)
     let mut out = vec![Vec::new(); event_count];
     for (id, mask) in sensitivities {
         for (word_index, word) in mask.words.iter().enumerate() {
+            let mut remaining = *word;
+            while remaining != 0 {
+                let bit = remaining.trailing_zeros() as usize;
+                let event_index = word_index * 64 + bit;
+                if event_index < event_count {
+                    out[event_index].push(*id);
+                }
+                remaining &= remaining - 1;
+            }
+        }
+    }
+    out
+}
+
+fn flat_sensitivity_flips_by_event(
+    sensitivities: &[(i64, Vec<u64>)],
+    event_count: usize,
+) -> Vec<Vec<i64>> {
+    let mut out = vec![Vec::new(); event_count];
+    for (id, words) in sensitivities {
+        for (word_index, word) in words.iter().enumerate() {
             let mut remaining = *word;
             while remaining != 0 {
                 let bit = remaining.trailing_zeros() as usize;

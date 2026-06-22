@@ -389,7 +389,7 @@ impl NativePackedBatch {
 #[pyclass]
 pub(crate) struct NativeDemSampler {
     pub(crate) observables: Vec<i64>,
-    pub(crate) edges: Vec<DemEdgeSpec>,
+    pub(crate) edge_count: usize,
     pub(crate) simulator: CoreDemBatchHotspotSimulator,
     pub(crate) py_dem: Option<Py<PyAny>>,
 }
@@ -421,7 +421,7 @@ impl NativeDemSampler {
 
     #[getter]
     pub(crate) fn edge_count(&self) -> usize {
-        self.edges.len()
+        self.edge_count
     }
 
     #[pyo3(signature = (shots, seed=None, return_edge_events=true, rng=None))]
@@ -579,9 +579,9 @@ impl NativeDemSampler {
 impl NativeDemGenerator {
     pub(crate) fn generate_dem(&self, py: Python<'_>) -> PyResult<PyDetectorErrorModel> {
         let dem = py
-            .allow_threads(|| self.generator.generate())
+            .allow_threads(|| self.generator.generate_lazy())
             .map_err(|err| PyValueError::new_err(err.to_string()))?;
-        detector_error_model_to_py(py, &dem)
+        detector_error_model_lazy_to_py(py, dem)
     }
 
     pub(crate) fn generate(&self, py: Python<'_>) -> PyResult<PyDetectorErrorModel> {
@@ -1018,9 +1018,9 @@ pub(crate) fn generate_dem(
     let generator =
         core_dem_generator_from_circuit(py, circuit, Some(detectors), Some(observables))?;
     let dem = generator
-        .generate()
+        .generate_lazy()
         .map_err(|err| PyValueError::new_err(err.to_string()))?;
-    detector_error_model_to_py(py, &dem)
+    detector_error_model_lazy_to_py(py, dem)
 }
 
 #[pyfunction]
@@ -1089,6 +1089,32 @@ fn core_dem_generator_from_circuit(
     detectors: Option<&Bound<'_, PyAny>>,
     observables: Option<&Bound<'_, PyAny>>,
 ) -> PyResult<CoreDetectorErrorModelGenerator> {
+    if let (Some(core_circuit), Some(event_plan)) = (
+        cached_core_circuit(circuit),
+        cached_core_event_plan(circuit),
+    ) {
+        let detector_specs = match detectors {
+            Some(items) if !items.is_none() => Some(parse_dem_detector_sequence(items)?),
+            _ => None,
+        };
+        let observable_specs = match observables {
+            Some(items) if !items.is_none() => Some(parse_dem_observable_sequence(items)?),
+            _ => None,
+        };
+        let detector_specs =
+            detector_specs.unwrap_or_else(|| npsim_core::detectors_from_circuit(&core_circuit));
+        let observable_specs =
+            observable_specs.unwrap_or_else(|| npsim_core::observables_from_circuit(&core_circuit));
+        return CoreDetectorErrorModelGenerator::new_with_shared_event_plan(
+            core_circuit,
+            detector_specs,
+            observable_specs,
+            event_plan,
+        )
+        .map_err(|err| PyValueError::new_err(err.to_string()));
+    }
+
+    let cached_event_plan = cached_core_event_plan(circuit);
     let core_circuit = parse_core_circuit_object(circuit)?;
     let detector_specs = match detectors {
         Some(items) if !items.is_none() => Some(parse_dem_detector_sequence(items)?),
@@ -1098,8 +1124,24 @@ fn core_dem_generator_from_circuit(
         Some(items) if !items.is_none() => Some(parse_dem_observable_sequence(items)?),
         _ => None,
     };
-    CoreDetectorErrorModelGenerator::new(core_circuit, detector_specs, observable_specs)
-        .map_err(|err| PyValueError::new_err(err.to_string()))
+    let detector_specs =
+        detector_specs.unwrap_or_else(|| npsim_core::detectors_from_circuit(&core_circuit));
+    let observable_specs =
+        observable_specs.unwrap_or_else(|| npsim_core::observables_from_circuit(&core_circuit));
+    match cached_event_plan {
+        Some(event_plan) => CoreDetectorErrorModelGenerator::new_with_shared_event_plan(
+            std::sync::Arc::new(core_circuit),
+            detector_specs,
+            observable_specs,
+            event_plan,
+        ),
+        None => CoreDetectorErrorModelGenerator::new(
+            core_circuit,
+            Some(detector_specs),
+            Some(observable_specs),
+        ),
+    }
+    .map_err(|err| PyValueError::new_err(err.to_string()))
 }
 
 fn native_dem_sampler_from_core_generator(
@@ -1124,7 +1166,7 @@ fn native_dem_sampler_from_core_generator(
         .map(|observable| observable.id)
         .collect();
     let edges = generator
-        .generate_sampler_edges()
+        .generate_sampling_edges()
         .map_err(|err| PyValueError::new_err(err.to_string()))?;
     native_dem_sampler_from_parts(detector_ids, observable_ids, edges, None)
 }
@@ -1153,7 +1195,7 @@ fn native_dem_sampler_from_core_dem(
         })
         .collect();
     let py_dem = if materialize_dem {
-        Some(Py::new(py, detector_error_model_to_py(py, &dem)?)?.into_any())
+        Some(Py::new(py, detector_error_model_to_py(py, dem)?)?.into_any())
     } else {
         None
     };
@@ -1180,12 +1222,16 @@ fn native_dem_sampler_from_parts(
     edges: Vec<DemEdgeSpec>,
     py_dem: Option<Py<PyAny>>,
 ) -> PyResult<NativeDemSampler> {
-    let simulator =
-        CoreDemBatchHotspotSimulator::from_parts(detectors, observables.clone(), edges.clone())
-            .map_err(|err| PyValueError::new_err(err.to_string()))?;
+    let edge_count = edges.len();
+    let simulator = if py_dem.is_some() {
+        CoreDemBatchHotspotSimulator::from_parts(detectors, observables.clone(), edges)
+    } else {
+        CoreDemBatchHotspotSimulator::from_sampling_parts(detectors, observables.clone(), edges)
+    }
+    .map_err(|err| PyValueError::new_err(err.to_string()))?;
     Ok(NativeDemSampler {
         observables,
-        edges,
+        edge_count,
         simulator,
         py_dem,
     })

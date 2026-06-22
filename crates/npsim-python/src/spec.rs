@@ -13,11 +13,44 @@ pub(crate) type Op = npsim_core::Operation;
 pub(crate) type DemEdgeSpec = npsim_core::DemSamplerEdge;
 
 pub(crate) fn parse_core_circuit_object(value: &Bound<'_, PyAny>) -> PyResult<npsim_core::Circuit> {
+    if let Ok(circuit) = value.extract::<PyRef<'_, PyCircuit>>() {
+        if let Some(core_circuit) = &circuit.core_circuit {
+            return Ok((**core_circuit).clone());
+        }
+        let py = value.py();
+        let operations = circuit
+            .operations
+            .iter()
+            .map(|operation| parse_operation_object(operation.bind(py)))
+            .collect::<PyResult<Vec<_>>>()?;
+        return Ok(npsim_core::Circuit {
+            n_qubits: circuit.n_qubits,
+            operations,
+        });
+    }
     let (n_qubits, operations) = parse_circuit_object(value)?;
     Ok(npsim_core::Circuit {
         n_qubits,
         operations,
     })
+}
+
+pub(crate) fn cached_core_circuit(
+    value: &Bound<'_, PyAny>,
+) -> Option<std::sync::Arc<npsim_core::Circuit>> {
+    value
+        .extract::<PyRef<'_, PyCircuit>>()
+        .ok()
+        .and_then(|circuit| circuit.core_circuit.clone())
+}
+
+pub(crate) fn cached_core_event_plan(
+    value: &Bound<'_, PyAny>,
+) -> Option<std::sync::Arc<npsim_core::DemEventPlan>> {
+    value
+        .extract::<PyRef<'_, PyCircuit>>()
+        .ok()
+        .and_then(|circuit| circuit.core_event_plan.clone())
 }
 
 pub(crate) fn parse_circuit_object(value: &Bound<'_, PyAny>) -> PyResult<(usize, Vec<Op>)> {
@@ -52,6 +85,9 @@ pub(crate) fn parse_operation_sequence(value: &Bound<'_, PyAny>) -> PyResult<Vec
 }
 
 pub(crate) fn parse_operation_object(value: &Bound<'_, PyAny>) -> PyResult<Op> {
+    if let Ok(operation) = value.extract::<PyRef<'_, PyOperation>>() {
+        return parse_native_operation_object(value.py(), &operation);
+    }
     let kind = required_attr(value, "kind", "Operation")?.extract::<String>()?;
     let qubits = required_attr(value, "qubits", "Operation")?.extract::<Vec<usize>>()?;
     match kind.as_str() {
@@ -135,6 +171,102 @@ pub(crate) fn parse_operation_object(value: &Bound<'_, PyAny>) -> PyResult<Op> {
     }
 }
 
+fn parse_native_operation_object(py: Python<'_>, operation: &PyOperation) -> PyResult<Op> {
+    if let Some(core_op) = &operation.core_op {
+        return Ok(core_op.clone());
+    }
+    match operation.kind.as_str() {
+        "h" => Ok(Op::H(one_qubit(&operation.qubits, "h")?)),
+        "s" => Ok(Op::S(one_qubit(&operation.qubits, "s")?)),
+        "s_dag" => Ok(Op::SDag(one_qubit(&operation.qubits, "s_dag")?)),
+        "cx" => {
+            let (a, b) = two_qubits(&operation.qubits, "cx")?;
+            Ok(Op::Cx(a, b))
+        }
+        "cz" => {
+            let (a, b) = two_qubits(&operation.qubits, "cz")?;
+            Ok(Op::Cz(a, b))
+        }
+        "swap" => {
+            let (a, b) = two_qubits(&operation.qubits, "swap")?;
+            Ok(Op::Swap(a, b))
+        }
+        "pauli" => Ok(Op::Pauli {
+            qubits: operation.qubits.clone(),
+            pauli: operation
+                .pauli
+                .clone()
+                .ok_or_else(|| PyValueError::new_err("pauli operation requires pauli"))?,
+        }),
+        "noise" => {
+            let location = operation
+                .noise_location
+                .as_ref()
+                .ok_or_else(|| PyValueError::new_err("noise operation requires noise_location"))?;
+            Ok(Op::Noise(parse_noise_location_object(location.bind(py))?))
+        }
+        "measure" => Ok(Op::Measure {
+            qubit: one_qubit(&operation.qubits, "measure")?,
+            key: operation.key.clone(),
+            basis: operation.basis.to_uppercase(),
+            noise: optional_native_noise_location(py, &operation.noise_location)?,
+        }),
+        "measure_pauli" => Ok(Op::MeasurePauli {
+            qubits: operation.qubits.clone(),
+            pauli: operation
+                .pauli
+                .clone()
+                .ok_or_else(|| PyValueError::new_err("measure_pauli operation requires pauli"))?,
+            key: operation.key.clone(),
+            noise: optional_native_noise_location(py, &operation.noise_location)?,
+        }),
+        "reset" => Ok(Op::Reset {
+            qubit: one_qubit(&operation.qubits, "reset")?,
+            key: operation.key.clone(),
+            basis: operation.basis.to_uppercase(),
+        }),
+        "detector" => {
+            let metadata = operation
+                .metadata
+                .bind(py)
+                .downcast::<PyDict>()
+                .map_err(|_| PyValueError::new_err("Operation.metadata must be a dict"))?;
+            let detector_id = match metadata.get_item("detector_id")? {
+                Some(item) if !item.is_none() => Some(item.extract::<i64>()?),
+                _ => None,
+            };
+            let coords = match metadata.get_item("coords")? {
+                Some(item) if !item.is_none() => item.extract::<Vec<f64>>()?,
+                _ => Vec::new(),
+            };
+            Ok(Op::Detector {
+                detector_id,
+                measurement_keys: operation.measurement_keys.clone(),
+                coords,
+            })
+        }
+        "observable_include" => Ok(Op::ObservableInclude {
+            observable_id: operation.observable_id.ok_or_else(|| {
+                PyValueError::new_err("observable_include requires observable_id")
+            })?,
+            measurement_keys: operation.measurement_keys.clone(),
+        }),
+        kind => Err(PyValueError::new_err(format!(
+            "unsupported native operation kind {kind:?}"
+        ))),
+    }
+}
+
+pub(crate) fn optional_native_noise_location(
+    py: Python<'_>,
+    location: &Option<Py<PyAny>>,
+) -> PyResult<Option<NoiseLocationSpec>> {
+    location
+        .as_ref()
+        .map(|location| parse_noise_location_object(location.bind(py)))
+        .transpose()
+}
+
 pub(crate) fn optional_noise_location_attr(
     value: &Bound<'_, PyAny>,
     attr: &str,
@@ -147,6 +279,18 @@ pub(crate) fn optional_noise_location_attr(
 }
 
 pub(crate) fn parse_noise_location_object(value: &Bound<'_, PyAny>) -> PyResult<NoiseLocationSpec> {
+    if let Ok(location) = value.extract::<PyRef<'_, PyNoiseLocation>>() {
+        return Ok(NoiseLocationSpec {
+            id: location.id.clone(),
+            model: parse_noise_model_object(location.model.bind(value.py()))?,
+            rate: location.rate,
+            qubits: location.qubits.clone(),
+            tags: match &location.core_tags {
+                Some(tags) => tags.clone(),
+                None => parse_tags_mapping(location.tags.bind(value.py()))?,
+            },
+        });
+    }
     let rate = required_attr(value, "rate", "NoiseLocation")?.extract::<f64>()?;
     if !(0.0..=1.0).contains(&rate) {
         return Err(PyValueError::new_err(format!(

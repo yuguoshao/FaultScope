@@ -57,8 +57,8 @@ impl PyDetectorErrorModelGenerator {
     }
 
     pub(crate) fn generate(&self, py: Python<'_>) -> PyResult<PyDetectorErrorModel> {
-        let dem = self.generator.generate().map_err(np_error_to_py)?;
-        detector_error_model_to_py(py, &dem)
+        let dem = self.generator.generate_lazy().map_err(np_error_to_py)?;
+        detector_error_model_lazy_to_py(py, dem)
     }
 
     pub(crate) fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
@@ -72,24 +72,25 @@ impl PyDetectorErrorModelGenerator {
 }
 
 pub(crate) fn detector_error_model_to_py(
-    py: Python<'_>,
-    dem: &npsim_core::DetectorErrorModel,
+    _py: Python<'_>,
+    dem: npsim_core::DetectorErrorModel,
 ) -> PyResult<PyDetectorErrorModel> {
-    Ok(PyDetectorErrorModel::new(
-        detectors_to_py_objects(py, &dem.detectors)?,
-        observables_to_py_objects(py, &dem.observables)?,
-        edges_to_py_objects(py, &dem.edges)?,
-    ))
+    Ok(PyDetectorErrorModel::from_core_dem(dem))
+}
+
+pub(crate) fn detector_error_model_lazy_to_py(
+    _py: Python<'_>,
+    dem: npsim_core::LazyDetectorErrorModel,
+) -> PyResult<PyDetectorErrorModel> {
+    Ok(PyDetectorErrorModel::from_core_lazy_dem(dem))
 }
 
 pub(crate) fn dem_event_to_py(py: Python<'_>, event: &npsim_core::DemEvent) -> PyResult<Py<PyAny>> {
     match event {
         npsim_core::DemEvent::Pauli(pauli) => Ok(PyString::new(py, pauli).into_any().unbind()),
-        npsim_core::DemEvent::Bool(value) => Ok(py
-            .import("builtins")?
-            .getattr("bool")?
-            .call1((*value,))?
-            .unbind()),
+        npsim_core::DemEvent::Bool(value) => {
+            Ok(PyBool::new(py, *value).to_owned().into_any().unbind())
+        }
     }
 }
 
@@ -147,7 +148,7 @@ fn observables_to_py_tuple(
     )
 }
 
-fn detectors_to_py_objects(
+pub(crate) fn detectors_to_py_objects(
     py: Python<'_>,
     detectors: &[npsim_core::Detector],
 ) -> PyResult<Vec<Py<PyAny>>> {
@@ -167,7 +168,7 @@ fn detectors_to_py_objects(
         .collect()
 }
 
-fn observables_to_py_objects(
+pub(crate) fn observables_to_py_objects(
     py: Python<'_>,
     observables: &[npsim_core::LogicalObservable],
 ) -> PyResult<Vec<Py<PyAny>>> {
@@ -188,7 +189,7 @@ fn observables_to_py_objects(
         .collect()
 }
 
-fn edges_to_py_objects(
+pub(crate) fn edges_to_py_objects(
     py: Python<'_>,
     edges: &[npsim_core::DetectorErrorEdge],
 ) -> PyResult<Vec<Py<PyAny>>> {
@@ -201,15 +202,14 @@ fn edges_to_py_objects(
             }
             Ok(Py::new(
                 py,
-                PyDetectorErrorEdge::new(
-                    py,
+                PyDetectorErrorEdge::from_core_parts(
                     edge.probability,
                     edge.detectors.clone(),
                     edge.observables.clone(),
                     edge.location_id.clone(),
                     dem_event_to_py(py, &edge.event)?,
-                    Some(tags.into_any()),
-                )?,
+                    tags.into_any().unbind(),
+                ),
             )?
             .into_any())
         })
