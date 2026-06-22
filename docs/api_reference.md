@@ -1,20 +1,19 @@
 # NPSim API Reference
 
-NPSim is a Rust Cargo workspace with a Python API. The main algorithms live in
-`npsim-core`; Python users normally import from `npsim`, `npsim.core`,
-`npsim.runtime`, and `npsim.dem`. The private extension module
-`npsim._npsim_native` backs those public modules, but direct imports from it are
-not the recommended API.
+NPSim is a Rust Cargo workspace with a Python API. The product runtime lives in
+`npsim-core` and is exposed to Python through the private extension module
+`npsim._npsim_native`. User code should import from the public Python modules:
+`npsim`, `npsim.core`, `npsim.runtime`, `npsim.dem`, `npsim.decoders`,
+`npsim.io`, and `npsim.viz`.
 
-The package is currently pre-1.0. Python source-level compatibility is the main
+The package is pre-1.0. Python source-level compatibility is the main user
 compatibility target. The Rust core API is public and typed, but may still move
-as the core package stabilizes.
+while the core stabilizes.
 
-## Python API
+## Import Surface
 
-### Import Surface
-
-Common objects are re-exported from the top-level package:
+Common runtime, circuit, DEM, decoder, IO, and visualization objects are
+re-exported from `npsim`:
 
 ```python
 from npsim import (
@@ -30,17 +29,23 @@ from npsim import (
 )
 ```
 
-Lower-level modules provide the same objects grouped by subsystem:
+`PauliFrame` and `StabilizerState` are not top-level exports. Import helper
+types and functions from `npsim.core`:
 
 ```python
-from npsim.core import Circuit, Operation, NoiseLocation, PauliFrame, StabilizerState
+from npsim.core import PauliFrame, StabilizerState, pauli_string_to_xz
+```
+
+Lower-level subsystem modules expose grouped APIs:
+
+```python
 from npsim.runtime import compile_native_sampler, generate_native_dem
 from npsim.dem import DetectorErrorModel, DemBatchHotspotSimulator
 ```
 
-### Core Circuit Objects
+## Core Circuit Objects
 
-`Circuit(n_qubits, operations)` stores a stabilizer-compatible circuit.
+`Circuit(n_qubits, operations)` stores an ordered stabilizer-compatible circuit.
 
 Read-only attributes:
 
@@ -52,7 +57,7 @@ Methods:
 - `noise_locations() -> dict[str, NoiseLocation]`
 
 `NoiseLocation(id, model, rate, qubits, tags=None)` names one stochastic noise
-source.
+source. The rate must be in `[0, 1]`.
 
 Read-only attributes:
 
@@ -62,18 +67,13 @@ Read-only attributes:
 - `qubits: tuple[int, ...]`
 - `tags: dict[str, object]`
 
-`NoiseLocation` is a frozen native object. The constructor copies `tags`, and
-the `tags` getter returns a shallow copy, so mutating `location.tags` does not
-change the stored noise metadata. Native `Circuit`, `Operation`, and
-`NoiseLocation` objects are the recommended fast path. Duck-typed Python
-objects with the same attributes are still accepted by native parsers for
-compatibility, but they are reparsed from their current attributes instead of
-participating in native cache fast paths.
+`NoiseLocation` is frozen. The constructor copies `tags`, and the getter returns
+a shallow copy, so add tags at construction time.
 
-`Operation` can be constructed directly, but most code should use the static
-constructors:
+`Operation` can be constructed directly, but application code should use the
+static constructors:
 
-```python
+```text
 Operation.h(qubit, **metadata)
 Operation.s(qubit, **metadata)
 Operation.s_dag(qubit, **metadata)
@@ -83,7 +83,7 @@ Operation.z(qubit, **metadata)
 Operation.cx(control, target, **metadata)
 Operation.cz(left, right, **metadata)
 Operation.swap(left, right, **metadata)
-Operation.pauli(qubits, pauli, **metadata)
+Operation.pauli_gate(qubits, pauli, **metadata)
 Operation.noise(location, **metadata)
 Operation.measure(qubit, *, key=None, basis="Z", noise=None, **metadata)
 Operation.measure_pauli(qubits, pauli, *, key=None, noise=None, **metadata)
@@ -92,36 +92,16 @@ Operation.detector(measurement_keys, *, detector_id=None, coords=None, **metadat
 Operation.observable_include(observable_id, measurement_keys, **metadata)
 ```
 
-Read-only attributes include `kind`, `qubits`, `key`, `basis`, `pauli`,
-`measurement_keys`, `observable_id`, `noise_location`, and `metadata`.
+`Operation.pauli` is a read-only attribute, not the Pauli-gate constructor.
 
-Example:
+Read-only operation attributes include `kind`, `qubits`, `key`, `basis`,
+`pauli`, `measurement_keys`, `observable_id`, `noise_location`, and `metadata`.
 
-```python
-from npsim import BernoulliPauliNoise, Circuit, NoiseLocation, Operation
+## Noise Models
 
-x_noise = NoiseLocation(
-    id="x0",
-    model=BernoulliPauliNoise("X"),
-    rate=0.01,
-    qubits=(0,),
-    tags={"round": 0, "gate": "idle"},
-)
+NPSim provides these stochastic noise model classes:
 
-circuit = Circuit(
-    n_qubits=1,
-    operations=(
-        Operation.noise(x_noise),
-        Operation.measure(0, key="m0", basis="Z"),
-    ),
-)
-```
-
-### Noise Models
-
-NPSim provides five stochastic noise models:
-
-```python
+```text
 BernoulliPauliNoise(pauli)
 PauliChannel(weights)
 SingleQubitDepolarizing()
@@ -131,12 +111,10 @@ MeasurementBitFlip()
 
 Common methods:
 
-- `sample(rng, rate)` samples an event using a Python RNG object that provides
-  `random()` and, where needed, `randrange()`.
+- `sample(rng, rate)` samples an event from a Python RNG object.
 - `score(event, rate)` returns the log-derivative score used by hotspot
   estimators.
-- `apply(event, state, frame, qubits)` applies the sampled event to Python
-  stabilizer/frame helpers.
+- `apply(event, state, frame, qubits)` applies an event to Python helper state.
 
 Additional attributes and methods:
 
@@ -146,24 +124,24 @@ Additional attributes and methods:
 - `PauliChannel.total_weight`
 - `MeasurementBitFlip.apply_to_bit(bit, event)`
 
-### Pauli And Stabilizer Helpers
+## Pauli And Stabilizer Helpers
 
-`npsim.core` exports helper functions for Pauli representation conversion:
+`npsim.core` exports helper functions for Pauli representations:
 
-```python
+```text
 pauli_to_xz(pauli)
 xz_to_pauli(x, z)
-pauli_string_to_xz(pauli)
-sparse_pauli_to_xz(n_qubits, qubits, pauli)
+pauli_string_to_xz(pauli_string, n_qubits=None)
+sparse_pauli_to_xz(n_qubits, qubits, paulis)
 symplectic_product(x1, z1, x2, z2)
-multiply_pauli_rows(left_x, left_z, right_x, right_z)
+multiply_pauli_rows(left_x, left_z, left_sign, right_x, right_z, right_sign)
 ```
 
-`PauliFrame` and `StabilizerState` are PyO3-backed Python classes used by the
-runtime and compatibility tests. They expose forward Clifford, Pauli, reset,
-and measurement helpers for source-level Python workflows.
+`PauliFrame` and `StabilizerState` are helper classes exposed from
+`npsim.core`. They are useful for tests and low-level workflows; the packed
+runtime APIs below are the normal product path.
 
-### Forward Runtime
+## Forward Runtime
 
 `BatchForwardNoiseAwareSimulator(circuit, *, observables=None)` compiles a
 circuit for packed batch simulation.
@@ -176,7 +154,7 @@ Read-only attributes:
 
 Methods:
 
-```python
+```text
 run_batch(*, shots, rng=None, seed=None) -> BatchTrajectory
 sample(shots, seed=None, rng=None) -> BatchTrajectory
 sample_measurements(shots, seed=None, rng=None) -> dict[str, int]
@@ -194,48 +172,80 @@ estimate(
 
 `BatchTrajectory` stores bit-packed integer masks:
 
-- `shots`
-- `all_mask`
-- `x_frame`, `z_frame`
+- `shots: int`
+- `all_mask: int`
+- `x_frame: tuple[int, ...]`
+- `z_frame: tuple[int, ...]`
 - `measurements: dict[str, int]`
 - `detectors: dict[int, int]`
 - `observables: dict[int, int]`
 - `noise_event_masks: dict[str, int]`
 
-It also provides bit helpers such as `measurement_bit(key, shot)`,
-`detector_bit(detector_id, shot)`, `observable_bit(observable_id, shot)`,
-`x_bit(qubit, shot)`, and `z_bit(qubit, shot)`.
+Bit helpers:
 
-`SimulationResult` contains `shots`, `mean_loss`,
-`logical_failure_rate`, `baseline`, `sensitivities`, `hotspots`, aggregation
-maps, `top_hotspots(top_k)`, and `hotspot_table(top_k)`.
+```text
+bit(mask, shot)
+measurement_bit(key, shot)
+measurement_mask(key)
+detector_bit(detector_id, shot)
+observable_bit(observable_id, shot)
+x_bit(qubit, shot)
+x_mask(qubit)
+z_bit(qubit, shot)
+z_mask(qubit)
+```
+
+`SimulationResult` exposes:
+
+- `shots`
+- `mean_loss`
+- `logical_failure_rate`
+- `baseline`
+- `sensitivities: dict[str, float]`
+- `hotspots: dict[str, float]`
+- `by_qubit`, `by_round`, `by_gate`, `by_operation`
+- `locations: dict[str, NoiseLocation]`
+- `top_hotspots(top_k=10)`
+- `hotspot_table(top_k=10)`
 
 Example:
 
 ```python
-from npsim import BatchForwardNoiseAwareSimulator
+from npsim import (
+    BernoulliPauliNoise,
+    BatchForwardNoiseAwareSimulator,
+    Circuit,
+    NoiseLocation,
+    Operation,
+)
+
+noise = NoiseLocation("x0", BernoulliPauliNoise("X"), 0.25, (0,))
+circuit = Circuit(
+    1,
+    (
+        Operation.noise(noise),
+        Operation.measure(0, key="m0"),
+    ),
+)
 
 sim = BatchForwardNoiseAwareSimulator(circuit)
-batch = sim.run_batch(shots=1024, seed=123)
-
-loss_mask = batch.measurements["m0"]
+batch = sim.run_batch(shots=32, seed=1)
 result = sim.estimate(
-    shots=4096,
-    loss_mask_fn=lambda trajectory, corrections: trajectory.measurements["m0"],
-    seed=123,
-    top_k=5,
+    shots=128,
+    seed=2,
+    loss_mask_fn=lambda batch: batch.measurements["m0"],
 )
 
 print(batch.measurement_bit("m0", 0))
-print(result.hotspot_table(top_k=5))
+print(result.top_hotspots(1)[0].location_id)
 ```
 
-### Native Runtime Wrappers
+## Native Runtime Handles
 
-The `npsim.runtime.native` wrappers expose lower-level native handles while
-preserving the public Python error boundary:
+The `npsim.runtime` wrappers expose lower-level native handles while preserving
+the public `UnsupportedNativeCircuitError` boundary:
 
-```python
+```text
 compile_native_sampler(circuit, *, observables=None) -> NativePackedSampler
 generate_native_dem(circuit, *, detectors=None, observables=None) -> DetectorErrorModel
 compile_native_dem_generator(circuit, *, detectors=None, observables=None) -> NativeDemGenerator
@@ -249,134 +259,114 @@ compile_native_dem_sampler_from_circuit(
 ) -> NativeDemSampler
 ```
 
-These functions always use the Rust native path. They raise
-`UnsupportedNativeCircuitError` when the extension cannot be imported, the
-circuit cannot be compiled, DEM generation fails, or sampling is unsupported.
+`NativePackedSampler` methods:
 
-`NativePackedSampler`, `NativeDemGenerator`, and `NativeDemSampler` are
-advanced handles used by the public simulator facades. `NativeDemGenerator`
-reuses native DEM compilation state across calls.
+```text
+sample(shots, seed=None, rng=None) -> BatchTrajectory
+sample_measurements(shots, seed=None, rng=None) -> dict[str, int]
+run_native_batch(shots, seed=None) -> native batch handle
+estimate(shots, loss_mask_fn=None, decoder=None, correction_mask_fn=None, seed=None, baseline=None, top_k=10)
+estimate_hotspots(batch, loss_mask, baseline=None, top_k=10)
+```
 
 `NativeDemGenerator` methods:
 
-```python
+```text
 generate_dem() -> DetectorErrorModel
 generate() -> DetectorErrorModel
 compile_sampler(*, materialize_dem=True) -> NativeDemSampler
 ```
 
-`generate_native_dem(...)`, `NativeDemGenerator.generate_dem()`, and
-`DetectorErrorModelGenerator.generate()` all return a full public
-`DetectorErrorModel`. Internally, native-generated DEMs may defer Python edge
-object construction until metadata is accessed, but public methods such as
-`.edges`, `to_dem_text()`, and `edges_by_location()` keep the same behavior.
+`materialize_dem=False` compiles a light DEM sampler without constructing a
+Python `DetectorErrorModel`. In that mode, `sampler.dem is None`. Sampling
+works, but APIs that need DEM metadata, including estimate and hotspot result
+construction, raise `ValueError`.
 
-`compile_sampler(materialize_dem=False)` and
-`compile_native_dem_sampler_from_circuit(..., materialize_dem=False)` compile a
-sampler from native edge specs without constructing a Python
-`DetectorErrorModel`. In that light mode, `sampler.dem is None`; the sampler is
-intended for detector, observable, and edge-event sampling. APIs that require
-full DEM metadata, such as location/tag-aware estimate and hotspot reporting,
-raise `ValueError`.
-
-Example:
-
-```python
-from npsim.runtime import (
-    compile_native_dem_generator,
-    compile_native_dem_sampler,
-    compile_native_dem_sampler_from_circuit,
-    compile_native_sampler,
-    generate_native_dem,
-)
-
-sampler = compile_native_sampler(circuit)
-trajectory = sampler.sample(1024, seed=7)
-
-dem = generate_native_dem(circuit)
-dem_sampler = compile_native_dem_sampler(dem)
-dem_result = dem_sampler.estimate_default(4096, seed=7, top_k=5)
-
-generator = compile_native_dem_generator(circuit)
-detector_dem = generator.generate_dem()
-same_generator_dem = generator.generate()
-light_sampler = generator.compile_sampler(materialize_dem=False)
-assert light_sampler.dem is None
-
-direct_light_sampler = compile_native_dem_sampler_from_circuit(
-    circuit,
-    materialize_dem=False,
-)
-```
-
-### Detector Error Models
+## Detector Error Models
 
 `Detector(id, measurement_keys, coords=None)` declares one detector.
 
+Read-only attributes:
+
+- `id: int`
+- `measurement_keys: tuple[str, ...]`
+- `coords: tuple[float, ...]`
+
 `LogicalObservable(id, measurement_keys=None, pauli_qubits=None, pauli="")`
-declares one logical observable. Observables can be measurement-key based,
-Pauli-frame based, or both.
+declares one logical observable. Observables can be based on measurement keys,
+final Pauli-frame projection, or both.
 
 `DetectorErrorEdge(probability, detectors, observables, location_id, event, tags=None)`
 stores one DEM edge.
 
 Read-only edge attributes:
 
-- `probability`
-- `detectors`
-- `observables`
-- `location_id`
-- `event`
-- `tags`
+- `probability: float`
+- `detectors: tuple[int, ...]`
+- `observables: tuple[int, ...]`
+- `location_id: str`
+- `event: object`
+- `tags: dict[str, object]`
 
 Methods:
 
 - `to_dem_line() -> str`
 
 `DetectorErrorModel(detectors, observables, edges)` stores a typed detector
-error model. Native-generated models may keep the core representation lazily
-until you inspect edge metadata; this is an implementation detail and does not
-change the public interface.
+error model.
 
 Methods:
 
-```python
-to_dem_text(include_detector_coords=True) -> str
-edges_by_location() -> dict[str, tuple[DetectorErrorEdge, ...]]
-project_hotspots_to_edges(result) -> DemHotspotResult
+```text
+to_dem_text(*, include_detector_coords=True) -> str
+edges_by_location() -> dict[str, list[DetectorErrorEdge]]
+project_hotspots_to_edges(hotspots) -> dict[tuple[str, object], float]
 project_result_to_detector_graph(result) -> DetectorGraphHotspots
 project_sensitivities_to_detector_graph(sensitivities) -> DetectorGraphHotspots
 ```
 
+`project_hotspots_to_edges(...)` expects a mapping from location id to hotspot
+value. It returns edge values keyed by `(location_id, event)`.
+
 `DetectorErrorModelGenerator(circuit, *, detectors=None, observables=None)`
-generates a DEM from a circuit. If detectors or observables are omitted, NPSim
-uses detector and observable declarations embedded in circuit operations.
+generates a DEM from a circuit. If declarations are omitted, NPSim reads
+`Operation.detector(...)` and `Operation.observable_include(...)` entries from
+the circuit.
 
 Example:
 
 ```python
-from npsim import Detector, DetectorErrorModelGenerator, LogicalObservable
+from npsim import (
+    BernoulliPauliNoise,
+    Circuit,
+    DetectorErrorModelGenerator,
+    NoiseLocation,
+    Operation,
+)
 
-detectors = (Detector(id=0, measurement_keys=("m0",)),)
-observables = (LogicalObservable(id=0, measurement_keys=("m0",)),)
+noise = NoiseLocation("x0", BernoulliPauliNoise("X"), 0.125, (0,))
+circuit = Circuit(
+    1,
+    (
+        Operation.noise(noise),
+        Operation.measure(0, key="m0"),
+        Operation.detector(("m0",), detector_id=0),
+        Operation.observable_include(0, ("m0",)),
+    ),
+)
 
-dem = DetectorErrorModelGenerator(
-    circuit,
-    detectors=detectors,
-    observables=observables,
-).generate()
-
+dem = DetectorErrorModelGenerator(circuit).generate()
 print(dem.to_dem_text())
+print(dem.edges_by_location()["x0"][0].event)
 ```
 
-### DEM Batch Hotspot Simulation
+## DEM Batch Hotspot Simulation
 
-`DemBatchHotspotSimulator(dem)` samples directly from detector error model
-edges.
+`DemBatchHotspotSimulator(dem)` samples directly from DEM edges.
 
 Methods:
 
-```python
+```text
 run_batch(*, shots, rng=None, seed=None, return_edge_events=True) -> DemBatchTrajectory
 estimate(
     *,
@@ -390,71 +380,112 @@ estimate(
 ) -> DemHotspotResult
 ```
 
-`DemBatchTrajectory` exposes `shots`, `all_mask`, `detectors`, `observables`,
-`edge_event_masks`, and bit helpers for detector, observable, and edge-event
-masks.
+`DemBatchTrajectory` stores:
 
-`DemHotspotResult` exposes edge-level and location-level sensitivities,
-detector graph projections, aggregation maps, `top_edges(top_k)`,
-`top_hotspots(top_k)`, and `hotspot_table(top_k)`.
+- `shots`
+- `all_mask`
+- `detectors: dict[int, int]`
+- `observables: dict[int, int]`
+- `edge_event_masks: dict[int, int]`
+
+Bit helpers:
+
+```text
+bit(mask, shot)
+detector_bit(detector_id, shot)
+observable_bit(observable_id, shot)
+edge_event_bit(edge_index, shot)
+```
+
+`DemHotspotResult` exposes:
+
+- `dem`
+- `shots`
+- `mean_loss`
+- `logical_failure_rate`
+- `baseline`
+- `edge_sensitivities: dict[int, float]`
+- `edge_hotspots: dict[int, float]`
+- `sensitivities: dict[str, float]`
+- `hotspots: dict[str, float]`
+- `by_detector`, `by_round`, `by_gate`, `by_operation`
+- `locations: dict[str, DemLocationMetadata]`
+- `detector_graph_hotspots`
+- `top_edges(top_k=10)`
+- `top_hotspots(top_k=10)`
+- `hotspot_table(top_k=10)`
 
 Example:
 
 ```python
+from npsim import Detector, DetectorErrorEdge, DetectorErrorModel, LogicalObservable
 from npsim.dem import DemBatchHotspotSimulator
 
-dem_sim = DemBatchHotspotSimulator(dem)
-dem_batch = dem_sim.run_batch(shots=1024, seed=5)
-dem_result = dem_sim.estimate(shots=4096, seed=5, top_k=5)
+dem = DetectorErrorModel(
+    detectors=(Detector(0, ()),),
+    observables=(LogicalObservable(0),),
+    edges=(DetectorErrorEdge(0.125, (0,), (0,), "edge0", "X"),),
+)
 
-print(dem_batch.detector_bit(0, 0))
-print(dem_result.hotspot_table(top_k=5))
+dem_sim = DemBatchHotspotSimulator(dem)
+batch = dem_sim.run_batch(shots=32, seed=3)
+result = dem_sim.estimate(shots=128, seed=4, top_k=1)
+
+print(batch.detector_bit(0, 0))
+print(result.top_edges(1)[0].edge_index)
 ```
 
-### Callback Contracts
+## Callback Contracts
 
-Forward runtime callbacks work with bit-packed integer masks:
+Forward estimate callbacks use bit-packed integer masks:
 
-- `decoder.decode_batch_masks(detector_masks, *, shots=None) -> dict[int, int]`
+- `decoder.decode_batch_masks(batch) -> dict[int, int]`
+- `correction_mask_fn(batch) -> dict[int, int]`
+- `loss_mask_fn(batch) -> int`
+- `loss_mask_fn(batch, corrections) -> int`
+
+DEM estimate callbacks use the same convention:
+
+- `decoder.decode_batch_masks(batch) -> dict[int, int]`
 - `correction_mask_fn(batch) -> dict[int, int]`
 - `loss_mask_fn(batch, corrections) -> int`
 
-DEM runtime callbacks use the same packed-mask convention:
+Returned masks use one bit per shot. A set bit means the condition is true for
+that shot. Do not pass both `decoder` and `correction_mask_fn` in the same
+estimate call.
 
-- `correction_mask_fn(batch) -> dict[int, int]`
-- `loss_mask_fn(batch, corrections) -> int`
-
-The returned integer mask has one bit per shot. A set bit means the condition is
-true for that shot.
-
-### Optional Integrations
+## Optional Integrations
 
 PyMatching:
 
 ```python
+from npsim import Detector, DetectorErrorEdge, DetectorErrorModel, LogicalObservable
 from npsim.decoders import PyMatchingBatchDecoder
 
+dem = DetectorErrorModel(
+    detectors=(Detector(0, ()),),
+    observables=(LogicalObservable(0),),
+    edges=(DetectorErrorEdge(0.1, (0,), (0,), "e0", "X"),),
+)
 decoder = PyMatchingBatchDecoder.from_dem(dem)
-corrections = decoder.decode_batch_masks(dem_batch)
+print(decoder.decode_batch_masks({0: 0b1010}, shots=4))
 ```
 
 Stim import:
 
 ```python
-from npsim.io import load_stim_file, parse_stim_circuit
+from npsim.io import parse_stim_circuit
 
-imported = parse_stim_circuit("H 0\nM 0\nDETECTOR rec[-1]\n")
-circuit = imported.circuit
+imported = parse_stim_circuit("X_ERROR(0.01) 0\nM 0\nDETECTOR rec[-1]\n")
+print(imported.measurement_keys)
 ```
 
 Visualization helpers require Pillow and write image files:
 
-```python
-from npsim.viz import (
-    write_repetition_gate_structure_hotspot_map,
-    write_repetition_hotspot_heatmap,
-    write_rotated_surface_code_spatial_hotspot_map,
-)
+```text
+write_repetition_hotspot_heatmap(result, path, *, distance, rounds)
+write_repetition_gate_structure_hotspot_map(result, path, *, distance, rounds)
+write_rotated_surface_code_spatial_hotspot_map(result, path, *, distance)
 ```
 
 ## Rust API
@@ -470,9 +501,7 @@ use npsim_core::{
 };
 ```
 
-### Data Model
-
-Core public data types include:
+Core data types include:
 
 - `Circuit { n_qubits, operations }`
 - `Operation`
@@ -488,10 +517,7 @@ Core public data types include:
 - `DemHotspotEstimate`
 - `NpError` and `NpResult<T>`
 
-The Rust API uses typed structs and enums instead of Python dictionaries.
-Validation failures return `NpError` with human-readable messages.
-
-### Forward Batch Sampling
+Example:
 
 ```rust
 use std::collections::HashMap;
@@ -514,7 +540,7 @@ let circuit = Circuit {
         Operation::Noise(noise),
         Operation::Measure {
             qubit: 0,
-            key: Some("m".to_string()),
+            key: Some("m0".to_string()),
             basis: "Z".to_string(),
             noise: None,
         },
@@ -523,72 +549,8 @@ let circuit = Circuit {
 
 let simulator = BatchForwardNoiseAwareSimulator::new(circuit, Vec::new())?;
 let batch = simulator.run_batch(1024, Some(1), true)?;
-let estimate = simulator.estimate_from_loss(&batch, &batch.measurements["m"], None, 10);
+let estimate = simulator.estimate_from_loss(&batch, &batch.measurements["m0"], None, 10);
 ```
 
-### DEM Generation
-
-```rust
-use npsim_core::{DetectorErrorModelGenerator, Operation};
-
-let circuit = Circuit {
-    n_qubits: 1,
-    operations: vec![
-        Operation::Measure {
-            qubit: 0,
-            key: Some("m".to_string()),
-            basis: "Z".to_string(),
-            noise: None,
-        },
-        Operation::Detector {
-            detector_id: Some(0),
-            measurement_keys: vec!["m".to_string()],
-            coords: vec![0.0],
-        },
-        Operation::ObservableInclude {
-            observable_id: 0,
-            measurement_keys: vec!["m".to_string()],
-        },
-    ],
-};
-
-let dem = DetectorErrorModelGenerator::new(circuit, None, None)?.generate()?;
-```
-
-### DEM Hotspot Sampling
-
-```rust
-use npsim_core::{DemBatchHotspotSimulator, Detector, LogicalObservable};
-
-let dem = DetectorErrorModelGenerator::new(
-    circuit,
-    Some(vec![Detector {
-        id: 0,
-        measurement_keys: vec!["m".to_string()],
-        coords: Vec::new(),
-    }]),
-    Some(vec![LogicalObservable {
-        id: 0,
-        measurement_keys: vec!["m".to_string()],
-        pauli_qubits: Vec::new(),
-        pauli: String::new(),
-    }]),
-)?
-.generate()?;
-
-let simulator = DemBatchHotspotSimulator::new(dem)?;
-let estimate = simulator.estimate_default(4096, Some(2), None, 10)?;
-```
-
-## Error Boundaries
-
-Public Python wrapper functions in `npsim.runtime` convert extension import,
-compile, DEM generation, and native sampling failures into
-`UnsupportedNativeCircuitError`.
-
-Direct construction of Python API objects may raise `TypeError` for wrong
-signatures and `ValueError` for invalid values such as unsupported rates,
-qubits, Pauli strings, or inconsistent observable declarations.
-
-The Rust core returns `NpResult<T>` and uses `NpError` for validation and
-unsupported-circuit diagnostics.
+Validation failures return `NpError` in Rust and usually become `ValueError` or
+`UnsupportedNativeCircuitError` through the public Python wrappers.

@@ -1,1206 +1,150 @@
-# 前向噪声感知 Stabilizer 模拟器
+# NPSim
 
-本文档描述一个用于量子纠错协议噪声热点分析的前向 stabilizer 模拟器。模拟器不使用 Heisenberg picture，也不对观测量做反向传播；它在 Schrodinger picture 中按纠错电路的真实时间顺序执行 trajectory，记录噪声事件、测量结果、syndrome、decoder 输出和逻辑失败事件，并通过对局部噪声率求导得到噪声热点。
+NPSim 是一个面向量子纠错工作流的前向噪声感知 stabilizer 模拟器。当前产品运行时由 Rust
+core 提供，并通过 Python API 暴露；主要能力包括 bit-packed batch sampling、detector
+error model 生成、DEM 层采样、decoder 集成和噪声热点估计。
 
-当前项目结构是 Rust Cargo workspace with Python API：
+文档站点见 [NPSim Documentation](https://yuguoshao.github.io/NPSim/)。
+本地文档入口：
 
-- `crates/npsim-core`：Python 无关的 typed Rust core，承载 circuit/DEM 数据模型、batch sampling、DEM generation、hotspot 估计等主体逻辑。
-- `crates/npsim-python`：PyO3 binding crate，构建 Python 模块 `npsim._npsim_native`。
-- `npsim/`：轻量 Python package surface，保留 re-export、typing helper、PyMatching/Stim/Pillow adapters 和 benchmark 入口；测试中的外部对照主要通过 Stim helper 完成。
+- [User Guide](docs/user_guide.md)：安装、示例、工作流和排错。
+- [API Reference](docs/api_reference.md)：当前 Python/Rust API surface。
+- [Theory](docs/theory.md)：理论原理、公式推导和实现中的计算细节。
 
-英文文档站点见 [NPSim Documentation](https://yuguoshao.github.io/NPSim/)。
-本地文档见 [NPSim User Guide](docs/user_guide.md) 和
-[NPSim API Reference](docs/api_reference.md)。
+## 项目结构
 
-核心目标是估计每个局部噪声位置 `l` 对纠错协议 logical failure probability 的边际影响：
-
-```math
-S_l = \frac{\partial J}{\partial \lambda_l},
-```
-
-其中 `J` 是由完整前向 trajectory 定义的 loss 期望，`\lambda_l` 是第 `l` 个时空噪声位置的错误率。热点分数定义为：
-
-```math
-H_l = |S_l|.
-```
-
-## 1. 前向 trajectory 模型
-
-考虑一个 stabilizer-compatible 纠错电路：
-
-```math
-C = O_T O_{T-1} \cdots O_1,
-```
-
-其中每个操作 `O_t` 可以是 Clifford gate、reset、measurement、classical record update、decoder-relevant detector construction，或局部噪声通道。
-
-一次 Monte Carlo shot 生成一条前向 trajectory：
-
-```math
-\tau =
-(e_1,e_2,\ldots,e_M,\;m_1,m_2,\ldots,m_R,\;s,\;\hat{\ell},\;\ell).
-```
-
-各符号含义为：
-
-- `e_l`：第 `l` 个噪声位置采样到的噪声事件。
-- `m_r`：第 `r` 个测量结果。
-- `s`：由测量记录生成的 syndrome 或 detector record。
-- `\hat{\ell}`：decoder 根据 `s` 给出的 logical correction。
-- `\ell`：由前向 Pauli frame 得到的真实 logical error。
-
-模拟器状态由两部分组成：
-
-```math
-\mathcal S_t,\quad F_t,
-```
-
-其中 `\mathcal S_t` 是 stabilizer tableau，表示当前 stabilizer state；`F_t` 是 Pauli frame，表示已经发生但可以用经典方式跟踪的 Pauli error。
-
-Clifford gate 按前向共轭规则更新 tableau 和 Pauli frame。Pauli 噪声事件直接作用到当前 tableau，并同步更新 Pauli frame。测量按 stabilizer 测量规则产生 classical bit，并写入 measurement record。
-
-## 2. 噪声模型与 score function
-
-每个局部噪声位置 `l` 有一个可微事件分布：
-
-```math
-e_l \sim p_l(e;\lambda_l).
-```
-
-例如单比特 bit-flip noise：
-
-```math
-p_l(I)=1-\lambda_l,\qquad p_l(X)=\lambda_l.
-```
-
-单比特 depolarizing noise：
-
-```math
-p_l(I)=1-\lambda_l,\qquad
-p_l(X)=p_l(Y)=p_l(Z)=\frac{\lambda_l}{3}.
-```
-
-测量 bit-flip noise：
-
-```math
-p_l(\text{no flip})=1-\lambda_l,\qquad
-p_l(\text{flip})=\lambda_l.
-```
-
-对每个采样到的事件 `e_l`，定义 score：
-
-```math
-s_l(\tau)
-=
-\frac{\partial}{\partial \lambda_l}
-\log p_l(e_l;\lambda_l).
-```
-
-典型 score 为：
-
-```math
-s_l(\tau)=
-\begin{cases}
--\frac{1}{1-\lambda_l}, & e_l = I,\\
-\frac{1}{\lambda_l}, & e_l \ne I.
-\end{cases}
-```
-
-测量 bit-flip noise 同理：
-
-```math
-s_l(\tau)=
-\begin{cases}
--\frac{1}{1-\lambda_l}, & \text{no flip},\\
-\frac{1}{\lambda_l}, & \text{flip}.
-\end{cases}
-```
-
-实际实现中对 `\lambda_l` 做数值裁剪，避免 `1 / \lambda_l` 或 `1 / (1-\lambda_l)` 发散。
-
-## 3. 目标函数与噪声敏感度
-
-纠错协议的目标函数定义为完整 trajectory loss 的期望：
-
-```math
-J(\lambda)
-=
-\mathbb E_{\tau\sim P_\lambda}[L(\tau)].
-```
-
-默认 loss 是 logical failure indicator：
-
-```math
-L(\tau)
-=
-\mathbf 1[\hat{\ell}(s(\tau)) \ne \ell(\tau)].
-```
-
-这里 `\hat{\ell}` 是 decoder 输出，`\ell` 是由前向 Pauli frame 计算出的真实 logical error。
-
-由于 trajectory 概率可分解为局部噪声事件概率和 stabilizer 测量采样概率：
-
-```math
-P_\lambda(\tau)
-=
-\prod_l p_l(e_l;\lambda_l)\;P(m\mid e),
-```
-
-并且给定噪声事件后，stabilizer 测量采样本身不显式依赖 `\lambda_l`，因此可用 score-function estimator：
-
-```math
-\frac{\partial J}{\partial \lambda_l}
-=
-\mathbb E_\tau
-\left[
-L(\tau)
-\frac{\partial}{\partial \lambda_l}
-\log p_l(e_l;\lambda_l)
-\right].
-```
-
-加入 baseline `b` 降低方差：
-
-```math
-S_l
-=
-\frac{\partial J}{\partial \lambda_l}
-=
-\mathbb E_\tau[(L(\tau)-b)s_l(\tau)].
-```
-
-这个 baseline 不改变真实敏感度。因为 score function 满足：
-
-```math
-\mathbb E_\tau[s_l(\tau)] = 0,
-```
-
-这是 log-derivative score 的归一化恒等式。对第 `l` 个噪声事件边缘化：
-
-```math
-\begin{aligned}
-\mathbb E[s_l]
-&=
-\sum_{e_l} p_l(e_l;\lambda_l)
-\frac{\partial}{\partial \lambda_l}
-\log p_l(e_l;\lambda_l) \\
-&=
-\sum_{e_l}
-\frac{\partial}{\partial \lambda_l}
-p_l(e_l;\lambda_l) \\
-&=
-\frac{\partial}{\partial \lambda_l}
-\sum_{e_l} p_l(e_l;\lambda_l)
-=
-\frac{\partial}{\partial \lambda_l}1
-=
-0.
-\end{aligned}
-```
-
-例如 Bernoulli 噪声中：
-
-```math
-s_l(\text{event})=\frac{1}{\lambda_l},
-\qquad
-s_l(\text{no event})=-\frac{1}{1-\lambda_l},
-```
-
-因此：
-
-```math
-\lambda_l\frac{1}{\lambda_l}
-+
-(1-\lambda_l)\left(-\frac{1}{1-\lambda_l}\right)
-=
-1-1
-=
-0.
-```
-
-完整 trajectory 中的其它噪声事件、测量随机性和 decoder 输出都会被一起边缘化掉；
-`s_l(\tau)` 只对第 `l` 个噪声位置的事件取这个 log-derivative，因此仍满足
-同一个期望为零的性质。这个推导要求概率模型在 `\lambda_l` 附近可微，且事件支持集不随
-`\lambda_l` 改变；实现中会对 `\lambda_l` 做数值裁剪，避免 `0` 或 `1` 附近的发散。
-
-所以只要 `b` 不依赖于当前 shot 中第 `l` 个噪声位置的实际事件，就有：
-
-```math
-\mathbb E_\tau[(L(\tau)-b)s_l(\tau)]
-=
-\mathbb E_\tau[L(\tau)s_l(\tau)]
-- b\,\mathbb E_\tau[s_l(\tau)]
-=
-\mathbb E_\tau[L(\tau)s_l(\tau)].
-```
-
-因此在无限采样极限下，baseline 不会改变 `S_l`，也不会改变 hotspot
-相对排序。它只是一个控制变量，用来降低 Monte Carlo 方差。有限 batch 中
-`\frac{1}{N}\sum_k s_l(\tau_k)` 不会严格为 0，所以 baseline 可能改变单次估计值和
-top-k 排序；这通常表示 shots 不足、两个位置的真实敏感度很接近，或 loss/decoder
-本身噪声较大。默认使用 batch mean loss 作为 baseline 时，会带来约 `1 - 1/N`
-量级的轻微有限样本效应，shots 足够大时可以忽略。
-
-在 batch 估计中，默认取：
-
-```math
-b=\frac{1}{N}\sum_{k=1}^N L(\tau_k).
-```
-
-因此有限样本估计为：
-
-```math
-\hat S_l
-=
-\frac{1}{N}
-\sum_{k=1}^N
-\left(L(\tau_k)-\bar L\right)
-s_l(\tau_k).
-```
-
-其中：
-
-```math
-\bar L=\frac{1}{N}\sum_{k=1}^N L(\tau_k).
-```
-
-热点分数为：
-
-```math
-\hat H_l = |\hat S_l|.
-```
-
-## 4. 前向 stabilizer trajectory 算法
-
-**Algorithm 1: Forward Noise-Aware Stabilizer Shot**
-
-输入：
-
-- stabilizer-compatible 纠错电路 `C`。
-- 初始 stabilizer state `\mathcal S_0`。
-- 初始 Pauli frame `F_0=I`。
-- 局部噪声模型集合 `{p_l(e;\lambda_l)}`。
-- detector construction `D`。
-- decoder `Dec`。
-- logical loss `L`。
-
-输出：
-
-- 一条 trajectory `\tau`。
-- 每个噪声位置的 score `s_l(\tau)`。
-- shot loss `L(\tau)`。
-
-过程：
-
-```text
-1.  Initialize stabilizer tableau S <- S_0.
-2.  Initialize Pauli frame F <- I.
-3.  Initialize measurement record M <- empty.
-4.  Initialize score record R <- empty.
-
-5.  For each operation O_t in time order:
-
-6.      If O_t is a Clifford gate:
-7.          Forward-update S by the Clifford action.
-8.          Forward-update F by the same Clifford action.
-
-9.      If O_t is a noise location l:
-10.         Sample event e_l ~ p_l(e; lambda_l).
-11.         Apply e_l to S.
-12.         Apply e_l to F.
-13.         Record score R[l] += d log p_l(e_l; lambda_l) / d lambda_l.
-
-14.     If O_t is a reset:
-15.         Measure/reset the target qubit in S.
-16.         Clear the corresponding component in F.
-
-17.     If O_t is a measurement:
-18.         Sample the stabilizer measurement result m.
-19.         If measurement noise exists:
-20.             Sample measurement flip event e_l.
-21.             Flip m if required.
-22.             Record its score in R[l].
-23.         Append m to measurement record M.
-
-24. Construct detector record s <- D(M).
-25. Decode logical correction ell_hat <- Dec(s).
-26. Compute true logical error ell from the final Pauli frame F.
-27. Compute shot loss L(tau) = 1[ell_hat != ell].
-28. Return tau, R, and L(tau).
-```
-
-这个算法保持纠错协议的前向时序：噪声先影响状态和后续 syndrome，syndrome 再影响 decoder，decoder 最后影响 logical failure 判断。
-
-## 5. 噪声热点估计算法
-
-**Algorithm 2: Score-Function Hotspot Estimation**
-
-输入：
-
-- 电路 `C`。
-- shot 数 `N`。
-- 噪声位置集合 `\mathcal L`。
-- detector construction `D`。
-- decoder `Dec`。
-- logical loss `L`。
-
-输出：
-
-- logical failure rate `\hat J`。
-- signed sensitivity `\hat S_l`。
-- hotspot score `\hat H_l`。
-- 聚合热点图。
-
-过程：
-
-```text
-1.  For k = 1, ..., N:
-2.      Run Algorithm 1 and obtain:
-3.          loss L_k = L(tau_k),
-4.          scores R_k[l] for all sampled noise locations.
-
-5.  Compute empirical logical failure rate:
-6.      J_hat = (1/N) sum_k L_k.
-
-7.  Use baseline:
-8.      b = J_hat.
-
-9.  For each noise location l:
-10.     S_hat[l] = (1/N) sum_k (L_k - b) R_k[l].
-11.     H_hat[l] = abs(S_hat[l]).
-
-12. Aggregate hotspots by metadata:
-13.     H_qubit[q] = sum_{l: q in qubits(l)} H_hat[l].
-14.     H_round[r] = sum_{l: round(l)=r} H_hat[l].
-15.     H_gate[g]  = sum_{l: gate(l)=g} H_hat[l].
-16.     H_op[o]    = sum_{l: operation(l)=o} H_hat[l].
-
-17. Return J_hat, S_hat, H_hat, and aggregated hotspot maps.
-```
-
-## 6. 高性能 bit-packed batch sampler
-
-高性能 batch sampler 不改变第 3 节的数学估计器。它仍然估计：
-
-```math
-\hat S_l
-=
-\frac{1}{N}
-\sum_{k=1}^N
-\left(L(\tau_k)-\bar L\right)
-s_l(\tau_k).
-```
-
-区别只在执行方式：逐 shot 引擎为每条 trajectory 创建独立 tableau、Pauli frame 和 measurement record；batch 引擎共享 stabilizer generator 的 Pauli 支撑，把 generator sign、Pauli frame、measurement record 和 noise event 压进整数 bit mask 中，并一次性执行相同的电路操作。
-
-对 `N` 个 shot，batch sampler 用一个整数的第 `k` 位表示第 `k` 条 trajectory：
-
-```text
-X_frame[q]: bit k = shot k has X component on qubit q.
-Z_frame[q]: bit k = shot k has Z component on qubit q.
-Sign[i]:    bit k = shot k has negative sign on stabilizer generator i.
-M[key]:     bit k = shot k measured 1 for measurement key.
-E[l]:       bit k = shot k sampled an error event at noise location l.
-```
-
-Clifford gate 对全部 shot 同时更新：
-
-```text
-H(q):       swap X_frame[q], Z_frame[q]
-S(q):       Z_frame[q] ^= X_frame[q]
-CX(c,t):    X_frame[t] ^= X_frame[c]
-            Z_frame[c] ^= Z_frame[t]
-CZ(a,b):    Z_frame[a] ^= X_frame[b]
-            Z_frame[b] ^= X_frame[a]
-SWAP(a,b):  swap X_frame[a], X_frame[b]
-            swap Z_frame[a], Z_frame[b]
-```
-
-测量时，batch sampler 维护一个无噪声理想 tableau `\mathcal S_t^{ideal}`。如果被测 Pauli 在当前 stabilizer span 中，理想测量 mask 由已打包的 generator signs 决定；如果它与某些 generator 反对易，则采样一个 50/50 outcome mask，并用该 mask 更新被替换 generator 的 sign。随后用 Pauli frame 决定每个 shot 的翻转：
-
-```math
-m_k
-=
-m^{ideal}_k
-\oplus
-\langle F_k, P_{meas}\rangle
-\oplus
-f_k,
-```
-
-其中 `f_k` 是 measurement bit-flip noise。该 batch sampler 支持随机 Pauli measurement，只要所有 shot 共享同一个 Clifford/stabilizer 支撑演化；也就是说，不支持基于单个 shot 测量结果选择不同后续电路的 adaptive branching。
-
-**Algorithm 3: Bit-Packed Batch Hotspot Estimation**
-
-输入：
-
-- 电路 `C`。
-- shot 数 `N`。
-- batch loss mask function `B`，返回 logical failure mask。
-- 局部噪声位置集合 `\mathcal L`。
-
-输出：
-
-- logical failure rate `\hat J`。
-- signed sensitivity `\hat S_l`。
-- hotspot score `\hat H_l`。
-
-过程：
-
-```text
-1.  Initialize ideal stabilizer tableau S_ideal <- S_0.
-2.  Initialize bit-packed stabilizer signs and frames:
-        Sign[i] <- 0 for all stabilizer generators
-        X_frame[q] <- 0 for all q
-        Z_frame[q] <- 0 for all q
-3.  Initialize measurement masks M and event masks E.
-
-4.  For each operation O_t in time order:
-
-5.      If O_t is a Clifford gate:
-6.          Update S_ideal once.
-7.          Update all shot frames by bit operations.
-
-8.      If O_t is noise location l:
-9.          Sample event mask E[l].
-10.         Apply the masked Pauli event to X_frame / Z_frame.
-
-11.     If O_t is measurement of Pauli P:
-12.         If P is deterministic, compute ideal mask from stabilizer span signs.
-13.         Else sample a random ideal outcome mask and update S_ideal signs.
-14.         Compute frame flip mask using symplectic product <F, P>.
-15.         Apply measurement-noise flip mask if present.
-16.         Store M[key].
-
-17. Compute loss mask Loss <- B(M, X_frame, Z_frame).
-18. J_hat <- popcount(Loss) / N.
-
-19. For each noise location l:
-20.     Use E[l] and Loss to count:
-            error-and-loss shots,
-            error-and-no-loss shots,
-            no-error-and-loss shots,
-            no-error-and-no-loss shots.
-21.     Compute S_hat[l] from the same score-function formula.
-22.     H_hat[l] <- abs(S_hat[l]).
-```
-
-这个 batch sampler 当前是快速路径，而不是通用 adaptive tableau 分支引擎。它适合 repetition code、surface-code syndrome extraction 这类所有 shot 共享同一 stabilizer 支撑演化、差异由 generator sign mask 和 Pauli frame mask 表示的 QEC 电路。
-
-### Rust Workspace Python API
-
-`npsim.runtime.compile_native_sampler` 是面向 Rust packed sampler 的稳定入口。
-batch/DEM/hotspot 的产品运行时由 Rust core 提供，并通过 PyO3 模块
-`npsim._npsim_native` 暴露到 Python；电路必须能被 Rust core 编译：
-
-```python
-from npsim.runtime import compile_native_sampler
-
-sampler = compile_native_sampler(circuit)
-batch = sampler.sample(shots=100_000, seed=1)
-```
-
-DEM 路径也有可复用 native generator。`generate_native_dem()` 返回完整
-`DetectorErrorModel`；如果同一个 circuit 要反复生成 DEM 或直接编译 DEM sampler，
-可以先编译 generator：
-
-```python
-from npsim.runtime import (
-    compile_native_dem_generator,
-    compile_native_dem_sampler_from_circuit,
-    generate_native_dem,
-)
-
-dem = generate_native_dem(circuit)
-
-generator = compile_native_dem_generator(circuit)
-same_dem = generator.generate_dem()
-light_sampler = generator.compile_sampler(materialize_dem=False)
-
-direct_light_sampler = compile_native_dem_sampler_from_circuit(
-    circuit,
-    materialize_dem=False,
-)
-```
-
-`materialize_dem=False` 是轻量采样路径：它直接生成 sampler edge specs，不构造
-Python `DetectorErrorModel`。返回 sampler 的 `dem` 为 `None`，适合 detector /
-observable / edge-event mask 采样；需要完整 DEM metadata 的 estimate/hotspot
-结果接口会抛出 `ValueError`。native `Operation`、`NoiseLocation`、`Circuit`
-是推荐高性能路径；兼容的 duck-typed Python 对象仍可被解析，但会按当前属性重读，
-不进入 native cache fast path。`NoiseLocation.tags` 返回 shallow copy，tags 应在
-构造时设置。
-
-普通采样吞吐基准使用 measurement-only fast path，避免为 hotspot 额外生成
-`noise_event_masks` 和 final Pauli frame：
-
-```python
-measurement_masks = sampler.sample_measurements(shots=100_000, seed=1)
-```
-
-热点识别同样走 Rust core。`BatchForwardNoiseAwareSimulator.estimate()` 和
-`DemBatchHotspotSimulator.estimate()` 会调用 Rust：采样 batch 保留在 Rust
-packed words 中，Python loss/decoder 回调只读取按需暴露的 bit helper 或 mask
-属性，最终 `loss_mask` 交回 Rust 计算 sensitivity、hotspot、metadata aggregation
-和 top-k cache。没有构建 `npsim._npsim_native` 或 Rust core 不支持该电路时会抛
-`UnsupportedNativeCircuitError`，不再回退到 Python reference。
-
-运行时不再暴露 backend 选择参数；Rust core 是唯一产品执行路径。向
-`BatchForwardNoiseAwareSimulator.run_batch()` 或
-`DemBatchHotspotSimulator.run_batch()` 传入 Python `rng` 时，运行时会用
-`rng.getrandbits(64)` 派生 native seed；这只保持随机分布，不保证旧 Python
-reference 路径的 bit-for-bit 序列一致。
-
-```python
-sampler = compile_native_sampler(circuit)
-```
-
-Rust 源码位于根目录 Cargo workspace：
-
-- `crates/npsim-core`：PyO3 无关的 typed Rust core types 和算法承载 crate。
+- `crates/npsim-core`：Python 无关的 Rust core，包含 circuit/DEM 数据模型、packed
+  sampling 和 hotspot 聚合。
 - `crates/npsim-python`：PyO3 binding crate，构建 `npsim._npsim_native`。
+- `npsim/`：公共 Python import surface、decoder/Stim/visualization adapters 和示例构建器。
+- `docs/`：MkDocs 文档站点。
+- `tests/`、`benchmarks/`：回归测试、Stim 对照和吞吐基准。
 
-`npsim-core` 也可以被 Rust 代码直接使用。Rust API 目前仍按 pre-1.0
-unstable 处理，但主入口已经是 typed core API：
+## 安装与构建
 
-```rust
-use std::collections::HashMap;
-
-use npsim_core::{
-    BatchForwardNoiseAwareSimulator, Circuit, NoiseLocation, NoiseModel, Operation,
-};
-
-let noise = NoiseLocation {
-    id: "x0".to_string(),
-    model: NoiseModel::BernoulliPauli("X".to_string()),
-    rate: 0.1,
-    qubits: vec![0],
-    tags: HashMap::new(),
-};
-let circuit = Circuit {
-    n_qubits: 1,
-    operations: vec![
-        Operation::Noise(noise),
-        Operation::Measure {
-            qubit: 0,
-            key: Some("m".to_string()),
-            basis: "Z".to_string(),
-            noise: None,
-        },
-    ],
-};
-let simulator = BatchForwardNoiseAwareSimulator::new(circuit, vec![])?;
-let batch = simulator.run_batch(1024, Some(1), true)?;
-```
-
-根目录通过 maturin 构建 Python package：
+从源码 checkout 构建 Python extension：
 
 ```bash
-.venv/bin/maturin develop --release
-cargo test --workspace
+python -m venv .venv
+.venv/bin/python -m pip install -U pip maturin
+.venv/bin/python -m maturin develop --release
 ```
 
-在只需要刷新当前 checkout 中的 extension artifact、且不希望触发安装步骤时，可用
-`.venv/bin/maturin develop --release --skip-install`。
+可选依赖按需安装：
 
-采样吞吐 benchmark 位于 `benchmarks/sampling_throughput.py`：
+```bash
+.venv/bin/python -m pip install numpy scipy pymatching pillow stim
+```
+
+常用验证：
+
+```bash
+.venv/bin/python -c "import npsim; print(npsim.Circuit)"
+cargo test --workspace
+.venv/bin/python -m unittest discover -s tests -q
+```
+
+如果只刷新当前 checkout 的 extension artifact，可用：
+
+```bash
+.venv/bin/python -m maturin develop --release --skip-install
+```
+
+## 最小示例
+
+下面的例子构造一个单比特 X 噪声位置，采样测量结果，并估计该噪声率对 loss mask 的敏感度。
+
+```python
+from npsim import (
+    BernoulliPauliNoise,
+    BatchForwardNoiseAwareSimulator,
+    Circuit,
+    NoiseLocation,
+    Operation,
+)
+
+x_noise = NoiseLocation(
+    id="data_x0",
+    model=BernoulliPauliNoise("X"),
+    rate=0.02,
+    qubits=(0,),
+    tags={"round": 0, "gate": "idle", "qubit": 0},
+)
+
+circuit = Circuit(
+    n_qubits=1,
+    operations=(
+        Operation.noise(x_noise),
+        Operation.measure(0, key="m0", basis="Z"),
+    ),
+)
+
+simulator = BatchForwardNoiseAwareSimulator(circuit)
+batch = simulator.run_batch(shots=1024, seed=1)
+result = simulator.estimate(
+    shots=2048,
+    seed=2,
+    loss_mask_fn=lambda batch: batch.measurements["m0"],
+    top_k=5,
+)
+
+print(batch.measurement_bit("m0", 0))
+print(result.hotspot_table(top_k=5))
+```
+
+## 当前 API 要点
+
+- `Operation.pauli_gate(...)` 是 Pauli gate 构造器；`Operation.pauli` 是只读属性。
+- `PauliFrame` 和 `StabilizerState` 从 `npsim.core` 导入，不是顶层 `npsim` export。
+- `BatchForwardNoiseAwareSimulator` 是前向 packed batch runtime 的主要入口。
+- `DetectorErrorModelGenerator` 和 `generate_native_dem(...)` 生成 DEM；未显式传入 detector /
+  observable 时，会读取 circuit 中的 `Operation.detector(...)` 和
+  `Operation.observable_include(...)`。
+- `DemBatchHotspotSimulator` 在 DEM 层采样，每条 DEM edge 按独立 Bernoulli instruction 处理。
+- `edge_sensitivities` 和 `edge_hotspots` 是按 DEM edge index keyed 的 dict。
+- `edges_by_location()` 返回 `dict[str, list[DetectorErrorEdge]]`。
+- `materialize_dem=False` 的 native DEM sampler 是轻量采样路径，`sampler.dem is None`，
+  需要完整 DEM metadata 的 estimate/hotspot API 会抛出 `ValueError`。
+
+## 工作流选择
+
+| 需求 | 推荐工作流 |
+| --- | --- |
+| 查看原始 measurement/noise masks | Forward sampling |
+| 自定义 measurement-history loss | Forward estimate + `loss_mask_fn` |
+| detector-level decoder | Forward 或 DEM estimate + decoder |
+| graphlike matching decoder | DEM + `PyMatchingBatchDecoder` |
+| DEM edge 级热点排序 | DEM hotspot estimate |
+| 重复 detector-level sampling | 生成 DEM 后复用 DEM sampler |
+| Rust 集成 | `npsim-core` |
+
+NPSim 当前产品路径是 packed batch engine，不暴露通用的 per-shot adaptive branching simulator。
+
+## 文档开发
+
+本地预览文档站：
+
+```bash
+.venv/bin/python -m pip install mkdocs-material
+.venv/bin/python -m mkdocs serve
+```
+
+严格构建：
+
+```bash
+.venv/bin/mkdocs build --strict --site-dir /private/tmp/npsim-doc-review-site
+```
+
+## Benchmarks
+
+构建 extension 后可从仓库根目录运行：
 
 ```bash
 .venv/bin/python benchmarks/sampling_throughput.py --distances 15 21 31 --rounds 3
 .venv/bin/python benchmarks/sampling_throughput.py --family random-clifford --qubits 128 256 512 --depth 20
-.venv/bin/python benchmarks/sampling_throughput.py --family random-clifford --qubits 128 256 512 --depth 20 --noise-rate 0.001
 .venv/bin/python benchmarks/dem_throughput.py --distances 9 13 21 --rounds 3
 .venv/bin/python benchmarks/hotspot_throughput.py --distances 9 13 21 --rounds 3 --shots 100000
+.venv/bin/python benchmarks/surface_code_threshold.py --distances 3 5 7 --shots 10000
 ```
 
-默认场景是 rotated surface-code memory；`--family random-clifford` 会生成固定种子的随机 Clifford layer circuit，最后测量所有 qubits。random Clifford benchmark 可用 `--noise-rate` 和 `--noise-model depolarizing1|x` 在每层后加入单比特噪声，并用 `--measurement-noise-rate` 加测量 bit-flip。benchmark 的外部对照统一使用 Stim：`sampling_throughput.py` 报告 Stim bit-packed sampler 吞吐，`dem_throughput.py` 默认同时报告 repetition code 和 rotated surface-code 的 Stim DEM generation 与 DEM detector sampling，并拆分 native full DEM generation、native detector-only DEM generation、reusable generator compile、compiled-generator generation、light sampler compile、native/Stim detector sampling throughput 和 ratio。light compile 对应 `materialize_dem=False`，会直接生成 sampler edge specs 而不构造 Python `DetectorErrorModel`；返回的 `sampler.dem` 为 `None`，需要完整 DEM metadata 的 estimate/hotspot API 会抛出 `ValueError`。`status` 列检查 native/Stim DEM 与 detector sample rate 是否一致，`hotspot_throughput.py` 报告 native hotspot 路径并附带 Stim raw/DEM sampling 基线。运行这些 benchmark 需要安装 `stim`。
-`hotspot_throughput.py` 同时报告全链路 estimate 和预生成 batch 上的纯 hotspot
-聚合阶段。Stim 不提供等价的 hotspot aggregation，因此这里不报告 Stim hotspot ratio；纯聚合阶段仍包含把完整 public result payload 转成 Python mapping 的兼容成本。
-
-## 7. Stabilizer 更新规则
-
-模拟器内部使用二进制 symplectic 表示。一个 `n` 比特 Pauli 写成：
-
-```math
-P(x,z)=i^\kappa X^x Z^z,
-\qquad
-x,z\in \mathbb F_2^n.
-```
-
-两个 Pauli 是否反对易由 symplectic product 判断：
-
-```math
-\langle (x,z),(x',z')\rangle
-=
-x\cdot z' + z\cdot x'
-\pmod 2.
-```
-
-Clifford gate 对 `(x,z)` 的前向更新为：
-
-```text
-H(q):       x_q <-> z_q
-
-S(q):       z_q <- z_q xor x_q
-
-S†(q):      z_q <- z_q xor x_q
-            phase/sign differs from S on tableau rows, but the x/z frame map is identical.
-
-CX(c,t):    x_t <- x_t xor x_c
-            z_c <- z_c xor z_t
-
-CZ(a,b):    implemented as H(b), CX(a,b), H(b)
-            equivalently:
-            z_a <- z_a xor x_b
-            z_b <- z_b xor x_a
-
-SWAP(a,b):  implemented as CX(a,b), CX(b,a), CX(a,b)
-            equivalently swaps x_a <-> x_b and z_a <-> z_b.
-```
-
-对 stabilizer tableau，以上规则作用到每个 stabilizer generator。对 Pauli frame，同样规则作用到已累计的物理错误 frame。
-
-Pauli measurement 的规则：
-
-- 若被测 Pauli 与所有 stabilizer generator 对易，则结果确定，由 stabilizer span 中的符号决定。
-- 若它与某些 generator 反对易，则结果随机；选择一个反对易 generator 替换为被测 Pauli，并用它消去其他 generator 的反对易关系。
-
-## 8. Detector Error Model 生成
-
-Detector error model，简称 DEM，是量子纠错电路到经典解码问题之间的中间表示。
-它不再描述完整的量子态、stabilizer tableau 或每一步 gate，而只记录一件事：
-
-```text
-如果某个物理错误事件发生，它会让哪些 syndrome detector 变成 1，
-并且会不会同时翻转某个 logical observable。
-```
-
-所以 DEM 可以看成一张“错误事件查表”：
-
-```text
-physical error event
-    -> detector syndrome pattern
-    -> logical observable flip pattern
-    -> event probability
-```
-
-在 QEC 里，measurement record 本身通常不是 syndrome。一次 syndrome extraction 会产生许多
-测量结果，真正给 decoder 的 syndrome 是这些测量结果的 parity。NPSim 中把这样的
-parity 称为 detector。理想情况下 detector 应该为 0；如果某个错误改变了这个 parity，
-就说这个错误翻转了该 detector。
-
-例如一个 repetition code 或 surface code 中间位置的数据错误，通常会让相邻两个
-check 的 syndrome parity 改变，因此在 DEM 里表现为：
-
-```text
-error(p) D3 D4
-```
-
-边界附近的错误可能只翻转一个 detector：
-
-```text
-error(p) D0
-```
-
-如果错误除了产生 syndrome 之外，还改变了被保护的 logical observable，例如把
-`Z_L` 读数翻转了，就会带上 logical target：
-
-```text
-error(p) D5 L0
-```
-
-这里的 `L0` 不是一个 detector，而是第 0 个 logical observable。它表示：这个错误在
-decoder 修正前，会对该 logical observable 造成真实 logical flip。decoder 的目标是根据
-观测到的 detector pattern 推断应该施加哪些 logical correction，使
-`true_logical_flip xor predicted_correction` 尽量为 0。
-
-因此 DEM 的基本形式是把一个局部噪声位置 `l` 上的非 identity 错误事件 `e` 映射成：
-
-```math
-(l,e)
-\longmapsto
-\left(
-p_l(e),
-\Delta D(l,e),
-\Delta L(l,e)
-\right).
-```
-
-其中 `p_l(e)` 是该错误事件概率，`\Delta D(l,e)` 是被翻转的 detector 集合，
-`\Delta L(l,e)` 是被翻转的 logical observable 集合。Stim-like 文本里一条 DEM edge 写作：
-
-```text
-error(p_l(e)) D_i D_j ... L_a ...
-```
-
-这条 edge 的含义是：独立采样这个错误事件时，如果它发生，就把列出的 detector bits 和
-logical observable bits 全部 xor 一次。PyMatching 等 decoder 可以只读取这样的 edge
-集合来构造 matching graph，而不需要重新执行原始 quantum circuit。
-
-DEM 不是 score-function 热点估计的替代品。它在本项目里有三个作用：
-
-- 给 decoder 提供输入：从 DEM 构造校验矩阵和 logical fault 矩阵。
-- 快速采样：在 DEM 层直接采样 edge，而不是每个 shot 都执行完整 stabilizer 电路。
-- 投影热点：把物理 location-level sensitivity 映射到 detector graph edge、detector node
-  和 logical observable 上，方便解释热点来自 syndrome graph 的哪一部分。
-
-Detector 被声明为若干 measurement key 的 parity：
-
-```math
-D_j(\tau)
-=
-\bigoplus_{r\in A_j} m_r.
-```
-
-Logical observable 也声明为 measurement parity 和/或最终 Pauli frame 上某个 Pauli observable 的翻转：
-
-```math
-L_a(\tau)
-=
-\left(\bigoplus_{r\in B_a}m_r\right)
-\oplus
-\langle F_\tau, P_a\rangle.
-```
-
-**Algorithm 4: Single-Error DEM Construction**
-
-输入：
-
-- 电路 `C`。
-- 结构化 detector 声明 `{D_j}`。
-- 结构化 logical observable 声明 `{L_a}`。
-- 局部噪声位置集合 `\mathcal L`。
-
-输出：
-
-- detector error model edges。
-
-过程：
-
-```text
-1.  Run the circuit with all stochastic noise disabled.
-2.  Record reference detector values D_ref and logical values L_ref.
-
-3.  For each noise occurrence l:
-4.      For each non-identity event e in the noise model at l:
-5.          Run the circuit again with only event e injected at l.
-6.          Record D_injected and L_injected.
-7.          detector_flips <- {j | D_ref[j] xor D_injected[j] = 1}
-8.          logical_flips  <- {a | L_ref[a] xor L_injected[a] = 1}
-9.          p <- probability of event e under the noise model.
-10.         If detector_flips or logical_flips is non-empty:
-11.             Add DEM edge error(p) detector_flips logical_flips.
-```
-
-这个过程要求理想电路和单错误注入后的相关测量是确定的；如果测量本身会产生随机 tableau 分支，当前 DEM 生成器会报错并要求使用更通用的逐 shot 分析。
-
-DEM 和热点可以通过噪声位置 id 连接。已有 location-level 热点：
-
-```math
-H_l = \left|\frac{\partial J}{\partial \lambda_l}\right|
-```
-
-可按 DEM edge 的事件概率投影：
-
-```math
-H_{(l,e)}
-=
-H_l
-\frac{p_l(e)}{\sum_{e'}p_l(e')}.
-```
-
-这样可以把噪声敏感度从物理时空位置投影到 detector graph edge 上，用于分析哪些 syndrome graph 边对应的物理错误最影响 logical failure。
-
-实现中提供两个投影入口：
-
-```text
-dem.project_sensitivities_to_detector_graph(sensitivities)
-dem.project_result_to_detector_graph(simulation_result)
-```
-
-输出 `DetectorGraphHotspots`，包含：
-
-```text
-edge_hotspots              # 每条 DEM edge 的 signed sensitivity / hotspot
-by_detector_edge           # 按 (detectors, observables) 聚合的 hotspot
-signed_by_detector_edge    # 按 (detectors, observables) 聚合的 signed sensitivity
-by_detector                # 按 detector node 聚合的 hotspot
-signed_by_detector         # 按 detector node 聚合的 signed sensitivity
-by_observable              # 按 logical observable 聚合的 hotspot
-signed_by_observable       # 按 logical observable 聚合的 signed sensitivity
-by_location                # 按原始噪声位置聚合的 hotspot
-signed_by_location         # 按原始噪声位置聚合的 signed sensitivity
-```
-
-对一个 location `l`，若它产生多条 DEM edge，投影权重为：
-
-```math
-w_{l,e}
-=
-\frac{p_l(e)}{\sum_{e'}p_l(e')}.
-```
-
-于是 edge-level signed sensitivity 为：
-
-```math
-S_{l,e}^{edge}=w_{l,e}S_l,
-\qquad
-H_{l,e}^{edge}=|S_{l,e}^{edge}|.
-```
-
-按 detector graph edge 聚合时，key 是：
-
-```text
-(detector_tuple, observable_tuple)
-```
-
-例如：
-
-```text
-((3, 8), ())      # detector D3-D8 graph edge
-((5,), (0,))      # boundary/logical edge involving D5 and L0
-```
-
-按 detector node 聚合时，一条包含多个 detector 的 edge 会把 hotspot 平均分给这些 detector，避免多 detector edge 在 node heatmap 中被重复计数。
-
-`DETECTOR` 和 `OBSERVABLE_INCLUDE` 在电路中是一等 operation。逐 shot 模拟器执行到这些 operation 时会立即计算并记录：
-
-```text
-trajectory.detectors[id]
-trajectory.observables[id]
-trajectory.detector_record
-```
-
-batch sampler 也会生成对应 bit mask：
-
-```text
-batch.detectors[id]
-batch.observables[id]
-```
-
-DEM 生成器既可以接受显式传入的 `Detector` / `LogicalObservable` 声明，也可以直接从 circuit 内的 detector / observable operations 自动读取声明。
-
-### PyMatching batch decoder 接口
-
-PyMatching 接口位于 DEM 和 loss 计算之间，不改变前向 trajectory 或 score-function
-梯度估计。它的作用是把 detector record 解码成 predicted logical correction：
-
-```math
-\text{forward batch}
-\longrightarrow
-s^{(k)}
-\longrightarrow
-\hat{\ell}^{(k)}
-\longrightarrow
-L^{(k)}.
-```
-
-给定 DEM edge 集合 `E`，构造二元校验矩阵：
-
-```math
-H_{i,e}
-=
-\mathbf 1[D_i\in \Delta D_e],
-```
-
-以及 logical fault 矩阵：
-
-```math
-F_{a,e}
-=
-\mathbf 1[L_a\in \Delta L_e].
-```
-
-其中 `H` 的行是 detector，列是 DEM edge；`F` 的行是 logical observable，
-列也是 DEM edge。每条 edge 的 matching 权重为：
-
-```math
-w_e
-=
-\log\frac{1-p_e}{p_e}.
-```
-
-**Algorithm 5: PyMatching Batch Decoding from DEM**
-
-输入：
-
-- graphlike detector error model。
-- batch detector masks `B_i`，其中第 `k` 位是 shot `k` 的 detector `D_i`。
-- shot 数 `N`。
-
-输出：
-
-- logical correction masks `C_a`。
-
-过程：
-
-```text
-1.  Enumerate detector ids D_i and logical observable ids L_a.
-2.  Build H[i,e] from the detector set of each DEM edge e.
-3.  Build F[a,e] from the logical observable set of each DEM edge e.
-4.  Set edge weight w_e <- log((1-p_e)/p_e).
-5.  Construct PyMatching from H, F, and w.
-6.  For each shot k and detector i:
-7.      S[k,i] <- bit_k(B_i).
-8.  Decode all rows of S with PyMatching.decode_batch.
-9.  Pack predicted logical correction bits back into C_a masks.
-```
-
-随后 loss 可以继续保持 bit mask 形式。例如单 logical observable 时：
-
-```text
-failure_mask = batch.observables[0] xor correction_masks[0]
-```
-
-这个 decoder 接口要求 DEM 是 graphlike：每条 edge 最多连接两个 detector。没有
-detector 的纯 logical edge 表示 syndrome 不可见的 logical fault，当前接口会拒绝它，
-因为 matching decoder 无法从 detector record 中恢复这种错误。
-
-### DEM mode hotspot 模拟
-
-DEM mode 不执行 stabilizer 电路，而是直接在 detector error model 上采样。每条
-DEM edge `e` 被视为一个独立 Bernoulli error instruction：
-
-```math
-f_e \sim \mathrm{Bernoulli}(p_e).
-```
-
-一次 DEM shot 的 detector record 和真实 logical observable flip 为：
-
-```math
-D_i
-=
-\bigoplus_{e: D_i\in \Delta D_e} f_e,
-\qquad
-L_a
-=
-\bigoplus_{e: L_a\in \Delta L_e} f_e.
-```
-
-decoder 只看 detector record：
-
-```math
-\hat L = \mathrm{Dec}(D),
-```
-
-默认 loss 是任一 logical observable correction 后仍翻转：
-
-```math
-L_{\mathrm{shot}}
-=
-\mathbf 1
-\left[
-\exists a:\; L_a\oplus \hat L_a = 1
-\right].
-```
-
-DEM-level 目标函数为：
-
-```math
-J_{\mathrm{DEM}}(p)
-=
-\mathbb E_{f\sim \prod_e \mathrm{Bernoulli}(p_e)}
-\left[L_{\mathrm{shot}}(f)\right].
-```
-
-对每条 DEM edge 的 hotspot 定义为：
-
-```math
-S_e
-=
-\frac{\partial J_{\mathrm{DEM}}}{\partial p_e}.
-```
-
-仍使用 score-function estimator：
-
-```math
-\hat S_e
-=
-\frac1N
-\sum_{k=1}^N
-\left(L_k-\bar L\right)
-\left(
-\frac{f_e^{(k)}}{p_e}
--
-\frac{1-f_e^{(k)}}{1-p_e}
-\right).
-```
-
-在 bit-packed 实现中，每条 edge 的 event mask `E_e` 与 loss mask `F` 只需要
-`popcount(F & E_e)`、`popcount(E_e)` 和 `popcount(F)` 就能累计梯度。
-
-如果需要回到物理 noise location `l`，并且 DEM edge 保留了 `location_id`，使用
-线性化链式聚合：
-
-```math
-S_l^{\mathrm{DEM}}
-=
-\sum_{e:\mathrm{loc}(e)=l}
-\frac{p_e}{\sum_{e':\mathrm{loc}(e')=l}p_{e'}}
-S_e.
-```
-
-实现入口：
-
-```text
-result = DemBatchHotspotSimulator(dem).estimate(
-    shots=100_000,
-    seed=1,
-    decoder=pymatching_decoder,
-)
-```
-
-其中 `decoder` 可以是 `PyMatchingBatchDecoder`，也可以是任何提供
-`decode_batch_masks(batch)` 的对象。输出同时包含：
-
-```text
-edge_sensitivities          # dJ_DEM / dp_e
-edge_hotspots               # |dJ_DEM / dp_e|
-sensitivities               # 按 location_id 聚合后的 signed sensitivity
-hotspots                    # 按 location_id 聚合后的 hotspot
-detector_graph_hotspots     # 按 detector edge / node / observable 聚合
-```
-
-这个模式非常适合做 detector graph / decoder-level 的高速热点扫描。它的限制是：
-同一物理 noise location 产生的多个 DEM edge 在这里按独立 error instruction 采样；
-这符合普通 DEM sampling 语义，但不完全等同于原始 forward trajectory 中的互斥
-categorical Pauli event。高噪声率或强相关噪声下，应回到 forward mode 校验。
-
-## 9. Repetition Code 热点示例
-
-对于 bit-flip repetition code，data qubit 上的 `X` 错误会改变相邻 parity-check syndrome。一次 syndrome extraction 中，第 `i` 个 check 测量：
-
-```math
-Z_i Z_{i+1}.
-```
-
-decoder 根据 syndrome 估计 correction `\hat{\ell}`。真实 residual error 由最终 Pauli frame 得到：
-
-```math
-r_i = F_i^X \oplus \hat c_i.
-```
-
-logical failure loss 为：
-
-```math
-L(\tau)
-=
-\mathbf 1
-\left[
-\sum_i r_i > \left\lfloor\frac{d}{2}\right\rfloor
-\right].
-```
-
-对每个 data-noise location 和 measurement-noise location 分别估计 `S_l`。如果某一轮 measurement error 或某个 data qubit error 被人为提高，其对应位置应在 `H_l` 排序中显著上升。
-
-## 10. Stim 子集导入
-
-为了和 Stim 工作流衔接，项目提供 `.stim` 文本子集导入器。导入器输出：
-
-```text
-StimImportResult(
-    circuit,
-    detectors,
-    observables,
-    measurement_keys,
-)
-```
-
-其中：
-
-- `circuit` 是本项目的前向 `Circuit`。
-- `detectors` 是结构化 `Detector` 声明。
-- `observables` 是结构化 `LogicalObservable` 声明。
-- `measurement_keys` 是 Stim measurement record 到内部 key 的顺序映射。
-
-导入器会把 `DETECTOR` 和 `OBSERVABLE_INCLUDE` 同时保留为 circuit operation，因此导入后的电路本身已经包含 detector / observable 语义；额外返回的 `detectors` / `observables` 主要用于显式检查或兼容旧接口。
-
-支持的 Stim 指令子集：
-
-```text
-H, S, S_DAG, SQRT_Z_DAG
-X, Y, Z
-CX, CNOT, CZ, SWAP
-R, RX, RY
-M, MX, MY
-MPP
-X_ERROR, Y_ERROR, Z_ERROR
-DEPOLARIZE1, DEPOLARIZE2
-PAULI_CHANNEL_1, PAULI_CHANNEL_2
-DETECTOR
-OBSERVABLE_INCLUDE
-TICK, QUBIT_COORDS, SHIFT_COORDS  # accepted as metadata/no-op subset
-```
-
-measurement record 引用支持 `rec[-k]`。导入器将其解析为内部 measurement key：
-
-```text
-M 0
-M 1
-DETECTOR rec[-1] rec[-2]
-```
-
-对应：
-
-```text
-Detector(measurement_keys=("m1", "m0"))
-```
-
-噪声指令映射为带唯一 id 的 `NoiseLocation`：
-
-```text
-X_ERROR(p) q          -> BernoulliPauliNoise("X")
-DEPOLARIZE1(p) q      -> SingleQubitDepolarizing()
-DEPOLARIZE2(p) a b    -> TwoQubitDepolarizing()
-PAULI_CHANNEL_1(...)  -> PauliChannel(...)
-M(p) q                -> MeasurementBitFlip() attached to measurement
-```
-
-导入后的电路可以直接用于 trajectory 模拟、batch sampler 或 DEM 生成：
-
-```text
-imported = parse_stim_circuit(stim_text)
-dem = DetectorErrorModelGenerator(
-    imported.circuit,
-    detectors=imported.detectors,
-    observables=imported.observables,
-).generate()
-```
-
-当前不支持 `REPEAT` block、复杂 target modifier、坐标平移语义的完整累积、非整数 qubit target、复杂 feedback target、`CORRELATED_ERROR` / `ELSE_CORRELATED_ERROR` 等 Stim 高级语义。遇到这些语法会抛出 `StimImportError`，避免静默生成错误电路。
-
-## 11. 验证标准
-
-实现应满足以下校验：
-
-- 无噪声或零 loss 时，`\hat J` 和热点分数应接近 0。
-- 单比特 bit-flip toy model 中，若 `J(\lambda)=\lambda`，则 `\partial J/\partial\lambda=1`。
-- 有限差分校验：
-
-```math
-\frac{J(\lambda_l+\epsilon)-J(\lambda_l-\epsilon)}{2\epsilon}
-\approx
-\hat S_l.
-```
-
-- 对称纠错电路中，几何等价的噪声位置应在统计误差内给出相近 hotspot score。
-- 人为提高某个时空位置的噪声率后，该位置或相邻 detector 区域应在 top-k hotspot 中出现。
-
-## 12. 当前算法边界
-
-当前模型限制在 stabilizer-compatible stochastic noise：
-
-- Clifford gate：`H`、`S`、`S†`、`CX`、`CZ`、`SWAP`。
-- 理想 Pauli gate：`X`、`Y`、`Z` 以及任意 sparse Pauli string。
-- Measurement：`X`、`Y`、`Z` basis 单比特测量，以及任意 Pauli-string measurement。
-- Reset：`X`、`Y`、`Z` basis reset。
-- Pauli noise：固定 Pauli 事件、通用 Pauli mixture、single-qubit depolarizing、two-qubit depolarizing。
-- Classical noise：measurement bit-flip noise。
-- Idle / reset / gate-local 错误：只要能表示为 stabilizer-compatible stochastic Pauli channel，就可以作为带 score 的噪声位置。
-- 高性能 batch sampler：支持确定和随机 Pauli measurement 的 bit-packed 快速路径；遇到按 shot 测量结果选择不同后续电路的 adaptive branching 时，需要使用逐 shot 通用模拟器。
-- Detector error model：支持结构化 detector / logical observable 声明，并通过单错误传播生成 Stim-like `error(p) D... L...` edge；当前不支持需要随机 tableau 分支的 DEM 构造。
-- PyMatching batch decoder：可从 graphlike DEM 构造 matching decoder，并批量解码 detector record / bit-packed detector masks；需要可选依赖 `pymatching`、`numpy`、`scipy`，且不接受 hyperedge 或 syndrome 不可见的纯 logical edge。
-- DEM hotspot mode：支持独立 DEM edge sampling、edge-level sensitivity、按 `location_id` 链式聚合的 physical-location hotspot，以及 detector-graph hotspot；不保留同一原始 noise location 下多个 Pauli event 的互斥采样语义。
-- Stim import：支持常见 Clifford、reset、measurement、Pauli/depolarizing noise、`DETECTOR rec[-k]` 和 `OBSERVABLE_INCLUDE(k) rec[-k]` 子集；不支持 `REPEAT` 和 Stim 完整语义。
-
-非 Clifford 门、非 Pauli 噪声、amplitude damping 等非 stabilizer-preserving channel 不直接进入初版算法；需要先做 Pauli twirling、离散化近似，或替换为可由 stabilizer trajectory 采样的等效噪声模型。
+Stim/PyMatching 相关 benchmark 会在对应可选依赖安装后启用对照。

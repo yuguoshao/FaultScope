@@ -7,11 +7,14 @@ stabilizer-compatible quantum error correction workflows.
 
 ## Start Here
 
-- [User Guide](user_guide.md): installation, workflows, examples, results,
-  troubleshooting, and best practices.
-- [API Reference](api_reference.md): public Python and Rust API surfaces.
-- [Theory](forward_noise_aware_stabilizer.md): score-function estimator and
-  forward trajectory model.
+- [User Guide](user_guide.md): installation, runnable workflows, examples,
+  packed-mask basics, troubleshooting, and best practices.
+- [API Reference](api_reference.md): current public Python and Rust API
+  surfaces, callback contracts, and result object fields.
+- [Theory](theory.md): theory, derivations, packed estimator formulas, DEM
+  equations, and implementation-level calculation details.
+- [Implementation Overview](implementation_overview.md): current packed
+  runtime behavior, supported workflows, and implementation boundaries.
 
 ## Quick Build
 
@@ -36,4 +39,10 @@ Preview this documentation site locally:
 ```bash
 .venv/bin/python -m pip install mkdocs-material
 .venv/bin/python -m mkdocs serve
+```
+
+Strict build:
+
+```bash
+.venv/bin/mkdocs build --strict --site-dir /private/tmp/npsim-doc-review-site
 ```

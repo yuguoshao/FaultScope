@@ -18,7 +18,8 @@ nav:
   - Home: index.md
   - User Guide: user_guide.md
   - API Reference: api_reference.md
-  - Theory: forward_noise_aware_stabilizer.md
+  - Theory: theory.md
+  - Implementation Overview: implementation_overview.md
 
 markdown_extensions:
   - admonition
