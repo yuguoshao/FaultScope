@@ -1270,6 +1270,15 @@ class NativeDetectorErrorModelTests(unittest.TestCase):
         self.assertEqual(dict(direct_result.dem.edges[0].tags), {"round": 1})
         with self.assertRaises(ValueError):
             direct_light_sampler.estimate_default(shots=256, seed=123)
+        direct_light_native_batch = direct_light_sampler.run_native_batch(
+            shots=256,
+            seed=123,
+        )
+        with self.assertRaises(ValueError):
+            direct_light_sampler.estimate_hotspots(
+                direct_light_native_batch,
+                direct_light_native_batch.detectors[0],
+            )
 
         direct_edge = direct_result.top_edges(1)[0]
         direct_graph_edge = direct_result.detector_graph_hotspots.edge_hotspots[0]

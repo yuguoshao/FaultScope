@@ -556,6 +556,7 @@ impl NativeDemSampler {
         baseline: Option<f64>,
         top_k: usize,
     ) -> PyResult<PyDemHotspotResult> {
+        self.require_dem_metadata()?;
         let loss_mask = py_int_to_mask(
             loss_mask,
             batch.batch.all_mask.words.len(),
