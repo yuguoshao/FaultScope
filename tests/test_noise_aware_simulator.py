@@ -2,6 +2,7 @@ import os
 import random
 import tempfile
 import unittest
+from types import SimpleNamespace
 from unittest import mock
 
 from npsim.runtime import BatchForwardNoiseAwareSimulator, BatchTrajectory
@@ -1273,6 +1274,73 @@ class NativeDetectorErrorModelTests(unittest.TestCase):
         direct_edge = direct_result.top_edges(1)[0]
         direct_graph_edge = direct_result.detector_graph_hotspots.edge_hotspots[0]
         self.assertEqual(direct_edge.edge_index, direct_graph_edge.edge_index)
+
+    def test_native_dem_reparses_mutated_duck_typed_operation(self) -> None:
+        self._require_native_dem()
+        first = NoiseLocation("x0", BernoulliPauliNoise("X"), 0.25, (0,))
+        second = NoiseLocation("x0", BernoulliPauliNoise("X"), 0.5, (0,))
+        duck_noise_op = SimpleNamespace(
+            kind="noise",
+            qubits=(0,),
+            noise_location=first,
+        )
+        circuit = Circuit(
+            n_qubits=1,
+            operations=[
+                duck_noise_op,
+                Operation.measure(0, key="m", basis="Z"),
+                Operation.detector(("m",), detector_id=0),
+            ],
+        )
+
+        self.assertEqual(generate_native_dem(circuit).edges[0].probability, 0.25)
+        duck_noise_op.noise_location = second
+        self.assertEqual(generate_native_dem(circuit).edges[0].probability, 0.5)
+
+    def test_native_operation_with_duck_typed_noise_location_is_reparsed(self) -> None:
+        self._require_native_dem()
+        duck_location = SimpleNamespace(
+            id="x0",
+            model=BernoulliPauliNoise("X"),
+            rate=0.25,
+            qubits=(0,),
+            tags={},
+        )
+        circuit = Circuit(
+            n_qubits=1,
+            operations=[
+                Operation.noise(duck_location),
+                Operation.measure(0, key="m", basis="Z"),
+                Operation.detector(("m",), detector_id=0),
+            ],
+        )
+
+        self.assertEqual(generate_native_dem(circuit).edges[0].probability, 0.25)
+        duck_location.rate = 0.5
+        self.assertEqual(generate_native_dem(circuit).edges[0].probability, 0.5)
+
+    def test_native_noise_location_tags_getter_returns_copy(self) -> None:
+        self._require_native_dem()
+        location = NoiseLocation(
+            id="x0",
+            model=BernoulliPauliNoise("X"),
+            rate=0.25,
+            qubits=(0,),
+            tags={"round": 1},
+        )
+        tags = location.tags
+        tags["round"] = 2
+        self.assertEqual(dict(location.tags), {"round": 1})
+
+        circuit = Circuit(
+            n_qubits=1,
+            operations=[
+                Operation.noise(location),
+                Operation.measure(0, key="m", basis="Z"),
+                Operation.detector(("m",), detector_id=0),
+            ],
+        )
+        self.assertEqual(dict(generate_native_dem(circuit).edges[0].tags), {"round": 1})
 
     def test_native_dem_generator_rejects_random_ideal_measurement(self) -> None:
         self._require_native_dem()

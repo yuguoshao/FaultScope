@@ -60,8 +60,8 @@ impl PyNoiseLocation {
     }
 
     #[getter]
-    pub(crate) fn tags(&self, py: Python<'_>) -> PyObject {
-        self.tags.clone_ref(py)
+    pub(crate) fn tags(&self, py: Python<'_>) -> PyResult<PyObject> {
+        Ok(self.tags.bind(py).call_method0("copy")?.unbind())
     }
 
     pub(crate) fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
@@ -256,7 +256,7 @@ impl PyOperation {
         location: Py<PyAny>,
         metadata: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Self> {
-        let core_location = parse_noise_location_object(location.bind(py)).ok();
+        let core_location = cache_safe_native_noise_location(py, &location);
         let qubits = match &core_location {
             Some(location) => location.qubits.clone(),
             None => location
@@ -288,14 +288,14 @@ impl PyOperation {
         noise: Option<Py<PyAny>>,
         metadata: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Self> {
-        let core_op = optional_native_noise_location(py, &noise)
-            .ok()
-            .map(|core_noise| npsim_core::Operation::Measure {
+        let core_op = cache_safe_optional_noise_location(py, &noise).map(|core_noise| {
+            npsim_core::Operation::Measure {
                 qubit,
                 key: key.clone(),
                 basis: basis.to_uppercase(),
                 noise: core_noise,
-            });
+            }
+        });
         Ok(Self {
             kind: "measure".to_string(),
             qubits: vec![qubit],
@@ -320,14 +320,14 @@ impl PyOperation {
         noise: Option<Py<PyAny>>,
         metadata: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Self> {
-        let core_op = optional_native_noise_location(py, &noise)
-            .ok()
-            .map(|core_noise| npsim_core::Operation::MeasurePauli {
+        let core_op = cache_safe_optional_noise_location(py, &noise).map(|core_noise| {
+            npsim_core::Operation::MeasurePauli {
                 qubits: qubits.clone(),
                 pauli: pauli.clone(),
                 key: key.clone(),
                 noise: core_noise,
-            });
+            }
+        });
         Ok(Self {
             kind: "measure_pauli".to_string(),
             qubits: qubits.clone(),
@@ -559,9 +559,14 @@ impl PyCircuit {
     pub(crate) fn new(py: Python<'_>, n_qubits: usize, operations: Vec<Py<PyAny>>) -> Self {
         let core_operations = operations
             .iter()
-            .map(|operation| parse_operation_object(operation.bind(py)))
-            .collect::<PyResult<Vec<_>>>()
-            .ok();
+            .map(|operation| {
+                let operation = operation
+                    .bind(py)
+                    .extract::<PyRef<'_, PyOperation>>()
+                    .ok()?;
+                operation.core_op.clone()
+            })
+            .collect::<Option<Vec<_>>>();
         let core_circuit = core_operations.map(|operations| {
             std::sync::Arc::new(npsim_core::Circuit {
                 n_qubits,

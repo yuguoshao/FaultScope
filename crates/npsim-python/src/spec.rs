@@ -267,6 +267,35 @@ pub(crate) fn optional_native_noise_location(
         .transpose()
 }
 
+pub(crate) fn cache_safe_optional_noise_location(
+    py: Python<'_>,
+    location: &Option<Py<PyAny>>,
+) -> Option<Option<NoiseLocationSpec>> {
+    match location {
+        Some(location) => cache_safe_native_noise_location(py, location).map(Some),
+        None => Some(None),
+    }
+}
+
+pub(crate) fn cache_safe_native_noise_location(
+    py: Python<'_>,
+    value: &Py<PyAny>,
+) -> Option<NoiseLocationSpec> {
+    let location = value
+        .bind(py)
+        .extract::<PyRef<'_, PyNoiseLocation>>()
+        .ok()?;
+    let model = cache_safe_native_noise_model(location.model.bind(py))?;
+    let tags = location.core_tags.clone()?;
+    Some(NoiseLocationSpec {
+        id: location.id.clone(),
+        model,
+        rate: location.rate,
+        qubits: location.qubits.clone(),
+        tags,
+    })
+}
+
 pub(crate) fn optional_noise_location_attr(
     value: &Bound<'_, PyAny>,
     attr: &str,
@@ -308,23 +337,8 @@ pub(crate) fn parse_noise_location_object(value: &Bound<'_, PyAny>) -> PyResult<
 }
 
 pub(crate) fn parse_noise_model_object(value: &Bound<'_, PyAny>) -> PyResult<NoiseModel> {
-    if let Ok(model) = value.extract::<PyRef<'_, PyBernoulliPauliNoise>>() {
-        return Ok(NoiseModel::BernoulliPauli(model.pauli.clone()));
-    }
-    if value.extract::<PyRef<'_, PyMeasurementBitFlip>>().is_ok() {
-        return Ok(NoiseModel::MeasurementBitFlip);
-    }
-    if value
-        .extract::<PyRef<'_, PySingleQubitDepolarizing>>()
-        .is_ok()
-    {
-        return Ok(NoiseModel::SingleQubitDepolarizing);
-    }
-    if value.extract::<PyRef<'_, PyTwoQubitDepolarizing>>().is_ok() {
-        return Ok(NoiseModel::TwoQubitDepolarizing);
-    }
-    if let Ok(model) = value.extract::<PyRef<'_, PyPauliChannel>>() {
-        return Ok(NoiseModel::PauliChannel(model.weights.clone()));
+    if let Some(model) = cache_safe_native_noise_model(value) {
+        return Ok(model);
     }
 
     let type_name = value.get_type().getattr("__name__")?.extract::<String>()?;
@@ -350,6 +364,28 @@ pub(crate) fn parse_noise_model_object(value: &Bound<'_, PyAny>) -> PyResult<Noi
             "unsupported native noise model {type_name:?}"
         ))),
     }
+}
+
+fn cache_safe_native_noise_model(value: &Bound<'_, PyAny>) -> Option<NoiseModel> {
+    if let Ok(model) = value.extract::<PyRef<'_, PyBernoulliPauliNoise>>() {
+        return Some(NoiseModel::BernoulliPauli(model.pauli.clone()));
+    }
+    if value.extract::<PyRef<'_, PyMeasurementBitFlip>>().is_ok() {
+        return Some(NoiseModel::MeasurementBitFlip);
+    }
+    if value
+        .extract::<PyRef<'_, PySingleQubitDepolarizing>>()
+        .is_ok()
+    {
+        return Some(NoiseModel::SingleQubitDepolarizing);
+    }
+    if value.extract::<PyRef<'_, PyTwoQubitDepolarizing>>().is_ok() {
+        return Some(NoiseModel::TwoQubitDepolarizing);
+    }
+    if let Ok(model) = value.extract::<PyRef<'_, PyPauliChannel>>() {
+        return Some(NoiseModel::PauliChannel(model.weights.clone()));
+    }
+    None
 }
 
 pub(crate) fn parse_optional_tags_attr(
