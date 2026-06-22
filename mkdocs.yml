@@ -3,6 +3,8 @@ site_description: Rust-core forward noise-aware stabilizer simulator with a Pyth
 site_url: https://yuguoshao.github.io/NPSim/
 repo_url: https://github.com/yuguoshao/NPSim
 repo_name: yuguoshao/NPSim
+# Keep local file:// builds navigable without relying on directory index lookup.
+use_directory_urls: false
 
 theme:
   name: material
