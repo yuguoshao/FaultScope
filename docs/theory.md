@@ -43,6 +43,106 @@ NPSim 的 batch representation 把每个 boolean shot value 存成一个 Python 
 \operatorname{popcount}(X) = \text{number of set bits in } X.
 \]
 
+## Packed masks: measurements, detectors, observables
+
+Python API 暴露的 batch 结果不是逐 shot 的列表，而是一组 keyed packed masks。measurement、
+detector、observable 都遵循同一个约定：dict 的 key 标识一个物理或逻辑量，dict 的 value 是一个
+整数；整数第 \(k\) 位就是第 \(k\) 个 shot 上这个量的 boolean 值。
+
+### Measurement masks
+
+`batch.measurements` 的类型是 `dict[str, int]`。每个 key 是一次 measurement 或 reset-with-key
+记录出的 measurement key，每个 value 是一个 packed measurement mask。对 key `m`，记这个整数为
+\(M_m\)。它把同一个 measurement key 在 \(N\) 个 shots 中的 boolean 结果压到一个整数里：
+
+\[
+M_m = \sum_{k=0}^{N-1} m_{k,m}2^k,
+\qquad
+m_{k,m} = \operatorname{bit}_k(M_m).
+\]
+
+也就是说，\(M_m\) 的第 \(k\) 位就是第 \(k\) 个 shot 上 key `m` 的测量结果。若
+`batch.measurements["m"] == 0b1010`，则 shot 1 和 shot 3 的结果为 1，shot 0 和 shot 2 的结果为
+0。实际使用时仍应通过 bit operation 读取：
+
+```text
+((batch.measurements["m"] >> k) & 1)
+```
+
+measurement key 必须唯一。显式写 `Operation.measure(..., key="m")` 时使用给定 key；没有显式 key
+的测量会按运行时顺序生成类似 `m0`, `m1`, ... 的 key。重复 key 会报错，因为一个 key 只能对应一个
+packed mask。
+
+`MeasurementBitFlip` noise 会在 measurement mask 记录前翻转相应 shots 的 measurement bit，因此
+下游 detector、observable 和 `loss_mask_fn` 看到的都是已经包含 measurement noise 的
+packed measurement mask。
+
+### Detector masks
+
+`batch.detectors` 的类型是 `dict[int, int]`。每个 key 是 detector id，每个 value 是 packed
+detector mask。detector 是若干 measurement masks 的 bitwise XOR parity。若 detector \(i\)
+依赖 measurement keys \(K_i\)，则：
+
+\[
+D_i = \bigoplus_{m\in K_i} M_m.
+\]
+
+这里的 XOR 是逐 bit 的：对每个 shot \(k\)，\(D_i\) 的第 \(k\) 位等于该 shot 上所有依赖测量结果的
+parity。也就是：
+
+\[
+\operatorname{bit}_k(D_i)
+=
+\bigoplus_{m\in K_i}
+\operatorname{bit}_k(M_m).
+\]
+
+### Observable masks
+
+`batch.observables` 的类型是 `dict[int, int]`。每个 key 是 logical observable id，每个 value 是
+packed observable mask。记 id 为 \(a\) 的 observable mask 为 \(O_a\)。它的第 \(k\) 位表示第
+\(k\) 个 shot 上该 logical observable 是否翻转：
+
+\[
+O_a = \sum_{k=0}^{N-1} o_{k,a}2^k,
+\qquad
+o_{k,a} = \operatorname{bit}_k(O_a).
+\]
+
+observable mask 可以来自 measurement keys、最终 Pauli frame projection，或二者的 XOR。对只由
+measurement keys \(K_a\) 定义的 observable：
+
+\[
+O_a = \bigoplus_{m\in K_a} M_m.
+\]
+
+如果 observable 还包含 final Pauli frame 项，设该 frame projection 产生的 packed mask 为
+\(Q_a\)，则：
+
+\[
+O_a =
+\left(
+\bigoplus_{m\in K_a} M_m
+\right)
+\oplus Q_a.
+\]
+
+`Operation.observable_include(a, keys)` 是电路内声明形式：它把这些 measurement keys 的 parity XOR
+到 `batch.observables[a]`。同一个 observable id 可以通过多条 include 逐次 XOR 累积。通过
+`BatchForwardNoiseAwareSimulator(..., observables=(LogicalObservable(...),))` 传入的
+`LogicalObservable` 则是在 batch 末尾从 `measurement_keys` 和可选 final Pauli frame projection
+计算出 \(O_a\)。
+
+observable mask 不是 decoder correction，也不是 residual logical loss。decoder 返回的 correction
+mask \(C_a\) 使用同样的 packed convention；默认 logical loss 先计算 residual：
+
+\[
+R_a = O_a \oplus C_a.
+\]
+
+然后把所有 residual observables 做 OR 得到 loss mask \(F\)。因此 \(O_a\) 表示 simulator 观测到的
+logical observable，\(C_a\) 表示 decoder 预测的修正，\(F\) 才是最终参与 hotspot 估计的 loss。
+
 ## 前向目标函数
 
 给定所有 noise rates \(\lambda = \{\lambda_l\}\)，目标函数是 shot-level loss 的期望：
