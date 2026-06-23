@@ -162,12 +162,21 @@ L_{\mathrm{loss}}(\tau)
 \right].
 \]
 
-在 batch API 中，loss 由 packed mask 表示：
+在 forward batch API 中，自定义 loss 由 packed mask 表示。forward estimator 支持一参或两参
+callback：
 
 ```text
 F = loss_mask_fn(batch)
 F = loss_mask_fn(batch, corrections)
 ```
+
+DEM estimator 的 custom loss callback 固定接收两参：
+
+```text
+F = loss_mask_fn(batch, corrections)
+```
+
+如果没有 decoder 或 `correction_mask_fn`，`corrections` 是空 mapping。
 
 默认 logical loss 使用 declared logical observables 和 decoder correction：
 

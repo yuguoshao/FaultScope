@@ -444,7 +444,8 @@ Forward estimate callbacks use bit-packed integer masks:
 - `loss_mask_fn(batch) -> int`
 - `loss_mask_fn(batch, corrections) -> int`
 
-DEM estimate callbacks use the same convention:
+DEM estimate callbacks also use bit-packed masks. The DEM loss callback is
+always called with a correction mapping:
 
 - `decoder.decode_batch_masks(batch) -> dict[int, int]`
 - `correction_mask_fn(batch) -> dict[int, int]`

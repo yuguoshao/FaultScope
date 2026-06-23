@@ -30,12 +30,20 @@ tau = (e_1, e_2, ..., e_M, m_1, m_2, ..., m_R, D, L)
 J(lambda) = E_tau[L_loss(tau)].
 ```
 
-在 Python API 中，自定义 loss 通过 packed mask callback 表达：
+在 Python API 中，自定义 loss 通过 packed mask callback 表达。forward estimator 支持：
 
 ```text
 loss_mask_fn(batch) -> int
 loss_mask_fn(batch, corrections) -> int
 ```
+
+DEM estimator 固定调用两参形式：
+
+```text
+loss_mask_fn(batch, corrections) -> int
+```
+
+如果没有 decoder 或 `correction_mask_fn`，`corrections` 是空 mapping。
 
 返回整数的第 `k` 位表示第 `k` 个 shot 是否贡献 loss。默认 logical loss 使用 declared
 observables 和 decoder correction masks：

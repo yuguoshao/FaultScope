@@ -224,7 +224,7 @@ result = BatchForwardNoiseAwareSimulator(
 print(result.top_hotspots(1)[0].location_id)
 ```
 
-Custom correction and loss callbacks use packed masks:
+Forward custom correction and loss callbacks use packed masks:
 
 ```text
 decoder.decode_batch_masks(batch) -> dict[int, int]
@@ -365,6 +365,15 @@ print(result.top_edges(1)[0].edge_index)
 `edge_sensitivities` and `edge_hotspots` are dictionaries keyed by DEM edge
 index. `sensitivities` and `hotspots` are dictionaries keyed by original
 location id.
+
+DEM custom loss callbacks always receive both the batch and a correction map:
+
+```text
+loss_mask_fn(batch, corrections) -> int
+```
+
+If no decoder or `correction_mask_fn` is supplied, `corrections` is an empty
+mapping.
 
 `materialize_dem=False` is a sampling-only path:
 
