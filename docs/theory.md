@@ -28,11 +28,18 @@ L_k
 - \(E_l\)：packed event mask；第 \(k\) 位为 1 表示 shot \(k\) 在 \(l\) 发生非 identity/flip event。
 - \(m_{k,r}\)：第 \(r\) 个 measurement 在 shot \(k\) 的 classical bit。
 - \(M_{\text{key}}\)：packed measurement mask；第 \(k\) 位为 measurement key 在 shot \(k\) 的值。
+- \(D_k\)：shot \(k\) 的 detector record；它是所有 detector bits \(D_{k,i}\) 组成的向量。
 - \(D_i\)：detector \(i\) 的 packed detector mask。
+- \(D_{k,i}\)：shot \(k\) 上 detector \(i\) 的 bit，满足 \(D_{k,i}=\operatorname{bit}_k(D_i)\)。
+- \(L_k\)：shot \(k\) 的 logical observable record；它是所有 logical observable bits \(L_{k,a}\) 组成的向量。
+- \(L_{k,a}\)：shot \(k\) 上 logical observable \(a\) 的 bit，满足 \(L_{k,a}=\operatorname{bit}_k(O_a)\)。
 - \(O_a\)：logical observable \(a\) 的 packed observable mask。
 - \(C_a\)：decoder 预测的 logical correction mask。
 - \(F\)：loss mask；第 \(k\) 位为 1 表示 shot \(k\) 贡献 loss。
 - \(A\)：all-shot mask，低 \(N\) 位为 1，用来裁剪未使用 bit。
+
+这里的 \(L_k\) 表示 logical observable record，不是 loss。本文把 shot-level loss 写成
+\(L_{\mathrm{loss}}(\tau)\)，把 batch-level loss 写成 packed mask \(F\)。
 
 NPSim 的 batch representation 把每个 boolean shot value 存成一个 Python integer 或 Rust
 `Mask`。因此：
@@ -509,11 +516,38 @@ These aggregations use absolute hotspot values, not signed sensitivities.
 
 ## Detector Error Model 语义
 
-DEM 将物理 noise event 映射到 detector flips 和 logical observable flips。每条 edge 记录：
+DEM 将低层 physical noise event 抽象成 detector flips 和 logical observable flips。这里的
+edge \(e\) 不是 circuit gate，也不是某个 shot 中已经发生的错误；它是 DEM 中的一条错误机制
+instruction。运行 DEM sampler 时，每条 edge 会被独立采样一次，决定这一类错误机制在当前 shot
+是否发生。
+
+一条 edge \(e\) 记录：
 
 \[
 e =
 (p_e,\Delta D_e,\Delta L_e,\operatorname{location\_id},\operatorname{event\_label},\operatorname{tags}).
+\]
+
+各字段含义：
+
+- \(p_e\)：edge probability，即这条 DEM instruction 在一个 shot 中发生的概率。
+- \(\Delta D_e\)：如果 edge \(e\) 发生，需要翻转的 detector id 集合。
+- \(\Delta L_e\)：如果 edge \(e\) 发生，需要翻转的 logical observable id 集合。
+- `location_id`：产生这条 edge 的原始 `NoiseLocation.id`，用于把 edge-level sensitivity 聚合回物理位置。
+- `event_label`：原始噪声事件标签，例如 Pauli event `"X"`、`"YZ"`，或 measurement bit flip 的 `true`。
+- `tags`：从原始 noise location 继承的 metadata，用于按 qubit、round、gate、operation 等维度聚合。
+
+在公式里，\(e\) 常同时被当作 edge 的索引使用。例如 `edge_event_masks[e]` 表示第 \(e\) 条 DEM
+edge 在一批 shots 中的 packed occurrence mask。若引入 Bernoulli 发生变量 \(f_e\)，则：
+
+\[
+f_e =
+\begin{cases}
+1, & \text{edge } e \text{ occurred in this shot},\\
+0, & \text{otherwise},
+\end{cases}
+\qquad
+f_e \sim \operatorname{Bernoulli}(p_e).
 \]
 
 Stim-like text:
@@ -522,7 +556,9 @@ Stim-like text:
 error(p_e) D0 D3 L0
 ```
 
-含义：当 edge \(e\) 发生时，把列出的 detector bits 和 logical observable bits 全部 xor 一次。
+含义是：这条 edge 的 \(p_e\) 是 `p_e`，\(\Delta D_e=\{0,3\}\)，\(\Delta L_e=\{0\}\)。当
+\(f_e=1\) 时，把 detector bits `D0`、`D3` 和 logical observable bit `L0` 全部 xor 一次；当
+\(f_e=0\) 时，它不产生任何 flip。
 
 ## 单错误传播生成 DEM
 
