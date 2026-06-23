@@ -412,6 +412,65 @@ PyMatching integration is optional and requires `numpy`, `scipy`, and
 detectors. Pure logical edges with no detectors are rejected because a matching
 decoder cannot infer them from syndrome data.
 
+NPSim integrates with PyMatching through `PyMatchingBatchDecoder`. The decoder
+is built from a graphlike `DetectorErrorModel`, because PyMatching needs a
+check matrix and logical fault matrix. After construction, the decoder can be
+used in either workflow:
+
+- Forward workflow: sample the original circuit with
+  `BatchForwardNoiseAwareSimulator`, then pass `decoder=decoder` to
+  `estimate(...)`.
+- DEM workflow: sample the detector error model with `DemBatchHotspotSimulator`,
+  then pass the same `decoder=decoder` to `estimate(...)`.
+
+In other words, a DEM is needed to construct the PyMatching decoder, but the
+sampling path can still be forward circuit sampling.
+
+```python
+from npsim import (
+    BernoulliPauliNoise,
+    BatchForwardNoiseAwareSimulator,
+    Circuit,
+    NoiseLocation,
+    Operation,
+)
+from npsim.decoders import PyMatchingBatchDecoder
+from npsim.dem import DemBatchHotspotSimulator
+from npsim.runtime import generate_native_dem
+
+noise = NoiseLocation("x0", BernoulliPauliNoise("X"), 0.1, (0,))
+circuit = Circuit(
+    1,
+    (
+        Operation.noise(noise),
+        Operation.measure(0, key="m0"),
+        Operation.detector(("m0",), detector_id=0),
+        Operation.observable_include(0, ("m0",)),
+    ),
+)
+
+dem = generate_native_dem(circuit)
+decoder = PyMatchingBatchDecoder.from_dem(dem)
+
+forward_result = BatchForwardNoiseAwareSimulator(circuit).estimate(
+    shots=256,
+    seed=10,
+    decoder=decoder,
+)
+
+dem_result = DemBatchHotspotSimulator(dem).estimate(
+    shots=256,
+    seed=10,
+    decoder=decoder,
+)
+
+print(forward_result.mean_loss)
+print(dem_result.mean_loss)
+```
+
+You can also call the decoder directly when you already have packed detector
+masks:
+
 ```python
 from npsim import Detector, DetectorErrorEdge, DetectorErrorModel, LogicalObservable
 from npsim.decoders import PyMatchingBatchDecoder

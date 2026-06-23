@@ -472,6 +472,11 @@ decoder = PyMatchingBatchDecoder.from_dem(dem)
 print(decoder.decode_batch_masks({0: 0b1010}, shots=4))
 ```
 
+`PyMatchingBatchDecoder.from_dem(...)` builds a decoder from a graphlike DEM.
+The resulting decoder implements `decode_batch_masks(batch)`, so it can be
+passed to either `BatchForwardNoiseAwareSimulator.estimate(..., decoder=decoder)`
+or `DemBatchHotspotSimulator.estimate(..., decoder=decoder)`.
+
 Stim import:
 
 ```python

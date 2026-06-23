@@ -117,7 +117,7 @@ print(result.hotspot_table(top_k=5))
 | 查看原始 measurement/noise masks | Forward sampling |
 | 自定义 measurement-history loss | Forward estimate + `loss_mask_fn` |
 | detector-level decoder | Forward 或 DEM estimate + decoder |
-| graphlike matching decoder | DEM + `PyMatchingBatchDecoder` |
+| graphlike matching decoder | 从 DEM 构造 `PyMatchingBatchDecoder`，用于 Forward 或 DEM estimate |
 | DEM edge 级热点排序 | DEM hotspot estimate |
 | 重复 detector-level sampling | 生成 DEM 后复用 DEM sampler |
 | Rust 集成 | `npsim-core` |
