@@ -22,19 +22,23 @@ error model 生成、DEM 层采样、decoder 集成和噪声热点估计。
 
 ## 安装与构建
 
-从源码 checkout 构建 Python extension：
+从源码 checkout 直接安装：
 
 ```bash
 python -m venv .venv
-.venv/bin/python -m pip install -U pip maturin
-.venv/bin/python -m maturin develop --release
+.venv/bin/python -m pip install -U pip
+.venv/bin/python -m pip install .
 ```
 
-可选依赖按需安装：
+可选依赖按需通过 extras 安装：
 
 ```bash
-.venv/bin/python -m pip install numpy scipy pymatching pillow stim
+.venv/bin/python -m pip install ".[pymatching,visualization]"
+.venv/bin/python -m pip install ".[test]"
 ```
+
+`pip install .` 会按 `pyproject.toml` 自动获取 build dependency `maturin>=1.7,<2`，并构建
+`npsim._npsim_native`。离线安装或使用 `--no-build-isolation` 时，需要提前准备好 maturin。
 
 常用验证：
 
@@ -44,10 +48,10 @@ cargo test --workspace
 .venv/bin/python -m unittest discover -s tests -q
 ```
 
-如果只刷新当前 checkout 的 extension artifact，可用：
+如果修改了 Rust extension 或 Python package 后需要刷新当前环境，重新安装即可：
 
 ```bash
-.venv/bin/python -m maturin develop --release --skip-install
+.venv/bin/python -m pip install --force-reinstall .
 ```
 
 ## 最小示例

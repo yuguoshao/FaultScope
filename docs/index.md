@@ -22,14 +22,15 @@ From a source checkout:
 
 ```bash
 python -m venv .venv
-.venv/bin/python -m pip install -U pip maturin
-.venv/bin/python -m maturin develop --release
+.venv/bin/python -m pip install -U pip
+.venv/bin/python -m pip install .
 ```
 
 Optional integrations:
 
 ```bash
-.venv/bin/python -m pip install numpy scipy pymatching pillow stim
+.venv/bin/python -m pip install ".[pymatching,visualization]"
+.venv/bin/python -m pip install ".[test]"
 ```
 
 ## Documentation Development

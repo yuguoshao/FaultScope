@@ -29,18 +29,24 @@ score-function estimator and DEM background, see
 
 ## Installation And Build
 
-From a source checkout, create a virtual environment and build the extension:
+From a source checkout, create a virtual environment and install the package:
 
 ```bash
 python -m venv .venv
-.venv/bin/python -m pip install -U pip maturin
-.venv/bin/python -m maturin develop --release
+.venv/bin/python -m pip install -U pip
+.venv/bin/python -m pip install .
 ```
+
+`pip install .` reads `pyproject.toml`, installs the build dependency
+`maturin>=1.7,<2` in an isolated build environment, and builds the
+`npsim._npsim_native` extension. Offline installs and `--no-build-isolation`
+workflows must provide `maturin` ahead of time.
 
 Install optional integrations only when needed:
 
 ```bash
-.venv/bin/python -m pip install numpy scipy pymatching pillow stim
+.venv/bin/python -m pip install ".[pymatching,visualization]"
+.venv/bin/python -m pip install ".[test]"
 ```
 
 Useful checks:
@@ -548,13 +554,16 @@ require `numpy`, `scipy`, `pymatching`, and `stim`.
 
 ### `ModuleNotFoundError: npsim._npsim_native`
 
-The Rust extension has not been built for the active Python environment. Run:
+The Rust extension has not been built for the active Python environment. From
+the repository root, run:
 
 ```bash
-.venv/bin/python -m maturin develop --release
+.venv/bin/python -m pip install .
 ```
 
-Make sure the same `.venv/bin/python` is used to build and run your script.
+Make sure the same `.venv/bin/python` is used to install and run your script.
+After changing Rust extension code, reinstall with `--force-reinstall` if
+needed.
 
 ### `UnsupportedNativeCircuitError`
 
@@ -580,7 +589,7 @@ detector parity deterministic, or use forward sampling with a custom
 Install optional dependencies:
 
 ```bash
-.venv/bin/python -m pip install numpy scipy pymatching
+.venv/bin/python -m pip install ".[pymatching]"
 ```
 
 If PyMatching rejects a DEM, check whether any edge touches more than two
