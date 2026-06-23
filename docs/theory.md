@@ -516,8 +516,39 @@ These aggregations use absolute hotspot values, not signed sensitivities.
 
 ## Detector Error Model 语义
 
-DEM 将低层 physical noise event 抽象成 detector flips 和 logical observable flips。这里的
-edge \(e\) 不是 circuit gate，也不是某个 shot 中已经发生的错误；它是 DEM 中的一条错误机制
+Detector Error Model, 简写 DEM，是把原始 circuit 的噪声过程压缩成 detector syndrome 和 logical
+observable flips 的二进制概率模型。它不再保存完整 stabilizer state、逐 shot measurement history
+或 final Pauli frame；它只保存“哪些独立错误机制会以多大概率触发，以及触发后会翻转哪些
+detectors 和 logical observables”。
+
+形式上，一个 DEM 可以写成：
+
+\[
+\mathcal{M}_{\mathrm{DEM}}
+=
+(\mathcal{D},\mathcal{O},\mathcal{E}),
+\]
+
+其中：
+
+- \(\mathcal{D}\)：detector 集合。detector bit 是 syndrome bit，表示一组 measurement parity 是否异常。
+- \(\mathcal{O}\)：logical observable 集合。logical observable bit 表示错误是否导致对应 logical observable 翻转。
+- \(\mathcal{E}\)：DEM edge 集合。每条 edge 是一个独立的 Bernoulli 错误机制。
+
+在一个 DEM shot 中，模型先为每条 edge \(e\in\mathcal{E}\) 采样一个发生变量 \(f_e\)。随后所有发生的
+edges 通过 XOR 叠加出 detector syndrome \(D\) 和 logical observable flip record \(O\)：
+
+\[
+D_i = \bigoplus_{e:\ i\in\Delta D_e} f_e,
+\qquad
+O_a = \bigoplus_{e:\ a\in\Delta L_e} f_e.
+\]
+
+因此 DEM 描述的是 \(P(D,O)\)，也就是 detector syndrome 和 logical flips 的联合分布。decoder 只能
+看到 detector syndrome \(D\)，并尝试预测 logical correction \(C\)；默认 loss 比较的是 residual
+logical flips \(O\oplus C\)。
+
+这里的 edge \(e\) 不是 circuit gate，也不是某个 shot 中已经发生的错误；它是 DEM 中的一条错误机制
 instruction。运行 DEM sampler 时，每条 edge 会被独立采样一次，决定这一类错误机制在当前 shot
 是否发生。
 
@@ -579,6 +610,17 @@ edge probability = p_l(event)
 
 只要 detector 或 observable effect 非空，就产生一条 DEM edge。DEM generation 要求相关
 detector/observable effects 在 reference 和 injected run 中可确定；随机裸测量不能直接作为 detector。
+
+Stim 的 `Circuit.detector_error_model(...)` 也默认采用这个严格约束：detectors 必须在 noiseless
+execution 下是 deterministic 的。Stim 另有 `allow_gauge_detectors=True` 选项；开启后，某些
+non-deterministic detectors 会被当作 gauge degrees of freedom 处理，通过 Gaussian elimination 从
+error model 中消去，并可能引入类似 `error(0.5) D_i D_j` 的 gauge relation。这个功能针对的是
+gauge detectors，不等同于把任意无法预测的裸随机测量直接保留成普通 detector。logical observables
+仍然必须是 deterministic。
+
+NPSim 当前 DEM generation 走严格路径：不暴露 Stim 式 gauge detector elimination。也就是说，
+detector 和 observable 声明必须能在 reference / injected propagation 中得到确定 effect；否则应该
+调整 detector 定义或先把随机自由度改写成确定的 syndrome relation。
 
 对 PauliChannel 或 depolarizing noise，一个 physical location 可能产生多条 DEM edges。每条 edge
 保留相同 `location_id`，event label 区分具体 Pauli event。
