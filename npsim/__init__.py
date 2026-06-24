@@ -48,12 +48,17 @@ from npsim.runtime import (
 )
 from npsim.decoders import (
     NativeBatchDecoder,
+    NativeBposdDecoder,
+    NativeDecoderBackendUnavailable,
+    NativeFusionBlossomDecoder,
     NativeGraphlikeDetectorCopyDecoder,
     NativeNoCorrectionDecoder,
     PyMatchingBatchDecoder,
     PyMatchingUnavailableError,
     UnsupportedPyMatchingDemError,
     available_native_decoders,
+    create_native_decoder,
+    get_native_decoder_class,
 )
 from npsim.runtime import HotspotRow, SimulationResult
 from npsim.io import StimImportError, StimImportResult, load_stim_file, parse_stim_circuit
@@ -88,6 +93,9 @@ __all__ = [
     "LogicalObservable",
     "MeasurementBitFlip",
     "NativeBatchDecoder",
+    "NativeBposdDecoder",
+    "NativeDecoderBackendUnavailable",
+    "NativeFusionBlossomDecoder",
     "NativeDemSampler",
     "NativeDemGenerator",
     "NativeGraphlikeDetectorCopyDecoder",
@@ -114,7 +122,9 @@ __all__ = [
     "compile_native_dem_sampler",
     "compile_native_dem_sampler_from_circuit",
     "compile_native_sampler",
+    "create_native_decoder",
     "generate_native_dem",
+    "get_native_decoder_class",
     "load_stim_file",
     "parse_stim_circuit",
     "write_rotated_surface_code_spatial_hotspot_map",

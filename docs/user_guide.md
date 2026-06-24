@@ -551,11 +551,25 @@ binary_problem = dem.compile_binary_linear_problem()
 These native views expose stable ids, counts, `edge_summary`, and compact reprs
 for inspection, but intentionally avoid public `to_numpy_*` hot-path helpers.
 
-Future native decoder backends are reserved behind Cargo/maturin features such
-as `decoder-fusion-blossom` and `decoder-bposd`. They are disabled by default,
-and Python extras do not currently enable third-party native decoder builds.
-The default build includes only smoke-test/template native backends, not a
-production fusion-blossom or BP+OSD decoder.
+Optional native decoder backends are managed explicitly after installing NPSim.
+Inspect the built-in backend catalog and installed backend status with:
+
+```bash
+python -m npsim.backends status
+```
+
+Inspect backend installation steps with:
+
+```bash
+python -m npsim.backends install fusion-blossom --dry-run
+python -m npsim.backends install bposd --dry-run
+```
+
+NPSim does not clone, compile, or install backend code during `import npsim` or
+`estimate(...)`. The default build includes only smoke-test/template native
+backends, not a production fusion-blossom or BP+OSD decoder. Until an official
+backend package is published, the non-dry-run installer reports a clear
+unavailable-package or reserved-backend error.
 
 For the full developer contract, including `from_circuit(...)`,
 `from_dem(...)`, Python prototype decoders, and native backend skeletons, see

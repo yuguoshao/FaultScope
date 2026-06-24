@@ -329,16 +329,24 @@ handles explicitly; a Python subclass that only implements
 `decode_batch_masks(batch)` remains a Python decoder and does not enter the
 native fast path.
 
-Native backends should be added as in-tree optional backends first. The current
-feature slots are:
+Native backends are discovered through built-in handles and post-install plugin
+entry points. The V1 plugin contract is intentionally scoped to NPSim-owned
+backend packages:
 
 ```text
-decoder-fusion-blossom
-decoder-bposd
+entry point group: npsim.native_decoders
+ABI name: npsim.native_decoder_plugin.v1
 ```
 
-They are Cargo/maturin build features, disabled by default. Python extras do
-not currently enable third-party native decoder builds.
+The plugin package returns decoder classes that construct native handles. The
+runtime still recognizes only native handles; a Python subclass that implements
+`decode_batch_masks(batch)` remains a slow-path Python decoder.
+
+Official backend installation metadata lives in the built-in catalog. Each
+entry records the backend name, backend package, proxy class name, target
+problem view, source repository, default revision, installability, and a short
+description. The initial catalog reserves `fusion-blossom` for graphlike MWPM
+decoding and `bposd` for binary-linear BP+OSD/LDPC decoding.
 
 Python can inspect compiled native backend names:
 
@@ -356,6 +364,23 @@ graphlike-detector-copy
 ```
 
 These are smoke-test and template backends, not production decoders.
+Post-install backend packages may add more names. NPSim never clones, builds, or
+installs backend code during `import npsim` or `estimate(...)`; installation is
+an explicit command.
+
+Python can use either friendly proxy classes or a generic resolver:
+
+```python
+from npsim.decoders import (
+    NativeFusionBlossomDecoder,
+    create_native_decoder,
+    get_native_decoder_class,
+)
+
+decoder = NativeFusionBlossomDecoder.from_dem(dem)
+decoder = create_native_decoder("fusion-blossom", dem=dem)
+Decoder = get_native_decoder_class("fusion-blossom")
+```
 
 ### Example Native Backend
 
@@ -393,6 +418,85 @@ fusion-blossom, MWPM, BP+OSD, or LDPC decoding. Its purpose is to demonstrate
 how Python can pass construction information while Rust owns the native decode
 backend.
 
+### Post-Install Native Backends
+
+Optional native backends are installed after the core NPSim package. Users can
+inspect backend status:
+
+```bash
+python -m npsim.backends status
+```
+
+Installation helpers are uniform for catalog entries:
+
+```bash
+python -m npsim.backends install fusion-blossom --dry-run
+python -m npsim.backends install bposd --dry-run
+```
+
+The command reserves the install workflow and prints the clone/build/install
+steps. Until official backend packages are available, non-dry-run installation
+fails with a clear package-unavailable or reserved-backend message. `bposd` is
+currently a catalog reservation only; it does not imply a BP+OSD backend exists.
+
+When the backend package is missing, the public proxy remains importable but
+construction raises an install hint:
+
+```python
+from npsim.decoders import NativeFusionBlossomDecoder
+
+decoder = NativeFusionBlossomDecoder.from_dem(dem)  # raises until installed
+```
+
+The post-install plugin ABI is not a general third-party stable ABI. It is a
+versioned contract for official NPSim backend packages so the core package can
+reject mismatched backend builds before any hot-path decoding begins.
+
+### Fusion-Blossom Adapter Plan
+
+Fusion Blossom is a MWPM decoder route for QEC. The
+[paper](https://arxiv.org/abs/2305.08307) describes a parallel MWPM decoder and
+stream decoding support. The public
+[repository](https://github.com/yuewuo/fusion-blossom) presents the project as
+a fast MWPM solver for QEC and ships Rust code plus a Python binding. The
+[PyPI package](https://pypi.org/project/fusion-blossom/) currently publishes
+`fusion-blossom 0.2.13` as a Python package. The public Rust source exposes
+types such as `SolverInitializer` and `SyndromePattern` and helper functions
+such as `fusion_mwpm(...)`, but NPSim has not yet pinned that API as a stable
+Cargo dependency.
+
+NPSim reserves the public constructor through a post-install proxy:
+
+```python
+from npsim.decoders import NativeFusionBlossomDecoder
+
+decoder = NativeFusionBlossomDecoder.from_dem(dem)
+decoder = NativeFusionBlossomDecoder.from_circuit(circuit)
+```
+
+The default package does not ship the fusion-blossom solver. After an official
+`npsim-fusion-blossom` backend is installed, the proxy delegates construction to
+that package while preserving the native fast path.
+
+The intended production adapter is:
+
+1. Compile `DetectorErrorModel` to `GraphlikeDecodingProblem`.
+2. Map each NPSim detector index to a fusion-blossom vertex.
+3. Convert two-detector graphlike DEM edges to graph edges.
+4. Convert one-detector DEM edges to boundary or virtual-vertex edges.
+5. Preserve each DEM edge's fault-observable indices so the solver prediction
+   can be converted back into observable correction masks.
+6. Convert each hot-path `DetectorMaskBatchView` shot into the solver syndrome
+   representation without touching Python.
+7. Return a checked `CorrectionMaskBatch`.
+
+The open productionization items are dependency pinning, integer weight
+scaling, per-shot solver reuse, boundary/virtual vertex semantics, and mapping
+the solver's selected error chain back through DEM edge observable flips. Until
+those are resolved, `NativeGraphlikeDetectorCopyDecoder` remains the concrete
+in-tree template backend and `"fusion-blossom"` remains unavailable unless a
+compatible post-install backend package is present.
+
 ## Validation And Performance Rules
 
 NPSim validates native decoder output before using it:
@@ -425,10 +529,11 @@ For a new decoder family:
    `decode_batch_masks(batch)`.
 2. Choose the construction view: graphlike for MWPM/fusion-blossom-style
    decoders, binary linear for BP+OSD/LDPC-style decoders.
-3. Add an in-tree Rust backend implementing `NativeBatchDecoder`.
-4. Expose a PyO3 handle with `from_dem(...)` and optionally
-   `from_circuit(...)`.
-5. Register the backend name in `available_native_decoders()` when the backend
-   feature is enabled.
+3. Add or update an official backend catalog entry with package name, problem
+   kind, source repo, installability, and proxy class name.
+4. Implement an official backend package that exposes a
+   `npsim.native_decoders` entry point manifest with the matching ABI.
+5. Expose a friendly proxy class when the backend should be importable from
+   `npsim.decoders`.
 6. Test both paths: Python compatibility behavior and native no-callback fast
    path.

@@ -112,8 +112,10 @@ print(result.hotspot_table(top_k=5))
 - `DetectorErrorModel.compile_indexed()`、`compile_graphlike_problem()` 和
   `compile_binary_linear_problem()` 提供面向后续 fusion-blossom、BP+OSD 等 decoder 的 native
   problem views。
-- `decoder-fusion-blossom` 和 `decoder-bposd` 是预留 Cargo/maturin feature，默认关闭；
-  Python extras 暂不自动启用第三方 native backend。
+- 可选 native decoder backend 通过统一后装命令管理，例如
+  `python -m npsim.backends status` 查看 catalog/status，
+  `python -m npsim.backends install fusion-blossom --dry-run` 查看安装步骤；NPSim 不会在
+  `import` 或 `estimate(...)` 时隐式联网、clone 或编译。
 - `edge_sensitivities` 和 `edge_hotspots` 是按 DEM edge index keyed 的 dict。
 - `edges_by_location()` 返回 `dict[str, list[DetectorErrorEdge]]`。
 - `materialize_dem=False` 的 native DEM sampler 是轻量采样路径，`sampler.dem is None`，

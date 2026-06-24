@@ -2,6 +2,11 @@ use std::collections::HashMap;
 
 use crate::{GraphlikeDecodingProblem, Mask, NpError, NpResult};
 
+pub const NATIVE_DECODER_PLUGIN_ABI_VERSION: u32 = 1;
+pub const NATIVE_DECODER_PLUGIN_ABI_NAME: &str = "npsim.native_decoder_plugin.v1";
+pub const NATIVE_DECODER_PLUGIN_CAPSULE_NAME: &str = "npsim.native_decoder_plugin.v1";
+pub const NATIVE_DECODER_PLUGIN_ENTRY_POINT_GROUP: &str = "npsim.native_decoders";
+
 #[derive(Debug, Clone, Copy)]
 pub struct DetectorMaskBatchView<'a> {
     pub detector_ids: &'a [i64],
@@ -272,6 +277,54 @@ impl NativeBatchDecoder for NativeGraphlikeDetectorCopyDecoder {
             })
             .collect::<NpResult<Vec<_>>>()?;
         CorrectionMaskBatch::new(self.observable_ids.clone(), masks, detectors.shots)
+    }
+}
+
+#[cfg(feature = "decoder-fusion-blossom")]
+#[derive(Debug, Clone, PartialEq)]
+pub struct NativeFusionBlossomDecoder {
+    detector_ids: Vec<i64>,
+    observable_ids: Vec<i64>,
+    edge_count: usize,
+}
+
+#[cfg(feature = "decoder-fusion-blossom")]
+impl NativeFusionBlossomDecoder {
+    pub fn from_graphlike_problem(problem: GraphlikeDecodingProblem) -> NpResult<Self> {
+        Ok(Self {
+            detector_ids: problem.detector_ids,
+            observable_ids: problem.observable_ids,
+            edge_count: problem.edges.len(),
+        })
+    }
+
+    pub fn edge_count(&self) -> usize {
+        self.edge_count
+    }
+
+    fn unavailable_error() -> NpError {
+        NpError::new(
+            "fusion-blossom native backend scaffold is compiled, but no stable Rust dependency is linked yet",
+        )
+    }
+}
+
+#[cfg(feature = "decoder-fusion-blossom")]
+impl NativeBatchDecoder for NativeFusionBlossomDecoder {
+    fn name(&self) -> &'static str {
+        "fusion-blossom"
+    }
+
+    fn detector_ids(&self) -> &[i64] {
+        &self.detector_ids
+    }
+
+    fn observable_ids(&self) -> &[i64] {
+        &self.observable_ids
+    }
+
+    fn decode_batch(&self, _detectors: DetectorMaskBatchView<'_>) -> NpResult<CorrectionMaskBatch> {
+        Err(Self::unavailable_error())
     }
 }
 
@@ -582,5 +635,32 @@ mod tests {
         let err = decoder.decode_batch(view).unwrap_err();
 
         assert!(err.to_string().contains("unexpected order"));
+    }
+
+    #[cfg(feature = "decoder-fusion-blossom")]
+    #[test]
+    fn fusion_blossom_scaffold_constructs_from_graphlike_problem() {
+        let decoder =
+            NativeFusionBlossomDecoder::from_graphlike_problem(graphlike_problem()).unwrap();
+
+        assert_eq!(decoder.name(), "fusion-blossom");
+        assert_eq!(decoder.detector_ids(), &[10, 20]);
+        assert_eq!(decoder.observable_ids(), &[0, 1]);
+        assert_eq!(decoder.edge_count(), 2);
+    }
+
+    #[cfg(feature = "decoder-fusion-blossom")]
+    #[test]
+    fn fusion_blossom_scaffold_reports_unavailable_on_decode() {
+        let decoder =
+            NativeFusionBlossomDecoder::from_graphlike_problem(graphlike_problem()).unwrap();
+        let detector_masks = vec![Mask { words: vec![0] }, Mask { words: vec![0] }];
+        let view = DetectorMaskBatchView::new(decoder.detector_ids(), &detector_masks, 4).unwrap();
+
+        let err = decoder.decode_batch_checked(view).unwrap_err();
+
+        assert!(err
+            .to_string()
+            .contains("no stable Rust dependency is linked yet"));
     }
 }

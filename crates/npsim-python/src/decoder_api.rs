@@ -1,4 +1,6 @@
 use crate::*;
+#[cfg(feature = "decoder-fusion-blossom")]
+use npsim_core::NativeFusionBlossomDecoder as CoreNativeFusionBlossomDecoder;
 use npsim_core::{
     BinaryLinearDecodingProblem, CorrectionMaskBatch, DetectorMaskBatchView,
     GraphlikeDecodingProblem, IndexedDem, NativeBatchDecoder as CoreNativeBatchDecoder,
@@ -12,7 +14,11 @@ use std::sync::{
 
 #[pyfunction]
 pub(crate) fn available_native_decoders(py: Python<'_>) -> PyResult<PyObject> {
-    Ok(PyTuple::new(py, ["no-correction", "graphlike-detector-copy"])?.into())
+    #[cfg(feature = "decoder-fusion-blossom")]
+    let names = ["no-correction", "graphlike-detector-copy", "fusion-blossom"];
+    #[cfg(not(feature = "decoder-fusion-blossom"))]
+    let names = ["no-correction", "graphlike-detector-copy"];
+    Ok(PyTuple::new(py, names)?.into())
 }
 
 #[pyclass(name = "NativeBatchDecoder", module = "npsim._npsim_native")]
@@ -32,6 +38,13 @@ pub(crate) struct PyNativeNoCorrectionDecoder {
     module = "npsim._npsim_native"
 )]
 pub(crate) struct PyNativeGraphlikeDetectorCopyDecoder {
+    pub(crate) inner: Arc<dyn CoreNativeBatchDecoder>,
+    python_decode_calls: Arc<AtomicUsize>,
+}
+
+#[cfg(feature = "decoder-fusion-blossom")]
+#[pyclass(name = "NativeFusionBlossomDecoder", module = "npsim._npsim_native")]
+pub(crate) struct PyNativeFusionBlossomDecoder {
     pub(crate) inner: Arc<dyn CoreNativeBatchDecoder>,
     python_decode_calls: Arc<AtomicUsize>,
 }
@@ -221,6 +234,102 @@ impl PyNativeGraphlikeDetectorCopyDecoder {
     }
 }
 
+#[cfg(feature = "decoder-fusion-blossom")]
+#[pymethods]
+impl PyNativeFusionBlossomDecoder {
+    #[staticmethod]
+    #[pyo3(signature = (dem, *, options=None))]
+    pub(crate) fn from_dem(
+        py: Python<'_>,
+        dem: PyRef<'_, PyDetectorErrorModel>,
+        options: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Self> {
+        reject_fusion_blossom_options(options)?;
+        let core_dem = dem.to_core_dem(py)?;
+        Self::from_core_dem(core_dem)
+    }
+
+    #[staticmethod]
+    #[pyo3(signature = (circuit, *, detectors=None, observables=None, options=None))]
+    pub(crate) fn from_circuit(
+        py: Python<'_>,
+        circuit: &Bound<'_, PyAny>,
+        detectors: Option<&Bound<'_, PyAny>>,
+        observables: Option<&Bound<'_, PyAny>>,
+        options: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Self> {
+        reject_fusion_blossom_options(options)?;
+        let generator = core_dem_generator_from_circuit(py, circuit, detectors, observables)?;
+        let core_dem = generator
+            .generate()
+            .map_err(|err| PyValueError::new_err(err.to_string()))?;
+        Self::from_core_dem(core_dem)
+    }
+
+    #[getter]
+    pub(crate) fn name(&self) -> String {
+        self.inner.name().to_string()
+    }
+
+    #[getter]
+    pub(crate) fn detector_ids(&self, py: Python<'_>) -> PyResult<PyObject> {
+        tuple_i64(py, self.inner.detector_ids())
+    }
+
+    #[getter]
+    pub(crate) fn observable_ids(&self, py: Python<'_>) -> PyResult<PyObject> {
+        tuple_i64(py, self.inner.observable_ids())
+    }
+
+    pub(crate) fn decode_batch_masks(
+        &self,
+        py: Python<'_>,
+        batch: &Bound<'_, PyAny>,
+    ) -> PyResult<PyObject> {
+        self.python_decode_calls.fetch_add(1, Ordering::Relaxed);
+        decode_batch_masks_with_native_decoder(py, self.inner.clone(), batch)
+    }
+
+    #[getter]
+    pub(crate) fn python_decode_call_count(&self) -> usize {
+        self.python_decode_calls.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn __repr__(&self) -> String {
+        format!(
+            "NativeFusionBlossomDecoder(name={:?}, detector_ids={:?}, observable_ids={:?})",
+            self.inner.name(),
+            self.inner.detector_ids(),
+            self.inner.observable_ids(),
+        )
+    }
+}
+
+#[cfg(feature = "decoder-fusion-blossom")]
+impl PyNativeFusionBlossomDecoder {
+    fn from_core_dem(core_dem: npsim_core::DetectorErrorModel) -> PyResult<Self> {
+        let problem = core_dem
+            .compile_graphlike_problem()
+            .map_err(|err| PyValueError::new_err(err.to_string()))?;
+        let backend = CoreNativeFusionBlossomDecoder::from_graphlike_problem(problem)
+            .map_err(|err| PyValueError::new_err(err.to_string()))?;
+        Ok(Self {
+            inner: Arc::new(backend),
+            python_decode_calls: Arc::new(AtomicUsize::new(0)),
+        })
+    }
+}
+
+#[cfg(feature = "decoder-fusion-blossom")]
+fn reject_fusion_blossom_options(options: Option<&Bound<'_, PyAny>>) -> PyResult<()> {
+    if options.is_some_and(|options| !options.is_none()) {
+        return Err(PyValueError::new_err(
+            "fusion-blossom options are reserved until the backend dependency is linked",
+        ));
+    }
+    Ok(())
+}
+
 pub(crate) fn native_decoder_from_py(
     decoder: &Bound<'_, PyAny>,
 ) -> Option<Arc<dyn CoreNativeBatchDecoder>> {
@@ -231,6 +340,10 @@ pub(crate) fn native_decoder_from_py(
         return Some(decoder.inner.clone());
     }
     if let Ok(decoder) = decoder.extract::<PyRef<'_, PyNativeGraphlikeDetectorCopyDecoder>>() {
+        return Some(decoder.inner.clone());
+    }
+    #[cfg(feature = "decoder-fusion-blossom")]
+    if let Ok(decoder) = decoder.extract::<PyRef<'_, PyNativeFusionBlossomDecoder>>() {
         return Some(decoder.inner.clone());
     }
     None

@@ -310,8 +310,12 @@ ordinary Python decoders and do not enter the native fast path.
 
 `available_native_decoders()` returns the names of compiled native decoder
 backends. The default build exposes `"no-correction"` and
-`"graphlike-detector-copy"`; future production backends will be enabled through
-Cargo/maturin features.
+`"graphlike-detector-copy"`. Optional post-install backends can add names such
+as `"fusion-blossom"` through the `npsim.native_decoders` entry point group. Use
+`get_native_decoder_class(name)` or `create_native_decoder(name, dem=dem)` for a
+uniform API. Friendly proxies such as `NativeFusionBlossomDecoder` and
+`NativeBposdDecoder` remain importable; construction raises an install hint
+until a compatible backend package is installed.
 
 ## Detector Error Models
 

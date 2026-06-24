@@ -1324,6 +1324,22 @@ fn native_dem_sampler_from_parts(
 #[pymodule]
 pub(crate) fn _npsim_native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add("__version__", NATIVE_KERNEL_VERSION)?;
+    module.add(
+        "NATIVE_DECODER_PLUGIN_ABI_VERSION",
+        npsim_core::NATIVE_DECODER_PLUGIN_ABI_VERSION,
+    )?;
+    module.add(
+        "NATIVE_DECODER_PLUGIN_ABI",
+        npsim_core::NATIVE_DECODER_PLUGIN_ABI_NAME,
+    )?;
+    module.add(
+        "NATIVE_DECODER_PLUGIN_CAPSULE_NAME",
+        npsim_core::NATIVE_DECODER_PLUGIN_CAPSULE_NAME,
+    )?;
+    module.add(
+        "NATIVE_DECODER_PLUGIN_ENTRY_POINT_GROUP",
+        npsim_core::NATIVE_DECODER_PLUGIN_ENTRY_POINT_GROUP,
+    )?;
     module.add_class::<PyBernoulliPauliNoise>()?;
     module.add_class::<PyPauliChannel>()?;
     module.add_class::<PySingleQubitDepolarizing>()?;
@@ -1348,6 +1364,8 @@ pub(crate) fn _npsim_native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<PyNativeBatchDecoder>()?;
     module.add_class::<PyNativeNoCorrectionDecoder>()?;
     module.add_class::<PyNativeGraphlikeDetectorCopyDecoder>()?;
+    #[cfg(feature = "decoder-fusion-blossom")]
+    module.add_class::<PyNativeFusionBlossomDecoder>()?;
     module.add_class::<PyDetectorGraphEdgeHotspot>()?;
     module.add_class::<PyDetectorGraphHotspots>()?;
     module.add_class::<PyBatchTrajectory>()?;

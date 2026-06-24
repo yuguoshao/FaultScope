@@ -1,3 +1,4 @@
+import io
 import os
 import random
 import tempfile
@@ -48,11 +49,21 @@ from npsim.runtime import (
 from npsim.runtime.loss import logical_residual_loss_mask
 from npsim.decoders import (
     NativeBatchDecoder,
+    NativeBposdDecoder,
+    NativeDecoderBackendUnavailable,
+    NativeFusionBlossomDecoder,
     NativeGraphlikeDetectorCopyDecoder,
     NativeNoCorrectionDecoder,
     PyMatchingBatchDecoder,
     UnsupportedPyMatchingDemError,
     available_native_decoders,
+    create_native_decoder,
+    get_native_decoder_class,
+)
+from npsim.backends import (
+    clear_native_decoder_plugin_cache,
+    native_decoder_backend_statuses,
+    official_native_decoder_backend_catalog,
 )
 from npsim.experiments import make_repetition_code_experiment
 from npsim.runtime import SimulationResult
@@ -89,6 +100,25 @@ def _assert_binomial_count_close(
     expected = shots * probability
     sigma = (shots * probability * (1.0 - probability)) ** 0.5
     testcase.assertLessEqual(abs(observed - expected), max(12.0, 6.0 * sigma))
+
+
+class _FakeEntryPoints:
+    def __init__(self, entry_points):
+        self._entry_points = tuple(entry_points)
+
+    def select(self, *, group):
+        if group == "npsim.native_decoders":
+            return self._entry_points
+        return ()
+
+
+class _FakeEntryPoint:
+    def __init__(self, name, manifest_factory):
+        self.name = name
+        self._manifest_factory = manifest_factory
+
+    def load(self):
+        return self._manifest_factory
 
 
 class StabilizerStateTests(unittest.TestCase):
@@ -197,7 +227,6 @@ class NoiseAwareSimulatorTests(unittest.TestCase):
             native.NativeGraphlikeDetectorCopyDecoder,
         )
         self.assertIs(NativeNoCorrectionDecoder, native.NativeNoCorrectionDecoder)
-        self.assertIs(available_native_decoders, native.available_native_decoders)
         self.assertIs(npsim.Circuit, native.Circuit)
         self.assertIs(npsim.BatchForwardNoiseAwareSimulator, native.BatchForwardNoiseAwareSimulator)
         self.assertIs(npsim.DetectorErrorModelGenerator, native.DetectorErrorModelGenerator)
@@ -216,10 +245,20 @@ class NoiseAwareSimulatorTests(unittest.TestCase):
             native.NativeGraphlikeDetectorCopyDecoder,
         )
         self.assertIs(decoders.NativeNoCorrectionDecoder, native.NativeNoCorrectionDecoder)
-        self.assertIs(decoders.available_native_decoders, native.available_native_decoders)
-        self.assertIs(npsim.available_native_decoders, native.available_native_decoders)
+        self.assertIs(decoders.available_native_decoders, available_native_decoders)
+        self.assertIs(npsim.available_native_decoders, available_native_decoders)
+        self.assertIs(decoders.NativeFusionBlossomDecoder, NativeFusionBlossomDecoder)
+        self.assertIs(npsim.NativeFusionBlossomDecoder, NativeFusionBlossomDecoder)
+        self.assertIs(decoders.NativeBposdDecoder, NativeBposdDecoder)
+        self.assertIs(npsim.NativeBposdDecoder, NativeBposdDecoder)
+        self.assertIs(decoders.create_native_decoder, create_native_decoder)
+        self.assertIs(npsim.create_native_decoder, create_native_decoder)
+        self.assertIs(decoders.get_native_decoder_class, get_native_decoder_class)
+        self.assertIs(npsim.get_native_decoder_class, get_native_decoder_class)
         self.assertTrue(hasattr(io, "parse_stim_circuit"))
         self.assertTrue(hasattr(decoders, "PyMatchingBatchDecoder"))
+        self.assertFalse(hasattr(native, "NativeFusionBlossomDecoder"))
+        self.assertTrue(hasattr(decoders, "NativeFusionBlossomDecoder"))
         self.assertTrue(hasattr(viz, "write_repetition_hotspot_heatmap"))
 
         location = NoiseLocation(
@@ -308,10 +347,17 @@ class NoiseAwareSimulatorTests(unittest.TestCase):
             detector_ids=(6,),
         )
 
-        self.assertEqual(
-            available_native_decoders(),
-            ("no-correction", "graphlike-detector-copy"),
-        )
+        with mock.patch(
+            "npsim.backends.registry.metadata.entry_points",
+            return_value=_FakeEntryPoints(()),
+        ):
+            clear_native_decoder_plugin_cache()
+            self.assertEqual(
+                available_native_decoders(),
+                ("no-correction", "graphlike-detector-copy"),
+            )
+            self.assertNotIn("fusion-blossom", available_native_decoders())
+        clear_native_decoder_plugin_cache()
         self.assertEqual(decoder.name, "no-correction")
         self.assertEqual(decoder.detector_ids, (5,))
         self.assertEqual(decoder.observable_ids, (0,))
@@ -320,6 +366,286 @@ class NoiseAwareSimulatorTests(unittest.TestCase):
         self.assertEqual(base_decoder.detector_ids, (6,))
         self.assertEqual(base_decoder.observable_ids, (1,))
         self.assertIn("NativeBatchDecoder", repr(base_decoder))
+
+    def test_native_backend_catalog_includes_reserved_decoders(self) -> None:
+        catalog = {entry.name: entry for entry in official_native_decoder_backend_catalog()}
+
+        self.assertIn("fusion-blossom", catalog)
+        self.assertEqual(catalog["fusion-blossom"].problem_kind, "graphlike")
+        self.assertTrue(catalog["fusion-blossom"].installable)
+        self.assertEqual(catalog["fusion-blossom"].package_name, "npsim-fusion-blossom")
+        self.assertIn("bposd", catalog)
+        self.assertEqual(catalog["bposd"].problem_kind, "binary-linear")
+        self.assertFalse(catalog["bposd"].installable)
+
+    def test_missing_fusion_blossom_backend_has_install_hint(self) -> None:
+        dem = DetectorErrorModel(
+            detectors=(Detector(id=0, measurement_keys=()),),
+            observables=(LogicalObservable(id=0),),
+            edges=(
+                DetectorErrorEdge(
+                    probability=0.2,
+                    detectors=(0,),
+                    observables=(0,),
+                    location_id="edge0",
+                    event="X",
+                ),
+            ),
+        )
+
+        with mock.patch(
+            "npsim.backends.registry.metadata.entry_points",
+            return_value=_FakeEntryPoints(()),
+        ):
+            clear_native_decoder_plugin_cache()
+            with self.assertRaisesRegex(
+                NativeDecoderBackendUnavailable,
+                "python -m npsim.backends install fusion-blossom",
+            ):
+                NativeFusionBlossomDecoder.from_dem(dem)
+        clear_native_decoder_plugin_cache()
+
+    def test_reserved_bposd_backend_has_install_hint(self) -> None:
+        dem = DetectorErrorModel(
+            detectors=(Detector(id=0, measurement_keys=()),),
+            observables=(LogicalObservable(id=0),),
+            edges=(
+                DetectorErrorEdge(
+                    probability=0.2,
+                    detectors=(0,),
+                    observables=(0,),
+                    location_id="edge0",
+                    event="X",
+                ),
+            ),
+        )
+
+        with mock.patch(
+            "npsim.backends.registry.metadata.entry_points",
+            return_value=_FakeEntryPoints(()),
+        ):
+            clear_native_decoder_plugin_cache()
+            with self.assertRaisesRegex(
+                NativeDecoderBackendUnavailable,
+                "python -m npsim.backends install bposd",
+            ):
+                NativeBposdDecoder.from_dem(dem)
+        clear_native_decoder_plugin_cache()
+
+    def test_mock_post_install_native_decoder_plugin_uses_fast_path(self) -> None:
+        class MockFusionBlossomDecoder:
+            @staticmethod
+            def from_dem(dem, *, options=None):
+                self.assertIsNone(options)
+                return NativeNoCorrectionDecoder(
+                    observable_ids=tuple(observable.id for observable in dem.observables),
+                    detector_ids=tuple(detector.id for detector in dem.detectors),
+                )
+
+            @staticmethod
+            def from_circuit(circuit, *, detectors=None, observables=None, options=None):
+                self.assertIsNone(options)
+                return NativeNoCorrectionDecoder(
+                    observable_ids=tuple(observable.id for observable in observables or ()),
+                    detector_ids=tuple(detector.id for detector in detectors or ()),
+                )
+
+        def manifest():
+            return {
+                "name": "fusion-blossom",
+                "version": "test",
+                "source": "unit-test",
+                "abi_version": "npsim.native_decoder_plugin.v1",
+                "decoders": {"fusion-blossom": MockFusionBlossomDecoder},
+            }
+
+        location = NoiseLocation(
+            id="x0",
+            model=BernoulliPauliNoise("X"),
+            rate=0.25,
+            qubits=(0,),
+        )
+        circuit = Circuit(
+            n_qubits=1,
+            operations=[
+                Operation.noise(location),
+                Operation.measure(0, key="m", basis="Z"),
+                Operation.detector(("m",), detector_id=0),
+            ],
+        )
+        observable = LogicalObservable(id=0, measurement_keys=("m",))
+        dem = generate_native_dem(
+            circuit,
+            detectors=(Detector(id=0, measurement_keys=("m",)),),
+            observables=(observable,),
+        )
+        simulator = BatchForwardNoiseAwareSimulator(circuit, observables=(observable,))
+        entry_points = _FakeEntryPoints((_FakeEntryPoint("fusion-blossom", manifest),))
+
+        with mock.patch(
+            "npsim.backends.registry.metadata.entry_points",
+            return_value=entry_points,
+        ):
+            clear_native_decoder_plugin_cache()
+            self.assertIn("fusion-blossom", available_native_decoders())
+            self.assertIs(get_native_decoder_class("fusion-blossom"), MockFusionBlossomDecoder)
+            decoder = NativeFusionBlossomDecoder.from_dem(dem)
+            generic_decoder = create_native_decoder("fusion-blossom", dem=dem)
+            native_result = simulator.estimate(shots=4096, seed=111, decoder=decoder)
+            default_result = simulator.estimate(shots=4096, seed=111)
+
+        clear_native_decoder_plugin_cache()
+        self.assertEqual(decoder.python_decode_call_count, 0)
+        self.assertEqual(generic_decoder.python_decode_call_count, 0)
+        self.assertEqual(native_result.mean_loss, default_result.mean_loss)
+
+    def test_backend_cli_status_and_install_dry_run(self) -> None:
+        from npsim.backends.__main__ import main
+
+        with mock.patch(
+            "npsim.backends.registry.metadata.entry_points",
+            return_value=_FakeEntryPoints(()),
+        ):
+            clear_native_decoder_plugin_cache()
+            stdout = io.StringIO()
+            with mock.patch("sys.stdout", stdout):
+                self.assertEqual(main(["status"]), 0)
+            self.assertIn("no-correction", stdout.getvalue())
+            self.assertIn("fusion-blossom", stdout.getvalue())
+            self.assertIn("bposd", stdout.getvalue())
+            self.assertIn("not-installed", stdout.getvalue())
+
+            stdout = io.StringIO()
+            with tempfile.TemporaryDirectory() as tmpdir:
+                with mock.patch("sys.stdout", stdout):
+                    self.assertEqual(
+                        main(
+                            [
+                                "install",
+                                "fusion-blossom",
+                                "--dry-run",
+                                "--target-dir",
+                                tmpdir,
+                            ]
+                        ),
+                        0,
+                    )
+                self.assertFalse(os.listdir(tmpdir))
+            self.assertIn("git clone", stdout.getvalue())
+            self.assertIn("npsim-fusion-blossom", stdout.getvalue())
+
+            stdout = io.StringIO()
+            with tempfile.TemporaryDirectory() as tmpdir:
+                with mock.patch("sys.stdout", stdout):
+                    self.assertEqual(
+                        main(
+                            [
+                                "install",
+                                "bposd",
+                                "--dry-run",
+                                "--target-dir",
+                                tmpdir,
+                            ]
+                        ),
+                        0,
+                    )
+                self.assertFalse(os.listdir(tmpdir))
+            self.assertIn("reserved and not installable yet", stdout.getvalue())
+            self.assertIn("npsim-bposd", stdout.getvalue())
+        clear_native_decoder_plugin_cache()
+
+    def test_post_install_plugin_abi_mismatch_is_not_loadable(self) -> None:
+        def manifest():
+            return {
+                "name": "fusion-blossom",
+                "version": "test",
+                "abi_version": "wrong",
+                "decoders": {"fusion-blossom": object},
+            }
+
+        with mock.patch(
+            "npsim.backends.registry.metadata.entry_points",
+            return_value=_FakeEntryPoints((_FakeEntryPoint("fusion-blossom", manifest),)),
+        ):
+            clear_native_decoder_plugin_cache()
+            self.assertNotIn("fusion-blossom", available_native_decoders())
+            statuses = {status.name: status for status in native_decoder_backend_statuses()}
+            self.assertFalse(statuses["fusion-blossom"].loadable)
+            self.assertIn("expected", statuses["fusion-blossom"].error)
+        clear_native_decoder_plugin_cache()
+
+    def test_post_install_plugin_duplicate_decoder_name_is_not_loadable(self) -> None:
+        def first_manifest():
+            return {
+                "name": "backend-a",
+                "version": "test",
+                "source": "unit-test",
+                "abi_version": "npsim.native_decoder_plugin.v1",
+                "decoders": {"fusion-blossom": object},
+            }
+
+        def second_manifest():
+            return {
+                "name": "backend-b",
+                "version": "test",
+                "source": "unit-test",
+                "abi_version": "npsim.native_decoder_plugin.v1",
+                "decoders": {"fusion-blossom": object},
+            }
+
+        with mock.patch(
+            "npsim.backends.registry.metadata.entry_points",
+            return_value=_FakeEntryPoints(
+                (
+                    _FakeEntryPoint("backend-a", first_manifest),
+                    _FakeEntryPoint("backend-b", second_manifest),
+                )
+            ),
+        ):
+            clear_native_decoder_plugin_cache()
+            statuses = {status.name: status for status in native_decoder_backend_statuses()}
+            self.assertTrue(statuses["backend-a"].loadable)
+            self.assertFalse(statuses["backend-b"].loadable)
+            self.assertIn("already provided", statuses["backend-b"].error)
+        clear_native_decoder_plugin_cache()
+
+    def test_post_install_plugin_missing_decoders_is_not_loadable(self) -> None:
+        def manifest():
+            return {
+                "name": "missing-decoders",
+                "version": "test",
+                "source": "unit-test",
+                "abi_version": "npsim.native_decoder_plugin.v1",
+            }
+
+        with mock.patch(
+            "npsim.backends.registry.metadata.entry_points",
+            return_value=_FakeEntryPoints((_FakeEntryPoint("missing-decoders", manifest),)),
+        ):
+            clear_native_decoder_plugin_cache()
+            statuses = {status.name: status for status in native_decoder_backend_statuses()}
+            self.assertFalse(statuses["missing-decoders"].loadable)
+            self.assertIn("did not declare decoders", statuses["missing-decoders"].error)
+        clear_native_decoder_plugin_cache()
+
+    def test_post_install_plugin_missing_required_field_is_not_loadable(self) -> None:
+        def manifest():
+            return {
+                "name": "missing-version",
+                "source": "unit-test",
+                "abi_version": "npsim.native_decoder_plugin.v1",
+                "decoders": {"missing-version": object},
+            }
+
+        with mock.patch(
+            "npsim.backends.registry.metadata.entry_points",
+            return_value=_FakeEntryPoints((_FakeEntryPoint("missing-version", manifest),)),
+        ):
+            clear_native_decoder_plugin_cache()
+            statuses = {status.name: status for status in native_decoder_backend_statuses()}
+            self.assertFalse(statuses["missing-version"].loadable)
+            self.assertIn("did not declare version", statuses["missing-version"].error)
+        clear_native_decoder_plugin_cache()
 
     def test_noise_models_are_extension_classes_with_public_methods(self) -> None:
         bernoulli = BernoulliPauliNoise("XZ")
