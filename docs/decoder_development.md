@@ -170,6 +170,98 @@ the intended path for production backends because the batch syndrome masks,
 correction masks, default residual loss, and hotspot aggregation stay in native
 memory.
 
+The recommended ownership model is:
+
+```text
+Python passes circuit / DEM / options
+        -> PyO3 factory reads those Python objects
+        -> Rust compiles a native decoder backend
+        -> Python receives an opaque decoder handle
+        -> estimate(..., decoder=decoder) uses the native fast path
+```
+
+Python is responsible for selecting and configuring the decoder. Rust is
+responsible for constructing the backend and running batch decode. After the
+decoder is constructed, Python should not participate in the syndrome or
+correction-mask hot path.
+
+### Python Input, Rust Construction
+
+A native decoder should expose constructors that accept Python objects:
+
+```python
+decoder = MyNativeDecoder.from_dem(
+    dem,
+    option_a=...,
+    option_b=...,
+)
+
+decoder = MyNativeDecoder.from_circuit(
+    circuit,
+    detectors=detectors,
+    observables=observables,
+    option_a=...,
+)
+```
+
+`from_circuit(...)` is a convenience constructor. It should generate or compile
+a DEM first, then delegate to the same Rust construction path as
+`from_dem(...)`.
+
+The PyO3 implementation should convert Python input into Rust core structures
+once:
+
+```rust
+#[pyclass(name = "MyNativeDecoder", module = "npsim._npsim_native")]
+pub struct PyMyNativeDecoder {
+    inner: Arc<dyn npsim_core::NativeBatchDecoder>,
+}
+
+#[pymethods]
+impl PyMyNativeDecoder {
+    #[staticmethod]
+    pub fn from_dem(
+        py: Python<'_>,
+        dem: &Bound<'_, PyDetectorErrorModel>,
+        option_a: Option<f64>,
+    ) -> PyResult<Self> {
+        let core_dem = dem.borrow().to_core_dem(py)?;
+
+        let problem = core_dem
+            .compile_graphlike_problem()
+            .map_err(|err| PyValueError::new_err(err.to_string()))?;
+
+        let backend = MyNativeDecoder::from_graphlike_problem(
+            problem,
+            option_a,
+        )
+        .map_err(|err| PyValueError::new_err(err.to_string()))?;
+
+        Ok(Self {
+            inner: Arc::new(backend),
+        })
+    }
+}
+```
+
+For BP+OSD/LDPC-style decoders, use
+`core_dem.compile_binary_linear_problem()` instead. For a decoder that needs
+more DEM metadata, use `compile_indexed()` or extend the construction-time DEM
+view. Do not add per-batch circuit or DEM reads to `decode_batch(...)`.
+
+The Rust backend stores all construction-time information:
+
+```rust
+pub struct MyNativeDecoder {
+    detector_ids: Vec<i64>,
+    observable_ids: Vec<i64>,
+    // Compiled graph / H matrix / F matrix / weights / LLR / backend state.
+}
+```
+
+The Python object only owns the handle. It does not own batch detector masks or
+correction masks during `estimate(...)`.
+
 The core Rust contract is `NativeBatchDecoder`:
 
 ```rust
