@@ -9,6 +9,9 @@ stabilizer-compatible quantum error correction workflows.
 
 - [User Guide](user_guide.md): installation, runnable workflows, examples,
   packed-mask basics, troubleshooting, and best practices.
+- [Decoder Development](decoder_development.md): how to prototype Python
+  decoders and add native decoder backends without moving hot-path data through
+  Python.
 - [API Reference](api_reference.md): current public Python and Rust API
   surfaces, callback contracts, and result object fields.
 - [Theory](theory.md): theory, derivations, packed estimator formulas, DEM

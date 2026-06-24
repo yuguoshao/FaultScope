@@ -555,6 +555,10 @@ Future native decoder backends are reserved behind Cargo/maturin features such
 as `decoder-fusion-blossom` and `decoder-bposd`. They are disabled by default,
 and Python extras do not currently enable third-party native decoder builds.
 
+For the full developer contract, including `from_circuit(...)`,
+`from_dem(...)`, Python prototype decoders, and native backend skeletons, see
+[Decoder Development](decoder_development.md).
+
 ## Stim Import
 
 NPSim includes a subset importer for flattened Stim text circuits. The importer
