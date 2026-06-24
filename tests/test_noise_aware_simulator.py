@@ -51,6 +51,7 @@ from npsim.decoders import (
     NativeNoCorrectionDecoder,
     PyMatchingBatchDecoder,
     UnsupportedPyMatchingDemError,
+    available_native_decoders,
 )
 from npsim.experiments import make_repetition_code_experiment
 from npsim.runtime import SimulationResult
@@ -191,6 +192,7 @@ class NoiseAwareSimulatorTests(unittest.TestCase):
         self.assertIs(NativeDemSampler, native.NativeDemSampler)
         self.assertIs(NativeBatchDecoder, native.NativeBatchDecoder)
         self.assertIs(NativeNoCorrectionDecoder, native.NativeNoCorrectionDecoder)
+        self.assertIs(available_native_decoders, native.available_native_decoders)
         self.assertIs(npsim.Circuit, native.Circuit)
         self.assertIs(npsim.BatchForwardNoiseAwareSimulator, native.BatchForwardNoiseAwareSimulator)
         self.assertIs(npsim.DetectorErrorModelGenerator, native.DetectorErrorModelGenerator)
@@ -201,6 +203,8 @@ class NoiseAwareSimulatorTests(unittest.TestCase):
         self.assertIs(dem_module.DemBatchHotspotSimulator, native.DemBatchHotspotSimulator)
         self.assertIs(dem_module.IndexedDem, native.IndexedDem)
         self.assertIs(decoders.NativeNoCorrectionDecoder, native.NativeNoCorrectionDecoder)
+        self.assertIs(decoders.available_native_decoders, native.available_native_decoders)
+        self.assertIs(npsim.available_native_decoders, native.available_native_decoders)
         self.assertTrue(hasattr(io, "parse_stim_circuit"))
         self.assertTrue(hasattr(decoders, "PyMatchingBatchDecoder"))
         self.assertTrue(hasattr(viz, "write_repetition_hotspot_heatmap"))
@@ -283,6 +287,23 @@ class NoiseAwareSimulatorTests(unittest.TestCase):
 
         with self.assertRaises((TypeError, ValueError)):
             native.compile_sampler({"n_qubits": 1, "operations": []})
+
+    def test_native_decoder_introspection(self) -> None:
+        decoder = NativeNoCorrectionDecoder(observable_ids=(0,), detector_ids=(5,))
+        base_decoder = NativeBatchDecoder.no_correction(
+            observable_ids=(1,),
+            detector_ids=(6,),
+        )
+
+        self.assertEqual(available_native_decoders(), ("no-correction",))
+        self.assertEqual(decoder.name, "no-correction")
+        self.assertEqual(decoder.detector_ids, (5,))
+        self.assertEqual(decoder.observable_ids, (0,))
+        self.assertIn("no-correction", repr(decoder))
+        self.assertEqual(base_decoder.name, "no-correction")
+        self.assertEqual(base_decoder.detector_ids, (6,))
+        self.assertEqual(base_decoder.observable_ids, (1,))
+        self.assertIn("NativeBatchDecoder", repr(base_decoder))
 
     def test_noise_models_are_extension_classes_with_public_methods(self) -> None:
         bernoulli = BernoulliPauliNoise("XZ")
@@ -413,6 +434,29 @@ class BatchNoiseAwareSimulatorTests(unittest.TestCase):
         self.assertEqual(decoder.python_decode_call_count, 0)
         self.assertEqual(native_result.mean_loss, default_result.mean_loss)
         self.assertEqual(native_result.hotspots, default_result.hotspots)
+
+    def test_native_decoder_invalid_correction_raises_value_error(self) -> None:
+        location = NoiseLocation(
+            id="x0",
+            model=BernoulliPauliNoise("X"),
+            rate=0.25,
+            qubits=(0,),
+        )
+        circuit = Circuit(
+            n_qubits=1,
+            operations=[
+                Operation.noise(location),
+                Operation.measure(0, key="m", basis="Z"),
+            ],
+        )
+        observables = (LogicalObservable(id=0, measurement_keys=("m",)),)
+        decoder = NativeNoCorrectionDecoder(observable_ids=(0, 0))
+
+        with self.assertRaisesRegex(ValueError, "duplicate correction observable id 0"):
+            BatchForwardNoiseAwareSimulator(
+                circuit,
+                observables=observables,
+            ).estimate(shots=128, seed=113, decoder=decoder)
 
     def test_native_decoder_with_python_loss_uses_slow_compat_path(self) -> None:
         location = NoiseLocation(
@@ -1341,12 +1385,30 @@ class NativeDetectorErrorModelTests(unittest.TestCase):
         self.assertIsInstance(binary, BinaryLinearDecodingProblem)
         self.assertEqual(indexed.detector_ids, (5, 2, 9))
         self.assertEqual(indexed.observable_ids, (7,))
+        self.assertEqual(indexed.detector_count, 3)
+        self.assertEqual(indexed.observable_count, 1)
+        self.assertEqual(indexed.edge_count, 2)
         self.assertEqual(indexed.edges[0].detectors, (1, 2))
+        self.assertEqual(indexed.edge_summary[0]["dem_edge_index"], 0)
+        self.assertEqual(indexed.edge_summary[0]["detectors"], (1, 2))
+        self.assertEqual(indexed.edge_summary[0]["observables"], (0,))
+        self.assertIn("IndexedDem(detector_count=3", repr(indexed))
         self.assertEqual(graphlike.edge_count, 2)
+        self.assertEqual(graphlike.detector_count, 3)
+        self.assertEqual(graphlike.observable_count, 1)
         self.assertEqual(graphlike.edges[0].fault_observables, (0,))
+        self.assertEqual(graphlike.edge_summary[0]["fault_observables"], (0,))
+        self.assertIn("GraphlikeDecodingProblem(detector_count=3", repr(graphlike))
         self.assertIsInstance(binary.h, SparseBinaryMatrix)
+        self.assertEqual(binary.detector_count, 3)
+        self.assertEqual(binary.observable_count, 1)
         self.assertEqual(binary.h.entries, ((1, 0), (2, 0), (0, 1)))
+        self.assertEqual(binary.h.entry_count, 3)
+        self.assertIn("SparseBinaryMatrix(row_count=3", repr(binary.h))
         self.assertEqual(binary.f.entries, ((0, 0),))
+        self.assertEqual(binary.edge_summary[0]["dem_edge_index"], 0)
+        self.assertEqual(binary.edge_summary[0]["edge_index"], 0)
+        self.assertIn("BinaryLinearDecodingProblem(detector_count=3", repr(binary))
         self.assertTrue(dem.is_graphlike())
 
         bad = DetectorErrorModel(

@@ -285,9 +285,17 @@ construction, raise `ValueError`.
 Native decoder handles:
 
 ```python
-from npsim.decoders import NativeBatchDecoder, NativeNoCorrectionDecoder
+from npsim.decoders import (
+    NativeBatchDecoder,
+    NativeNoCorrectionDecoder,
+    available_native_decoders,
+)
 
+available_native_decoders()
 decoder = NativeNoCorrectionDecoder(observable_ids=(0,))
+decoder.name
+decoder.detector_ids
+decoder.observable_ids
 ```
 
 Native decoders are Python-owned handles around Rust decoder objects. When a
@@ -296,6 +304,12 @@ native decoder is passed to `estimate(..., decoder=decoder)` without
 detector masks, correction masks, default residual loss, and hotspot
 aggregation stay in Rust. If a Python loss or correction callback is supplied,
 NPSim uses the compatibility path and may call `decoder.decode_batch_masks(...)`.
+Python classes that merely define or subclass `decode_batch_masks(...)` remain
+ordinary Python decoders and do not enter the native fast path.
+
+`available_native_decoders()` returns the names of compiled native decoder
+backends. The default build currently exposes only `"no-correction"`; future
+in-tree backends will be enabled through Cargo/maturin features.
 
 ## Detector Error Models
 
@@ -353,11 +367,13 @@ generates a DEM from a circuit. If declarations are omitted, NPSim reads
 the circuit.
 
 `IndexedDem`, `GraphlikeDecodingProblem`, and `BinaryLinearDecodingProblem` are
-native decoder-ready views. `GraphlikeDecodingProblem` targets MWPM-style
-backends such as future fusion-blossom adapters. `BinaryLinearDecodingProblem`
-targets BP+OSD/LDPC-style backends with sparse binary `H` and `F` matrices.
-These objects expose metadata for inspection but are intended to be consumed by
-native decoders without converting hot-path masks through Python.
+native decoder-ready views. They expose stable ids, counts, `edge_summary`, and
+compact `repr(...)` metadata for inspection. `GraphlikeDecodingProblem` targets
+MWPM-style backends such as future fusion-blossom adapters.
+`BinaryLinearDecodingProblem` targets BP+OSD/LDPC-style backends with sparse
+binary `H` and `F` matrices. These objects intentionally do not expose
+`to_numpy_*` hot-path helpers; native decoders should consume the native view
+without moving masks through Python.
 
 Example:
 

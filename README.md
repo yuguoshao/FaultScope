@@ -107,10 +107,13 @@ print(result.hotspot_table(top_k=5))
 - `DemBatchHotspotSimulator` 在 DEM 层采样，每条 DEM edge 按独立 Bernoulli instruction 处理。
 - `NativeNoCorrectionDecoder` 和后续 native decoder handle 可通过
   `estimate(..., decoder=decoder)` 自动走 native fast path；传入 Python loss/correction
-  callback 时回退到兼容路径。
+  callback 时回退到兼容路径。普通 Python decoder 或 subclass 不会自动获得 native hot path；
+  可用 native backend 通过 `npsim.decoders.available_native_decoders()` 查看。
 - `DetectorErrorModel.compile_indexed()`、`compile_graphlike_problem()` 和
   `compile_binary_linear_problem()` 提供面向后续 fusion-blossom、BP+OSD 等 decoder 的 native
   problem views。
+- `decoder-fusion-blossom` 和 `decoder-bposd` 是预留 Cargo/maturin feature，默认关闭；
+  Python extras 暂不自动启用第三方 native backend。
 - `edge_sensitivities` 和 `edge_hotspots` 是按 DEM edge index keyed 的 dict。
 - `edges_by_location()` 返回 `dict[str, list[DetectorErrorEdge]]`。
 - `materialize_dem=False` 的 native DEM sampler 是轻量采样路径，`sampler.dem is None`，

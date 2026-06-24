@@ -511,6 +511,7 @@ from npsim import (
     NoiseLocation,
     Operation,
 )
+from npsim.decoders import available_native_decoders
 
 noise = NoiseLocation("x0", BernoulliPauliNoise("X"), 0.05, (0,))
 circuit = Circuit(
@@ -521,6 +522,7 @@ circuit = Circuit(
     ),
 )
 decoder = NativeNoCorrectionDecoder(observable_ids=(0,))
+assert decoder.name in available_native_decoders()
 
 result = BatchForwardNoiseAwareSimulator(
     circuit,
@@ -532,7 +534,9 @@ When `loss_mask_fn` and `correction_mask_fn` are omitted, this uses the native
 fast path: detector masks, decoder output, default residual loss, and hotspot
 aggregation all stay in Rust. If you supply a Python loss or correction
 callback, NPSim falls back to the compatibility path and calls
-`decode_batch_masks(batch)`.
+`decode_batch_masks(batch)`. A Python class or subclass that only implements
+`decode_batch_masks(batch)` is still a Python decoder and does not enter the
+native fast path.
 
 DEM objects can also compile decoder-ready native views:
 
@@ -544,6 +548,12 @@ binary_problem = dem.compile_binary_linear_problem()
 
 `compile_graphlike_problem()` is for future MWPM/fusion-blossom style backends.
 `compile_binary_linear_problem()` is for future BP+OSD/LDPC style backends.
+These native views expose stable ids, counts, `edge_summary`, and compact reprs
+for inspection, but intentionally avoid public `to_numpy_*` hot-path helpers.
+
+Future native decoder backends are reserved behind Cargo/maturin features such
+as `decoder-fusion-blossom` and `decoder-bposd`. They are disabled by default,
+and Python extras do not currently enable third-party native decoder builds.
 
 ## Stim Import
 

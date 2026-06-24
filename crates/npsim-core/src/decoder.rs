@@ -16,6 +16,15 @@ impl<'a> DetectorMaskBatchView<'a> {
                 "detector ids and detector masks must have the same length",
             ));
         }
+        let expected_words = crate::word_count(shots);
+        for (detector_id, mask) in detector_ids.iter().zip(masks) {
+            if mask.words.len() != expected_words {
+                return Err(NpError::new(format!(
+                    "detector mask for detector id {detector_id} has {} words; expected {expected_words} for {shots} shots",
+                    mask.words.len()
+                )));
+            }
+        }
         Ok(Self {
             detector_ids,
             masks,
@@ -38,11 +47,13 @@ impl CorrectionMaskBatch {
                 "observable ids and correction masks must have the same length",
             ));
         }
-        Ok(Self {
+        let batch = Self {
             observable_ids,
             masks,
             shots,
-        })
+        };
+        batch.validate_shape()?;
+        Ok(batch)
     }
 
     pub fn empty(shots: usize) -> Self {
@@ -59,14 +70,70 @@ impl CorrectionMaskBatch {
             .position(|id| *id == observable_id)
             .and_then(|index| self.masks.get(index))
     }
+
+    pub fn validate_against(&self, declared_observable_ids: &[i64], shots: usize) -> NpResult<()> {
+        if self.shots != shots {
+            return Err(NpError::new(format!(
+                "correction batch has {} shots; expected {shots}",
+                self.shots
+            )));
+        }
+        self.validate_shape()?;
+        for observable_id in &self.observable_ids {
+            if !declared_observable_ids.contains(observable_id) {
+                return Err(NpError::new(format!(
+                    "correction mask for undeclared observable id {observable_id}"
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_shape(&self) -> NpResult<()> {
+        let expected_words = crate::word_count(self.shots);
+        for (observable_id, mask) in self.observable_ids.iter().zip(&self.masks) {
+            if mask.words.len() != expected_words {
+                return Err(NpError::new(format!(
+                    "correction mask for observable id {observable_id} has {} words; expected {expected_words} for {} shots",
+                    mask.words.len(),
+                    self.shots
+                )));
+            }
+        }
+        for (index, observable_id) in self.observable_ids.iter().enumerate() {
+            if self.observable_ids[..index].contains(observable_id) {
+                return Err(NpError::new(format!(
+                    "duplicate correction observable id {observable_id}"
+                )));
+            }
+        }
+        Ok(())
+    }
 }
 
 pub trait NativeBatchDecoder: Send + Sync {
+    /// Stable backend name used for lightweight Python introspection.
+    fn name(&self) -> &'static str {
+        "native"
+    }
+
+    /// Detector ids define the only syndrome order passed to `decode_batch`.
     fn detector_ids(&self) -> &[i64];
 
+    /// Observable ids define the allowed correction-mask output ids.
     fn observable_ids(&self) -> &[i64];
 
     fn decode_batch(&self, detectors: DetectorMaskBatchView<'_>) -> NpResult<CorrectionMaskBatch>;
+
+    fn decode_batch_checked(
+        &self,
+        detectors: DetectorMaskBatchView<'_>,
+    ) -> NpResult<CorrectionMaskBatch> {
+        let shots = detectors.shots;
+        let corrections = self.decode_batch(detectors)?;
+        corrections.validate_against(self.observable_ids(), shots)?;
+        Ok(corrections)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -92,6 +159,10 @@ impl NativeNoCorrectionDecoder {
 }
 
 impl NativeBatchDecoder for NativeNoCorrectionDecoder {
+    fn name(&self) -> &'static str {
+        "no-correction"
+    }
+
     fn detector_ids(&self) -> &[i64] {
         &self.detector_ids
     }
@@ -175,25 +246,146 @@ mod tests {
     fn fixed_decoder_correction_controls_native_residual_loss() {
         let decoder = FixedCorrectionDecoder {
             observable_ids: vec![0],
-            correction: Mask { words: vec![0b0011] },
+            correction: Mask {
+                words: vec![0b0011],
+            },
         };
         let detector_ids = vec![0];
         let detector_masks = vec![Mask { words: vec![0] }];
         let view = DetectorMaskBatchView::new(&detector_ids, &detector_masks, 4).unwrap();
         let corrections = decoder.decode_batch(view).unwrap();
-        let observables = HashMap::from([(0, Mask { words: vec![0b0110] })]);
+        let observables = HashMap::from([(
+            0,
+            Mask {
+                words: vec![0b0110],
+            },
+        )]);
 
         let loss =
             logical_residual_loss_mask_native(&observables, &corrections, &[0], &Mask::all(4));
 
-        assert_eq!(loss, Mask { words: vec![0b0101] });
+        assert_eq!(
+            loss,
+            Mask {
+                words: vec![0b0101]
+            }
+        );
+    }
+
+    #[test]
+    fn correction_batch_rejects_wrong_word_count() {
+        let err =
+            CorrectionMaskBatch::new(vec![0], vec![Mask { words: vec![0, 0] }], 4).unwrap_err();
+
+        assert!(err.to_string().contains("expected 1"));
+    }
+
+    #[test]
+    fn correction_batch_rejects_duplicate_observable_ids() {
+        let err = CorrectionMaskBatch::new(
+            vec![0, 0],
+            vec![Mask { words: vec![0] }, Mask { words: vec![0] }],
+            4,
+        )
+        .unwrap_err();
+
+        assert!(err
+            .to_string()
+            .contains("duplicate correction observable id 0"));
+    }
+
+    #[test]
+    fn checked_decode_rejects_unknown_observable_id() {
+        struct UnknownObservableDecoder;
+
+        impl NativeBatchDecoder for UnknownObservableDecoder {
+            fn detector_ids(&self) -> &[i64] {
+                &[]
+            }
+
+            fn observable_ids(&self) -> &[i64] {
+                &[0]
+            }
+
+            fn decode_batch(
+                &self,
+                detectors: DetectorMaskBatchView<'_>,
+            ) -> NpResult<CorrectionMaskBatch> {
+                CorrectionMaskBatch::new(
+                    vec![1],
+                    vec![Mask::zero(crate::word_count(detectors.shots))],
+                    detectors.shots,
+                )
+            }
+        }
+
+        let view = DetectorMaskBatchView::new(&[], &[], 4).unwrap();
+        let err = UnknownObservableDecoder
+            .decode_batch_checked(view)
+            .unwrap_err();
+
+        assert!(err
+            .to_string()
+            .contains("correction mask for undeclared observable id 1"));
+    }
+
+    #[test]
+    fn checked_decode_rejects_shots_mismatch() {
+        struct MismatchedShotsDecoder;
+
+        impl NativeBatchDecoder for MismatchedShotsDecoder {
+            fn detector_ids(&self) -> &[i64] {
+                &[]
+            }
+
+            fn observable_ids(&self) -> &[i64] {
+                &[0]
+            }
+
+            fn decode_batch(
+                &self,
+                _detectors: DetectorMaskBatchView<'_>,
+            ) -> NpResult<CorrectionMaskBatch> {
+                CorrectionMaskBatch::new(vec![0], vec![Mask::zero(crate::word_count(5))], 5)
+            }
+        }
+
+        let view = DetectorMaskBatchView::new(&[], &[], 4).unwrap();
+        let err = MismatchedShotsDecoder
+            .decode_batch_checked(view)
+            .unwrap_err();
+
+        assert!(err.to_string().contains("expected 4"));
+    }
+
+    #[test]
+    fn missing_correction_observable_is_zero_residual_correction() {
+        let corrections = CorrectionMaskBatch::empty(4);
+        let observables = HashMap::from([(
+            0,
+            Mask {
+                words: vec![0b1010],
+            },
+        )]);
+
+        let loss =
+            logical_residual_loss_mask_native(&observables, &corrections, &[0], &Mask::all(4));
+
+        assert_eq!(
+            loss,
+            Mask {
+                words: vec![0b1010]
+            }
+        );
     }
 
     #[test]
     fn no_correction_decoder_returns_zero_masks_for_observables() {
         let decoder = NativeNoCorrectionDecoder::new(vec![0, 2]);
         let detector_ids = vec![1];
-        let detector_masks = vec![Mask { words: vec![0b1010] }];
+        let detector_masks = vec![Mask {
+            words: vec![0b1010],
+        }];
         let view = DetectorMaskBatchView::new(&detector_ids, &detector_masks, 4).unwrap();
 
         let corrections = decoder.decode_batch(view).unwrap();

@@ -52,6 +52,7 @@ from npsim.decoders import (
     PyMatchingBatchDecoder,
     PyMatchingUnavailableError,
     UnsupportedPyMatchingDemError,
+    available_native_decoders,
 )
 from npsim.runtime import HotspotRow, SimulationResult
 from npsim.io import StimImportError, StimImportResult, load_stim_file, parse_stim_circuit
@@ -106,6 +107,7 @@ __all__ = [
     "UnsupportedNativeCircuitError",
     "UnsupportedPyMatchingDemError",
     "VisualizationUnavailableError",
+    "available_native_decoders",
     "compile_native_dem_generator",
     "compile_native_dem_sampler",
     "compile_native_dem_sampler_from_circuit",

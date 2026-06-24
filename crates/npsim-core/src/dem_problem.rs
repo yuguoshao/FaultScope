@@ -100,9 +100,10 @@ impl DetectorErrorModel {
     }
 
     pub fn is_graphlike(&self) -> bool {
-        self.edges
-            .iter()
-            .all(|edge| edge.detectors.len() <= 2 && !(edge.detectors.is_empty() && !edge.observables.is_empty()))
+        self.edges.iter().all(|edge| {
+            edge.detectors.len() <= 2
+                && !(edge.detectors.is_empty() && !edge.observables.is_empty())
+        })
     }
 
     pub fn compile_graphlike_problem(&self) -> NpResult<GraphlikeDecodingProblem> {

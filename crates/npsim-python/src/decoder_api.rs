@@ -9,11 +9,15 @@ use std::sync::{
     Arc,
 };
 
+#[pyfunction]
+pub(crate) fn available_native_decoders(py: Python<'_>) -> PyResult<PyObject> {
+    Ok(PyTuple::new(py, ["no-correction"])?.into())
+}
+
 #[pyclass(name = "NativeBatchDecoder", module = "npsim._npsim_native")]
 pub(crate) struct PyNativeBatchDecoder {
     pub(crate) inner: Arc<dyn CoreNativeBatchDecoder>,
     python_decode_calls: Arc<AtomicUsize>,
-    name: String,
 }
 
 #[pyclass(name = "NativeNoCorrectionDecoder", module = "npsim._npsim_native")]
@@ -36,8 +40,12 @@ impl PyNativeBatchDecoder {
                 observable_ids.unwrap_or_default(),
             )),
             python_decode_calls: Arc::new(AtomicUsize::new(0)),
-            name: "NativeNoCorrectionDecoder".to_string(),
         }
+    }
+
+    #[getter]
+    pub(crate) fn name(&self) -> String {
+        self.inner.name().to_string()
     }
 
     #[getter]
@@ -66,8 +74,8 @@ impl PyNativeBatchDecoder {
 
     pub(crate) fn __repr__(&self) -> String {
         format!(
-            "{}(detector_ids={:?}, observable_ids={:?})",
-            self.name,
+            "NativeBatchDecoder(name={:?}, detector_ids={:?}, observable_ids={:?})",
+            self.inner.name(),
             self.inner.detector_ids(),
             self.inner.observable_ids(),
         )
@@ -78,10 +86,7 @@ impl PyNativeBatchDecoder {
 impl PyNativeNoCorrectionDecoder {
     #[new]
     #[pyo3(signature = (observable_ids=None, detector_ids=None))]
-    pub(crate) fn new(
-        observable_ids: Option<Vec<i64>>,
-        detector_ids: Option<Vec<i64>>,
-    ) -> Self {
+    pub(crate) fn new(observable_ids: Option<Vec<i64>>, detector_ids: Option<Vec<i64>>) -> Self {
         Self {
             inner: Arc::new(CoreNativeNoCorrectionDecoder::with_detector_ids(
                 detector_ids.unwrap_or_default(),
@@ -89,6 +94,11 @@ impl PyNativeNoCorrectionDecoder {
             )),
             python_decode_calls: Arc::new(AtomicUsize::new(0)),
         }
+    }
+
+    #[getter]
+    pub(crate) fn name(&self) -> String {
+        self.inner.name().to_string()
     }
 
     #[getter]
@@ -117,7 +127,8 @@ impl PyNativeNoCorrectionDecoder {
 
     pub(crate) fn __repr__(&self) -> String {
         format!(
-            "NativeNoCorrectionDecoder(detector_ids={:?}, observable_ids={:?})",
+            "NativeNoCorrectionDecoder(name={:?}, detector_ids={:?}, observable_ids={:?})",
+            self.inner.name(),
             self.inner.detector_ids(),
             self.inner.observable_ids(),
         )
@@ -177,7 +188,7 @@ fn decode_batch_masks_with_native_decoder(
     let view = DetectorMaskBatchView::new(decoder.detector_ids(), &detector_masks, shots)
         .map_err(|err| PyValueError::new_err(err.to_string()))?;
     let corrections = decoder
-        .decode_batch(view)
+        .decode_batch_checked(view)
         .map_err(|err| PyValueError::new_err(err.to_string()))?;
     correction_batch_to_py(py, &corrections)
 }
@@ -191,9 +202,9 @@ fn py_detector_masks_to_vec(
     detector_ids
         .iter()
         .map(|detector_id| {
-            let value = detectors
-                .get_item(*detector_id)?
-                .ok_or_else(|| PyValueError::new_err(format!("missing detector id {detector_id}")))?;
+            let value = detectors.get_item(*detector_id)?.ok_or_else(|| {
+                PyValueError::new_err(format!("missing detector id {detector_id}"))
+            })?;
             py_int_to_mask(&value, words, shots)
         })
         .collect()
@@ -230,6 +241,16 @@ impl PyIndexedDemEdge {
     pub(crate) fn original_edge_index(&self) -> usize {
         self.edge.original_edge_index
     }
+
+    pub(crate) fn __repr__(&self) -> String {
+        format!(
+            "IndexedDemEdge(original_edge_index={}, detectors={:?}, observables={:?}, probability={:.6})",
+            self.edge.original_edge_index,
+            self.edge.detectors,
+            self.edge.observables,
+            self.edge.probability
+        )
+    }
 }
 
 #[pyclass(name = "IndexedDem", module = "npsim._npsim_native", frozen)]
@@ -250,6 +271,16 @@ impl PyIndexedDem {
     }
 
     #[getter]
+    pub(crate) fn detector_count(&self) -> usize {
+        self.indexed.detector_ids.len()
+    }
+
+    #[getter]
+    pub(crate) fn observable_count(&self) -> usize {
+        self.indexed.observable_ids.len()
+    }
+
+    #[getter]
     pub(crate) fn edge_count(&self) -> usize {
         self.indexed.edges.len()
     }
@@ -264,6 +295,20 @@ impl PyIndexedDem {
             .map(|edge| Py::new(py, PyIndexedDemEdge { edge }))
             .collect::<PyResult<Vec<_>>>()?;
         Ok(PyTuple::new(py, items.iter().map(|item| item.clone_ref(py)))?.into())
+    }
+
+    #[getter]
+    pub(crate) fn edge_summary(&self, py: Python<'_>) -> PyResult<PyObject> {
+        indexed_edge_summary_to_py(py, &self.indexed.edges)
+    }
+
+    pub(crate) fn __repr__(&self) -> String {
+        format!(
+            "IndexedDem(detector_count={}, observable_count={}, edge_count={})",
+            self.indexed.detector_ids.len(),
+            self.indexed.observable_ids.len(),
+            self.indexed.edges.len()
+        )
     }
 }
 
@@ -298,9 +343,23 @@ impl PyGraphlikeEdge {
     pub(crate) fn dem_edge_index(&self) -> usize {
         self.edge.dem_edge_index
     }
+
+    pub(crate) fn __repr__(&self) -> String {
+        format!(
+            "GraphlikeEdge(dem_edge_index={}, detectors={:?}, fault_observables={:?}, probability={:.6})",
+            self.edge.dem_edge_index,
+            self.edge.detectors,
+            self.edge.fault_observables,
+            self.edge.probability
+        )
+    }
 }
 
-#[pyclass(name = "GraphlikeDecodingProblem", module = "npsim._npsim_native", frozen)]
+#[pyclass(
+    name = "GraphlikeDecodingProblem",
+    module = "npsim._npsim_native",
+    frozen
+)]
 pub(crate) struct PyGraphlikeDecodingProblem {
     pub(crate) problem: GraphlikeDecodingProblem,
 }
@@ -318,6 +377,16 @@ impl PyGraphlikeDecodingProblem {
     }
 
     #[getter]
+    pub(crate) fn detector_count(&self) -> usize {
+        self.problem.detector_ids.len()
+    }
+
+    #[getter]
+    pub(crate) fn observable_count(&self) -> usize {
+        self.problem.observable_ids.len()
+    }
+
+    #[getter]
     pub(crate) fn edge_count(&self) -> usize {
         self.problem.edges.len()
     }
@@ -332,6 +401,20 @@ impl PyGraphlikeDecodingProblem {
             .map(|edge| Py::new(py, PyGraphlikeEdge { edge }))
             .collect::<PyResult<Vec<_>>>()?;
         Ok(PyTuple::new(py, items.iter().map(|item| item.clone_ref(py)))?.into())
+    }
+
+    #[getter]
+    pub(crate) fn edge_summary(&self, py: Python<'_>) -> PyResult<PyObject> {
+        graphlike_edge_summary_to_py(py, &self.problem.edges)
+    }
+
+    pub(crate) fn __repr__(&self) -> String {
+        format!(
+            "GraphlikeDecodingProblem(detector_count={}, observable_count={}, edge_count={})",
+            self.problem.detector_ids.len(),
+            self.problem.observable_ids.len(),
+            self.problem.edges.len()
+        )
     }
 }
 
@@ -353,6 +436,11 @@ impl PySparseBinaryMatrix {
     }
 
     #[getter]
+    pub(crate) fn entry_count(&self) -> usize {
+        self.matrix.entries.len()
+    }
+
+    #[getter]
     pub(crate) fn entries(&self, py: Python<'_>) -> PyResult<PyObject> {
         let entries = self
             .matrix
@@ -362,9 +450,22 @@ impl PySparseBinaryMatrix {
             .collect::<PyResult<Vec<_>>>()?;
         Ok(PyTuple::new(py, entries.iter())?.into())
     }
+
+    pub(crate) fn __repr__(&self) -> String {
+        format!(
+            "SparseBinaryMatrix(row_count={}, col_count={}, entry_count={})",
+            self.matrix.row_count,
+            self.matrix.col_count,
+            self.matrix.entries.len()
+        )
+    }
 }
 
-#[pyclass(name = "BinaryLinearDecodingProblem", module = "npsim._npsim_native", frozen)]
+#[pyclass(
+    name = "BinaryLinearDecodingProblem",
+    module = "npsim._npsim_native",
+    frozen
+)]
 pub(crate) struct PyBinaryLinearDecodingProblem {
     pub(crate) problem: BinaryLinearDecodingProblem,
 }
@@ -382,6 +483,16 @@ impl PyBinaryLinearDecodingProblem {
     }
 
     #[getter]
+    pub(crate) fn detector_count(&self) -> usize {
+        self.problem.detector_ids.len()
+    }
+
+    #[getter]
+    pub(crate) fn observable_count(&self) -> usize {
+        self.problem.observable_ids.len()
+    }
+
+    #[getter]
     pub(crate) fn edge_count(&self) -> usize {
         self.problem.edge_count
     }
@@ -394,8 +505,7 @@ impl PyBinaryLinearDecodingProblem {
                 matrix: self.problem.h.clone(),
             },
         )?
-        .into_any()
-        )
+        .into_any())
     }
 
     #[getter]
@@ -406,8 +516,7 @@ impl PyBinaryLinearDecodingProblem {
                 matrix: self.problem.f.clone(),
             },
         )?
-        .into_any()
-        )
+        .into_any())
     }
 
     #[getter]
@@ -424,6 +533,20 @@ impl PyBinaryLinearDecodingProblem {
     pub(crate) fn dem_edge_indices(&self, py: Python<'_>) -> PyResult<PyObject> {
         tuple_usize_local(py, &self.problem.dem_edge_indices)
     }
+
+    #[getter]
+    pub(crate) fn edge_summary(&self, py: Python<'_>) -> PyResult<PyObject> {
+        binary_edge_summary_to_py(py, &self.problem)
+    }
+
+    pub(crate) fn __repr__(&self) -> String {
+        format!(
+            "BinaryLinearDecodingProblem(detector_count={}, observable_count={}, edge_count={})",
+            self.problem.detector_ids.len(),
+            self.problem.observable_ids.len(),
+            self.problem.edge_count
+        )
+    }
 }
 
 fn tuple_i64(py: Python<'_>, values: &[i64]) -> PyResult<PyObject> {
@@ -432,4 +555,81 @@ fn tuple_i64(py: Python<'_>, values: &[i64]) -> PyResult<PyObject> {
 
 fn tuple_usize_local(py: Python<'_>, values: &[usize]) -> PyResult<PyObject> {
     Ok(PyTuple::new(py, values.iter().copied())?.into())
+}
+
+fn indexed_edge_summary_to_py(
+    py: Python<'_>,
+    edges: &[npsim_core::IndexedDemEdge],
+) -> PyResult<PyObject> {
+    let rows = edges
+        .iter()
+        .map(|edge| {
+            let row = PyDict::new(py);
+            row.set_item("dem_edge_index", edge.original_edge_index)?;
+            row.set_item(
+                "detectors",
+                PyTuple::new(py, edge.detectors.iter().copied())?,
+            )?;
+            row.set_item(
+                "observables",
+                PyTuple::new(py, edge.observables.iter().copied())?,
+            )?;
+            row.set_item("probability", edge.probability)?;
+            row.set_item("weight", edge.weight)?;
+            Ok(row.into())
+        })
+        .collect::<PyResult<Vec<PyObject>>>()?;
+    tuple_py_objects(py, rows)
+}
+
+fn graphlike_edge_summary_to_py(
+    py: Python<'_>,
+    edges: &[npsim_core::GraphlikeEdge],
+) -> PyResult<PyObject> {
+    let rows = edges
+        .iter()
+        .map(|edge| {
+            let row = PyDict::new(py);
+            row.set_item("dem_edge_index", edge.dem_edge_index)?;
+            row.set_item(
+                "detectors",
+                PyTuple::new(py, edge.detectors.iter().copied())?,
+            )?;
+            row.set_item(
+                "fault_observables",
+                PyTuple::new(py, edge.fault_observables.iter().copied())?,
+            )?;
+            row.set_item("probability", edge.probability)?;
+            row.set_item("weight", edge.weight)?;
+            Ok(row.into())
+        })
+        .collect::<PyResult<Vec<PyObject>>>()?;
+    tuple_py_objects(py, rows)
+}
+
+fn binary_edge_summary_to_py(
+    py: Python<'_>,
+    problem: &BinaryLinearDecodingProblem,
+) -> PyResult<PyObject> {
+    let rows = problem
+        .dem_edge_indices
+        .iter()
+        .enumerate()
+        .map(|(edge_index, dem_edge_index)| {
+            let row = PyDict::new(py);
+            row.set_item("edge_index", edge_index)?;
+            row.set_item("dem_edge_index", *dem_edge_index)?;
+            row.set_item("probability", problem.probabilities[edge_index])?;
+            row.set_item(
+                "log_likelihood_ratio",
+                problem.log_likelihood_ratios[edge_index],
+            )?;
+            Ok(row.into())
+        })
+        .collect::<PyResult<Vec<PyObject>>>()?;
+    tuple_py_objects(py, rows)
+}
+
+fn tuple_py_objects(py: Python<'_>, items: Vec<PyObject>) -> PyResult<PyObject> {
+    Ok(PyTuple::new(py, items.iter().map(|item| item.clone_ref(py)))?.into())
 }

@@ -9,6 +9,11 @@ repository.workspace = true
 name = "_npsim_native"
 crate-type = ["cdylib"]
 
+[features]
+default = []
+decoder-fusion-blossom = ["npsim-core/decoder-fusion-blossom"]
+decoder-bposd = ["npsim-core/decoder-bposd"]
+
 [dependencies]
 npsim-core = { path = "../npsim-core" }
 pyo3 = { version = "0.23", features = ["extension-module"] }

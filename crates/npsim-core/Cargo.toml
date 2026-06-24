@@ -8,6 +8,10 @@ repository.workspace = true
 [lib]
 name = "npsim_core"
 
+[features]
+default = []
+decoder-fusion-blossom = []
+decoder-bposd = []
+
 [dependencies]
 rand = { version = "0.9.2", features = ["small_rng"] }
-
