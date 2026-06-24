@@ -105,6 +105,12 @@ print(result.hotspot_table(top_k=5))
   observable 时，会读取 circuit 中的 `Operation.detector(...)` 和
   `Operation.observable_include(...)`。
 - `DemBatchHotspotSimulator` 在 DEM 层采样，每条 DEM edge 按独立 Bernoulli instruction 处理。
+- `NativeNoCorrectionDecoder` 和后续 native decoder handle 可通过
+  `estimate(..., decoder=decoder)` 自动走 native fast path；传入 Python loss/correction
+  callback 时回退到兼容路径。
+- `DetectorErrorModel.compile_indexed()`、`compile_graphlike_problem()` 和
+  `compile_binary_linear_problem()` 提供面向后续 fusion-blossom、BP+OSD 等 decoder 的 native
+  problem views。
 - `edge_sensitivities` 和 `edge_hotspots` 是按 DEM edge index keyed 的 dict。
 - `edges_by_location()` 返回 `dict[str, list[DetectorErrorEdge]]`。
 - `materialize_dem=False` 的 native DEM sampler 是轻量采样路径，`sampler.dem is None`，
@@ -148,6 +154,7 @@ NPSim 当前产品路径是 packed batch engine，不暴露通用的 per-shot ad
 .venv/bin/python benchmarks/sampling_throughput.py --family random-clifford --qubits 128 256 512 --depth 20
 .venv/bin/python benchmarks/dem_throughput.py --distances 9 13 21 --rounds 3
 .venv/bin/python benchmarks/hotspot_throughput.py --distances 9 13 21 --rounds 3 --shots 100000
+.venv/bin/python benchmarks/native_decoder_fast_path.py
 .venv/bin/python benchmarks/surface_code_threshold.py --distances 3 5 7 --shots 10000
 ```
 

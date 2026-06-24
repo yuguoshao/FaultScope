@@ -8,13 +8,17 @@ from unittest import mock
 from npsim.runtime import BatchForwardNoiseAwareSimulator, BatchTrajectory
 from npsim.core import Circuit, NoiseLocation, Operation
 from npsim.dem import (
+    BinaryLinearDecodingProblem,
     Detector,
     DetectorErrorEdge,
     DetectorErrorModel,
     DetectorErrorModelGenerator,
     DetectorGraphEdgeHotspot,
     DetectorGraphHotspots,
+    GraphlikeDecodingProblem,
+    IndexedDem,
     LogicalObservable,
+    SparseBinaryMatrix,
 )
 from npsim.dem import (
     DemBatchHotspotSimulator,
@@ -43,6 +47,8 @@ from npsim.runtime import (
 )
 from npsim.runtime.loss import logical_residual_loss_mask
 from npsim.decoders import (
+    NativeBatchDecoder,
+    NativeNoCorrectionDecoder,
     PyMatchingBatchDecoder,
     UnsupportedPyMatchingDemError,
 )
@@ -165,6 +171,10 @@ class NoiseAwareSimulatorTests(unittest.TestCase):
         self.assertIs(DetectorErrorEdge, native.DetectorErrorEdge)
         self.assertIs(DetectorErrorModel, native.DetectorErrorModel)
         self.assertIs(DetectorErrorModelGenerator, native.DetectorErrorModelGenerator)
+        self.assertIs(IndexedDem, native.IndexedDem)
+        self.assertIs(GraphlikeDecodingProblem, native.GraphlikeDecodingProblem)
+        self.assertIs(BinaryLinearDecodingProblem, native.BinaryLinearDecodingProblem)
+        self.assertIs(SparseBinaryMatrix, native.SparseBinaryMatrix)
         self.assertIs(DetectorGraphEdgeHotspot, native.DetectorGraphEdgeHotspot)
         self.assertIs(DetectorGraphHotspots, native.DetectorGraphHotspots)
         self.assertIs(BatchForwardNoiseAwareSimulator, native.BatchForwardNoiseAwareSimulator)
@@ -179,6 +189,8 @@ class NoiseAwareSimulatorTests(unittest.TestCase):
         self.assertIs(DemBatchHotspotSimulator, native.DemBatchHotspotSimulator)
         self.assertIs(NativePackedSampler, native.NativePackedSampler)
         self.assertIs(NativeDemSampler, native.NativeDemSampler)
+        self.assertIs(NativeBatchDecoder, native.NativeBatchDecoder)
+        self.assertIs(NativeNoCorrectionDecoder, native.NativeNoCorrectionDecoder)
         self.assertIs(npsim.Circuit, native.Circuit)
         self.assertIs(npsim.BatchForwardNoiseAwareSimulator, native.BatchForwardNoiseAwareSimulator)
         self.assertIs(npsim.DetectorErrorModelGenerator, native.DetectorErrorModelGenerator)
@@ -187,6 +199,8 @@ class NoiseAwareSimulatorTests(unittest.TestCase):
         self.assertIs(runtime_module.BatchForwardNoiseAwareSimulator, native.BatchForwardNoiseAwareSimulator)
         self.assertIs(dem_module.DetectorErrorModelGenerator, native.DetectorErrorModelGenerator)
         self.assertIs(dem_module.DemBatchHotspotSimulator, native.DemBatchHotspotSimulator)
+        self.assertIs(dem_module.IndexedDem, native.IndexedDem)
+        self.assertIs(decoders.NativeNoCorrectionDecoder, native.NativeNoCorrectionDecoder)
         self.assertTrue(hasattr(io, "parse_stim_circuit"))
         self.assertTrue(hasattr(decoders, "PyMatchingBatchDecoder"))
         self.assertTrue(hasattr(viz, "write_repetition_hotspot_heatmap"))
@@ -374,6 +388,61 @@ class BatchNoiseAwareSimulatorTests(unittest.TestCase):
         self.assertIn(0, result.by_round)
         self.assertIn("idle", result.by_gate)
         self.assertIn("measure", result.by_gate)
+
+    def test_native_decoder_forward_estimate_uses_native_fast_path(self) -> None:
+        location = NoiseLocation(
+            id="x0",
+            model=BernoulliPauliNoise("X"),
+            rate=0.25,
+            qubits=(0,),
+        )
+        circuit = Circuit(
+            n_qubits=1,
+            operations=[
+                Operation.noise(location),
+                Operation.measure(0, key="m", basis="Z"),
+            ],
+        )
+        observables = (LogicalObservable(id=0, measurement_keys=("m",)),)
+        simulator = BatchForwardNoiseAwareSimulator(circuit, observables=observables)
+        decoder = NativeNoCorrectionDecoder(observable_ids=(0,))
+
+        native_result = simulator.estimate(shots=4096, seed=111, decoder=decoder)
+        default_result = simulator.estimate(shots=4096, seed=111)
+
+        self.assertEqual(decoder.python_decode_call_count, 0)
+        self.assertEqual(native_result.mean_loss, default_result.mean_loss)
+        self.assertEqual(native_result.hotspots, default_result.hotspots)
+
+    def test_native_decoder_with_python_loss_uses_slow_compat_path(self) -> None:
+        location = NoiseLocation(
+            id="x0",
+            model=BernoulliPauliNoise("X"),
+            rate=0.25,
+            qubits=(0,),
+        )
+        circuit = Circuit(
+            n_qubits=1,
+            operations=[
+                Operation.noise(location),
+                Operation.measure(0, key="m", basis="Z"),
+            ],
+        )
+        observables = (LogicalObservable(id=0, measurement_keys=("m",)),)
+        decoder = NativeNoCorrectionDecoder(observable_ids=(0,))
+
+        result = BatchForwardNoiseAwareSimulator(
+            circuit,
+            observables=observables,
+        ).estimate(
+            shots=128,
+            seed=112,
+            decoder=decoder,
+            loss_mask_fn=lambda batch, corrections: corrections[0],
+        )
+
+        self.assertEqual(decoder.python_decode_call_count, 1)
+        self.assertEqual(result.mean_loss, 0.0)
 
     def test_batch_samples_random_ideal_measurements(self) -> None:
         circuit = Circuit(
@@ -1173,6 +1242,52 @@ class NativeDetectorErrorModelTests(unittest.TestCase):
         self.assertEqual(result.top_edges(1)[0].edge_index, 0)
         self.assertEqual(result.top_hotspots(1)[0].location_id, "logical_edge")
 
+    def test_native_dem_estimate_accepts_native_decoder_fast_path(self) -> None:
+        self._require_native_dem()
+        dem = DetectorErrorModel(
+            detectors=(Detector(id=0, measurement_keys=()),),
+            observables=(LogicalObservable(id=0),),
+            edges=(
+                DetectorErrorEdge(
+                    probability=0.2,
+                    detectors=(0,),
+                    observables=(0,),
+                    location_id="edge0",
+                    event="X",
+                ),
+            ),
+        )
+        decoder = NativeNoCorrectionDecoder(observable_ids=(0,), detector_ids=(0,))
+        sampler = compile_native_dem_sampler(dem)
+
+        native_result = sampler.estimate(shots=20_000, seed=55, decoder=decoder)
+        default_result = sampler.estimate(shots=20_000, seed=55)
+
+        self.assertEqual(decoder.python_decode_call_count, 0)
+        self.assertEqual(native_result.mean_loss, default_result.mean_loss)
+        self.assertEqual(native_result.edge_hotspots, default_result.edge_hotspots)
+
+    def test_native_dem_decoder_with_python_loss_uses_slow_compat_path(self) -> None:
+        self._require_native_dem()
+        dem = DetectorErrorModel(
+            detectors=(Detector(id=0, measurement_keys=()),),
+            observables=(LogicalObservable(id=0),),
+            edges=(
+                DetectorErrorEdge(0.2, (0,), (0,), "edge0", "X"),
+            ),
+        )
+        decoder = NativeNoCorrectionDecoder(observable_ids=(0,), detector_ids=(0,))
+
+        result = compile_native_dem_sampler(dem).estimate(
+            shots=128,
+            seed=56,
+            decoder=decoder,
+            loss_mask_fn=lambda batch, corrections: corrections[0],
+        )
+
+        self.assertEqual(decoder.python_decode_call_count, 1)
+        self.assertEqual(result.mean_loss, 0.0)
+
     def test_native_dem_custom_loss_uses_rust_hotspot_aggregation(self) -> None:
         self._require_native_dem()
         dem = DetectorErrorModel(
@@ -1202,6 +1317,46 @@ class NativeDetectorErrorModelTests(unittest.TestCase):
         self.assertAlmostEqual(result.sensitivities["edge0"], 1.0, delta=0.08)
         self.assertAlmostEqual(result.by_gate["idle"], result.hotspots["edge0"])
         self.assertEqual(result.top_edges(1)[0].edge_index, 0)
+
+    def test_native_dem_problem_views_are_available(self) -> None:
+        self._require_native_dem()
+        dem = DetectorErrorModel(
+            detectors=(
+                Detector(id=5, measurement_keys=()),
+                Detector(id=2, measurement_keys=()),
+            ),
+            observables=(LogicalObservable(id=7),),
+            edges=(
+                DetectorErrorEdge(0.1, (2, 9), (7,), "a", "X"),
+                DetectorErrorEdge(0.2, (5,), (), "b", "Z"),
+            ),
+        )
+
+        indexed = dem.compile_indexed()
+        graphlike = dem.compile_graphlike_problem()
+        binary = dem.compile_binary_linear_problem()
+
+        self.assertIsInstance(indexed, IndexedDem)
+        self.assertIsInstance(graphlike, GraphlikeDecodingProblem)
+        self.assertIsInstance(binary, BinaryLinearDecodingProblem)
+        self.assertEqual(indexed.detector_ids, (5, 2, 9))
+        self.assertEqual(indexed.observable_ids, (7,))
+        self.assertEqual(indexed.edges[0].detectors, (1, 2))
+        self.assertEqual(graphlike.edge_count, 2)
+        self.assertEqual(graphlike.edges[0].fault_observables, (0,))
+        self.assertIsInstance(binary.h, SparseBinaryMatrix)
+        self.assertEqual(binary.h.entries, ((1, 0), (2, 0), (0, 1)))
+        self.assertEqual(binary.f.entries, ((0, 0),))
+        self.assertTrue(dem.is_graphlike())
+
+        bad = DetectorErrorModel(
+            detectors=(Detector(id=0, measurement_keys=()),),
+            observables=(),
+            edges=(DetectorErrorEdge(0.1, (0, 1, 2), (), "bad", "X"),),
+        )
+        self.assertFalse(bad.is_graphlike())
+        with self.assertRaises(ValueError):
+            bad.compile_graphlike_problem()
 
     def test_native_dem_sampler_compiles_directly_from_circuit(self) -> None:
         self._require_native_dem()

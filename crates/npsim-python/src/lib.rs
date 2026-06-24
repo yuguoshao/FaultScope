@@ -9,6 +9,7 @@ pub(crate) const NATIVE_KERNEL_VERSION: &str = "0.1.0";
 
 mod api;
 mod core_api;
+mod decoder_api;
 mod dem {
     pub(crate) mod generate;
 }
@@ -25,6 +26,7 @@ mod spec;
 
 pub(crate) use api::*;
 pub(crate) use core_api::*;
+pub(crate) use decoder_api::*;
 pub(crate) use dem::generate::*;
 pub(crate) use hotspot::*;
 pub(crate) use mask::*;

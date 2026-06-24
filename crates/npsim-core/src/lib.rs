@@ -6,7 +6,9 @@
 //! integration while the algorithms are migrated here.
 
 pub mod compile;
+pub mod decoder;
 pub mod dem;
+pub mod dem_problem;
 pub mod dem_sampling;
 pub mod expr;
 pub mod hotspot;
@@ -19,7 +21,9 @@ pub mod sampling;
 pub mod stabilizer;
 
 pub use compile::*;
+pub use decoder::*;
 pub use dem::*;
+pub use dem_problem::*;
 pub use dem_sampling::*;
 pub use expr::*;
 pub use hotspot::*;

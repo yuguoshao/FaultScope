@@ -1,5 +1,6 @@
 """Classical and PyMatching decoders."""
 
+from npsim._npsim_native import NativeBatchDecoder, NativeNoCorrectionDecoder
 from npsim.decoders.classical import NoCorrectionDecoder, RepetitionCodeDecoder
 from npsim.decoders.pymatching import (
     PyMatchingBatchDecoder,
@@ -8,6 +9,8 @@ from npsim.decoders.pymatching import (
 )
 
 __all__ = [
+    "NativeBatchDecoder",
+    "NativeNoCorrectionDecoder",
     "NoCorrectionDecoder",
     "PyMatchingBatchDecoder",
     "PyMatchingUnavailableError",

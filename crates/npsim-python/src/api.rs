@@ -126,6 +126,49 @@ impl NativePackedSampler {
         }
         let baseline = native_baseline_value(baseline)?;
         let state = py.allow_threads(|| run_packed_sample(self, shots, seed, true))?;
+        if loss_mask_fn.is_none() && correction_mask_fn.is_none() {
+            let corrections = match decoder {
+                Some(decoder) => {
+                    if let Some(native_decoder) = native_decoder_from_py(decoder) {
+                        let detector_masks = detector_mask_view_from_map(
+                            &state.detectors,
+                            native_decoder.detector_ids(),
+                            state.shots,
+                        )?;
+                        let view = npsim_core::DetectorMaskBatchView::new(
+                            native_decoder.detector_ids(),
+                            &detector_masks,
+                            state.shots,
+                        )
+                        .map_err(|err| PyValueError::new_err(err.to_string()))?;
+                        native_decoder
+                            .decode_batch(view)
+                            .map_err(|err| PyValueError::new_err(err.to_string()))?
+                    } else {
+                        npsim_core::CorrectionMaskBatch::empty(state.shots)
+                    }
+                }
+                None => npsim_core::CorrectionMaskBatch::empty(state.shots),
+            };
+            if decoder.is_none() || decoder.and_then(native_decoder_from_py).is_some() {
+                validate_declared_observables(&state.observables, &self.simulator.observables)?;
+                let observable_ids = self
+                    .simulator
+                    .observables
+                    .iter()
+                    .map(|observable| observable.id)
+                    .collect::<Vec<_>>();
+                let loss_mask = npsim_core::logical_residual_loss_mask_native(
+                    &state.observables,
+                    &corrections,
+                    &observable_ids,
+                    &state.all_mask,
+                );
+                let estimate =
+                    compute_packed_estimate(self, &state, &loss_mask, baseline, top_k);
+                return simulation_result_from_estimate(py, &estimate, &self.py_noise_locations);
+            }
+        }
         let batch = Py::new(py, NativePackedBatch { state })?;
         let corrections = forward_correction_masks(py, &batch, decoder, correction_mask_fn)?;
         let loss_mask = if let Some(loss_mask_fn) = loss_mask_fn {
@@ -514,15 +557,47 @@ impl NativeDemSampler {
             ));
         }
         let baseline = native_baseline_value(baseline)?;
-        if decoder.is_none() && correction_mask_fn.is_none() && loss_mask_fn.is_none() {
-            let estimate = py.allow_threads(|| {
-                let mut rng = SmallRng::new(seed.unwrap_or(0x95f2_04dc_4291_a715));
-                let batch = run_dem_batch(self, shots, &mut rng, true);
-                compute_dem_estimate(self, &batch, &batch.loss_mask, baseline, top_k)
-            });
-            return dem_hotspot_result_from_estimate(py, self, &estimate);
+        if correction_mask_fn.is_none() && loss_mask_fn.is_none() {
+            if let Some(decoder) = decoder {
+                if let Some(native_decoder) = native_decoder_from_py(decoder) {
+                    let estimate = py.allow_threads(|| {
+                        let mut rng = SmallRng::new(seed.unwrap_or(0x95f2_04dc_4291_a715));
+                        let batch = run_dem_batch(self, shots, &mut rng, true);
+                        let detector_masks = detector_mask_view_from_map(
+                            &batch.detectors,
+                            native_decoder.detector_ids(),
+                            batch.shots,
+                        )?;
+                        let view = npsim_core::DetectorMaskBatchView::new(
+                            native_decoder.detector_ids(),
+                            &detector_masks,
+                            batch.shots,
+                        )
+                        .map_err(|err| PyValueError::new_err(err.to_string()))?;
+                        let corrections = native_decoder
+                            .decode_batch(view)
+                            .map_err(|err| PyValueError::new_err(err.to_string()))?;
+                        let loss_mask = npsim_core::logical_residual_loss_mask_native(
+                            &batch.observables,
+                            &corrections,
+                            &self.observables,
+                            &batch.all_mask,
+                        );
+                        Ok::<DemEstimate, PyErr>(compute_dem_estimate(
+                            self, &batch, &loss_mask, baseline, top_k,
+                        ))
+                    })?;
+                    return dem_hotspot_result_from_estimate(py, self, &estimate);
+                }
+            } else {
+                let estimate = py.allow_threads(|| {
+                    let mut rng = SmallRng::new(seed.unwrap_or(0x95f2_04dc_4291_a715));
+                    let batch = run_dem_batch(self, shots, &mut rng, true);
+                    compute_dem_estimate(self, &batch, &batch.loss_mask, baseline, top_k)
+                });
+                return dem_hotspot_result_from_estimate(py, self, &estimate);
+            }
         }
-
         let batch = py.allow_threads(|| {
             let mut rng = SmallRng::new(seed.unwrap_or(0x95f2_04dc_4291_a715));
             run_dem_batch(self, shots, &mut rng, true)
@@ -1256,6 +1331,14 @@ pub(crate) fn _npsim_native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<PyDetectorErrorEdge>()?;
     module.add_class::<PyDetectorErrorModel>()?;
     module.add_class::<PyDetectorErrorModelGenerator>()?;
+    module.add_class::<PyIndexedDemEdge>()?;
+    module.add_class::<PyIndexedDem>()?;
+    module.add_class::<PyGraphlikeEdge>()?;
+    module.add_class::<PyGraphlikeDecodingProblem>()?;
+    module.add_class::<PySparseBinaryMatrix>()?;
+    module.add_class::<PyBinaryLinearDecodingProblem>()?;
+    module.add_class::<PyNativeBatchDecoder>()?;
+    module.add_class::<PyNativeNoCorrectionDecoder>()?;
     module.add_class::<PyDetectorGraphEdgeHotspot>()?;
     module.add_class::<PyDetectorGraphHotspots>()?;
     module.add_class::<PyBatchTrajectory>()?;

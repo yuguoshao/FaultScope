@@ -7,13 +7,17 @@ from npsim.runtime import (
 )
 from npsim.core import Circuit, NoiseLocation, Operation
 from npsim.dem import (
+    BinaryLinearDecodingProblem,
     Detector,
     DetectorErrorEdge,
     DetectorErrorModel,
     DetectorErrorModelGenerator,
     DetectorGraphEdgeHotspot,
     DetectorGraphHotspots,
+    GraphlikeDecodingProblem,
+    IndexedDem,
     LogicalObservable,
+    SparseBinaryMatrix,
     UnsupportedDemCircuitError,
 )
 from npsim.dem import (
@@ -43,6 +47,8 @@ from npsim.runtime import (
     generate_native_dem,
 )
 from npsim.decoders import (
+    NativeBatchDecoder,
+    NativeNoCorrectionDecoder,
     PyMatchingBatchDecoder,
     PyMatchingUnavailableError,
     UnsupportedPyMatchingDemError,
@@ -60,6 +66,7 @@ __all__ = [
     "BernoulliPauliNoise",
     "BatchForwardNoiseAwareSimulator",
     "BatchTrajectory",
+    "BinaryLinearDecodingProblem",
     "Circuit",
     "DemBatchHotspotSimulator",
     "DemBatchTrajectory",
@@ -73,11 +80,15 @@ __all__ = [
     "DetectorErrorModelGenerator",
     "DetectorGraphEdgeHotspot",
     "DetectorGraphHotspots",
+    "GraphlikeDecodingProblem",
     "HotspotRow",
+    "IndexedDem",
     "LogicalObservable",
     "MeasurementBitFlip",
+    "NativeBatchDecoder",
     "NativeDemSampler",
     "NativeDemGenerator",
+    "NativeNoCorrectionDecoder",
     "NativePackedSampler",
     "NoiseLocation",
     "Operation",
@@ -86,6 +97,7 @@ __all__ = [
     "PyMatchingUnavailableError",
     "SimulationResult",
     "SingleQubitDepolarizing",
+    "SparseBinaryMatrix",
     "StimImportError",
     "StimImportResult",
     "TwoQubitDepolarizing",

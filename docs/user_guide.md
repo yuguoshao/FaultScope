@@ -495,6 +495,56 @@ decode_batch_masks(batch) -> dict[int, int]
 
 The return value maps observable ids to correction masks.
 
+## Native Decoder Fast Path
+
+Python decoders remain supported for prototypes, but native decoder handles can
+avoid moving detector and correction masks through Python. A native decoder is
+still created and selected from Python:
+
+```python
+from npsim import (
+    BatchForwardNoiseAwareSimulator,
+    BernoulliPauliNoise,
+    Circuit,
+    LogicalObservable,
+    NativeNoCorrectionDecoder,
+    NoiseLocation,
+    Operation,
+)
+
+noise = NoiseLocation("x0", BernoulliPauliNoise("X"), 0.05, (0,))
+circuit = Circuit(
+    1,
+    (
+        Operation.noise(noise),
+        Operation.measure(0, key="m0", basis="Z"),
+    ),
+)
+decoder = NativeNoCorrectionDecoder(observable_ids=(0,))
+
+result = BatchForwardNoiseAwareSimulator(
+    circuit,
+    observables=(LogicalObservable(0, measurement_keys=("m0",)),),
+).estimate(shots=1024, seed=1, decoder=decoder)
+```
+
+When `loss_mask_fn` and `correction_mask_fn` are omitted, this uses the native
+fast path: detector masks, decoder output, default residual loss, and hotspot
+aggregation all stay in Rust. If you supply a Python loss or correction
+callback, NPSim falls back to the compatibility path and calls
+`decode_batch_masks(batch)`.
+
+DEM objects can also compile decoder-ready native views:
+
+```python
+indexed = dem.compile_indexed()
+matching_problem = dem.compile_graphlike_problem()
+binary_problem = dem.compile_binary_linear_problem()
+```
+
+`compile_graphlike_problem()` is for future MWPM/fusion-blossom style backends.
+`compile_binary_linear_problem()` is for future BP+OSD/LDPC style backends.
+
 ## Stim Import
 
 NPSim includes a subset importer for flattened Stim text circuits. The importer
@@ -612,6 +662,7 @@ Run benchmarks from the repository root after building the native extension:
 .venv/bin/python benchmarks/sampling_throughput.py --family random-clifford --qubits 128 256 512 --depth 20
 .venv/bin/python benchmarks/dem_throughput.py --distances 9 13 21 --rounds 3
 .venv/bin/python benchmarks/hotspot_throughput.py --distances 9 13 21 --rounds 3 --shots 100000
+.venv/bin/python benchmarks/native_decoder_fast_path.py
 .venv/bin/python benchmarks/surface_code_threshold.py --distances 3 5 7 --shots 10000
 ```
 

@@ -1225,6 +1225,40 @@ impl PyDetectorErrorModel {
         )
     }
 
+    pub(crate) fn compile_indexed(&self, py: Python<'_>) -> PyResult<PyIndexedDem> {
+        let dem = self.to_core_dem(py)?;
+        let indexed = dem
+            .compile_indexed()
+            .map_err(|err| PyValueError::new_err(err.to_string()))?;
+        Ok(PyIndexedDem { indexed })
+    }
+
+    pub(crate) fn compile_graphlike_problem(
+        &self,
+        py: Python<'_>,
+    ) -> PyResult<PyGraphlikeDecodingProblem> {
+        let dem = self.to_core_dem(py)?;
+        let problem = dem
+            .compile_graphlike_problem()
+            .map_err(|err| PyValueError::new_err(err.to_string()))?;
+        Ok(PyGraphlikeDecodingProblem { problem })
+    }
+
+    pub(crate) fn compile_binary_linear_problem(
+        &self,
+        py: Python<'_>,
+    ) -> PyResult<PyBinaryLinearDecodingProblem> {
+        let dem = self.to_core_dem(py)?;
+        let problem = dem
+            .compile_binary_linear_problem()
+            .map_err(|err| PyValueError::new_err(err.to_string()))?;
+        Ok(PyBinaryLinearDecodingProblem { problem })
+    }
+
+    pub(crate) fn is_graphlike(&self, py: Python<'_>) -> PyResult<bool> {
+        Ok(self.to_core_dem(py)?.is_graphlike())
+    }
+
     pub(crate) fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
         Ok(format!(
             "DetectorErrorModel(detectors={}, observables={}, edges={})",
@@ -1254,6 +1288,33 @@ impl PyDetectorErrorModel {
             observables: Vec::new(),
             edges: Vec::new(),
         }
+    }
+
+    pub(crate) fn to_core_dem(&self, py: Python<'_>) -> PyResult<npsim_core::DetectorErrorModel> {
+        if let Some(dem) = &self.core_dem {
+            return Ok(dem.clone());
+        }
+        if let Some(dem) = &self.core_lazy_dem {
+            return Ok(dem.materialize());
+        }
+        let detectors = parse_dem_detector_sequence(&self.detectors(py)?.bind(py))?;
+        let observables = parse_dem_observable_sequence(&self.observables(py)?.bind(py))?;
+        let edges = parse_dem_edge_sequence(&self.edges(py)?.bind(py))?;
+        Ok(npsim_core::DetectorErrorModel {
+            detectors,
+            observables,
+            edges: edges
+                .into_iter()
+                .map(|edge| npsim_core::DetectorErrorEdge {
+                    probability: edge.probability,
+                    detectors: edge.detectors,
+                    observables: edge.observables,
+                    location_id: edge.location_id,
+                    event: edge.event,
+                    tags: edge.tags,
+                })
+                .collect(),
+        })
     }
 
     fn edge_views(&self, py: Python<'_>) -> PyResult<Vec<PyDemEdgeView>> {

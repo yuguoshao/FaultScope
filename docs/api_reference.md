@@ -282,6 +282,21 @@ Python `DetectorErrorModel`. In that mode, `sampler.dem is None`. Sampling
 works, but APIs that need DEM metadata, including estimate and hotspot result
 construction, raise `ValueError`.
 
+Native decoder handles:
+
+```python
+from npsim.decoders import NativeBatchDecoder, NativeNoCorrectionDecoder
+
+decoder = NativeNoCorrectionDecoder(observable_ids=(0,))
+```
+
+Native decoders are Python-owned handles around Rust decoder objects. When a
+native decoder is passed to `estimate(..., decoder=decoder)` without
+`loss_mask_fn` or `correction_mask_fn`, NPSim uses the native fast path:
+detector masks, correction masks, default residual loss, and hotspot
+aggregation stay in Rust. If a Python loss or correction callback is supplied,
+NPSim uses the compatibility path and may call `decoder.decode_batch_masks(...)`.
+
 ## Detector Error Models
 
 `Detector(id, measurement_keys, coords=None)` declares one detector.
@@ -320,6 +335,10 @@ Methods:
 ```text
 to_dem_text(*, include_detector_coords=True) -> str
 edges_by_location() -> dict[str, list[DetectorErrorEdge]]
+compile_indexed() -> IndexedDem
+compile_graphlike_problem() -> GraphlikeDecodingProblem
+compile_binary_linear_problem() -> BinaryLinearDecodingProblem
+is_graphlike() -> bool
 project_hotspots_to_edges(hotspots) -> dict[tuple[str, object], float]
 project_result_to_detector_graph(result) -> DetectorGraphHotspots
 project_sensitivities_to_detector_graph(sensitivities) -> DetectorGraphHotspots
@@ -332,6 +351,13 @@ value. It returns edge values keyed by `(location_id, event)`.
 generates a DEM from a circuit. If declarations are omitted, NPSim reads
 `Operation.detector(...)` and `Operation.observable_include(...)` entries from
 the circuit.
+
+`IndexedDem`, `GraphlikeDecodingProblem`, and `BinaryLinearDecodingProblem` are
+native decoder-ready views. `GraphlikeDecodingProblem` targets MWPM-style
+backends such as future fusion-blossom adapters. `BinaryLinearDecodingProblem`
+targets BP+OSD/LDPC-style backends with sparse binary `H` and `F` matrices.
+These objects expose metadata for inspection but are intended to be consumed by
+native decoders without converting hot-path masks through Python.
 
 Example:
 
