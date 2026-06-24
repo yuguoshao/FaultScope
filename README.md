@@ -116,6 +116,9 @@ print(result.hotspot_table(top_k=5))
   `python -m npsim.backends status` 查看 catalog/status，
   `python -m npsim.backends install fusion-blossom --dry-run` 查看安装步骤；NPSim 不会在
   `import` 或 `estimate(...)` 时隐式联网、clone 或编译。
+- 开发中的 fusion-blossom scaffold backend 可通过
+  `.venv/bin/python -m pip install -e backends/npsim-fusion-blossom` 本地安装；它只验证后装链路，
+  不是真实 fusion-blossom solver。
 - `edge_sensitivities` 和 `edge_hotspots` 是按 DEM edge index keyed 的 dict。
 - `edges_by_location()` 返回 `dict[str, list[DetectorErrorEdge]]`。
 - `materialize_dem=False` 的 native DEM sampler 是轻量采样路径，`sampler.dem is None`，

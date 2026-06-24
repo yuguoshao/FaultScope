@@ -452,6 +452,34 @@ The post-install plugin ABI is not a general third-party stable ABI. It is a
 versioned contract for official NPSim backend packages so the core package can
 reject mismatched backend builds before any hot-path decoding begins.
 
+### Official Backend Package Scaffold
+
+The repository includes an official fusion-blossom backend package scaffold at:
+
+```text
+backends/npsim-fusion-blossom/
+```
+
+Install it in editable mode during development:
+
+```bash
+.venv/bin/python -m pip install -e backends/npsim-fusion-blossom
+```
+
+The package declares:
+
+```toml
+[project.entry-points."npsim.native_decoders"]
+fusion-blossom = "npsim_fusion_blossom:backend_manifest"
+```
+
+Its manifest returns the current NPSim native decoder plugin ABI, package
+metadata, and a `fusion-blossom` decoder class. The scaffold class implements
+`from_dem(...)` and `from_circuit(...)`, but delegates to
+`NativeGraphlikeDetectorCopyDecoder`. This proves the post-install discovery and
+native fast-path construction chain without claiming to be a production
+fusion-blossom solver.
+
 ### Fusion-Blossom Adapter Plan
 
 Fusion Blossom is a MWPM decoder route for QEC. The

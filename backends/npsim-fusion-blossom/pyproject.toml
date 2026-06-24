@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "npsim-fusion-blossom"
+version = "0.1.0"
+description = "Official NPSim fusion-blossom native decoder backend scaffold"
+requires-python = ">=3.10"
+dependencies = [
+    "npsim",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[project.entry-points."npsim.native_decoders"]
+fusion-blossom = "npsim_fusion_blossom:backend_manifest"
