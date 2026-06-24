@@ -48,6 +48,7 @@ from npsim.runtime import (
 )
 from npsim.decoders import (
     NativeBatchDecoder,
+    NativeGraphlikeDetectorCopyDecoder,
     NativeNoCorrectionDecoder,
     PyMatchingBatchDecoder,
     PyMatchingUnavailableError,
@@ -89,6 +90,7 @@ __all__ = [
     "NativeBatchDecoder",
     "NativeDemSampler",
     "NativeDemGenerator",
+    "NativeGraphlikeDetectorCopyDecoder",
     "NativeNoCorrectionDecoder",
     "NativePackedSampler",
     "NoiseLocation",

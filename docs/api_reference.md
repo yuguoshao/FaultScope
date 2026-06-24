@@ -287,6 +287,7 @@ Native decoder handles:
 ```python
 from npsim.decoders import (
     NativeBatchDecoder,
+    NativeGraphlikeDetectorCopyDecoder,
     NativeNoCorrectionDecoder,
     available_native_decoders,
 )
@@ -308,8 +309,9 @@ Python classes that merely define or subclass `decode_batch_masks(...)` remain
 ordinary Python decoders and do not enter the native fast path.
 
 `available_native_decoders()` returns the names of compiled native decoder
-backends. The default build currently exposes only `"no-correction"`; future
-in-tree backends will be enabled through Cargo/maturin features.
+backends. The default build exposes `"no-correction"` and
+`"graphlike-detector-copy"`; future production backends will be enabled through
+Cargo/maturin features.
 
 ## Detector Error Models
 

@@ -48,6 +48,7 @@ from npsim.runtime import (
 from npsim.runtime.loss import logical_residual_loss_mask
 from npsim.decoders import (
     NativeBatchDecoder,
+    NativeGraphlikeDetectorCopyDecoder,
     NativeNoCorrectionDecoder,
     PyMatchingBatchDecoder,
     UnsupportedPyMatchingDemError,
@@ -191,17 +192,29 @@ class NoiseAwareSimulatorTests(unittest.TestCase):
         self.assertIs(NativePackedSampler, native.NativePackedSampler)
         self.assertIs(NativeDemSampler, native.NativeDemSampler)
         self.assertIs(NativeBatchDecoder, native.NativeBatchDecoder)
+        self.assertIs(
+            NativeGraphlikeDetectorCopyDecoder,
+            native.NativeGraphlikeDetectorCopyDecoder,
+        )
         self.assertIs(NativeNoCorrectionDecoder, native.NativeNoCorrectionDecoder)
         self.assertIs(available_native_decoders, native.available_native_decoders)
         self.assertIs(npsim.Circuit, native.Circuit)
         self.assertIs(npsim.BatchForwardNoiseAwareSimulator, native.BatchForwardNoiseAwareSimulator)
         self.assertIs(npsim.DetectorErrorModelGenerator, native.DetectorErrorModelGenerator)
         self.assertIs(npsim.DemBatchHotspotSimulator, native.DemBatchHotspotSimulator)
+        self.assertIs(
+            npsim.NativeGraphlikeDetectorCopyDecoder,
+            native.NativeGraphlikeDetectorCopyDecoder,
+        )
         self.assertIs(core.Circuit, native.Circuit)
         self.assertIs(runtime_module.BatchForwardNoiseAwareSimulator, native.BatchForwardNoiseAwareSimulator)
         self.assertIs(dem_module.DetectorErrorModelGenerator, native.DetectorErrorModelGenerator)
         self.assertIs(dem_module.DemBatchHotspotSimulator, native.DemBatchHotspotSimulator)
         self.assertIs(dem_module.IndexedDem, native.IndexedDem)
+        self.assertIs(
+            decoders.NativeGraphlikeDetectorCopyDecoder,
+            native.NativeGraphlikeDetectorCopyDecoder,
+        )
         self.assertIs(decoders.NativeNoCorrectionDecoder, native.NativeNoCorrectionDecoder)
         self.assertIs(decoders.available_native_decoders, native.available_native_decoders)
         self.assertIs(npsim.available_native_decoders, native.available_native_decoders)
@@ -295,7 +308,10 @@ class NoiseAwareSimulatorTests(unittest.TestCase):
             detector_ids=(6,),
         )
 
-        self.assertEqual(available_native_decoders(), ("no-correction",))
+        self.assertEqual(
+            available_native_decoders(),
+            ("no-correction", "graphlike-detector-copy"),
+        )
         self.assertEqual(decoder.name, "no-correction")
         self.assertEqual(decoder.detector_ids, (5,))
         self.assertEqual(decoder.observable_ids, (0,))
@@ -1331,6 +1347,90 @@ class NativeDetectorErrorModelTests(unittest.TestCase):
 
         self.assertEqual(decoder.python_decode_call_count, 1)
         self.assertEqual(result.mean_loss, 0.0)
+
+    def test_graphlike_detector_copy_decoder_from_dem_uses_native_fast_path(self) -> None:
+        self._require_native_dem()
+        dem = DetectorErrorModel(
+            detectors=(Detector(id=0, measurement_keys=()),),
+            observables=(LogicalObservable(id=0),),
+            edges=(
+                DetectorErrorEdge(0.2, (0,), (0,), "edge0", "X"),
+            ),
+        )
+        decoder = NativeGraphlikeDetectorCopyDecoder.from_dem(dem)
+
+        result = compile_native_dem_sampler(dem).estimate(
+            shots=4096,
+            seed=59,
+            decoder=decoder,
+        )
+
+        self.assertEqual(decoder.name, "graphlike-detector-copy")
+        self.assertEqual(decoder.detector_ids, (0,))
+        self.assertEqual(decoder.observable_ids, (0,))
+        self.assertEqual(decoder.python_decode_call_count, 0)
+        self.assertEqual(result.mean_loss, 0.0)
+
+    def test_graphlike_detector_copy_decoder_from_circuit_matches_from_dem(self) -> None:
+        self._require_native_dem()
+        location = NoiseLocation("x0", BernoulliPauliNoise("X"), 0.2, (0,))
+        circuit = Circuit(
+            1,
+            (
+                Operation.noise(location),
+                Operation.measure(0, key="m0", basis="Z"),
+                Operation.detector(("m0",), detector_id=0),
+                Operation.observable_include(0, ("m0",)),
+            ),
+        )
+        dem = generate_native_dem(circuit)
+        from_dem = NativeGraphlikeDetectorCopyDecoder.from_dem(dem)
+        from_circuit = NativeGraphlikeDetectorCopyDecoder.from_circuit(circuit)
+
+        self.assertEqual(from_circuit.name, from_dem.name)
+        self.assertEqual(from_circuit.detector_ids, from_dem.detector_ids)
+        self.assertEqual(from_circuit.observable_ids, from_dem.observable_ids)
+
+    def test_graphlike_detector_copy_decoder_with_python_loss_uses_slow_path(self) -> None:
+        self._require_native_dem()
+        dem = DetectorErrorModel(
+            detectors=(Detector(id=0, measurement_keys=()),),
+            observables=(LogicalObservable(id=0),),
+            edges=(
+                DetectorErrorEdge(0.2, (0,), (0,), "edge0", "X"),
+            ),
+        )
+        decoder = NativeGraphlikeDetectorCopyDecoder.from_dem(dem)
+
+        result = compile_native_dem_sampler(dem).estimate(
+            shots=128,
+            seed=60,
+            decoder=decoder,
+            loss_mask_fn=lambda batch, corrections: corrections[0],
+        )
+
+        self.assertEqual(decoder.python_decode_call_count, 1)
+        self.assertGreaterEqual(result.mean_loss, 0.0)
+
+    def test_graphlike_detector_copy_decoder_rejects_ambiguous_mapping(self) -> None:
+        self._require_native_dem()
+        dem = DetectorErrorModel(
+            detectors=(
+                Detector(id=0, measurement_keys=()),
+                Detector(id=1, measurement_keys=()),
+            ),
+            observables=(LogicalObservable(id=0),),
+            edges=(
+                DetectorErrorEdge(0.1, (0,), (0,), "edge0", "X"),
+                DetectorErrorEdge(0.1, (1,), (0,), "edge1", "X"),
+            ),
+        )
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "multiple single-detector candidate edges for observable id 0",
+        ):
+            NativeGraphlikeDetectorCopyDecoder.from_dem(dem)
 
     def test_native_dem_custom_loss_uses_rust_hotspot_aggregation(self) -> None:
         self._require_native_dem()

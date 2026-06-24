@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use crate::{Mask, NpError, NpResult};
+use crate::{GraphlikeDecodingProblem, Mask, NpError, NpResult};
 
 #[derive(Debug, Clone, Copy)]
 pub struct DetectorMaskBatchView<'a> {
@@ -181,6 +181,100 @@ impl NativeBatchDecoder for NativeNoCorrectionDecoder {
     }
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct NativeGraphlikeDetectorCopyDecoder {
+    detector_ids: Vec<i64>,
+    observable_ids: Vec<i64>,
+    observable_detector_indices: Vec<Option<usize>>,
+}
+
+impl NativeGraphlikeDetectorCopyDecoder {
+    pub fn from_graphlike_problem(problem: GraphlikeDecodingProblem) -> NpResult<Self> {
+        let mut observable_detector_indices = vec![None; problem.observable_ids.len()];
+        for edge in &problem.edges {
+            if edge.detectors.len() != 1 || edge.fault_observables.len() != 1 {
+                continue;
+            }
+            let detector_index = edge.detectors[0];
+            let observable_index = edge.fault_observables[0];
+            if detector_index >= problem.detector_ids.len() {
+                return Err(NpError::new(format!(
+                    "graphlike-detector-copy edge {} references detector index {} but only {} detectors exist",
+                    edge.dem_edge_index,
+                    detector_index,
+                    problem.detector_ids.len()
+                )));
+            }
+            if observable_index >= problem.observable_ids.len() {
+                return Err(NpError::new(format!(
+                    "graphlike-detector-copy edge {} references observable index {} but only {} observables exist",
+                    edge.dem_edge_index,
+                    observable_index,
+                    problem.observable_ids.len()
+                )));
+            }
+            if let Some(existing_detector_index) = observable_detector_indices[observable_index] {
+                return Err(NpError::new(format!(
+                    "graphlike-detector-copy found multiple single-detector candidate edges for observable id {}; detector indices {} and {}",
+                    problem.observable_ids[observable_index],
+                    existing_detector_index,
+                    detector_index
+                )));
+            }
+            observable_detector_indices[observable_index] = Some(detector_index);
+        }
+        Ok(Self {
+            detector_ids: problem.detector_ids,
+            observable_ids: problem.observable_ids,
+            observable_detector_indices,
+        })
+    }
+
+    pub fn observable_detector_indices(&self) -> &[Option<usize>] {
+        &self.observable_detector_indices
+    }
+}
+
+impl NativeBatchDecoder for NativeGraphlikeDetectorCopyDecoder {
+    fn name(&self) -> &'static str {
+        "graphlike-detector-copy"
+    }
+
+    fn detector_ids(&self) -> &[i64] {
+        &self.detector_ids
+    }
+
+    fn observable_ids(&self) -> &[i64] {
+        &self.observable_ids
+    }
+
+    fn decode_batch(&self, detectors: DetectorMaskBatchView<'_>) -> NpResult<CorrectionMaskBatch> {
+        if detectors.detector_ids != self.detector_ids.as_slice() {
+            return Err(NpError::new(
+                "graphlike-detector-copy received detector masks in an unexpected order",
+            ));
+        }
+        let words = crate::word_count(detectors.shots);
+        let masks = self
+            .observable_detector_indices
+            .iter()
+            .map(|detector_index| match detector_index {
+                Some(detector_index) => detectors
+                    .masks
+                    .get(*detector_index)
+                    .cloned()
+                    .ok_or_else(|| {
+                        NpError::new(format!(
+                            "graphlike-detector-copy missing detector mask at index {detector_index}"
+                        ))
+                    }),
+                None => Ok(Mask::zero(words)),
+            })
+            .collect::<NpResult<Vec<_>>>()?;
+        CorrectionMaskBatch::new(self.observable_ids.clone(), masks, detectors.shots)
+    }
+}
+
 pub fn logical_residual_loss_mask_native(
     observables: &HashMap<i64, Mask>,
     corrections: &CorrectionMaskBatch,
@@ -215,10 +309,34 @@ pub fn logical_residual_loss_mask_native(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::GraphlikeEdge;
 
     struct FixedCorrectionDecoder {
         observable_ids: Vec<i64>,
         correction: Mask,
+    }
+
+    fn graphlike_problem() -> GraphlikeDecodingProblem {
+        GraphlikeDecodingProblem {
+            detector_ids: vec![10, 20],
+            observable_ids: vec![0, 1],
+            edges: vec![
+                GraphlikeEdge {
+                    detectors: vec![1],
+                    fault_observables: vec![0],
+                    probability: 0.1,
+                    weight: 2.0,
+                    dem_edge_index: 0,
+                },
+                GraphlikeEdge {
+                    detectors: vec![0, 1],
+                    fault_observables: vec![1],
+                    probability: 0.2,
+                    weight: 1.0,
+                    dem_edge_index: 1,
+                },
+            ],
+        }
     }
 
     impl NativeBatchDecoder for FixedCorrectionDecoder {
@@ -392,5 +510,77 @@ mod tests {
 
         assert_eq!(corrections.observable_ids, vec![0, 2]);
         assert_eq!(corrections.masks, vec![Mask { words: vec![0] }; 2]);
+    }
+
+    #[test]
+    fn graphlike_detector_copy_constructs_unique_mapping() {
+        let decoder =
+            NativeGraphlikeDetectorCopyDecoder::from_graphlike_problem(graphlike_problem())
+                .unwrap();
+
+        assert_eq!(decoder.detector_ids(), &[10, 20]);
+        assert_eq!(decoder.observable_ids(), &[0, 1]);
+        assert_eq!(decoder.observable_detector_indices(), &[Some(1), None]);
+    }
+
+    #[test]
+    fn graphlike_detector_copy_rejects_ambiguous_observable_mapping() {
+        let mut problem = graphlike_problem();
+        problem.edges.push(GraphlikeEdge {
+            detectors: vec![0],
+            fault_observables: vec![0],
+            probability: 0.3,
+            weight: 0.8,
+            dem_edge_index: 2,
+        });
+
+        let err = NativeGraphlikeDetectorCopyDecoder::from_graphlike_problem(problem).unwrap_err();
+
+        assert!(err
+            .to_string()
+            .contains("multiple single-detector candidate edges for observable id 0"));
+    }
+
+    #[test]
+    fn graphlike_detector_copy_decodes_by_copying_detector_masks() {
+        let decoder =
+            NativeGraphlikeDetectorCopyDecoder::from_graphlike_problem(graphlike_problem())
+                .unwrap();
+        let detector_masks = vec![
+            Mask {
+                words: vec![0b0011],
+            },
+            Mask {
+                words: vec![0b1010],
+            },
+        ];
+        let view = DetectorMaskBatchView::new(decoder.detector_ids(), &detector_masks, 4).unwrap();
+
+        let corrections = decoder.decode_batch_checked(view).unwrap();
+
+        assert_eq!(corrections.observable_ids, vec![0, 1]);
+        assert_eq!(
+            corrections.masks,
+            vec![
+                Mask {
+                    words: vec![0b1010]
+                },
+                Mask { words: vec![0] }
+            ]
+        );
+    }
+
+    #[test]
+    fn graphlike_detector_copy_rejects_wrong_detector_order() {
+        let decoder =
+            NativeGraphlikeDetectorCopyDecoder::from_graphlike_problem(graphlike_problem())
+                .unwrap();
+        let detector_ids = vec![20, 10];
+        let detector_masks = vec![Mask { words: vec![0] }, Mask { words: vec![0] }];
+        let view = DetectorMaskBatchView::new(&detector_ids, &detector_masks, 4).unwrap();
+
+        let err = decoder.decode_batch(view).unwrap_err();
+
+        assert!(err.to_string().contains("unexpected order"));
     }
 }

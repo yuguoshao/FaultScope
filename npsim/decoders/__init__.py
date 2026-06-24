@@ -2,6 +2,7 @@
 
 from npsim._npsim_native import (
     NativeBatchDecoder,
+    NativeGraphlikeDetectorCopyDecoder,
     NativeNoCorrectionDecoder,
     available_native_decoders,
 )
@@ -14,6 +15,7 @@ from npsim.decoders.pymatching import (
 
 __all__ = [
     "NativeBatchDecoder",
+    "NativeGraphlikeDetectorCopyDecoder",
     "NativeNoCorrectionDecoder",
     "NoCorrectionDecoder",
     "PyMatchingBatchDecoder",

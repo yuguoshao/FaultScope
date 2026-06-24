@@ -554,6 +554,8 @@ for inspection, but intentionally avoid public `to_numpy_*` hot-path helpers.
 Future native decoder backends are reserved behind Cargo/maturin features such
 as `decoder-fusion-blossom` and `decoder-bposd`. They are disabled by default,
 and Python extras do not currently enable third-party native decoder builds.
+The default build includes only smoke-test/template native backends, not a
+production fusion-blossom or BP+OSD decoder.
 
 For the full developer contract, including `from_circuit(...)`,
 `from_dem(...)`, Python prototype decoders, and native backend skeletons, see

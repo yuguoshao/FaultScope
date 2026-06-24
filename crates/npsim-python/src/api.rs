@@ -1167,7 +1167,7 @@ fn native_dem_sampler_from_circuit(
     native_dem_sampler_from_core_generator(py, &generator, materialize_dem)
 }
 
-fn core_dem_generator_from_circuit(
+pub(crate) fn core_dem_generator_from_circuit(
     _py: Python<'_>,
     circuit: &Bound<'_, PyAny>,
     detectors: Option<&Bound<'_, PyAny>>,
@@ -1347,6 +1347,7 @@ pub(crate) fn _npsim_native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<PyBinaryLinearDecodingProblem>()?;
     module.add_class::<PyNativeBatchDecoder>()?;
     module.add_class::<PyNativeNoCorrectionDecoder>()?;
+    module.add_class::<PyNativeGraphlikeDetectorCopyDecoder>()?;
     module.add_class::<PyDetectorGraphEdgeHotspot>()?;
     module.add_class::<PyDetectorGraphHotspots>()?;
     module.add_class::<PyBatchTrajectory>()?;

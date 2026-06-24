@@ -348,7 +348,50 @@ from npsim.decoders import available_native_decoders
 print(available_native_decoders())
 ```
 
-The default build currently exposes only the no-correction smoke-test backend.
+The default build currently exposes:
+
+```text
+no-correction
+graphlike-detector-copy
+```
+
+These are smoke-test and template backends, not production decoders.
+
+### Example Native Backend
+
+`NativeGraphlikeDetectorCopyDecoder` is an in-tree example backend that shows
+the intended construction pattern without introducing third-party dependencies.
+It is useful for testing the native path and for copying when adding a real
+backend.
+
+```python
+from npsim.decoders import NativeGraphlikeDetectorCopyDecoder
+
+decoder = NativeGraphlikeDetectorCopyDecoder.from_dem(dem)
+
+decoder = NativeGraphlikeDetectorCopyDecoder.from_circuit(
+    circuit,
+    detectors=detectors,
+    observables=observables,
+)
+```
+
+Construction happens in Rust:
+
+1. The PyO3 factory receives the Python `DetectorErrorModel` or `Circuit`.
+2. Rust compiles a `GraphlikeDecodingProblem`.
+3. The backend finds single-detector, single-observable graphlike edges.
+4. The Python object stores only a native decoder handle.
+
+On the hot path, it copies the mapped detector syndrome mask into the
+corresponding observable correction mask. Observables without a unique mapped
+edge receive zero correction. If more than one single-detector candidate edge
+maps to the same observable, construction fails with `ValueError`.
+
+This backend is intentionally not a general decoder. It does not replace
+fusion-blossom, MWPM, BP+OSD, or LDPC decoding. Its purpose is to demonstrate
+how Python can pass construction information while Rust owns the native decode
+backend.
 
 ## Validation And Performance Rules
 
