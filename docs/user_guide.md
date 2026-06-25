@@ -721,7 +721,13 @@ per-shot adaptive branching simulator.
 
 ## Benchmarks
 
-Run benchmarks from the repository root after building the native extension:
+Run performance benchmarks with a release build of the native extension:
+
+```bash
+.venv/bin/maturin develop --release --skip-install
+```
+
+Then run benchmarks from the repository root:
 
 ```bash
 .venv/bin/python benchmarks/sampling_throughput.py --distances 15 21 31 --rounds 3

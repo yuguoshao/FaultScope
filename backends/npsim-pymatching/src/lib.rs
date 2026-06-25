@@ -97,41 +97,15 @@ struct PyNativePyMatchingNativeDecoder {
 #[pymethods]
 impl PyNativePyMatchingNativeDecoder {
     #[staticmethod]
+    fn from_dem(py: Python<'_>, dem: &Bound<'_, PyAny>) -> PyResult<Self> {
+        let builder = PyMatchingProblemBuilder::from_dem_object(dem)?;
+        build_py_native_decoder(py, builder)
+    }
+
+    #[staticmethod]
     fn from_graphlike_problem(py: Python<'_>, problem: &Bound<'_, PyAny>) -> PyResult<Self> {
         let builder = PyMatchingProblemBuilder::from_graphlike_problem(problem)?;
-        let detector_ids = builder.detector_ids.clone();
-        let observable_ids = builder.observable_ids.clone();
-        let built = builder.build()?;
-        let build_summary = built.summary;
-        let native =
-            PymatchingNativeDecoder::new(detector_ids.len(), observable_ids.len(), &built.edges)?;
-        let state = Box::new(DecoderState {
-            detector_ids: detector_ids.clone(),
-            observable_ids: observable_ids.clone(),
-            native: Mutex::new(native),
-            last_error: Mutex::new(CString::new("").expect("empty CString")),
-        });
-        let descriptor = Box::new(NpsimNativeDecoderV1 {
-            abi_version: NATIVE_DECODER_PLUGIN_ABI_VERSION,
-            struct_size: mem::size_of::<NpsimNativeDecoderV1>(),
-            flags: NATIVE_DECODER_PLUGIN_FLAG_THREAD_SAFE,
-            state: Box::into_raw(state).cast::<c_void>(),
-            drop_state: Some(drop_state),
-            name: Some(decoder_name),
-            detector_ids: Some(decoder_detector_ids),
-            observable_ids: Some(decoder_observable_ids),
-            decode_batch: Some(decoder_decode_batch),
-            decode_packed_batch: Some(decoder_decode_packed_batch),
-        });
-        let capsule = unsafe { create_decoder_capsule(py, Box::into_raw(descriptor))? };
-        Ok(Self {
-            capsule,
-            detector_ids,
-            observable_ids,
-            edge_count: build_summary.dem_edge_count,
-            solver_edge_count: build_summary.solver_edge_count,
-            build_summary,
-        })
+        build_py_native_decoder(py, builder)
     }
 
     #[getter]
@@ -255,6 +229,50 @@ impl PyNativePyMatchingNativeDecoder {
             BACKEND_NAME, self.detector_ids, self.observable_ids, self.solver_edge_count
         )
     }
+}
+
+fn build_py_native_decoder(
+    py: Python<'_>,
+    builder: PyMatchingProblemBuilder,
+) -> PyResult<PyNativePyMatchingNativeDecoder> {
+    let detector_ids = builder.detector_ids.clone();
+    let observable_ids = builder.observable_ids.clone();
+    let built = builder.build()?;
+    let native =
+        PymatchingNativeDecoder::new(detector_ids.len(), observable_ids.len(), &built.edges)?;
+    let build_summary = BuildSummary {
+        dem_edge_count: built.dem_edge_count,
+        solver_edge_count: built.edges.len(),
+        merged_parallel_edge_count: built.merged_parallel_edge_count,
+        edges: built.edges,
+    };
+    let state = Box::new(DecoderState {
+        detector_ids: detector_ids.clone(),
+        observable_ids: observable_ids.clone(),
+        native: Mutex::new(native),
+        last_error: Mutex::new(CString::new("").expect("empty CString")),
+    });
+    let descriptor = Box::new(NpsimNativeDecoderV1 {
+        abi_version: NATIVE_DECODER_PLUGIN_ABI_VERSION,
+        struct_size: mem::size_of::<NpsimNativeDecoderV1>(),
+        flags: NATIVE_DECODER_PLUGIN_FLAG_THREAD_SAFE,
+        state: Box::into_raw(state).cast::<c_void>(),
+        drop_state: Some(drop_state),
+        name: Some(decoder_name),
+        detector_ids: Some(decoder_detector_ids),
+        observable_ids: Some(decoder_observable_ids),
+        decode_batch: Some(decoder_decode_batch),
+        decode_packed_batch: Some(decoder_decode_packed_batch),
+    });
+    let capsule = unsafe { create_decoder_capsule(py, Box::into_raw(descriptor))? };
+    Ok(PyNativePyMatchingNativeDecoder {
+        capsule,
+        detector_ids,
+        observable_ids,
+        edge_count: build_summary.dem_edge_count,
+        solver_edge_count: build_summary.solver_edge_count,
+        build_summary,
+    })
 }
 
 struct DecoderState {
@@ -450,10 +468,68 @@ struct BuildSummary {
 
 struct BuiltPyMatchingProblem {
     edges: Vec<BuiltPyMatchingEdge>,
-    summary: BuildSummary,
+    dem_edge_count: usize,
+    merged_parallel_edge_count: usize,
 }
 
 impl PyMatchingProblemBuilder {
+    fn from_dem_object(dem: &Bound<'_, PyAny>) -> PyResult<Self> {
+        let detector_ids = extract_ids(dem.getattr("detectors")?, "detector")?;
+        let observable_ids = extract_ids(dem.getattr("observables")?, "observable")?;
+        let detector_index = detector_ids
+            .iter()
+            .copied()
+            .enumerate()
+            .map(|(index, id)| (id, index))
+            .collect::<HashMap<_, _>>();
+        let observable_index = observable_ids
+            .iter()
+            .copied()
+            .enumerate()
+            .map(|(index, id)| (id, index))
+            .collect::<HashMap<_, _>>();
+        let mut builder = Self {
+            detector_ids,
+            observable_ids,
+            dem_edge_count: 0,
+            groups: Vec::new(),
+            group_by_endpoint: HashMap::new(),
+        };
+        let edges = dem.getattr("edges")?;
+        for (fallback_index, edge) in PyIterator::from_object(&edges)?.enumerate() {
+            let edge = edge?;
+            let probability = edge.getattr("probability")?.extract::<f64>()?;
+            let detector_ids = edge.getattr("detectors")?.extract::<Vec<i64>>()?;
+            let observable_ids = edge.getattr("observables")?.extract::<Vec<i64>>()?;
+            let dem_edge_index = edge
+                .getattr("original_edge_index")
+                .and_then(|value| value.extract::<usize>())
+                .unwrap_or(fallback_index);
+            let detectors = detector_ids
+                .iter()
+                .map(|detector_id| {
+                    detector_index.get(detector_id).copied().ok_or_else(|| {
+                        PyValueError::new_err(format!(
+                            "pymatching edge {dem_edge_index} references unknown detector id {detector_id}"
+                        ))
+                    })
+                })
+                .collect::<PyResult<Vec<_>>>()?;
+            let fault_observables = observable_ids
+                .iter()
+                .map(|observable_id| {
+                    observable_index.get(observable_id).copied().ok_or_else(|| {
+                        PyValueError::new_err(format!(
+                            "pymatching edge {dem_edge_index} references unknown observable id {observable_id}"
+                        ))
+                    })
+                })
+                .collect::<PyResult<Vec<_>>>()?;
+            builder.push_edge(dem_edge_index, detectors, fault_observables, probability)?;
+        }
+        Ok(builder)
+    }
+
     fn from_graphlike_problem(problem: &Bound<'_, PyAny>) -> PyResult<Self> {
         let detector_ids = problem.getattr("detector_ids")?.extract::<Vec<i64>>()?;
         let observable_ids = problem.getattr("observable_ids")?.extract::<Vec<i64>>()?;
@@ -505,7 +581,14 @@ impl PyMatchingProblemBuilder {
         }
 
         let endpoint = match detectors.as_slice() {
-            [] => return Ok(()),
+            [] => {
+                if fault_observables.is_empty() {
+                    return Ok(());
+                }
+                return Err(PyValueError::new_err(format!(
+                    "pymatching edge {dem_edge_index} flips observables but has no detectors; pure logical edges are unsupported"
+                )));
+            }
             [detector] => (*detector, None),
             [left, right] => {
                 if left == right {
@@ -560,14 +643,26 @@ impl PyMatchingProblemBuilder {
             .iter()
             .map(|edge| edge.dem_edge_indices.len().saturating_sub(1))
             .sum();
-        let summary = BuildSummary {
+        Ok(BuiltPyMatchingProblem {
+            edges,
             dem_edge_count: self.dem_edge_count,
-            solver_edge_count: edges.len(),
             merged_parallel_edge_count,
-            edges: edges.clone(),
-        };
-        Ok(BuiltPyMatchingProblem { edges, summary })
+        })
     }
+}
+
+fn extract_ids(sequence: Bound<'_, PyAny>, kind: &str) -> PyResult<Vec<i64>> {
+    PyIterator::from_object(&sequence)?
+        .enumerate()
+        .map(|(index, item)| {
+            let item = item?;
+            item.getattr("id")?.extract::<i64>().map_err(|err| {
+                PyValueError::new_err(format!(
+                    "pymatching {kind} at index {index} does not expose integer id: {err}"
+                ))
+            })
+        })
+        .collect()
 }
 
 fn scale_weights(edges: &mut [BuiltPyMatchingEdge]) -> PyResult<()> {

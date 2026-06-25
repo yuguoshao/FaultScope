@@ -615,6 +615,7 @@ The primary beta evaluation entry point is the surface-code decoder performance
 benchmark:
 
 ```bash
+.venv/bin/maturin develop --release --skip-install
 .venv/bin/python benchmarks/surface_code_decoder_performance.py --distances 3 5 7 --shots 10000
 ```
 

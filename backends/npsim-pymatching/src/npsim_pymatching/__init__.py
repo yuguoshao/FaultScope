@@ -36,8 +36,7 @@ class NativePyMatchingDecoder:
     def from_dem(dem, *, options=None):
         _require_native_extension()
         _parse_options(options)
-        problem = dem.compile_graphlike_problem()
-        inner = _native.NativePyMatchingNativeDecoder.from_graphlike_problem(problem)
+        inner = _native.NativePyMatchingNativeDecoder.from_dem(dem)
         return NativePyMatchingDecoder(inner)
 
     @staticmethod

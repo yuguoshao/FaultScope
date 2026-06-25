@@ -156,7 +156,13 @@ NPSim 当前产品路径是 packed batch engine，不暴露通用的 per-shot ad
 
 ## Benchmarks
 
-构建 extension 后可从仓库根目录运行：
+性能 benchmark 应使用 release 构建的 extension：
+
+```bash
+.venv/bin/maturin develop --release --skip-install
+```
+
+然后从仓库根目录运行：
 
 ```bash
 .venv/bin/python benchmarks/sampling_throughput.py --distances 15 21 31 --rounds 3

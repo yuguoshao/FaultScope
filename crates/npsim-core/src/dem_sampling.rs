@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 
 use crate::{
-    bernoulli_mask, word_count, DemBatch, DemHotspotEstimate, DemLocationGroup, DemSamplerEdge,
-    DetectorErrorModel, Mask, NpError, NpResult, SmallRng,
+    bernoulli_mask, for_each_bernoulli_event, word_count, DemBatch, DemHotspotEstimate,
+    DemLocationGroup, DemSamplerEdge, DetectorErrorModel, Mask, NpError, NpResult, SmallRng,
 };
 
 /// Bit-packed detector-error-model sampler and hotspot estimator.
@@ -176,98 +176,115 @@ pub fn run_dem_packed_shot_batch(
     shots: usize,
     rng: &mut SmallRng,
 ) -> NpResult<PackedDemShotBatch> {
-    let sampling_detector_index = sampling_detector_ids
-        .iter()
-        .copied()
-        .enumerate()
-        .map(|(index, id)| (id, index))
-        .collect::<HashMap<_, _>>();
-    for detector_id in detector_ids {
-        if !sampling_detector_index.contains_key(detector_id) {
-            return Err(NpError::new(format!(
-                "packed DEM sampler requested detector id {detector_id}, but it is not declared by the DEM"
-            )));
-        }
-    }
+    let detector_identity_order = detector_ids == sampling_detector_ids
+        && detector_ids
+            .iter()
+            .enumerate()
+            .all(|(index, id)| *id == index as i64);
+    let observable_identity_order = observable_ids == sampling_observable_ids
+        && observable_ids
+            .iter()
+            .enumerate()
+            .all(|(index, id)| *id == index as i64);
 
-    let detector_index = detector_ids
-        .iter()
-        .copied()
-        .enumerate()
-        .map(|(index, id)| (id, index))
-        .collect::<HashMap<_, _>>();
-    let observable_index = observable_ids
-        .iter()
-        .copied()
-        .enumerate()
-        .map(|(index, id)| (id, index))
-        .collect::<HashMap<_, _>>();
-    let sampling_observable_index = sampling_observable_ids
-        .iter()
-        .copied()
-        .enumerate()
-        .map(|(index, id)| (id, index))
-        .collect::<HashMap<_, _>>();
-    for observable_id in observable_ids {
-        if !sampling_observable_index.contains_key(observable_id) {
-            return Err(NpError::new(format!(
-                "packed DEM sampler requested observable id {observable_id}, but it is not declared by the DEM"
-            )));
+    let detector_index = if detector_identity_order {
+        None
+    } else {
+        let sampling_detector_index = sampling_detector_ids
+            .iter()
+            .copied()
+            .enumerate()
+            .map(|(index, id)| (id, index))
+            .collect::<HashMap<_, _>>();
+        for detector_id in detector_ids {
+            if !sampling_detector_index.contains_key(detector_id) {
+                return Err(NpError::new(format!(
+                    "packed DEM sampler requested detector id {detector_id}, but it is not declared by the DEM"
+                )));
+            }
         }
-    }
+        Some(
+            detector_ids
+                .iter()
+                .copied()
+                .enumerate()
+                .map(|(index, id)| (id, index))
+                .collect::<HashMap<_, _>>(),
+        )
+    };
+    let observable_index = if observable_identity_order {
+        None
+    } else {
+        let sampling_observable_index = sampling_observable_ids
+            .iter()
+            .copied()
+            .enumerate()
+            .map(|(index, id)| (id, index))
+            .collect::<HashMap<_, _>>();
+        for observable_id in observable_ids {
+            if !sampling_observable_index.contains_key(observable_id) {
+                return Err(NpError::new(format!(
+                    "packed DEM sampler requested observable id {observable_id}, but it is not declared by the DEM"
+                )));
+            }
+        }
+        Some(
+            observable_ids
+                .iter()
+                .copied()
+                .enumerate()
+                .map(|(index, id)| (id, index))
+                .collect::<HashMap<_, _>>(),
+        )
+    };
 
-    let detector_byte_count = detector_ids.len().div_ceil(8);
-    let observable_byte_count = observable_ids.len().div_ceil(8);
-    let mut detector_data = vec![0; shots * detector_byte_count];
-    let mut observable_data = vec![0; shots * observable_byte_count];
     let packed_edges = edges
         .iter()
         .map(|edge| {
             let detector_columns = edge
                 .detectors
                 .iter()
-                .filter_map(|detector_id| detector_index.get(detector_id).copied())
-                .map(|column| (column >> 3, 1u8 << (column & 7)))
-                .collect::<Vec<_>>();
+                .map(|detector_id| {
+                    packed_column_for_id(*detector_id, detector_ids.len(), detector_index.as_ref())
+                        .map(|column| (column >> 3, 1u8 << (column & 7)))
+                })
+                .collect::<NpResult<Vec<_>>>()?;
             let mut observable_columns = Vec::with_capacity(edge.observables.len());
             for observable_id in &edge.observables {
-                let Some(column) = observable_index.get(observable_id).copied() else {
-                    return Err(NpError::new(format!(
-                        "packed DEM sampler edge references observable id {observable_id}, but it is not declared by the DEM"
-                    )));
-                };
+                let column = packed_column_for_id(
+                    *observable_id,
+                    observable_ids.len(),
+                    observable_index.as_ref(),
+                )?;
                 observable_columns.push((column >> 3, 1u8 << (column & 7)));
             }
             Ok(PackedEdgeColumns {
+                probability: edge.probability,
                 detector_columns,
                 observable_columns,
             })
         })
         .collect::<NpResult<Vec<_>>>()?;
 
-    for (edge, columns) in edges.iter().zip(&packed_edges) {
-        let event_mask = bernoulli_mask(rng, shots, edge.probability);
-        if event_mask.is_zero() {
+    let detector_byte_count = detector_ids.len().div_ceil(8);
+    let observable_byte_count = observable_ids.len().div_ceil(8);
+    let mut detector_data = vec![0; shots * detector_byte_count];
+    let mut observable_data = vec![0; shots * observable_byte_count];
+
+    for columns in &packed_edges {
+        if columns.detector_columns.is_empty() && columns.observable_columns.is_empty() {
             continue;
         }
-        for (word_index, word) in event_mask.words.iter().copied().enumerate() {
-            let mut word = word;
-            while word != 0 {
-                let bit = word.trailing_zeros() as usize;
-                let shot = (word_index << 6) + bit;
-                if shot < shots {
-                    let detector_row = shot * detector_byte_count;
-                    for (byte_index, bit_mask) in &columns.detector_columns {
-                        detector_data[detector_row + byte_index] ^= bit_mask;
-                    }
-                    let observable_row = shot * observable_byte_count;
-                    for (byte_index, bit_mask) in &columns.observable_columns {
-                        observable_data[observable_row + byte_index] ^= bit_mask;
-                    }
-                }
-                word &= word - 1;
+        for_each_bernoulli_event(rng, shots, columns.probability, |shot, _| {
+            let detector_row = shot * detector_byte_count;
+            for (byte_index, bit_mask) in &columns.detector_columns {
+                detector_data[detector_row + byte_index] ^= bit_mask;
             }
-        }
+            let observable_row = shot * observable_byte_count;
+            for (byte_index, bit_mask) in &columns.observable_columns {
+                observable_data[observable_row + byte_index] ^= bit_mask;
+            }
+        });
     }
 
     Ok(PackedDemShotBatch {
@@ -280,9 +297,31 @@ pub fn run_dem_packed_shot_batch(
     })
 }
 
+#[derive(Debug, Clone, PartialEq)]
 struct PackedEdgeColumns {
+    probability: f64,
     detector_columns: Vec<(usize, u8)>,
     observable_columns: Vec<(usize, u8)>,
+}
+
+fn packed_column_for_id(
+    id: i64,
+    count: usize,
+    index: Option<&HashMap<i64, usize>>,
+) -> NpResult<usize> {
+    if let Some(index) = index {
+        return index.get(&id).copied().ok_or_else(|| {
+            NpError::new(format!(
+                "packed DEM sampler edge references unknown id {id}"
+            ))
+        });
+    }
+    if id < 0 || id as usize >= count {
+        return Err(NpError::new(format!(
+            "packed DEM sampler edge references id {id}, but identity order has {count} ids"
+        )));
+    }
+    Ok(id as usize)
 }
 
 pub fn run_dem_batch(

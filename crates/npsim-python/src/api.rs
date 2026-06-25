@@ -580,37 +580,33 @@ impl NativeDemSampler {
                     let estimate = py.allow_threads(|| {
                         let mut rng = SmallRng::new(seed.unwrap_or(0x95f2_04dc_4291_a715));
                         if !aggregate_hotspots && native_decoder.supports_packed_batch() {
-                            let batch = run_dem_batch(self, shots, &mut rng, false);
-                            let detector_data = packed_shot_bytes_from_mask_map(
-                                &batch.detectors,
-                                native_decoder.detector_ids(),
-                                batch.shots,
-                                Some("detector"),
-                            )?;
+                            let packed_batch = self
+                                .simulator
+                                .run_packed_shot_batch_with_rng(
+                                    shots,
+                                    &mut rng,
+                                    native_decoder.detector_ids(),
+                                    &self.observables,
+                                )
+                                .map_err(|err| PyValueError::new_err(err.to_string()))?;
                             let detector_view = npsim_core::PackedDetectorShotBatchView::new(
                                 native_decoder.detector_ids(),
-                                &detector_data,
-                                batch.shots,
+                                &packed_batch.detector_data,
+                                packed_batch.shots,
                             )
                             .map_err(|err| PyValueError::new_err(err.to_string()))?;
                             let corrections = native_decoder
                                 .decode_packed_batch_checked(detector_view)
                                 .map_err(|err| PyValueError::new_err(err.to_string()))?;
-                            let observable_data = packed_shot_bytes_from_mask_map(
-                                &batch.observables,
-                                &self.observables,
-                                batch.shots,
-                                None,
-                            )?;
                             let mean_loss = packed_residual_mean_loss_from_rows(
-                                &self.observables,
-                                &observable_data,
-                                self.observables.len().div_ceil(8),
+                                &packed_batch.observable_ids,
+                                &packed_batch.observable_data,
+                                packed_batch.observable_byte_count,
                                 &corrections,
-                                batch.shots,
+                                packed_batch.shots,
                             )?;
                             return Ok::<DemEstimate, PyErr>(dem_estimate_from_mean_loss(
-                                batch.shots,
+                                packed_batch.shots,
                                 mean_loss,
                                 baseline,
                             ));
@@ -768,41 +764,6 @@ fn dem_estimate_from_loss_mask(
     let loss_count = clipped_loss.bit_count();
     let mean_loss = loss_count as f64 / batch.shots as f64;
     dem_estimate_from_mean_loss(batch.shots, mean_loss, baseline)
-}
-
-fn packed_shot_bytes_from_mask_map(
-    masks: &HashMap<i64, Mask>,
-    ids: &[i64],
-    shots: usize,
-    required_kind: Option<&str>,
-) -> PyResult<Vec<u8>> {
-    let byte_count = ids.len().div_ceil(8);
-    let mut out = vec![0; shots * byte_count];
-    if byte_count == 0 {
-        return Ok(out);
-    }
-    for (column, id) in ids.iter().enumerate() {
-        let Some(mask) = masks.get(id) else {
-            if let Some(kind) = required_kind {
-                return Err(PyValueError::new_err(format!("missing {kind} id {id}")));
-            }
-            continue;
-        };
-        let byte_index = column >> 3;
-        let bit_mask = 1u8 << (column & 7);
-        for (word_index, word) in mask.words.iter().copied().enumerate() {
-            let mut word = word;
-            while word != 0 {
-                let bit = word.trailing_zeros() as usize;
-                let shot = (word_index << 6) + bit;
-                if shot < shots {
-                    out[shot * byte_count + byte_index] |= bit_mask;
-                }
-                word &= word - 1;
-            }
-        }
-    }
-    Ok(out)
 }
 
 fn packed_residual_mean_loss_from_rows(
@@ -1505,6 +1466,37 @@ fn native_dem_sampler_from_core_dem(
 }
 
 fn native_dem_sampler_from_dem(dem: &Bound<'_, PyAny>) -> PyResult<NativeDemSampler> {
+    if let Ok(native_dem) = dem.extract::<PyRef<'_, PyDetectorErrorModel>>() {
+        let core_dem = native_dem.to_core_dem(dem.py())?;
+        let detectors: Vec<i64> = core_dem
+            .detectors
+            .iter()
+            .map(|detector| detector.id)
+            .collect();
+        let observables: Vec<i64> = core_dem
+            .observables
+            .iter()
+            .map(|observable| observable.id)
+            .collect();
+        let edges: Vec<DemEdgeSpec> = core_dem
+            .edges
+            .into_iter()
+            .map(|edge| DemEdgeSpec {
+                probability: edge.probability,
+                detectors: edge.detectors,
+                observables: edge.observables,
+                location_id: edge.location_id,
+                event: edge.event,
+                tags: edge.tags,
+            })
+            .collect();
+        return native_dem_sampler_from_parts(
+            detectors,
+            observables,
+            edges,
+            Some(dem.clone().unbind()),
+        );
+    }
     let detector_specs =
         parse_dem_detector_sequence(&required_attr(dem, "detectors", "DetectorErrorModel")?)?;
     let observable_specs =
