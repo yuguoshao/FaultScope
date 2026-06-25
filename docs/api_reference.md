@@ -315,7 +315,9 @@ as `"fusion-blossom"` through the `npsim.native_decoders` entry point group. Use
 `get_native_decoder_class(name)` or `create_native_decoder(name, dem=dem)` for a
 uniform API. Friendly proxies such as `NativeFusionBlossomDecoder` and
 `NativeBposdDecoder` remain importable; construction raises an install hint
-until a compatible backend package is installed.
+until a compatible backend package is installed. A post-install backend enters
+the native fast path only when the constructed decoder exposes the NPSim native
+decoder PyCapsule ABI; otherwise it remains a normal Python decoder.
 
 ## Detector Error Models
 

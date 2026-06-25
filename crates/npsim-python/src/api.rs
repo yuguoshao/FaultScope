@@ -145,36 +145,43 @@ impl NativePackedSampler {
                 let estimate = compute_packed_estimate(self, &state, &loss_mask, baseline, top_k);
                 return simulation_result_from_estimate(py, &estimate, &self.py_noise_locations);
             }
-            if let Some(native_decoder) = decoder.and_then(native_decoder_from_py) {
-                let detector_masks = detector_mask_view_from_map(
-                    &state.detectors,
-                    native_decoder.detector_ids(),
-                    state.shots,
-                )?;
-                let view = npsim_core::DetectorMaskBatchView::new(
-                    native_decoder.detector_ids(),
-                    &detector_masks,
-                    state.shots,
-                )
-                .map_err(|err| PyValueError::new_err(err.to_string()))?;
-                let corrections = native_decoder
-                    .decode_batch_checked(view)
+            if let Some(decoder) = decoder {
+                if let Some(native_decoder) = native_decoder_from_py(decoder)? {
+                    let detector_masks = detector_mask_view_from_map(
+                        &state.detectors,
+                        native_decoder.detector_ids(),
+                        state.shots,
+                    )?;
+                    let view = npsim_core::DetectorMaskBatchView::new(
+                        native_decoder.detector_ids(),
+                        &detector_masks,
+                        state.shots,
+                    )
                     .map_err(|err| PyValueError::new_err(err.to_string()))?;
-                validate_declared_observables(&state.observables, &self.simulator.observables)?;
-                let observable_ids = self
-                    .simulator
-                    .observables
-                    .iter()
-                    .map(|observable| observable.id)
-                    .collect::<Vec<_>>();
-                let loss_mask = npsim_core::logical_residual_loss_mask_native(
-                    &state.observables,
-                    &corrections,
-                    &observable_ids,
-                    &state.all_mask,
-                );
-                let estimate = compute_packed_estimate(self, &state, &loss_mask, baseline, top_k);
-                return simulation_result_from_estimate(py, &estimate, &self.py_noise_locations);
+                    let corrections = native_decoder
+                        .decode_batch_checked(view)
+                        .map_err(|err| PyValueError::new_err(err.to_string()))?;
+                    validate_declared_observables(&state.observables, &self.simulator.observables)?;
+                    let observable_ids = self
+                        .simulator
+                        .observables
+                        .iter()
+                        .map(|observable| observable.id)
+                        .collect::<Vec<_>>();
+                    let loss_mask = npsim_core::logical_residual_loss_mask_native(
+                        &state.observables,
+                        &corrections,
+                        &observable_ids,
+                        &state.all_mask,
+                    );
+                    let estimate =
+                        compute_packed_estimate(self, &state, &loss_mask, baseline, top_k);
+                    return simulation_result_from_estimate(
+                        py,
+                        &estimate,
+                        &self.py_noise_locations,
+                    );
+                }
             }
         }
         let batch = Py::new(py, NativePackedBatch { state })?;
@@ -567,7 +574,7 @@ impl NativeDemSampler {
         let baseline = native_baseline_value(baseline)?;
         if correction_mask_fn.is_none() && loss_mask_fn.is_none() {
             if let Some(decoder) = decoder {
-                if let Some(native_decoder) = native_decoder_from_py(decoder) {
+                if let Some(native_decoder) = native_decoder_from_py(decoder)? {
                     let estimate = py.allow_threads(|| {
                         let mut rng = SmallRng::new(seed.unwrap_or(0x95f2_04dc_4291_a715));
                         let batch = run_dem_batch(self, shots, &mut rng, true);
@@ -1335,6 +1342,10 @@ pub(crate) fn _npsim_native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add(
         "NATIVE_DECODER_PLUGIN_CAPSULE_NAME",
         npsim_core::NATIVE_DECODER_PLUGIN_CAPSULE_NAME,
+    )?;
+    module.add(
+        "NATIVE_DECODER_PLUGIN_CAPSULE_METHOD",
+        npsim_core::NATIVE_DECODER_PLUGIN_CAPSULE_METHOD,
     )?;
     module.add(
         "NATIVE_DECODER_PLUGIN_ENTRY_POINT_GROUP",

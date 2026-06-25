@@ -1,5 +1,6 @@
 [workspace]
 members = [
+    "backends/npsim-fusion-blossom",
     "crates/npsim-core",
     "crates/npsim-python",
 ]
@@ -10,4 +11,3 @@ version = "0.1.0"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/npsim/npsim"
-

@@ -64,6 +64,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "npsim-fusion-blossom-python"
+version = "0.1.0"
+dependencies = [
+ "npsim-core",
+ "pyo3",
+]
+
+[[package]]
 name = "npsim-python"
 version = "0.1.0"
 dependencies = [

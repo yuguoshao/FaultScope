@@ -1,11 +1,134 @@
 use std::collections::HashMap;
+use std::ffi::c_void;
+use std::os::raw::c_char;
 
 use crate::{GraphlikeDecodingProblem, Mask, NpError, NpResult};
 
 pub const NATIVE_DECODER_PLUGIN_ABI_VERSION: u32 = 1;
 pub const NATIVE_DECODER_PLUGIN_ABI_NAME: &str = "npsim.native_decoder_plugin.v1";
 pub const NATIVE_DECODER_PLUGIN_CAPSULE_NAME: &str = "npsim.native_decoder_plugin.v1";
+pub const NATIVE_DECODER_PLUGIN_CAPSULE_METHOD: &str = "__npsim_native_decoder_capsule__";
 pub const NATIVE_DECODER_PLUGIN_ENTRY_POINT_GROUP: &str = "npsim.native_decoders";
+pub const NATIVE_DECODER_PLUGIN_FLAG_THREAD_SAFE: u64 = 1 << 0;
+pub const NATIVE_DECODER_PLUGIN_STATUS_OK: i32 = 0;
+pub const NATIVE_DECODER_PLUGIN_STATUS_ERROR: i32 = 1;
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct NpsimNativeDecoderStringViewV1 {
+    pub ptr: *const c_char,
+    pub len: usize,
+}
+
+impl NpsimNativeDecoderStringViewV1 {
+    pub const fn empty() -> Self {
+        Self {
+            ptr: std::ptr::null(),
+            len: 0,
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct NpsimNativeDecoderI64SliceV1 {
+    pub ptr: *const i64,
+    pub len: usize,
+}
+
+impl NpsimNativeDecoderI64SliceV1 {
+    pub const fn empty() -> Self {
+        Self {
+            ptr: std::ptr::null(),
+            len: 0,
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct NpsimNativeDecoderMaskViewV1 {
+    pub words: *const u64,
+    pub word_count: usize,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct NpsimNativeDecoderMaskMutViewV1 {
+    pub words: *mut u64,
+    pub word_count: usize,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct NpsimNativeDetectorMaskBatchViewV1 {
+    pub detector_ids: *const i64,
+    pub detector_count: usize,
+    pub masks: *const NpsimNativeDecoderMaskViewV1,
+    pub shots: usize,
+    pub word_count: usize,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct NpsimNativeCorrectionMaskBatchMutViewV1 {
+    pub observable_ids: *const i64,
+    pub observable_count: usize,
+    pub masks: *mut NpsimNativeDecoderMaskMutViewV1,
+    pub shots: usize,
+    pub word_count: usize,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct NpsimNativeDecoderStatusV1 {
+    pub code: i32,
+    pub message: NpsimNativeDecoderStringViewV1,
+}
+
+impl NpsimNativeDecoderStatusV1 {
+    pub const fn ok() -> Self {
+        Self {
+            code: NATIVE_DECODER_PLUGIN_STATUS_OK,
+            message: NpsimNativeDecoderStringViewV1::empty(),
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct NpsimNativeDecoderV1 {
+    pub abi_version: u32,
+    pub struct_size: usize,
+    pub flags: u64,
+    pub state: *mut c_void,
+    pub drop_state: Option<unsafe extern "C" fn(*mut c_void)>,
+    pub name: Option<
+        unsafe extern "C" fn(
+            *const c_void,
+            *mut NpsimNativeDecoderStringViewV1,
+        ) -> NpsimNativeDecoderStatusV1,
+    >,
+    pub detector_ids: Option<
+        unsafe extern "C" fn(
+            *const c_void,
+            *mut NpsimNativeDecoderI64SliceV1,
+        ) -> NpsimNativeDecoderStatusV1,
+    >,
+    pub observable_ids: Option<
+        unsafe extern "C" fn(
+            *const c_void,
+            *mut NpsimNativeDecoderI64SliceV1,
+        ) -> NpsimNativeDecoderStatusV1,
+    >,
+    pub decode_batch: Option<
+        unsafe extern "C" fn(
+            *mut c_void,
+            *const NpsimNativeDetectorMaskBatchViewV1,
+            *mut NpsimNativeCorrectionMaskBatchMutViewV1,
+        ) -> NpsimNativeDecoderStatusV1,
+    >,
+}
 
 #[derive(Debug, Clone, Copy)]
 pub struct DetectorMaskBatchView<'a> {
@@ -118,7 +241,7 @@ impl CorrectionMaskBatch {
 
 pub trait NativeBatchDecoder: Send + Sync {
     /// Stable backend name used for lightweight Python introspection.
-    fn name(&self) -> &'static str {
+    fn name(&self) -> &str {
         "native"
     }
 
@@ -164,7 +287,7 @@ impl NativeNoCorrectionDecoder {
 }
 
 impl NativeBatchDecoder for NativeNoCorrectionDecoder {
-    fn name(&self) -> &'static str {
+    fn name(&self) -> &str {
         "no-correction"
     }
 
@@ -241,7 +364,7 @@ impl NativeGraphlikeDetectorCopyDecoder {
 }
 
 impl NativeBatchDecoder for NativeGraphlikeDetectorCopyDecoder {
-    fn name(&self) -> &'static str {
+    fn name(&self) -> &str {
         "graphlike-detector-copy"
     }
 
@@ -311,7 +434,7 @@ impl NativeFusionBlossomDecoder {
 
 #[cfg(feature = "decoder-fusion-blossom")]
 impl NativeBatchDecoder for NativeFusionBlossomDecoder {
-    fn name(&self) -> &'static str {
+    fn name(&self) -> &str {
         "fusion-blossom"
     }
 

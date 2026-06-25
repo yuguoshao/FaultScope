@@ -1,6 +1,6 @@
 [build-system]
-requires = ["setuptools>=68"]
-build-backend = "setuptools.build_meta"
+requires = ["maturin>=1.7,<2"]
+build-backend = "maturin"
 
 [project]
 name = "npsim-fusion-blossom"
@@ -11,8 +11,9 @@ dependencies = [
     "npsim",
 ]
 
-[tool.setuptools.packages.find]
-where = ["src"]
+[tool.maturin]
+module-name = "npsim_fusion_blossom._native"
+python-source = "src"
 
 [project.entry-points."npsim.native_decoders"]
 fusion-blossom = "npsim_fusion_blossom:backend_manifest"

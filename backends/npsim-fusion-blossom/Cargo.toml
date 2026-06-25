@@ -1,0 +1,13 @@
+[package]
+name = "npsim-fusion-blossom-python"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[lib]
+name = "_native"
+crate-type = ["cdylib"]
+
+[dependencies]
+npsim-core = { path = "../../crates/npsim-core" }
+pyo3 = { version = "0.23", features = ["extension-module"] }

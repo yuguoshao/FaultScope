@@ -576,8 +576,9 @@ installed from the source checkout:
 NPSim does not clone, compile, or install backend code during `import npsim` or
 `estimate(...)`. The default build includes only smoke-test/template native
 backends, not a production fusion-blossom or BP+OSD decoder. The local
-`npsim-fusion-blossom` package is also a scaffold: it delegates to the in-tree
-graphlike smoke decoder and does not run the real fusion-blossom solver.
+`npsim-fusion-blossom` package is also a scaffold: it builds an external
+Rust/PyO3 graphlike smoke decoder and exposes it through the native PyCapsule
+ABI, but it does not run the real fusion-blossom solver.
 
 For the full developer contract, including `from_circuit(...)`,
 `from_dem(...)`, Python prototype decoders, and native backend skeletons, see

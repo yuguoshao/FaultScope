@@ -475,10 +475,27 @@ fusion-blossom = "npsim_fusion_blossom:backend_manifest"
 
 Its manifest returns the current NPSim native decoder plugin ABI, package
 metadata, and a `fusion-blossom` decoder class. The scaffold class implements
-`from_dem(...)` and `from_circuit(...)`, but delegates to
-`NativeGraphlikeDetectorCopyDecoder`. This proves the post-install discovery and
-native fast-path construction chain without claiming to be a production
-fusion-blossom solver.
+`from_dem(...)` and `from_circuit(...)`; construction compiles the DEM to a
+`GraphlikeDecodingProblem`, passes that metadata to the package's Rust/PyO3
+extension, and stores an external native decoder state in a PyCapsule. This
+proves the post-install discovery, construction, and native fast-path chain
+without claiming to be a production fusion-blossom solver.
+
+The backend decoder object exposes:
+
+```python
+decoder.__npsim_native_decoder_capsule__()
+decoder.name
+decoder.detector_ids
+decoder.observable_ids
+decoder.decode_batch_masks(batch)  # debug fallback only
+```
+
+NPSim only calls the capsule method on the native fast path. The plugin ABI is
+host-allocated for hot outputs: NPSim allocates correction mask words for the
+decoder's declared observables, and the backend writes into those buffers.
+Backend packages must not allocate correction masks and ask NPSim to free them
+across the dynamic-library boundary.
 
 ### Fusion-Blossom Adapter Plan
 
@@ -522,8 +539,8 @@ The open productionization items are dependency pinning, integer weight
 scaling, per-shot solver reuse, boundary/virtual vertex semantics, and mapping
 the solver's selected error chain back through DEM edge observable flips. Until
 those are resolved, `NativeGraphlikeDetectorCopyDecoder` remains the concrete
-in-tree template backend and `"fusion-blossom"` remains unavailable unless a
-compatible post-install backend package is present.
+in-tree template backend, and the optional `npsim-fusion-blossom` package
+remains a PyCapsule ABI scaffold rather than a real solver.
 
 ## Validation And Performance Rules
 
