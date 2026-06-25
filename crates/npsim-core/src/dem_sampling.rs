@@ -176,67 +176,45 @@ pub fn run_dem_packed_shot_batch(
     shots: usize,
     rng: &mut SmallRng,
 ) -> NpResult<PackedDemShotBatch> {
-    let detector_identity_order = detector_ids == sampling_detector_ids
-        && detector_ids
-            .iter()
-            .enumerate()
-            .all(|(index, id)| *id == index as i64);
-    let observable_identity_order = observable_ids == sampling_observable_ids
-        && observable_ids
-            .iter()
-            .enumerate()
-            .all(|(index, id)| *id == index as i64);
+    let sampling_detector_index = sampling_detector_ids
+        .iter()
+        .copied()
+        .enumerate()
+        .map(|(index, id)| (id, index))
+        .collect::<HashMap<_, _>>();
+    for detector_id in detector_ids {
+        if !sampling_detector_index.contains_key(detector_id) {
+            return Err(NpError::new(format!(
+                "packed DEM sampler requested detector id {detector_id}, but it is not declared by the DEM"
+            )));
+        }
+    }
+    let detector_index = detector_ids
+        .iter()
+        .copied()
+        .enumerate()
+        .map(|(index, id)| (id, index))
+        .collect::<HashMap<_, _>>();
 
-    let detector_index = if detector_identity_order {
-        None
-    } else {
-        let sampling_detector_index = sampling_detector_ids
-            .iter()
-            .copied()
-            .enumerate()
-            .map(|(index, id)| (id, index))
-            .collect::<HashMap<_, _>>();
-        for detector_id in detector_ids {
-            if !sampling_detector_index.contains_key(detector_id) {
-                return Err(NpError::new(format!(
-                    "packed DEM sampler requested detector id {detector_id}, but it is not declared by the DEM"
-                )));
-            }
+    let sampling_observable_index = sampling_observable_ids
+        .iter()
+        .copied()
+        .enumerate()
+        .map(|(index, id)| (id, index))
+        .collect::<HashMap<_, _>>();
+    for observable_id in observable_ids {
+        if !sampling_observable_index.contains_key(observable_id) {
+            return Err(NpError::new(format!(
+                "packed DEM sampler requested observable id {observable_id}, but it is not declared by the DEM"
+            )));
         }
-        Some(
-            detector_ids
-                .iter()
-                .copied()
-                .enumerate()
-                .map(|(index, id)| (id, index))
-                .collect::<HashMap<_, _>>(),
-        )
-    };
-    let observable_index = if observable_identity_order {
-        None
-    } else {
-        let sampling_observable_index = sampling_observable_ids
-            .iter()
-            .copied()
-            .enumerate()
-            .map(|(index, id)| (id, index))
-            .collect::<HashMap<_, _>>();
-        for observable_id in observable_ids {
-            if !sampling_observable_index.contains_key(observable_id) {
-                return Err(NpError::new(format!(
-                    "packed DEM sampler requested observable id {observable_id}, but it is not declared by the DEM"
-                )));
-            }
-        }
-        Some(
-            observable_ids
-                .iter()
-                .copied()
-                .enumerate()
-                .map(|(index, id)| (id, index))
-                .collect::<HashMap<_, _>>(),
-        )
-    };
+    }
+    let observable_index = observable_ids
+        .iter()
+        .copied()
+        .enumerate()
+        .map(|(index, id)| (id, index))
+        .collect::<HashMap<_, _>>();
 
     let packed_edges = edges
         .iter()
@@ -245,17 +223,13 @@ pub fn run_dem_packed_shot_batch(
                 .detectors
                 .iter()
                 .map(|detector_id| {
-                    packed_column_for_id(*detector_id, detector_ids.len(), detector_index.as_ref())
+                    packed_column_for_id(*detector_id, &detector_index)
                         .map(|column| (column >> 3, 1u8 << (column & 7)))
                 })
                 .collect::<NpResult<Vec<_>>>()?;
             let mut observable_columns = Vec::with_capacity(edge.observables.len());
             for observable_id in &edge.observables {
-                let column = packed_column_for_id(
-                    *observable_id,
-                    observable_ids.len(),
-                    observable_index.as_ref(),
-                )?;
+                let column = packed_column_for_id(*observable_id, &observable_index)?;
                 observable_columns.push((column >> 3, 1u8 << (column & 7)));
             }
             Ok(PackedEdgeColumns {
@@ -304,24 +278,12 @@ struct PackedEdgeColumns {
     observable_columns: Vec<(usize, u8)>,
 }
 
-fn packed_column_for_id(
-    id: i64,
-    count: usize,
-    index: Option<&HashMap<i64, usize>>,
-) -> NpResult<usize> {
-    if let Some(index) = index {
-        return index.get(&id).copied().ok_or_else(|| {
-            NpError::new(format!(
-                "packed DEM sampler edge references unknown id {id}"
-            ))
-        });
-    }
-    if id < 0 || id as usize >= count {
-        return Err(NpError::new(format!(
-            "packed DEM sampler edge references id {id}, but identity order has {count} ids"
-        )));
-    }
-    Ok(id as usize)
+fn packed_column_for_id(id: i64, index: &HashMap<i64, usize>) -> NpResult<usize> {
+    index.get(&id).copied().ok_or_else(|| {
+        NpError::new(format!(
+            "packed DEM sampler edge references unknown id {id}"
+        ))
+    })
 }
 
 pub fn run_dem_batch(
