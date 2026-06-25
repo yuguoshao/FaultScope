@@ -498,7 +498,11 @@ def _logical_failure_stats_from_packed_arrays(
             f"packed correction shape {corrections.shape} does not match "
             f"observable shape {observables.shape}"
         )
-    failures = int(np.bitwise_xor(corrections, observables).any(axis=1).sum())
+    if corrections.shape[1] == 1:
+        failures = int(np.count_nonzero(np.bitwise_xor(corrections[:, 0], observables[:, 0])))
+    else:
+        residual = np.bitwise_xor(corrections, observables)
+        failures = int(np.count_nonzero(np.bitwise_or.reduce(residual, axis=1)))
     return LogicalFailureStats(shots=shots, failures=failures)
 
 
