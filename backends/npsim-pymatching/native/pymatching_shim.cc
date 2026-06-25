@@ -312,6 +312,52 @@ void validate_batch_masks(
     }
 }
 
+size_t packed_byte_count(size_t bit_count) {
+    return (bit_count + 7) >> 3;
+}
+
+void validate_packed_batch(
+    const NpsimPyMatchingDecoder *decoder,
+    const uint8_t *detector_shots,
+    size_t detector_count,
+    size_t detector_byte_count,
+    const uint8_t *observable_predictions,
+    size_t observable_count,
+    size_t observable_byte_count,
+    size_t shots) {
+    if (decoder == nullptr) {
+        throw std::invalid_argument("decoder pointer is null");
+    }
+    if (detector_count != decoder->detector_count) {
+        throw std::invalid_argument(
+            "packed detector count " + std::to_string(detector_count) +
+            " does not match decoder detector count " + std::to_string(decoder->detector_count));
+    }
+    if (observable_count != decoder->observable_count) {
+        throw std::invalid_argument(
+            "packed observable count " + std::to_string(observable_count) +
+            " does not match decoder observable count " + std::to_string(decoder->observable_count));
+    }
+    size_t expected_detector_bytes = packed_byte_count(detector_count);
+    if (detector_byte_count != expected_detector_bytes) {
+        throw std::invalid_argument(
+            "packed detector byte count " + std::to_string(detector_byte_count) +
+            " does not match expected " + std::to_string(expected_detector_bytes));
+    }
+    size_t expected_observable_bytes = packed_byte_count(observable_count);
+    if (observable_byte_count != expected_observable_bytes) {
+        throw std::invalid_argument(
+            "packed observable byte count " + std::to_string(observable_byte_count) +
+            " does not match expected " + std::to_string(expected_observable_bytes));
+    }
+    if (shots > 0 && detector_byte_count > 0 && detector_shots == nullptr) {
+        throw std::invalid_argument("packed detector shots pointer is null");
+    }
+    if (shots > 0 && observable_byte_count > 0 && observable_predictions == nullptr) {
+        throw std::invalid_argument("packed observable output pointer is null");
+    }
+}
+
 }  // namespace
 
 extern "C" NpsimPyMatchingDecoder *npsim_pymatching_decoder_new(
@@ -478,6 +524,121 @@ extern "C" int npsim_pymatching_decoder_decode_batch(
         write_error(error_message, error_message_capacity, ex.what());
     } catch (...) {
         write_error(error_message, error_message_capacity, "unknown PyMatching batch decode error");
+    }
+    return 1;
+}
+
+extern "C" int npsim_pymatching_decoder_decode_packed_batch(
+    NpsimPyMatchingDecoder *decoder,
+    const uint8_t *detector_shots,
+    size_t detector_count,
+    size_t detector_byte_count,
+    uint8_t *observable_predictions,
+    size_t observable_count,
+    size_t observable_byte_count,
+    size_t shots,
+    char *error_message,
+    size_t error_message_capacity) {
+    try {
+        validate_packed_batch(
+            decoder,
+            detector_shots,
+            detector_count,
+            detector_byte_count,
+            observable_predictions,
+            observable_count,
+            observable_byte_count,
+            shots);
+
+        if (shots > 0 && observable_byte_count > 0) {
+            std::memset(observable_predictions, 0, shots * observable_byte_count);
+        }
+
+        std::vector<uint64_t> detection_events;
+        detection_events.reserve(std::min(detector_count, (size_t)256));
+
+        if (observable_count <= sizeof(pm::obs_int) * 8) {
+            for (size_t shot = 0; shot < shots; shot++) {
+                const uint8_t *row = detector_shots + shot * detector_byte_count;
+                detection_events.clear();
+                for (size_t byte_index = 0; byte_index < detector_byte_count; byte_index++) {
+                    uint8_t byte = row[byte_index];
+                    while (byte != 0) {
+#if defined(__GNUC__) || defined(__clang__)
+                        size_t bit = (size_t)__builtin_ctz((unsigned int)byte);
+#else
+                        size_t bit = 0;
+                        while (((byte >> bit) & 1) == 0) {
+                            bit++;
+                        }
+#endif
+                        size_t detector = (byte_index << 3) + bit;
+                        if (detector < detector_count) {
+                            detection_events.push_back(detector);
+                        }
+                        byte &= (uint8_t)(byte - 1);
+                    }
+                }
+                if (detection_events.empty()) {
+                    continue;
+                }
+                pm::MatchingResult packed =
+                    decode_detection_events_for_up_to_64_observables(
+                        decoder->mwpm,
+                        span_from_vector(detection_events));
+                uint8_t *out_row = observable_predictions + shot * observable_byte_count;
+                for (size_t observable = 0; observable < observable_count; observable++) {
+                    if (((packed.obs_mask >> observable) & 1) != 0) {
+                        out_row[observable >> 3] ^= (uint8_t)(1u << (observable & 7));
+                    }
+                }
+            }
+        } else {
+            std::vector<uint8_t> temp_predictions(observable_count);
+            for (size_t shot = 0; shot < shots; shot++) {
+                const uint8_t *row = detector_shots + shot * detector_byte_count;
+                detection_events.clear();
+                for (size_t byte_index = 0; byte_index < detector_byte_count; byte_index++) {
+                    uint8_t byte = row[byte_index];
+                    while (byte != 0) {
+#if defined(__GNUC__) || defined(__clang__)
+                        size_t bit = (size_t)__builtin_ctz((unsigned int)byte);
+#else
+                        size_t bit = 0;
+                        while (((byte >> bit) & 1) == 0) {
+                            bit++;
+                        }
+#endif
+                        size_t detector = (byte_index << 3) + bit;
+                        if (detector < detector_count) {
+                            detection_events.push_back(detector);
+                        }
+                        byte &= (uint8_t)(byte - 1);
+                    }
+                }
+                if (detection_events.empty()) {
+                    continue;
+                }
+                std::fill(temp_predictions.begin(), temp_predictions.end(), 0);
+                pm::total_weight_int decoded_weight = 0;
+                decode_detection_events(
+                    decoder->mwpm,
+                    span_from_vector(detection_events),
+                    temp_predictions.data(),
+                    decoded_weight);
+                uint8_t *out_row = observable_predictions + shot * observable_byte_count;
+                for (size_t observable = 0; observable < observable_count; observable++) {
+                    if (temp_predictions[observable] != 0) {
+                        out_row[observable >> 3] ^= (uint8_t)(1u << (observable & 7));
+                    }
+                }
+            }
+        }
+        return 0;
+    } catch (const std::exception &ex) {
+        write_error(error_message, error_message_capacity, ex.what());
+    } catch (...) {
+        write_error(error_message, error_message_capacity, "unknown PyMatching packed batch decode error");
     }
     return 1;
 }

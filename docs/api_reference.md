@@ -437,7 +437,9 @@ estimate(
 Set `aggregate_hotspots=False` for decoder benchmarks and logic-only estimates.
 This skips DEM edge-event recording and hotspot metadata aggregation while
 keeping the same result object shape; when `decoder` is native, syndrome and
-correction masks stay in native memory.
+correction masks stay in native memory. Native decoders that implement the
+optional packed-row callback receive `shots x ceil(detectors/8)` syndrome bytes
+on this path and return `shots x ceil(observables/8)` correction bytes.
 
 `DemBatchTrajectory` stores:
 

@@ -271,6 +271,8 @@ use npsim_core::{
     Mask,
     NativeBatchDecoder,
     NpResult,
+    PackedDetectorShotBatchView,
+    PackedObservableShotBatch,
 };
 
 pub struct MyNativeDecoder {
@@ -280,7 +282,7 @@ pub struct MyNativeDecoder {
 }
 
 impl NativeBatchDecoder for MyNativeDecoder {
-    fn name(&self) -> &'static str {
+    fn name(&self) -> &str {
         "my-decoder"
     }
 
@@ -310,6 +312,30 @@ impl NativeBatchDecoder for MyNativeDecoder {
     }
 }
 ```
+
+`decode_batch(...)` is the required compatibility-native callback. Backends
+that can consume Stim/PyMatching-style row-major packed shots may additionally
+override:
+
+```rust
+fn supports_packed_batch(&self) -> bool {
+    true
+}
+
+fn decode_packed_batch(
+    &self,
+    detectors: PackedDetectorShotBatchView<'_>,
+) -> NpResult<PackedObservableShotBatch> {
+    // detectors.data layout is shots x ceil(detectors / 8), little-endian
+    // bit order within each byte. Return the same layout for observables.
+    PackedObservableShotBatch::zero(self.observable_ids.clone(), detectors.shots)
+}
+```
+
+The DEM sampler uses this optional path only for native decoders when
+`aggregate_hotspots=False` and no Python callbacks are supplied. Hotspot
+aggregation still uses the detector-major mask path because it needs DEM edge
+event masks.
 
 The PyO3 layer should expose a Python handle with constructors such as:
 
@@ -494,7 +520,9 @@ The PyMatching backend links pinned PyMatching sparse-blossom C++ source in the
 `PyMatchingBatchDecoder` hot path and does not depend on the PyPI wheel exposing
 a stable native SDK. The backend uses the same native PyCapsule boundary as the
 other official packages: Python passes construction metadata, while hot-path
-`DetectorMaskBatchView` and `CorrectionMaskBatch` buffers stay native.
+detector/correction buffers stay native. For `aggregate_hotspots=False`, it
+uses the optional row-major packed batch callback so the hot input layout
+matches PyMatching's `decode_batch(..., bit_packed_shots=True)` convention.
 
 The current backend is a minimal serial beta fusion-blossom MWPM adapter. It
 maps NPSim detector indices to fusion-blossom vertices, converts graphlike DEM
@@ -600,10 +628,11 @@ this does not change the threshold benchmark. It reports construction time,
 sampling time where separable, native estimate time, solver-edge metadata,
 merged parallel edges, and whether native paths stayed out of Python callbacks.
 
-For native backend diagnosis, add `--split-native-baseline`. The native rows
-then report `sample_s` as a no-decoder native mean-loss baseline and
-`decode_or_estimate_s` as the additional decoder cost. This makes it clear
-whether a gap is in NPSim sampling/aggregation or in the backend decode loop.
+For native backend diagnosis, add `--split-native-baseline`. Native PyMatching
+rows then report `sample_s` using a native no-correction decoder through the
+same packed-row sampler path, and `decode_or_estimate_s` as the additional
+decoder cost. This makes it clearer whether a gap is in NPSim sampling or in
+the backend decode loop.
 
 ## Validation And Performance Rules
 
@@ -620,6 +649,12 @@ The native fast path is used only when:
 - `decoder` is a native decoder handle;
 - no `loss_mask_fn` is supplied;
 - no `correction_mask_fn` is supplied.
+
+For DEM estimates, `aggregate_hotspots=False` also allows backends that support
+the packed-row callback to receive `shots x ceil(detectors/8)` syndrome bytes
+and return `shots x ceil(observables/8)` correction bytes. With
+`aggregate_hotspots=True`, NPSim preserves the existing hotspot-capable
+detector-major path.
 
 If a Python loss or correction callback is supplied, NPSim uses the
 compatibility path and may call `decoder.decode_batch_masks(batch)`. This is

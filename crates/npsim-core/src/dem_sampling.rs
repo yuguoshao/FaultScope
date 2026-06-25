@@ -18,6 +18,16 @@ pub struct DemBatchHotspotSimulator {
     pub location_groups: Vec<DemLocationGroup>,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct PackedDemShotBatch {
+    pub shots: usize,
+    pub detector_data: Vec<u8>,
+    pub detector_byte_count: usize,
+    pub observable_ids: Vec<i64>,
+    pub observable_data: Vec<u8>,
+    pub observable_byte_count: usize,
+}
+
 impl DemBatchHotspotSimulator {
     /// Build a simulator from a typed detector error model.
     pub fn new(dem: DetectorErrorModel) -> NpResult<Self> {
@@ -108,6 +118,24 @@ impl DemBatchHotspotSimulator {
         )
     }
 
+    pub fn run_packed_shot_batch_with_rng(
+        &self,
+        shots: usize,
+        rng: &mut SmallRng,
+        detector_ids: &[i64],
+        observable_ids: &[i64],
+    ) -> NpResult<PackedDemShotBatch> {
+        run_dem_packed_shot_batch(
+            &self.detector_ids,
+            &self.observable_ids,
+            &self.edges,
+            detector_ids,
+            observable_ids,
+            shots,
+            rng,
+        )
+    }
+
     /// Run a batch and estimate hotspots using the default logical loss mask.
     pub fn estimate_default(
         &self,
@@ -137,6 +165,124 @@ impl DemBatchHotspotSimulator {
             top_k,
         )
     }
+}
+
+pub fn run_dem_packed_shot_batch(
+    sampling_detector_ids: &[i64],
+    sampling_observable_ids: &[i64],
+    edges: &[DemSamplerEdge],
+    detector_ids: &[i64],
+    observable_ids: &[i64],
+    shots: usize,
+    rng: &mut SmallRng,
+) -> NpResult<PackedDemShotBatch> {
+    let sampling_detector_index = sampling_detector_ids
+        .iter()
+        .copied()
+        .enumerate()
+        .map(|(index, id)| (id, index))
+        .collect::<HashMap<_, _>>();
+    for detector_id in detector_ids {
+        if !sampling_detector_index.contains_key(detector_id) {
+            return Err(NpError::new(format!(
+                "packed DEM sampler requested detector id {detector_id}, but it is not declared by the DEM"
+            )));
+        }
+    }
+
+    let detector_index = detector_ids
+        .iter()
+        .copied()
+        .enumerate()
+        .map(|(index, id)| (id, index))
+        .collect::<HashMap<_, _>>();
+    let observable_index = observable_ids
+        .iter()
+        .copied()
+        .enumerate()
+        .map(|(index, id)| (id, index))
+        .collect::<HashMap<_, _>>();
+    let sampling_observable_index = sampling_observable_ids
+        .iter()
+        .copied()
+        .enumerate()
+        .map(|(index, id)| (id, index))
+        .collect::<HashMap<_, _>>();
+    for observable_id in observable_ids {
+        if !sampling_observable_index.contains_key(observable_id) {
+            return Err(NpError::new(format!(
+                "packed DEM sampler requested observable id {observable_id}, but it is not declared by the DEM"
+            )));
+        }
+    }
+
+    let detector_byte_count = detector_ids.len().div_ceil(8);
+    let observable_byte_count = observable_ids.len().div_ceil(8);
+    let mut detector_data = vec![0; shots * detector_byte_count];
+    let mut observable_data = vec![0; shots * observable_byte_count];
+    let packed_edges = edges
+        .iter()
+        .map(|edge| {
+            let detector_columns = edge
+                .detectors
+                .iter()
+                .filter_map(|detector_id| detector_index.get(detector_id).copied())
+                .map(|column| (column >> 3, 1u8 << (column & 7)))
+                .collect::<Vec<_>>();
+            let mut observable_columns = Vec::with_capacity(edge.observables.len());
+            for observable_id in &edge.observables {
+                let Some(column) = observable_index.get(observable_id).copied() else {
+                    return Err(NpError::new(format!(
+                        "packed DEM sampler edge references observable id {observable_id}, but it is not declared by the DEM"
+                    )));
+                };
+                observable_columns.push((column >> 3, 1u8 << (column & 7)));
+            }
+            Ok(PackedEdgeColumns {
+                detector_columns,
+                observable_columns,
+            })
+        })
+        .collect::<NpResult<Vec<_>>>()?;
+
+    for (edge, columns) in edges.iter().zip(&packed_edges) {
+        let event_mask = bernoulli_mask(rng, shots, edge.probability);
+        if event_mask.is_zero() {
+            continue;
+        }
+        for (word_index, word) in event_mask.words.iter().copied().enumerate() {
+            let mut word = word;
+            while word != 0 {
+                let bit = word.trailing_zeros() as usize;
+                let shot = (word_index << 6) + bit;
+                if shot < shots {
+                    let detector_row = shot * detector_byte_count;
+                    for (byte_index, bit_mask) in &columns.detector_columns {
+                        detector_data[detector_row + byte_index] ^= bit_mask;
+                    }
+                    let observable_row = shot * observable_byte_count;
+                    for (byte_index, bit_mask) in &columns.observable_columns {
+                        observable_data[observable_row + byte_index] ^= bit_mask;
+                    }
+                }
+                word &= word - 1;
+            }
+        }
+    }
+
+    Ok(PackedDemShotBatch {
+        shots,
+        detector_data,
+        detector_byte_count,
+        observable_ids: observable_ids.to_vec(),
+        observable_data,
+        observable_byte_count,
+    })
+}
+
+struct PackedEdgeColumns {
+    detector_columns: Vec<(usize, u8)>,
+    observable_columns: Vec<(usize, u8)>,
 }
 
 pub fn run_dem_batch(

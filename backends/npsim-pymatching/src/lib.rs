@@ -1,7 +1,8 @@
 use npsim_core::{
     log_likelihood_ratio, NpsimNativeCorrectionMaskBatchMutViewV1, NpsimNativeDecoderI64SliceV1,
     NpsimNativeDecoderStatusV1, NpsimNativeDecoderStringViewV1, NpsimNativeDecoderV1,
-    NpsimNativeDetectorMaskBatchViewV1, NATIVE_DECODER_PLUGIN_ABI_VERSION,
+    NpsimNativeDetectorMaskBatchViewV1, NpsimNativePackedDetectorShotBatchViewV1,
+    NpsimNativePackedObservableShotBatchMutViewV1, NATIVE_DECODER_PLUGIN_ABI_VERSION,
     NATIVE_DECODER_PLUGIN_FLAG_THREAD_SAFE, NATIVE_DECODER_PLUGIN_STATUS_ERROR,
     NATIVE_DECODER_PLUGIN_STATUS_OK,
 };
@@ -68,6 +69,19 @@ extern "C" {
         error_message: *mut c_char,
         error_message_capacity: usize,
     ) -> c_int;
+
+    fn npsim_pymatching_decoder_decode_packed_batch(
+        decoder: *mut PymatchingShimDecoder,
+        detector_shots: *const u8,
+        detector_count: usize,
+        detector_byte_count: usize,
+        observable_predictions: *mut u8,
+        observable_count: usize,
+        observable_byte_count: usize,
+        shots: usize,
+        error_message: *mut c_char,
+        error_message_capacity: usize,
+    ) -> c_int;
 }
 
 #[pyclass(name = "NativePyMatchingNativeDecoder")]
@@ -107,6 +121,7 @@ impl PyNativePyMatchingNativeDecoder {
             detector_ids: Some(decoder_detector_ids),
             observable_ids: Some(decoder_observable_ids),
             decode_batch: Some(decoder_decode_batch),
+            decode_packed_batch: Some(decoder_decode_packed_batch),
         });
         let capsule = unsafe { create_decoder_capsule(py, Box::into_raw(descriptor))? };
         Ok(Self {
@@ -314,6 +329,37 @@ impl PymatchingNativeDecoder {
                 observable_masks.len(),
                 shots,
                 word_count,
+                error.ptr(),
+                error.capacity(),
+            )
+        };
+        if code != 0 {
+            return Err(error.message());
+        }
+        Ok(())
+    }
+
+    fn decode_packed_batch(
+        &mut self,
+        detector_shots: &[u8],
+        detector_count: usize,
+        detector_byte_count: usize,
+        observable_predictions: &mut [u8],
+        observable_count: usize,
+        observable_byte_count: usize,
+        shots: usize,
+    ) -> Result<(), String> {
+        let mut error = ErrorBuffer::new();
+        let code = unsafe {
+            npsim_pymatching_decoder_decode_packed_batch(
+                self.ptr,
+                detector_shots.as_ptr(),
+                detector_count,
+                detector_byte_count,
+                observable_predictions.as_mut_ptr(),
+                observable_count,
+                observable_byte_count,
+                shots,
                 error.ptr(),
                 error.capacity(),
             )
@@ -677,6 +723,24 @@ unsafe extern "C" fn decoder_decode_batch(
     }
 }
 
+unsafe extern "C" fn decoder_decode_packed_batch(
+    state: *mut c_void,
+    input: *const NpsimNativePackedDetectorShotBatchViewV1,
+    output: *mut NpsimNativePackedObservableShotBatchMutViewV1,
+) -> NpsimNativeDecoderStatusV1 {
+    if state.is_null() {
+        return static_error("pymatching packed decode callback received null state pointer");
+    }
+    let state = &*state.cast::<DecoderState>();
+    let result = catch_unwind(AssertUnwindSafe(|| unsafe {
+        decoder_decode_packed_batch_impl(state, input, output)
+    }));
+    match result {
+        Ok(status) => status,
+        Err(_) => state_error(state, "pymatching decoder panicked during packed decode"),
+    }
+}
+
 unsafe fn decoder_decode_batch_impl(
     state: &DecoderState,
     input: *const NpsimNativeDetectorMaskBatchViewV1,
@@ -821,6 +885,159 @@ unsafe fn decoder_decode_batch_impl(
         input.word_count,
     ) {
         return state_error(state, format!("pymatching solver error: {message}"));
+    }
+    NpsimNativeDecoderStatusV1::ok()
+}
+
+unsafe fn decoder_decode_packed_batch_impl(
+    state: &DecoderState,
+    input: *const NpsimNativePackedDetectorShotBatchViewV1,
+    output: *mut NpsimNativePackedObservableShotBatchMutViewV1,
+) -> NpsimNativeDecoderStatusV1 {
+    if input.is_null() {
+        return state_error(
+            state,
+            "pymatching packed decode callback received null input pointer",
+        );
+    }
+    if output.is_null() {
+        return state_error(
+            state,
+            "pymatching packed decode callback received null output pointer",
+        );
+    }
+    let input = &*input;
+    let output = &mut *output;
+    if input.detector_count != state.detector_ids.len() {
+        return state_error(
+            state,
+            format!(
+                "pymatching expected {} packed detector columns but received {}",
+                state.detector_ids.len(),
+                input.detector_count
+            ),
+        );
+    }
+    if output.observable_count != state.observable_ids.len() {
+        return state_error(
+            state,
+            format!(
+                "pymatching expected {} packed observable columns but received {}",
+                state.observable_ids.len(),
+                output.observable_count
+            ),
+        );
+    }
+    let expected_detector_bytes = state.detector_ids.len().div_ceil(8);
+    if input.detector_byte_count != expected_detector_bytes {
+        return state_error(
+            state,
+            format!(
+                "pymatching packed detector byte count is {}; expected {expected_detector_bytes}",
+                input.detector_byte_count
+            ),
+        );
+    }
+    let expected_observable_bytes = state.observable_ids.len().div_ceil(8);
+    if output.observable_byte_count != expected_observable_bytes {
+        return state_error(
+            state,
+            format!(
+                "pymatching packed observable byte count is {}; expected {expected_observable_bytes}",
+                output.observable_byte_count
+            ),
+        );
+    }
+    if input.detector_count > 0 && input.detector_ids.is_null() {
+        return state_error(
+            state,
+            "pymatching packed input detector ids pointer is null",
+        );
+    }
+    if output.observable_count > 0 && output.observable_ids.is_null() {
+        return state_error(
+            state,
+            "pymatching packed output observable ids pointer is null",
+        );
+    }
+    if input.shots > 0 && input.detector_byte_count > 0 && input.data.is_null() {
+        return state_error(state, "pymatching packed input data pointer is null");
+    }
+    if output.shots > 0 && output.observable_byte_count > 0 && output.data.is_null() {
+        return state_error(state, "pymatching packed output data pointer is null");
+    }
+    if input.shots != output.shots {
+        return state_error(
+            state,
+            format!(
+                "pymatching packed input has {} shots but output has {}",
+                input.shots, output.shots
+            ),
+        );
+    }
+
+    let input_detector_ids = if input.detector_count == 0 {
+        &[]
+    } else {
+        slice::from_raw_parts(input.detector_ids, input.detector_count)
+    };
+    if input_detector_ids != state.detector_ids.as_slice() {
+        return state_error(
+            state,
+            format!(
+                "pymatching packed detector id order mismatch: expected {:?}, received {:?}",
+                state.detector_ids, input_detector_ids
+            ),
+        );
+    }
+    let output_observable_ids = if output.observable_count == 0 {
+        &[]
+    } else {
+        slice::from_raw_parts(output.observable_ids, output.observable_count)
+    };
+    if output_observable_ids != state.observable_ids.as_slice() {
+        return state_error(
+            state,
+            format!(
+                "pymatching packed observable id order mismatch: expected {:?}, received {:?}",
+                state.observable_ids, output_observable_ids
+            ),
+        );
+    }
+
+    let input_len = match input.shots.checked_mul(input.detector_byte_count) {
+        Some(len) => len,
+        None => return state_error(state, "pymatching packed input byte length overflow"),
+    };
+    let output_len = match output.shots.checked_mul(output.observable_byte_count) {
+        Some(len) => len,
+        None => return state_error(state, "pymatching packed output byte length overflow"),
+    };
+    let detector_shots = if input_len == 0 {
+        &[]
+    } else {
+        slice::from_raw_parts(input.data, input_len)
+    };
+    let observable_predictions = if output_len == 0 {
+        &mut []
+    } else {
+        slice::from_raw_parts_mut(output.data, output_len)
+    };
+
+    let mut native = match state.native.lock() {
+        Ok(native) => native,
+        Err(_) => return state_error(state, "pymatching native decoder mutex poisoned"),
+    };
+    if let Err(message) = native.decode_packed_batch(
+        detector_shots,
+        input.detector_count,
+        input.detector_byte_count,
+        observable_predictions,
+        output.observable_count,
+        output.observable_byte_count,
+        input.shots,
+    ) {
+        return state_error(state, format!("pymatching packed solver error: {message}"));
     }
     NpsimNativeDecoderStatusV1::ok()
 }

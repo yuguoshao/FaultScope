@@ -81,6 +81,26 @@ pub struct NpsimNativeCorrectionMaskBatchMutViewV1 {
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
+pub struct NpsimNativePackedDetectorShotBatchViewV1 {
+    pub detector_ids: *const i64,
+    pub detector_count: usize,
+    pub data: *const u8,
+    pub shots: usize,
+    pub detector_byte_count: usize,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct NpsimNativePackedObservableShotBatchMutViewV1 {
+    pub observable_ids: *const i64,
+    pub observable_count: usize,
+    pub data: *mut u8,
+    pub shots: usize,
+    pub observable_byte_count: usize,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
 pub struct NpsimNativeDecoderStatusV1 {
     pub code: i32,
     pub message: NpsimNativeDecoderStringViewV1,
@@ -128,6 +148,13 @@ pub struct NpsimNativeDecoderV1 {
             *mut NpsimNativeCorrectionMaskBatchMutViewV1,
         ) -> NpsimNativeDecoderStatusV1,
     >,
+    pub decode_packed_batch: Option<
+        unsafe extern "C" fn(
+            *mut c_void,
+            *const NpsimNativePackedDetectorShotBatchViewV1,
+            *mut NpsimNativePackedObservableShotBatchMutViewV1,
+        ) -> NpsimNativeDecoderStatusV1,
+    >,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -158,6 +185,116 @@ impl<'a> DetectorMaskBatchView<'a> {
             masks,
             shots,
         })
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct PackedDetectorShotBatchView<'a> {
+    pub detector_ids: &'a [i64],
+    pub data: &'a [u8],
+    pub shots: usize,
+    pub detector_byte_count: usize,
+}
+
+impl<'a> PackedDetectorShotBatchView<'a> {
+    pub fn new(detector_ids: &'a [i64], data: &'a [u8], shots: usize) -> NpResult<Self> {
+        let detector_byte_count = detector_ids.len().div_ceil(8);
+        let expected_len = shots.checked_mul(detector_byte_count).ok_or_else(|| {
+            NpError::new("packed detector shot batch byte length overflowed usize")
+        })?;
+        if data.len() != expected_len {
+            return Err(NpError::new(format!(
+                "packed detector shot batch has {} bytes; expected {expected_len} for {shots} shots and {} detectors",
+                data.len(),
+                detector_ids.len()
+            )));
+        }
+        Ok(Self {
+            detector_ids,
+            data,
+            shots,
+            detector_byte_count,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct PackedObservableShotBatch {
+    pub observable_ids: Vec<i64>,
+    pub data: Vec<u8>,
+    pub shots: usize,
+    pub observable_byte_count: usize,
+}
+
+impl PackedObservableShotBatch {
+    pub fn new(observable_ids: Vec<i64>, data: Vec<u8>, shots: usize) -> NpResult<Self> {
+        let observable_byte_count = observable_ids.len().div_ceil(8);
+        let batch = Self {
+            observable_ids,
+            data,
+            shots,
+            observable_byte_count,
+        };
+        batch.validate_shape()?;
+        Ok(batch)
+    }
+
+    pub fn zero(observable_ids: Vec<i64>, shots: usize) -> Self {
+        let observable_byte_count = observable_ids.len().div_ceil(8);
+        Self {
+            data: vec![0; shots * observable_byte_count],
+            observable_ids,
+            shots,
+            observable_byte_count,
+        }
+    }
+
+    pub fn validate_against(&self, declared_observable_ids: &[i64], shots: usize) -> NpResult<()> {
+        if self.shots != shots {
+            return Err(NpError::new(format!(
+                "packed correction batch has {} shots; expected {shots}",
+                self.shots
+            )));
+        }
+        self.validate_shape()?;
+        for observable_id in &self.observable_ids {
+            if !declared_observable_ids.contains(observable_id) {
+                return Err(NpError::new(format!(
+                    "packed correction for undeclared observable id {observable_id}"
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_shape(&self) -> NpResult<()> {
+        let expected_byte_count = self.observable_ids.len().div_ceil(8);
+        if self.observable_byte_count != expected_byte_count {
+            return Err(NpError::new(format!(
+                "packed correction observable byte count is {}; expected {expected_byte_count}",
+                self.observable_byte_count
+            )));
+        }
+        let expected_len = self
+            .shots
+            .checked_mul(self.observable_byte_count)
+            .ok_or_else(|| NpError::new("packed correction byte length overflowed usize"))?;
+        if self.data.len() != expected_len {
+            return Err(NpError::new(format!(
+                "packed correction batch has {} bytes; expected {expected_len} for {} shots and {} observables",
+                self.data.len(),
+                self.shots,
+                self.observable_ids.len()
+            )));
+        }
+        for (index, observable_id) in self.observable_ids.iter().enumerate() {
+            if self.observable_ids[..index].contains(observable_id) {
+                return Err(NpError::new(format!(
+                    "duplicate packed correction observable id {observable_id}"
+                )));
+            }
+        }
+        Ok(())
     }
 }
 
@@ -253,12 +390,36 @@ pub trait NativeBatchDecoder: Send + Sync {
 
     fn decode_batch(&self, detectors: DetectorMaskBatchView<'_>) -> NpResult<CorrectionMaskBatch>;
 
+    fn supports_packed_batch(&self) -> bool {
+        false
+    }
+
+    fn decode_packed_batch(
+        &self,
+        _detectors: PackedDetectorShotBatchView<'_>,
+    ) -> NpResult<PackedObservableShotBatch> {
+        Err(NpError::new(format!(
+            "{} does not support packed-row batch decode",
+            self.name()
+        )))
+    }
+
     fn decode_batch_checked(
         &self,
         detectors: DetectorMaskBatchView<'_>,
     ) -> NpResult<CorrectionMaskBatch> {
         let shots = detectors.shots;
         let corrections = self.decode_batch(detectors)?;
+        corrections.validate_against(self.observable_ids(), shots)?;
+        Ok(corrections)
+    }
+
+    fn decode_packed_batch_checked(
+        &self,
+        detectors: PackedDetectorShotBatchView<'_>,
+    ) -> NpResult<PackedObservableShotBatch> {
+        let shots = detectors.shots;
+        let corrections = self.decode_packed_batch(detectors)?;
         corrections.validate_against(self.observable_ids(), shots)?;
         Ok(corrections)
     }
@@ -304,6 +465,21 @@ impl NativeBatchDecoder for NativeNoCorrectionDecoder {
         CorrectionMaskBatch::new(
             self.observable_ids.clone(),
             vec![Mask::zero(words); self.observable_ids.len()],
+            detectors.shots,
+        )
+    }
+
+    fn supports_packed_batch(&self) -> bool {
+        true
+    }
+
+    fn decode_packed_batch(
+        &self,
+        detectors: PackedDetectorShotBatchView<'_>,
+    ) -> NpResult<PackedObservableShotBatch> {
+        PackedObservableShotBatch::new(
+            self.observable_ids.clone(),
+            vec![0; detectors.shots * self.observable_ids.len().div_ceil(8)],
             detectors.shots,
         )
     }
@@ -686,6 +862,21 @@ mod tests {
 
         assert_eq!(corrections.observable_ids, vec![0, 2]);
         assert_eq!(corrections.masks, vec![Mask { words: vec![0] }; 2]);
+    }
+
+    #[test]
+    fn no_correction_decoder_returns_zero_packed_rows_for_observables() {
+        let decoder = NativeNoCorrectionDecoder::with_detector_ids(vec![1, 2], vec![0, 3]);
+        let detector_data = vec![0b11, 0b01, 0b10, 0b00];
+        let view =
+            PackedDetectorShotBatchView::new(decoder.detector_ids(), &detector_data, 4).unwrap();
+
+        let corrections = decoder.decode_packed_batch_checked(view).unwrap();
+
+        assert_eq!(corrections.observable_ids, vec![0, 3]);
+        assert_eq!(corrections.shots, 4);
+        assert_eq!(corrections.observable_byte_count, 1);
+        assert_eq!(corrections.data, vec![0; 4]);
     }
 
     #[test]

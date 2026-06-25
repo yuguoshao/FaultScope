@@ -59,6 +59,18 @@ int npsim_pymatching_decoder_decode_batch(
     char *error_message,
     size_t error_message_capacity);
 
+int npsim_pymatching_decoder_decode_packed_batch(
+    NpsimPyMatchingDecoder *decoder,
+    const uint8_t *detector_shots,
+    size_t detector_count,
+    size_t detector_byte_count,
+    uint8_t *observable_predictions,
+    size_t observable_count,
+    size_t observable_byte_count,
+    size_t shots,
+    char *error_message,
+    size_t error_message_capacity);
+
 #ifdef __cplusplus
 }
 #endif

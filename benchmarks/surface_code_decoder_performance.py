@@ -6,7 +6,9 @@ Run from the repository root after building the native extension:
 
 The benchmark compares PyMatching and optional NPSim native decoder backends on
 Stim standard rotated surface-code DEMs. It reports TSV rows for machine
-consumption and does not estimate threshold crossings.
+consumption and does not estimate threshold crossings. With
+``--split-native-baseline``, native PyMatching reports a no-correction
+packed-row baseline separately from the decoder delta.
 """
 
 from __future__ import annotations
@@ -27,6 +29,7 @@ if str(BENCHMARK_DIR) not in sys.path:
 
 from npsim.decoders import (
     NativeFusionBlossomDecoder,
+    NativeNoCorrectionDecoder,
     NativePyMatchingDecoder,
 )
 from npsim.dem import Detector, DetectorErrorEdge, DetectorErrorModel, LogicalObservable
@@ -400,8 +403,17 @@ def run_npsim_dem_pymatching_native(
 
     baseline_s = None
     if split_baseline:
+        baseline_decoder = NativeNoCorrectionDecoder(
+            observable_ids=decoder.observable_ids,
+            detector_ids=decoder.detector_ids,
+        )
         started = time.perf_counter()
-        sampler.estimate(shots=shots, seed=seed, aggregate_hotspots=False)
+        sampler.estimate(
+            shots=shots,
+            seed=seed,
+            decoder=baseline_decoder,
+            aggregate_hotspots=False,
+        )
         baseline_s = time.perf_counter() - started
 
     started = time.perf_counter()
@@ -455,7 +467,12 @@ def run_npsim_dem_fusion_blossom(
     construct_s = time.perf_counter() - started
 
     started = time.perf_counter()
-    result = sampler.estimate(shots=shots, seed=seed, decoder=decoder)
+    result = sampler.estimate(
+        shots=shots,
+        seed=seed,
+        decoder=decoder,
+        aggregate_hotspots=False,
+    )
     estimate_s = time.perf_counter() - started
 
     python_decode_calls = int(getattr(decoder, "python_decode_call_count", -1))

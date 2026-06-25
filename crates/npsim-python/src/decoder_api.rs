@@ -9,7 +9,9 @@ use npsim_core::{
     NpsimNativeCorrectionMaskBatchMutViewV1, NpsimNativeDecoderI64SliceV1,
     NpsimNativeDecoderMaskMutViewV1, NpsimNativeDecoderMaskViewV1, NpsimNativeDecoderStatusV1,
     NpsimNativeDecoderStringViewV1, NpsimNativeDecoderV1, NpsimNativeDetectorMaskBatchViewV1,
-    SparseBinaryMatrix, NATIVE_DECODER_PLUGIN_ABI_VERSION, NATIVE_DECODER_PLUGIN_CAPSULE_METHOD,
+    NpsimNativePackedDetectorShotBatchViewV1, NpsimNativePackedObservableShotBatchMutViewV1,
+    PackedDetectorShotBatchView, PackedObservableShotBatch, SparseBinaryMatrix,
+    NATIVE_DECODER_PLUGIN_ABI_VERSION, NATIVE_DECODER_PLUGIN_CAPSULE_METHOD,
     NATIVE_DECODER_PLUGIN_CAPSULE_NAME, NATIVE_DECODER_PLUGIN_FLAG_THREAD_SAFE,
     NATIVE_DECODER_PLUGIN_STATUS_OK,
 };
@@ -410,6 +412,22 @@ impl ExternalNativeBatchDecoder {
     fn descriptor(&self) -> &NpsimNativeDecoderV1 {
         unsafe { self.descriptor.as_ref() }
     }
+
+    fn decode_packed_callback(
+        &self,
+    ) -> Option<
+        unsafe extern "C" fn(
+            *mut std::ffi::c_void,
+            *const NpsimNativePackedDetectorShotBatchViewV1,
+            *mut NpsimNativePackedObservableShotBatchMutViewV1,
+        ) -> NpsimNativeDecoderStatusV1,
+    > {
+        let descriptor = self.descriptor();
+        if descriptor.struct_size < mem::size_of::<NpsimNativeDecoderV1>() {
+            return None;
+        }
+        descriptor.decode_packed_batch
+    }
 }
 
 impl CoreNativeBatchDecoder for ExternalNativeBatchDecoder {
@@ -474,6 +492,48 @@ impl CoreNativeBatchDecoder for ExternalNativeBatchDecoder {
         status_to_np_result(status)?;
         CorrectionMaskBatch::new(self.observable_ids.clone(), output_masks, detectors.shots)
     }
+
+    fn supports_packed_batch(&self) -> bool {
+        self.decode_packed_callback().is_some()
+    }
+
+    fn decode_packed_batch(
+        &self,
+        detectors: PackedDetectorShotBatchView<'_>,
+    ) -> npsim_core::NpResult<PackedObservableShotBatch> {
+        if detectors.detector_ids != self.detector_ids.as_slice() {
+            return Err(npsim_core::NpError::new(format!(
+                "{} received packed detector shots in an unexpected order",
+                self.name
+            )));
+        }
+        let decode_packed_batch = self.decode_packed_callback().ok_or_else(|| {
+            npsim_core::NpError::new(format!(
+                "{} does not support packed-row batch decode",
+                self.name
+            ))
+        })?;
+        let observable_byte_count = self.observable_ids.len().div_ceil(8);
+        let mut output_data = vec![0; detectors.shots * observable_byte_count];
+        let input = NpsimNativePackedDetectorShotBatchViewV1 {
+            detector_ids: self.detector_ids.as_ptr(),
+            detector_count: self.detector_ids.len(),
+            data: detectors.data.as_ptr(),
+            shots: detectors.shots,
+            detector_byte_count: detectors.detector_byte_count,
+        };
+        let mut output = NpsimNativePackedObservableShotBatchMutViewV1 {
+            observable_ids: self.observable_ids.as_ptr(),
+            observable_count: self.observable_ids.len(),
+            data: output_data.as_mut_ptr(),
+            shots: detectors.shots,
+            observable_byte_count,
+        };
+        let descriptor = self.descriptor();
+        let status = unsafe { decode_packed_batch(descriptor.state, &input, &mut output) };
+        status_to_np_result(status)?;
+        PackedObservableShotBatch::new(self.observable_ids.clone(), output_data, detectors.shots)
+    }
 }
 
 pub(crate) fn native_decoder_from_py(
@@ -512,11 +572,11 @@ fn validate_external_decoder_descriptor(descriptor: &NpsimNativeDecoderV1) -> Py
             descriptor.abi_version, NATIVE_DECODER_PLUGIN_ABI_VERSION
         )));
     }
-    if descriptor.struct_size < mem::size_of::<NpsimNativeDecoderV1>() {
+    let minimum_descriptor_size = mem::offset_of!(NpsimNativeDecoderV1, decode_packed_batch);
+    if descriptor.struct_size < minimum_descriptor_size {
         return Err(PyValueError::new_err(format!(
             "native decoder descriptor has size {}; expected at least {}",
-            descriptor.struct_size,
-            mem::size_of::<NpsimNativeDecoderV1>()
+            descriptor.struct_size, minimum_descriptor_size
         )));
     }
     if descriptor.flags & NATIVE_DECODER_PLUGIN_FLAG_THREAD_SAFE == 0 {

@@ -66,6 +66,7 @@ impl PyNativeFusionBlossomNativeDecoder {
             detector_ids: Some(decoder_detector_ids),
             observable_ids: Some(decoder_observable_ids),
             decode_batch: Some(decoder_decode_batch),
+            decode_packed_batch: None,
         });
         let capsule = unsafe { create_decoder_capsule(py, Box::into_raw(descriptor))? };
 
@@ -245,6 +246,7 @@ impl PyInvalidNativeDecoderCapsule {
             detector_ids: Some(decoder_detector_ids),
             observable_ids: Some(decoder_observable_ids),
             decode_batch: Some(decoder_decode_batch),
+            decode_packed_batch: None,
         };
         match kind {
             "abi-mismatch" => descriptor.abi_version = NATIVE_DECODER_PLUGIN_ABI_VERSION + 1,
