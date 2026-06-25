@@ -54,6 +54,7 @@ from npsim.decoders import (
     NativeFusionBlossomDecoder,
     NativeGraphlikeDetectorCopyDecoder,
     NativeNoCorrectionDecoder,
+    NativePyMatchingDecoder,
     PyMatchingBatchDecoder,
     UnsupportedPyMatchingDemError,
     available_native_decoders,
@@ -374,6 +375,10 @@ class NoiseAwareSimulatorTests(unittest.TestCase):
         self.assertEqual(catalog["fusion-blossom"].problem_kind, "graphlike")
         self.assertTrue(catalog["fusion-blossom"].installable)
         self.assertEqual(catalog["fusion-blossom"].package_name, "npsim-fusion-blossom")
+        self.assertIn("pymatching", catalog)
+        self.assertEqual(catalog["pymatching"].problem_kind, "graphlike")
+        self.assertTrue(catalog["pymatching"].installable)
+        self.assertEqual(catalog["pymatching"].package_name, "npsim-pymatching")
         self.assertIn("bposd", catalog)
         self.assertEqual(catalog["bposd"].problem_kind, "binary-linear")
         self.assertFalse(catalog["bposd"].installable)
@@ -403,6 +408,33 @@ class NoiseAwareSimulatorTests(unittest.TestCase):
                 "python -m npsim.backends install fusion-blossom",
             ):
                 NativeFusionBlossomDecoder.from_dem(dem)
+        clear_native_decoder_plugin_cache()
+
+    def test_missing_pymatching_backend_has_install_hint(self) -> None:
+        dem = DetectorErrorModel(
+            detectors=(Detector(id=0, measurement_keys=()),),
+            observables=(LogicalObservable(id=0),),
+            edges=(
+                DetectorErrorEdge(
+                    probability=0.2,
+                    detectors=(0,),
+                    observables=(0,),
+                    location_id="edge0",
+                    event="X",
+                ),
+            ),
+        )
+
+        with mock.patch(
+            "npsim.backends.registry.metadata.entry_points",
+            return_value=_FakeEntryPoints(()),
+        ):
+            clear_native_decoder_plugin_cache()
+            with self.assertRaisesRegex(
+                NativeDecoderBackendUnavailable,
+                "python -m npsim.backends install pymatching",
+            ):
+                NativePyMatchingDecoder.from_dem(dem)
         clear_native_decoder_plugin_cache()
 
     def test_reserved_bposd_backend_has_install_hint(self) -> None:

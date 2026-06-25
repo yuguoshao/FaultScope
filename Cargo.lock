@@ -478,6 +478,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "npsim-pymatching-python"
+version = "0.1.0"
+dependencies = [
+ "cc",
+ "npsim-core",
+ "pyo3",
+]
+
+[[package]]
 name = "npsim-python"
 version = "0.1.0"
 dependencies = [

@@ -79,6 +79,18 @@ OFFICIAL_BACKEND_CATALOG: dict[str, NativeDecoderBackendCatalogEntry] = {
             "Minimal serial beta fusion-blossom MWPM graphlike decoder backend."
         ),
     ),
+    "pymatching": NativeDecoderBackendCatalogEntry(
+        name="pymatching",
+        package_name="npsim-pymatching",
+        decoder_class_name="NativePyMatchingDecoder",
+        problem_kind="graphlike",
+        repo_url="https://github.com/oscarhiggott/PyMatching.git",
+        default_rev="v2.4.0",
+        installable=True,
+        description=(
+            "Optional native PyMatching sparse-blossom graphlike decoder backend."
+        ),
+    ),
     "bposd": NativeDecoderBackendCatalogEntry(
         name="bposd",
         package_name="npsim-bposd",

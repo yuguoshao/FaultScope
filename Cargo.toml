@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "backends/npsim-fusion-blossom",
+    "backends/npsim-pymatching",
     "crates/npsim-core",
     "crates/npsim-python",
 ]

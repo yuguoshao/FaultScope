@@ -345,8 +345,9 @@ runtime still recognizes only native handles; a Python subclass that implements
 Official backend installation metadata lives in the built-in catalog. Each
 entry records the backend name, backend package, proxy class name, target
 problem view, source repository, default revision, installability, and a short
-description. The initial catalog reserves `fusion-blossom` for graphlike MWPM
-decoding and `bposd` for binary-linear BP+OSD/LDPC decoding.
+description. The catalog includes `pymatching` and `fusion-blossom` for
+graphlike MWPM-style decoding and reserves `bposd` for binary-linear
+BP+OSD/LDPC decoding.
 
 Python can inspect compiled native backend names:
 
@@ -373,10 +374,13 @@ Python can use either friendly proxy classes or a generic resolver:
 ```python
 from npsim.decoders import (
     NativeFusionBlossomDecoder,
+    NativePyMatchingDecoder,
     create_native_decoder,
     get_native_decoder_class,
 )
 
+decoder = NativePyMatchingDecoder.from_dem(dem)
+decoder = create_native_decoder("pymatching", dem=dem)
 decoder = NativeFusionBlossomDecoder.from_dem(dem)
 decoder = create_native_decoder("fusion-blossom", dem=dem)
 Decoder = get_native_decoder_class("fusion-blossom")
@@ -431,6 +435,7 @@ Installation helpers are uniform for catalog entries:
 
 ```bash
 python -m npsim.backends install fusion-blossom --dry-run
+python -m npsim.backends install pymatching --dry-run
 python -m npsim.backends install bposd --dry-run
 ```
 
@@ -443,26 +448,30 @@ When the backend package is missing, the public proxy remains importable but
 construction raises an install hint:
 
 ```python
-from npsim.decoders import NativeFusionBlossomDecoder
+from npsim.decoders import NativeFusionBlossomDecoder, NativePyMatchingDecoder
 
 decoder = NativeFusionBlossomDecoder.from_dem(dem)  # raises until installed
+decoder = NativePyMatchingDecoder.from_dem(dem)  # raises until installed
 ```
 
 The post-install plugin ABI is not a general third-party stable ABI. It is a
 versioned contract for official NPSim backend packages so the core package can
 reject mismatched backend builds before any hot-path decoding begins.
 
-### Official Backend Package
+### Official Backend Packages
 
-The repository includes an official fusion-blossom backend package at:
+The repository includes official optional backend packages at:
 
 ```text
+backends/npsim-pymatching/
 backends/npsim-fusion-blossom/
 ```
 
-Install it in editable mode during development:
+Install them in editable mode during development from an activated project
+virtual environment, or with `.venv/bin` explicitly on `PATH`:
 
 ```bash
+.venv/bin/python -m pip install -e backends/npsim-pymatching --no-build-isolation
 .venv/bin/python -m pip install -e backends/npsim-fusion-blossom
 ```
 
@@ -470,14 +479,22 @@ The package declares:
 
 ```toml
 [project.entry-points."npsim.native_decoders"]
+pymatching = "npsim_pymatching:backend_manifest"
 fusion-blossom = "npsim_fusion_blossom:backend_manifest"
 ```
 
 Its manifest returns the current NPSim native decoder plugin ABI, package
-metadata, and a `fusion-blossom` decoder class. The class implements
+metadata, and one or more decoder classes. The class implements
 `from_dem(...)` and `from_circuit(...)`; construction compiles the DEM to a
 `GraphlikeDecodingProblem`, passes that metadata to the package's Rust/PyO3
 extension, and stores external native decoder state in a PyCapsule.
+
+The PyMatching backend links pinned PyMatching sparse-blossom C++ source in the
+`npsim-pymatching` package. It does not call the Python
+`PyMatchingBatchDecoder` hot path and does not depend on the PyPI wheel exposing
+a stable native SDK. The backend uses the same native PyCapsule boundary as the
+other official packages: Python passes construction metadata, while hot-path
+`DetectorMaskBatchView` and `CorrectionMaskBatch` buffers stay native.
 
 The current backend is a minimal serial beta fusion-blossom MWPM adapter. It
 maps NPSim detector indices to fusion-blossom vertices, converts graphlike DEM
@@ -573,13 +590,14 @@ benchmark:
 .venv/bin/python benchmarks/surface_code_decoder_performance.py --distances 3 5 7 --shots 10000
 ```
 
-It compares Stim DEM + PyMatching, NPSim DEM + PyMatching, and NPSim DEM +
-fusion-blossom native decoding when the optional backend package is installed.
-The benchmark uses a local graphlike Stim DEM converter that splits separator
-groups into NPSim DEM edges for the fusion-blossom path; this does not change
-the threshold benchmark. It reports construction time, sampling time where
-separable, native estimate time, solver-edge metadata, merged parallel edges,
-and whether the fusion-blossom path stayed out of Python callbacks.
+It compares Stim DEM + PyMatching, NPSim DEM + Python PyMatching, NPSim DEM +
+native PyMatching, and NPSim DEM + fusion-blossom native decoding when the
+optional backend packages are installed. The benchmark uses a local graphlike
+Stim DEM converter that splits separator groups into NPSim DEM edges for native
+paths; this does not change the threshold benchmark. It reports construction
+time, sampling time where separable, native estimate time, solver-edge
+metadata, merged parallel edges, and whether native paths stayed out of Python
+callbacks.
 
 ## Validation And Performance Rules
 

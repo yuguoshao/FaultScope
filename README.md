@@ -114,12 +114,12 @@ print(result.hotspot_table(top_k=5))
   problem views。
 - 可选 native decoder backend 通过统一后装命令管理，例如
   `python -m npsim.backends status` 查看 catalog/status，
-  `python -m npsim.backends install fusion-blossom --dry-run` 查看安装步骤；NPSim 不会在
+  `python -m npsim.backends install pymatching --dry-run` 查看安装步骤；NPSim 不会在
   `import` 或 `estimate(...)` 时隐式联网、clone 或编译。
-- 开发中的 fusion-blossom backend 可通过
+- 开发中的 PyMatching 和 fusion-blossom backend 可在激活 venv 后通过
+  `.venv/bin/python -m pip install -e backends/npsim-pymatching --no-build-isolation` 和
   `.venv/bin/python -m pip install -e backends/npsim-fusion-blossom` 本地安装；当前是最小
-  serial beta MWPM adapter，支持同端点同 logical effect 的 two-detector parallel edge
-  安全合并，但尚未做 parallel/streaming/生产级性能优化。
+  native MWPM backend；PyMatching backend 避免 NPSim batch/correction masks 经 Python 转换。
 - `edge_sensitivities` 和 `edge_hotspots` 是按 DEM edge index keyed 的 dict。
 - `edges_by_location()` 返回 `dict[str, list[DetectorErrorEdge]]`。
 - `materialize_dem=False` 的 native DEM sampler 是轻量采样路径，`sampler.dem is None`，
@@ -132,7 +132,7 @@ print(result.hotspot_table(top_k=5))
 | 查看原始 measurement/noise masks | Forward sampling |
 | 自定义 measurement-history loss | Forward estimate + `loss_mask_fn` |
 | detector-level decoder | Forward 或 DEM estimate + decoder |
-| graphlike matching decoder | 从 DEM 构造 `PyMatchingBatchDecoder`，用于 Forward 或 DEM estimate |
+| graphlike matching decoder | 原型用 `PyMatchingBatchDecoder`；高性能路径安装 `npsim-pymatching` 后使用 `NativePyMatchingDecoder` |
 | DEM edge 级热点排序 | DEM hotspot estimate |
 | 重复 detector-level sampling | 生成 DEM 后复用 DEM sampler |
 | Rust 集成 | `npsim-core` |
@@ -169,5 +169,5 @@ NPSim 当前产品路径是 packed batch engine，不暴露通用的 per-shot ad
 ```
 
 Stim/PyMatching 相关 benchmark 会在对应可选依赖安装后启用对照；
-surface-code decoder performance benchmark 会在安装 `npsim-fusion-blossom`
-后额外输出 fusion-blossom native path。
+surface-code decoder performance benchmark 会在安装 `npsim-pymatching` 或
+`npsim-fusion-blossom` 后额外输出对应 native path。

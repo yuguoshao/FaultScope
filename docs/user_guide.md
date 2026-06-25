@@ -426,6 +426,23 @@ used in either workflow:
 In other words, a DEM is needed to construct the PyMatching decoder, but the
 sampling path can still be forward circuit sampling.
 
+`PyMatchingBatchDecoder` is the Python compatibility path. It is useful for
+prototyping and for environments that only install the PyMatching Python wheel,
+but NPSim packed detector masks must still be converted through Python/NumPy
+before PyMatching decodes them. For the native hot path, install the optional
+`npsim-pymatching` backend and use `NativePyMatchingDecoder`:
+
+```bash
+python -m npsim.backends install pymatching --dry-run
+```
+
+```python
+from npsim.decoders import NativePyMatchingDecoder
+
+decoder = NativePyMatchingDecoder.from_dem(dem)
+result = sampler.estimate(shots=1024, seed=1, decoder=decoder)
+```
+
 ```python
 from npsim import (
     BernoulliPauliNoise,
@@ -561,14 +578,17 @@ python -m npsim.backends status
 Inspect backend installation steps with:
 
 ```bash
+python -m npsim.backends install pymatching --dry-run
 python -m npsim.backends install fusion-blossom --dry-run
 python -m npsim.backends install bposd --dry-run
 ```
 
-For local development, the fusion-blossom backend package can be installed from
-the source checkout:
+For local development, activate the project virtual environment, or otherwise
+ensure `.venv/bin` is on `PATH`, then install optional backend packages from the
+source checkout:
 
 ```bash
+.venv/bin/python -m pip install -e backends/npsim-pymatching --no-build-isolation
 .venv/bin/python -m pip install -e backends/npsim-fusion-blossom
 .venv/bin/python -c "from npsim.decoders import available_native_decoders; print(available_native_decoders())"
 ```
@@ -581,6 +601,11 @@ fast path, exposes construction metadata such as `solver_edge_count`, and
 safely compresses identical two-detector parallel edges. It still rejects
 ambiguous parallel logical effects and has not implemented parallel/streaming
 execution or production performance tuning.
+
+The local `npsim-pymatching` package links pinned PyMatching sparse-blossom C++
+source and exposes `NativePyMatchingDecoder`. It is graphlike-only and keeps
+hot-path detector/correction masks out of Python; the existing
+`PyMatchingBatchDecoder` remains available as the Python compatibility adapter.
 
 For the full developer contract, including `from_circuit(...)`,
 `from_dem(...)`, Python prototype decoders, and native backend skeletons, see
@@ -711,8 +736,8 @@ Run benchmarks from the repository root after building the native extension:
 Stim comparisons are reported when `stim` is installed. Threshold comparisons
 require `numpy`, `scipy`, `pymatching`, and `stim`. The surface-code decoder
 performance benchmark compares PyMatching with the optional
-`npsim-fusion-blossom` backend when that backend is installed; unavailable
-native backends are reported as `skip:<reason>` rows.
+`npsim-pymatching` and `npsim-fusion-blossom` backends when those backends are
+installed; unavailable native backends are reported as `skip:<reason>` rows.
 
 ## Troubleshooting
 

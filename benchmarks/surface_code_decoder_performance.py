@@ -4,8 +4,8 @@ Run from the repository root after building the native extension:
 
     .venv/bin/python benchmarks/surface_code_decoder_performance.py
 
-The benchmark compares PyMatching and the optional npsim-fusion-blossom backend
-on Stim standard rotated surface-code DEMs. It reports TSV rows for machine
+The benchmark compares PyMatching and optional NPSim native decoder backends on
+Stim standard rotated surface-code DEMs. It reports TSV rows for machine
 consumption and does not estimate threshold crossings.
 """
 
@@ -25,7 +25,7 @@ if str(ROOT) not in sys.path:
 if str(BENCHMARK_DIR) not in sys.path:
     sys.path.insert(0, str(BENCHMARK_DIR))
 
-from npsim.decoders import NativeFusionBlossomDecoder
+from npsim.decoders import NativeFusionBlossomDecoder, NativePyMatchingDecoder
 from npsim.dem import Detector, DetectorErrorEdge, DetectorErrorModel, LogicalObservable
 from npsim.runtime import compile_native_dem_sampler
 from surface_code_threshold import (
@@ -39,6 +39,7 @@ from surface_code_threshold import (
 PATHS = (
     "stim-dem-pymatching",
     "npsim-dem-pymatching",
+    "npsim-dem-pymatching-native",
     "npsim-dem-fusion-blossom",
 )
 
@@ -93,13 +94,13 @@ def main() -> None:
     parser.add_argument("--basis", choices=("x", "z"), default="x")
     parser.add_argument("--rounds", type=int, default=None)
     parser.add_argument("--seed", type=int, default=12_345)
-    parser.add_argument("--paths", nargs="+", choices=PATHS, default=list(PATHS))
+    parser.add_argument("--paths", nargs="+", default=list(PATHS))
     args = parser.parse_args()
 
     stim, pymatching, _np = _load_required_modules()
     distances = tuple(sorted(set(args.distances)))
     rates = tuple(sorted(set(float(rate) for rate in args.rates)))
-    paths = tuple(dict.fromkeys(args.paths))
+    paths = parse_paths(args.paths)
     if not distances:
         raise SystemExit("at least one distance is required")
     if not rates:
@@ -159,6 +160,16 @@ def main() -> None:
                     metadata,
                     seed,
                 ),
+                "npsim-dem-pymatching-native": lambda seed: run_npsim_dem_pymatching_native(
+                    npsim_dem,
+                    args.basis,
+                    distance,
+                    rounds,
+                    p,
+                    args.shots,
+                    metadata,
+                    seed,
+                ),
                 "npsim-dem-fusion-blossom": lambda seed: run_npsim_dem_fusion_blossom(
                     npsim_dem,
                     args.basis,
@@ -188,7 +199,7 @@ def main() -> None:
                     failed = True
 
     if failed:
-        raise SystemExit("fusion-blossom path used Python decode callback")
+        raise SystemExit("native decoder path used Python decode callback")
 
 
 def run_stim_dem_pymatching(
@@ -293,6 +304,48 @@ def run_npsim_dem_pymatching(
         mean_loss=stats.rate,
         python_decode_calls=None,
         status="ok",
+    )
+
+
+def run_npsim_dem_pymatching_native(
+    npsim_dem: Any,
+    basis: str,
+    distance: int,
+    rounds: int,
+    p: float,
+    shots: int,
+    metadata: ProblemMetadata,
+    seed: int,
+) -> BenchmarkRow:
+    started = time.perf_counter()
+    sampler = compile_native_dem_sampler(npsim_dem)
+    decoder = NativePyMatchingDecoder.from_dem(npsim_dem)
+    construct_s = time.perf_counter() - started
+
+    started = time.perf_counter()
+    result = sampler.estimate(shots=shots, seed=seed, decoder=decoder)
+    estimate_s = time.perf_counter() - started
+
+    python_decode_calls = int(getattr(decoder, "python_decode_call_count", -1))
+    status = "ok" if python_decode_calls == 0 else "python-callback-used"
+    summary = decoder.build_summary
+
+    return BenchmarkRow(
+        basis,
+        distance,
+        rounds,
+        p,
+        shots,
+        "npsim-dem-pymatching-native",
+        metadata,
+        solver_edges=int(getattr(decoder, "solver_edge_count")),
+        merged_edges=int(summary.get("merged_parallel_edge_count", 0)),
+        construct_s=construct_s,
+        sample_s=None,
+        decode_or_estimate_s=estimate_s,
+        mean_loss=float(result.mean_loss),
+        python_decode_calls=python_decode_calls,
+        status=status,
     )
 
 
@@ -491,6 +544,24 @@ def format_optional_int(value: int | None) -> str:
 
 def sanitize_status(value: str) -> str:
     return " ".join(value.replace("\t", " ").split())
+
+
+def parse_paths(raw_paths: list[str]) -> tuple[str, ...]:
+    paths: list[str] = []
+    for raw in raw_paths:
+        for path in raw.split(","):
+            path = path.strip()
+            if path:
+                paths.append(path)
+    unknown = sorted(set(paths) - set(PATHS))
+    if unknown:
+        raise SystemExit(
+            "unknown path(s): "
+            + ", ".join(unknown)
+            + "; expected one of "
+            + ", ".join(PATHS)
+        )
+    return tuple(dict.fromkeys(paths))
 
 
 if __name__ == "__main__":

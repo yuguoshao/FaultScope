@@ -116,6 +116,26 @@ class NativeBposdDecoder(_NativeDecoderProxy):
         )
 
 
+class NativePyMatchingDecoder(_NativeDecoderProxy):
+    """Proxy for the optional post-install PyMatching native backend."""
+
+    backend_name = "pymatching"
+
+    @staticmethod
+    def from_dem(dem, *, options=None):
+        return create_native_decoder("pymatching", dem=dem, options=options)
+
+    @staticmethod
+    def from_circuit(circuit, *, detectors=None, observables=None, options=None):
+        return create_native_decoder(
+            "pymatching",
+            circuit=circuit,
+            detectors=detectors,
+            observables=observables,
+            options=options,
+        )
+
+
 __all__ = [
     "NativeBatchDecoder",
     "NativeBposdDecoder",
@@ -123,6 +143,7 @@ __all__ = [
     "NativeFusionBlossomDecoder",
     "NativeGraphlikeDetectorCopyDecoder",
     "NativeNoCorrectionDecoder",
+    "NativePyMatchingDecoder",
     "NoCorrectionDecoder",
     "PyMatchingBatchDecoder",
     "PyMatchingUnavailableError",

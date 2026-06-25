@@ -25,6 +25,7 @@ from npsim import (
     LogicalObservable,
     NoiseLocation,
     Operation,
+    NativePyMatchingDecoder,
     PyMatchingBatchDecoder,
 )
 ```
@@ -311,13 +312,15 @@ ordinary Python decoders and do not enter the native fast path.
 `available_native_decoders()` returns the names of compiled native decoder
 backends. The default build exposes `"no-correction"` and
 `"graphlike-detector-copy"`. Optional post-install backends can add names such
-as `"fusion-blossom"` through the `npsim.native_decoders` entry point group. Use
+as `"pymatching"` and `"fusion-blossom"` through the
+`npsim.native_decoders` entry point group. Use
 `get_native_decoder_class(name)` or `create_native_decoder(name, dem=dem)` for a
-uniform API. Friendly proxies such as `NativeFusionBlossomDecoder` and
-`NativeBposdDecoder` remain importable; construction raises an install hint
-until a compatible backend package is installed. A post-install backend enters
-the native fast path only when the constructed decoder exposes the NPSim native
-decoder PyCapsule ABI; otherwise it remains a normal Python decoder.
+uniform API. Friendly proxies such as `NativePyMatchingDecoder`,
+`NativeFusionBlossomDecoder`, and `NativeBposdDecoder` remain importable;
+construction raises an install hint until a compatible backend package is
+installed. A post-install backend enters the native fast path only when the
+constructed decoder exposes the NPSim native decoder PyCapsule ABI; otherwise it
+remains a normal Python decoder.
 
 ## Detector Error Models
 
@@ -522,10 +525,20 @@ decoder = PyMatchingBatchDecoder.from_dem(dem)
 print(decoder.decode_batch_masks({0: 0b1010}, shots=4))
 ```
 
-`PyMatchingBatchDecoder.from_dem(...)` builds a decoder from a graphlike DEM.
-The resulting decoder implements `decode_batch_masks(batch)`, so it can be
-passed to either `BatchForwardNoiseAwareSimulator.estimate(..., decoder=decoder)`
-or `DemBatchHotspotSimulator.estimate(..., decoder=decoder)`.
+`PyMatchingBatchDecoder.from_dem(...)` builds a Python compatibility decoder
+from a graphlike DEM. The resulting decoder implements
+`decode_batch_masks(batch)`, so it can be passed to either
+`BatchForwardNoiseAwareSimulator.estimate(..., decoder=decoder)` or
+`DemBatchHotspotSimulator.estimate(..., decoder=decoder)`, but its hot batch
+data crosses Python.
+
+For the native PyMatching hot path, install the optional backend and use:
+
+```python
+from npsim.decoders import NativePyMatchingDecoder
+
+decoder = NativePyMatchingDecoder.from_dem(dem)
+```
 
 Stim import:
 
