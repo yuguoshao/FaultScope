@@ -19,6 +19,16 @@ typedef struct NpsimPyMatchingEdge {
     size_t observable_count;
 } NpsimPyMatchingEdge;
 
+typedef struct NpsimPyMatchingMaskView {
+    const uint64_t *words;
+    size_t word_count;
+} NpsimPyMatchingMaskView;
+
+typedef struct NpsimPyMatchingMaskMutView {
+    uint64_t *words;
+    size_t word_count;
+} NpsimPyMatchingMaskMutView;
+
 NpsimPyMatchingDecoder *npsim_pymatching_decoder_new(
     size_t detector_count,
     size_t observable_count,
@@ -35,6 +45,17 @@ int npsim_pymatching_decoder_decode(
     size_t defect_count,
     uint8_t *observables,
     int64_t *weight,
+    char *error_message,
+    size_t error_message_capacity);
+
+int npsim_pymatching_decoder_decode_batch(
+    NpsimPyMatchingDecoder *decoder,
+    const NpsimPyMatchingMaskView *detector_masks,
+    size_t detector_count,
+    NpsimPyMatchingMaskMutView *observable_masks,
+    size_t observable_count,
+    size_t shots,
+    size_t word_count,
     char *error_message,
     size_t error_message_capacity);
 

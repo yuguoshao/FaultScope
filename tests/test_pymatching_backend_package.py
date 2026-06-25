@@ -112,10 +112,18 @@ class PyMatchingBackendPackageTests(unittest.TestCase):
             decoder = create_native_decoder("pymatching", dem=dem)
             friendly_decoder = NativePyMatchingDecoder.from_dem(dem)
             result = sampler.estimate(shots=2048, seed=101, decoder=decoder)
+            mean_loss_result = sampler.estimate(
+                shots=2048,
+                seed=101,
+                decoder=decoder,
+                aggregate_hotspots=False,
+            )
 
         self.assertEqual(decoder.python_decode_call_count, 0)
         self.assertEqual(friendly_decoder.python_decode_call_count, 0)
         self.assertEqual(result.mean_loss, 0.0)
+        self.assertEqual(mean_loss_result.mean_loss, 0.0)
+        self.assertEqual(mean_loss_result.edge_sensitivities, {})
 
     @requires_native_backend
     def test_decode_batch_masks_debug_fallback_decodes_two_detector_edge(self) -> None:
@@ -141,6 +149,28 @@ class PyMatchingBackendPackageTests(unittest.TestCase):
         corrections = decoder.decode_batch_masks(batch)
 
         self.assertEqual(corrections, {0: 0b1010})
+        self.assertEqual(decoder.python_decode_call_count, 1)
+
+    @requires_native_backend
+    def test_decode_batch_masks_reads_and_writes_multiple_packed_words(self) -> None:
+        decoder = npsim_pymatching.NativePyMatchingDecoder.from_dem(single_boundary_dem())
+        mask = (1 << 0) | (1 << 65) | (1 << 129)
+        batch = _Batch(shots=130, detectors={0: mask})
+
+        corrections = decoder.decode_batch_masks(batch)
+
+        self.assertEqual(corrections, {0: mask})
+        self.assertEqual(decoder.python_decode_call_count, 1)
+
+    @requires_native_backend
+    def test_decode_batch_masks_handles_more_than_64_observables(self) -> None:
+        decoder = npsim_pymatching.NativePyMatchingDecoder.from_dem(many_observable_dem(65))
+        mask = 0b10101
+        batch = _Batch(shots=5, detectors={0: mask})
+
+        corrections = decoder.decode_batch_masks(batch)
+
+        self.assertEqual(corrections, {observable_id: mask for observable_id in range(65)})
         self.assertEqual(decoder.python_decode_call_count, 1)
 
     @requires_native_backend
@@ -209,6 +239,22 @@ def two_edge_dem() -> DetectorErrorModel:
                 detectors=(1,),
                 observables=(),
                 location_id="edge2",
+                event="X",
+            ),
+        ),
+    )
+
+
+def many_observable_dem(observable_count: int) -> DetectorErrorModel:
+    return DetectorErrorModel(
+        detectors=(Detector(id=0, measurement_keys=()),),
+        observables=tuple(LogicalObservable(id=index) for index in range(observable_count)),
+        edges=(
+            DetectorErrorEdge(
+                probability=0.2,
+                detectors=(0,),
+                observables=tuple(range(observable_count)),
+                location_id="edge0",
                 event="X",
             ),
         ),

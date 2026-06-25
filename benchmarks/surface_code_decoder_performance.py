@@ -25,7 +25,10 @@ if str(ROOT) not in sys.path:
 if str(BENCHMARK_DIR) not in sys.path:
     sys.path.insert(0, str(BENCHMARK_DIR))
 
-from npsim.decoders import NativeFusionBlossomDecoder, NativePyMatchingDecoder
+from npsim.decoders import (
+    NativeFusionBlossomDecoder,
+    NativePyMatchingDecoder,
+)
 from npsim.dem import Detector, DetectorErrorEdge, DetectorErrorModel, LogicalObservable
 from npsim.runtime import compile_native_dem_sampler
 from surface_code_threshold import (
@@ -95,6 +98,16 @@ def main() -> None:
     parser.add_argument("--rounds", type=int, default=None)
     parser.add_argument("--seed", type=int, default=12_345)
     parser.add_argument("--paths", nargs="+", default=list(PATHS))
+    parser.add_argument(
+        "--split-native-baseline",
+        action="store_true",
+        help=(
+            "For native decoder paths, report sample_s as a no-decoder native "
+            "estimate baseline and decode_or_estimate_s as the decoder delta. "
+            "This preserves the TSV schema while exposing whether remaining "
+            "time is sampler/hotspot baseline or decoder work."
+        ),
+    )
     args = parser.parse_args()
 
     stim, pymatching, _np = _load_required_modules()
@@ -169,6 +182,7 @@ def main() -> None:
                     args.shots,
                     metadata,
                     seed,
+                    args.split_native_baseline,
                 ),
                 "npsim-dem-fusion-blossom": lambda seed: run_npsim_dem_fusion_blossom(
                     npsim_dem,
@@ -316,15 +330,30 @@ def run_npsim_dem_pymatching_native(
     shots: int,
     metadata: ProblemMetadata,
     seed: int,
+    split_baseline: bool,
 ) -> BenchmarkRow:
     started = time.perf_counter()
     sampler = compile_native_dem_sampler(npsim_dem)
     decoder = NativePyMatchingDecoder.from_dem(npsim_dem)
     construct_s = time.perf_counter() - started
 
+    baseline_s = None
+    if split_baseline:
+        started = time.perf_counter()
+        sampler.estimate(shots=shots, seed=seed, aggregate_hotspots=False)
+        baseline_s = time.perf_counter() - started
+
     started = time.perf_counter()
-    result = sampler.estimate(shots=shots, seed=seed, decoder=decoder)
+    result = sampler.estimate(
+        shots=shots,
+        seed=seed,
+        decoder=decoder,
+        aggregate_hotspots=False,
+    )
     estimate_s = time.perf_counter() - started
+    decoder_delta_s = (
+        max(0.0, estimate_s - baseline_s) if baseline_s is not None else estimate_s
+    )
 
     python_decode_calls = int(getattr(decoder, "python_decode_call_count", -1))
     status = "ok" if python_decode_calls == 0 else "python-callback-used"
@@ -341,8 +370,8 @@ def run_npsim_dem_pymatching_native(
         solver_edges=int(getattr(decoder, "solver_edge_count")),
         merged_edges=int(summary.get("merged_parallel_edge_count", 0)),
         construct_s=construct_s,
-        sample_s=None,
-        decode_or_estimate_s=estimate_s,
+        sample_s=baseline_s,
+        decode_or_estimate_s=decoder_delta_s,
         mean_loss=float(result.mean_loss),
         python_decode_calls=python_decode_calls,
         status=status,

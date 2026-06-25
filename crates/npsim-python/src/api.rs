@@ -548,7 +548,8 @@ impl NativeDemSampler {
         correction_mask_fn=None,
         loss_mask_fn=None,
         baseline=None,
-        top_k=10
+        top_k=10,
+        aggregate_hotspots=true
     ))]
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn estimate(
@@ -561,6 +562,7 @@ impl NativeDemSampler {
         loss_mask_fn: Option<&Bound<'_, PyAny>>,
         baseline: Option<&Bound<'_, PyAny>>,
         top_k: usize,
+        aggregate_hotspots: bool,
     ) -> PyResult<PyDemHotspotResult> {
         if shots == 0 {
             return Err(PyValueError::new_err("shots must be positive"));
@@ -577,7 +579,7 @@ impl NativeDemSampler {
                 if let Some(native_decoder) = native_decoder_from_py(decoder)? {
                     let estimate = py.allow_threads(|| {
                         let mut rng = SmallRng::new(seed.unwrap_or(0x95f2_04dc_4291_a715));
-                        let batch = run_dem_batch(self, shots, &mut rng, true);
+                        let batch = run_dem_batch(self, shots, &mut rng, aggregate_hotspots);
                         let detector_masks = detector_mask_view_from_map(
                             &batch.detectors,
                             native_decoder.detector_ids(),
@@ -598,8 +600,13 @@ impl NativeDemSampler {
                             &self.observables,
                             &batch.all_mask,
                         );
-                        Ok::<DemEstimate, PyErr>(compute_dem_estimate(
-                            self, &batch, &loss_mask, baseline, top_k,
+                        Ok::<DemEstimate, PyErr>(dem_estimate_from_loss_mask(
+                            self,
+                            &batch,
+                            &loss_mask,
+                            baseline,
+                            top_k,
+                            aggregate_hotspots,
                         ))
                     })?;
                     return dem_hotspot_result_from_estimate(py, self, &estimate);
@@ -607,15 +614,22 @@ impl NativeDemSampler {
             } else {
                 let estimate = py.allow_threads(|| {
                     let mut rng = SmallRng::new(seed.unwrap_or(0x95f2_04dc_4291_a715));
-                    let batch = run_dem_batch(self, shots, &mut rng, true);
-                    compute_dem_estimate(self, &batch, &batch.loss_mask, baseline, top_k)
+                    let batch = run_dem_batch(self, shots, &mut rng, aggregate_hotspots);
+                    dem_estimate_from_loss_mask(
+                        self,
+                        &batch,
+                        &batch.loss_mask,
+                        baseline,
+                        top_k,
+                        aggregate_hotspots,
+                    )
                 });
                 return dem_hotspot_result_from_estimate(py, self, &estimate);
             }
         }
         let batch = py.allow_threads(|| {
             let mut rng = SmallRng::new(seed.unwrap_or(0x95f2_04dc_4291_a715));
-            run_dem_batch(self, shots, &mut rng, true)
+            run_dem_batch(self, shots, &mut rng, aggregate_hotspots)
         });
         let batch = Py::new(py, NativeDemBatch { batch })?;
         let corrections = dem_correction_masks(py, &batch, decoder, correction_mask_fn)?;
@@ -633,7 +647,14 @@ impl NativeDemSampler {
             dem_default_loss_mask(py, &batch_ref, &corrections, &self.observables)?
         };
         let batch_ref = batch.bind(py).borrow();
-        let estimate = compute_dem_estimate(self, &batch_ref.batch, &loss_mask, baseline, top_k);
+        let estimate = dem_estimate_from_loss_mask(
+            self,
+            &batch_ref.batch,
+            &loss_mask,
+            baseline,
+            top_k,
+            aggregate_hotspots,
+        );
         dem_hotspot_result_from_estimate(py, self, &estimate)
     }
 
@@ -663,6 +684,49 @@ impl NativeDemSampler {
             ));
         }
         Ok(())
+    }
+}
+
+fn dem_estimate_from_loss_mask(
+    sampler: &NativeDemSampler,
+    batch: &DemBatch,
+    loss_mask: &Mask,
+    baseline: Option<f64>,
+    top_k: usize,
+    aggregate_hotspots: bool,
+) -> DemEstimate {
+    if aggregate_hotspots {
+        return compute_dem_estimate(sampler, batch, loss_mask, baseline, top_k);
+    }
+
+    let mut clipped_loss = loss_mask.clone();
+    clipped_loss.and_assign(&batch.all_mask);
+    let loss_count = clipped_loss.bit_count();
+    let mean_loss = loss_count as f64 / batch.shots as f64;
+    DemEstimate {
+        shots: batch.shots,
+        mean_loss,
+        baseline: baseline.unwrap_or(mean_loss),
+        edge_sensitivities: Vec::new(),
+        edge_hotspots: Vec::new(),
+        location_sensitivities: HashMap::new(),
+        location_hotspots: HashMap::new(),
+        by_detector: HashMap::new(),
+        by_round: HashMap::new(),
+        by_gate: HashMap::new(),
+        by_operation: HashMap::new(),
+        detector_graph: npsim_core::DetectorGraphEstimate {
+            by_detector_edge: HashMap::new(),
+            signed_by_detector_edge: HashMap::new(),
+            by_detector: HashMap::new(),
+            signed_by_detector: HashMap::new(),
+            by_observable: HashMap::new(),
+            signed_by_observable: HashMap::new(),
+            by_location: HashMap::new(),
+            signed_by_location: HashMap::new(),
+        },
+        top_edges: Vec::new(),
+        top_locations: Vec::new(),
     }
 }
 
@@ -725,7 +789,8 @@ impl PyDemBatchHotspotSimulator {
         correction_mask_fn=None,
         loss_mask_fn=None,
         baseline=None,
-        top_k=10
+        top_k=10,
+        aggregate_hotspots=true
     ))]
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn estimate(
@@ -738,6 +803,7 @@ impl PyDemBatchHotspotSimulator {
         loss_mask_fn: Option<&Bound<'_, PyAny>>,
         baseline: Option<&Bound<'_, PyAny>>,
         top_k: usize,
+        aggregate_hotspots: bool,
     ) -> PyResult<PyDemHotspotResult> {
         self.sampler.estimate(
             py,
@@ -748,6 +814,7 @@ impl PyDemBatchHotspotSimulator {
             loss_mask_fn,
             baseline,
             top_k,
+            aggregate_hotspots,
         )
     }
 

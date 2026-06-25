@@ -599,6 +599,11 @@ time, sampling time where separable, native estimate time, solver-edge
 metadata, merged parallel edges, and whether native paths stayed out of Python
 callbacks.
 
+For native backend diagnosis, add `--split-native-baseline`. The native rows
+then report `sample_s` as a no-decoder native mean-loss baseline and
+`decode_or_estimate_s` as the additional decoder cost. This makes it clear
+whether a gap is in NPSim sampling/aggregation or in the backend decode loop.
+
 ## Validation And Performance Rules
 
 NPSim validates native decoder output before using it:

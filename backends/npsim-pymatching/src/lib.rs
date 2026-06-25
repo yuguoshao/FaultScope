@@ -31,6 +31,18 @@ struct PymatchingShimEdge {
     observable_count: usize,
 }
 
+#[repr(C)]
+struct PymatchingShimMaskView {
+    words: *const u64,
+    word_count: usize,
+}
+
+#[repr(C)]
+struct PymatchingShimMaskMutView {
+    words: *mut u64,
+    word_count: usize,
+}
+
 enum PymatchingShimDecoder {}
 
 extern "C" {
@@ -45,12 +57,14 @@ extern "C" {
 
     fn npsim_pymatching_decoder_free(decoder: *mut PymatchingShimDecoder);
 
-    fn npsim_pymatching_decoder_decode(
+    fn npsim_pymatching_decoder_decode_batch(
         decoder: *mut PymatchingShimDecoder,
-        defects: *const u64,
-        defect_count: usize,
-        observables: *mut u8,
-        weight: *mut i64,
+        detector_masks: *const PymatchingShimMaskView,
+        detector_count: usize,
+        observable_masks: *mut PymatchingShimMaskMutView,
+        observable_count: usize,
+        shots: usize,
+        word_count: usize,
         error_message: *mut c_char,
         error_message_capacity: usize,
     ) -> c_int;
@@ -283,16 +297,23 @@ impl PymatchingNativeDecoder {
         Ok(Self { ptr })
     }
 
-    fn decode(&mut self, defects: &[u64], observables: &mut [u8]) -> Result<i64, String> {
-        let mut weight = 0;
+    fn decode_batch(
+        &mut self,
+        detector_masks: &[PymatchingShimMaskView],
+        observable_masks: &mut [PymatchingShimMaskMutView],
+        shots: usize,
+        word_count: usize,
+    ) -> Result<(), String> {
         let mut error = ErrorBuffer::new();
         let code = unsafe {
-            npsim_pymatching_decoder_decode(
+            npsim_pymatching_decoder_decode_batch(
                 self.ptr,
-                defects.as_ptr(),
-                defects.len(),
-                observables.as_mut_ptr(),
-                &mut weight,
+                detector_masks.as_ptr(),
+                detector_masks.len(),
+                observable_masks.as_mut_ptr(),
+                observable_masks.len(),
+                shots,
+                word_count,
                 error.ptr(),
                 error.capacity(),
             )
@@ -300,7 +321,7 @@ impl PymatchingNativeDecoder {
         if code != 0 {
             return Err(error.message());
         }
-        Ok(weight)
+        Ok(())
     }
 }
 
@@ -779,39 +800,29 @@ unsafe fn decoder_decode_batch_impl(
         Ok(native) => native,
         Err(_) => return state_error(state, "pymatching native decoder mutex poisoned"),
     };
-    let mut defects = Vec::with_capacity(state.detector_ids.len());
-    let mut observables = vec![0u8; state.observable_ids.len()];
-    for shot in 0..input.shots {
-        defects.clear();
-        for (detector_index, input_mask) in input_masks.iter().enumerate() {
-            if read_bit(input_mask.words, shot) {
-                defects.push(detector_index as u64);
-            }
-        }
-        if defects.is_empty() {
-            continue;
-        }
-        observables.fill(0);
-        if let Err(message) = native.decode(&defects, &mut observables) {
-            return state_error(state, format!("pymatching solver error: {message}"));
-        }
-        for (observable_index, bit) in observables.iter().enumerate() {
-            if *bit != 0 {
-                xor_bit(output_masks[observable_index].words, shot);
-            }
-        }
+    let detector_mask_views = input_masks
+        .iter()
+        .map(|mask| PymatchingShimMaskView {
+            words: mask.words,
+            word_count: mask.word_count,
+        })
+        .collect::<Vec<_>>();
+    let mut observable_mask_views = output_masks
+        .iter_mut()
+        .map(|mask| PymatchingShimMaskMutView {
+            words: mask.words,
+            word_count: mask.word_count,
+        })
+        .collect::<Vec<_>>();
+    if let Err(message) = native.decode_batch(
+        &detector_mask_views,
+        &mut observable_mask_views,
+        input.shots,
+        input.word_count,
+    ) {
+        return state_error(state, format!("pymatching solver error: {message}"));
     }
     NpsimNativeDecoderStatusV1::ok()
-}
-
-unsafe fn read_bit(words: *const u64, shot: usize) -> bool {
-    let word = *words.add(shot / 64);
-    ((word >> (shot % 64)) & 1) != 0
-}
-
-unsafe fn xor_bit(words: *mut u64, shot: usize) {
-    let word = words.add(shot / 64);
-    *word ^= 1u64 << (shot % 64);
 }
 
 fn build_summary_to_py(py: Python<'_>, summary: &BuildSummary) -> PyResult<PyObject> {

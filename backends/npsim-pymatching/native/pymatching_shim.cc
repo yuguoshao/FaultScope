@@ -27,6 +27,16 @@ struct NpsimPyMatchingDecoder {
 
 namespace {
 
+struct DetectionEventSpan {
+    const uint64_t *data;
+    size_t size;
+};
+
+struct PackedShotEvents {
+    std::vector<size_t> offsets;
+    std::vector<uint64_t> events;
+};
+
 void write_error(char *buffer, size_t capacity, const std::string &message) {
     if (buffer == nullptr || capacity == 0) {
         return;
@@ -36,14 +46,31 @@ void write_error(char *buffer, size_t capacity, const std::string &message) {
     buffer[len] = '\0';
 }
 
-void process_timeline_until_completion(pm::Mwpm &mwpm, const std::vector<uint64_t> &detection_events) {
+size_t trailing_zero_count(uint64_t word) {
+#if defined(__GNUC__) || defined(__clang__)
+    return (size_t)__builtin_ctzll(word);
+#else
+    size_t count = 0;
+    while (((word >> count) & 1) == 0) {
+        count++;
+    }
+    return count;
+#endif
+}
+
+DetectionEventSpan span_from_vector(const std::vector<uint64_t> &events) {
+    return DetectionEventSpan{events.data(), events.size()};
+}
+
+void process_timeline_until_completion(pm::Mwpm &mwpm, DetectionEventSpan detection_events) {
     if (!mwpm.flooder.queue.empty()) {
         throw std::invalid_argument("!mwpm.flooder.queue.empty()");
     }
     mwpm.flooder.queue.cur_time = 0;
 
     if (mwpm.flooder.negative_weight_detection_events.empty()) {
-        for (auto detection : detection_events) {
+        for (size_t event_index = 0; event_index < detection_events.size; event_index++) {
+            auto detection = detection_events.data[event_index];
             if (detection >= mwpm.flooder.graph.nodes.size()) {
                 throw std::invalid_argument(
                     "detection event index " + std::to_string(detection) +
@@ -58,7 +85,8 @@ void process_timeline_until_completion(pm::Mwpm &mwpm, const std::vector<uint64_
         for (auto det : mwpm.flooder.negative_weight_detection_events) {
             mwpm.flooder.graph.nodes[det].radius_of_arrival = 1;
         }
-        for (auto detection : detection_events) {
+        for (size_t event_index = 0; event_index < detection_events.size; event_index++) {
+            auto detection = detection_events.data[event_index];
             if (detection >= mwpm.flooder.graph.nodes.size()) {
                 throw std::invalid_argument(
                     "detection event index " + std::to_string(detection) +
@@ -99,9 +127,10 @@ void process_timeline_until_completion(pm::Mwpm &mwpm, const std::vector<uint64_
 
 pm::MatchingResult shatter_blossoms_and_extract_obs_mask(
     pm::Mwpm &mwpm,
-    const std::vector<uint64_t> &detection_events) {
+    DetectionEventSpan detection_events) {
     pm::MatchingResult result;
-    for (auto i : detection_events) {
+    for (size_t event_index = 0; event_index < detection_events.size; event_index++) {
+        auto i = detection_events.data[event_index];
         if (mwpm.flooder.graph.nodes[i].region_that_arrived) {
             result += mwpm.shatter_blossom_and_extract_matches(
                 mwpm.flooder.graph.nodes[i].region_that_arrived_top);
@@ -112,8 +141,9 @@ pm::MatchingResult shatter_blossoms_and_extract_obs_mask(
 
 void shatter_blossoms_and_extract_match_edges(
     pm::Mwpm &mwpm,
-    const std::vector<uint64_t> &detection_events) {
-    for (auto i : detection_events) {
+    DetectionEventSpan detection_events) {
+    for (size_t event_index = 0; event_index < detection_events.size; event_index++) {
+        auto i = detection_events.data[event_index];
         if (mwpm.flooder.graph.nodes[i].region_that_arrived) {
             mwpm.shatter_blossom_and_extract_match_edges(
                 mwpm.flooder.graph.nodes[i].region_that_arrived_top,
@@ -128,21 +158,42 @@ void fill_bit_vector_from_obs_mask(pm::obs_int obs_mask, uint8_t *obs_begin_ptr,
     }
 }
 
+void xor_packed_bit(uint64_t *words, size_t shot) {
+    words[shot >> 6] ^= (uint64_t)1 << (shot & 63);
+}
+
+pm::MatchingResult decode_detection_events_for_up_to_64_observables(
+    pm::Mwpm &mwpm,
+    DetectionEventSpan detection_events) {
+    process_timeline_until_completion(mwpm, detection_events);
+
+    pm::MatchingResult packed =
+        shatter_blossoms_and_extract_obs_mask(mwpm, detection_events);
+    if (!mwpm.flooder.negative_weight_detection_events.empty()) {
+        packed += shatter_blossoms_and_extract_obs_mask(
+            mwpm,
+            span_from_vector(mwpm.flooder.negative_weight_detection_events));
+    }
+    packed.obs_mask ^= mwpm.flooder.negative_weight_obs_mask;
+    packed.weight += mwpm.flooder.negative_weight_sum;
+    return packed;
+}
+
 void decode_detection_events(
     pm::Mwpm &mwpm,
-    const std::vector<uint64_t> &detection_events,
+    DetectionEventSpan detection_events,
     uint8_t *observables,
     pm::total_weight_int &weight) {
     size_t num_observables = mwpm.flooder.graph.num_observables;
-    process_timeline_until_completion(mwpm, detection_events);
 
     if (num_observables > sizeof(pm::obs_int) * 8) {
+        process_timeline_until_completion(mwpm, detection_events);
         mwpm.flooder.match_edges.clear();
         shatter_blossoms_and_extract_match_edges(mwpm, detection_events);
         if (!mwpm.flooder.negative_weight_detection_events.empty()) {
             shatter_blossoms_and_extract_match_edges(
                 mwpm,
-                mwpm.flooder.negative_weight_detection_events);
+                span_from_vector(mwpm.flooder.negative_weight_detection_events));
         }
         mwpm.extract_paths_from_match_edges(mwpm.flooder.match_edges, observables, weight);
         for (auto obs : mwpm.flooder.negative_weight_observables) {
@@ -151,15 +202,9 @@ void decode_detection_events(
         weight += mwpm.flooder.negative_weight_sum;
     } else {
         pm::MatchingResult packed =
-            shatter_blossoms_and_extract_obs_mask(mwpm, detection_events);
-        if (!mwpm.flooder.negative_weight_detection_events.empty()) {
-            packed += shatter_blossoms_and_extract_obs_mask(
-                mwpm,
-                mwpm.flooder.negative_weight_detection_events);
-        }
-        packed.obs_mask ^= mwpm.flooder.negative_weight_obs_mask;
+            decode_detection_events_for_up_to_64_observables(mwpm, detection_events);
         fill_bit_vector_from_obs_mask(packed.obs_mask, observables, num_observables);
-        weight = packed.weight + mwpm.flooder.negative_weight_sum;
+        weight = packed.weight;
     }
 }
 
@@ -171,6 +216,100 @@ std::vector<size_t> edge_observables(const NpsimPyMatchingEdge &edge) {
         throw std::invalid_argument("edge observables pointer is null");
     }
     return std::vector<size_t>(edge.observables, edge.observables + edge.observable_count);
+}
+
+PackedShotEvents collect_packed_shot_events(
+    const NpsimPyMatchingMaskView *detector_masks,
+    size_t detector_count,
+    size_t shots,
+    size_t word_count) {
+    std::vector<size_t> counts(shots, 0);
+    for (size_t detector = 0; detector < detector_count; detector++) {
+        const uint64_t *words = detector_masks[detector].words;
+        for (size_t word_index = 0; word_index < word_count; word_index++) {
+            uint64_t word = words[word_index];
+            while (word != 0) {
+                size_t bit = trailing_zero_count(word);
+                size_t shot = (word_index << 6) + bit;
+                if (shot < shots) {
+                    counts[shot]++;
+                }
+                word &= word - 1;
+            }
+        }
+    }
+
+    std::vector<size_t> offsets(shots + 1, 0);
+    for (size_t shot = 0; shot < shots; shot++) {
+        offsets[shot + 1] = offsets[shot] + counts[shot];
+    }
+
+    std::vector<uint64_t> events(offsets.back());
+    std::vector<size_t> next = offsets;
+    for (size_t detector = 0; detector < detector_count; detector++) {
+        const uint64_t *words = detector_masks[detector].words;
+        for (size_t word_index = 0; word_index < word_count; word_index++) {
+            uint64_t word = words[word_index];
+            while (word != 0) {
+                size_t bit = trailing_zero_count(word);
+                size_t shot = (word_index << 6) + bit;
+                if (shot < shots) {
+                    events[next[shot]++] = detector;
+                }
+                word &= word - 1;
+            }
+        }
+    }
+
+    return PackedShotEvents{std::move(offsets), std::move(events)};
+}
+
+void validate_batch_masks(
+    const NpsimPyMatchingDecoder *decoder,
+    const NpsimPyMatchingMaskView *detector_masks,
+    size_t detector_count,
+    const NpsimPyMatchingMaskMutView *observable_masks,
+    size_t observable_count,
+    size_t word_count) {
+    if (decoder == nullptr) {
+        throw std::invalid_argument("decoder pointer is null");
+    }
+    if (detector_count != decoder->detector_count) {
+        throw std::invalid_argument(
+            "detector mask count " + std::to_string(detector_count) +
+            " does not match decoder detector count " + std::to_string(decoder->detector_count));
+    }
+    if (observable_count != decoder->observable_count) {
+        throw std::invalid_argument(
+            "observable mask count " + std::to_string(observable_count) +
+            " does not match decoder observable count " + std::to_string(decoder->observable_count));
+    }
+    if (detector_count > 0 && detector_masks == nullptr) {
+        throw std::invalid_argument("detector masks pointer is null");
+    }
+    if (observable_count > 0 && observable_masks == nullptr) {
+        throw std::invalid_argument("observable masks pointer is null");
+    }
+    for (size_t index = 0; index < detector_count; index++) {
+        if (detector_masks[index].word_count != word_count) {
+            throw std::invalid_argument(
+                "detector mask " + std::to_string(index) +
+                " word count does not match batch word count");
+        }
+        if (word_count > 0 && detector_masks[index].words == nullptr) {
+            throw std::invalid_argument("detector mask words pointer is null");
+        }
+    }
+    for (size_t index = 0; index < observable_count; index++) {
+        if (observable_masks[index].word_count != word_count) {
+            throw std::invalid_argument(
+                "observable mask " + std::to_string(index) +
+                " word count does not match batch word count");
+        }
+        if (word_count > 0 && observable_masks[index].words == nullptr) {
+            throw std::invalid_argument("observable mask words pointer is null");
+        }
+    }
 }
 
 }  // namespace
@@ -252,13 +391,93 @@ extern "C" int npsim_pymatching_decoder_decode(
         std::memset(observables, 0, decoder->observable_count);
         std::vector<uint64_t> detection_events(defects, defects + defect_count);
         pm::total_weight_int decoded_weight = 0;
-        decode_detection_events(decoder->mwpm, detection_events, observables, decoded_weight);
+        decode_detection_events(
+            decoder->mwpm,
+            span_from_vector(detection_events),
+            observables,
+            decoded_weight);
         *weight = decoded_weight;
         return 0;
     } catch (const std::exception &ex) {
         write_error(error_message, error_message_capacity, ex.what());
     } catch (...) {
         write_error(error_message, error_message_capacity, "unknown PyMatching decode error");
+    }
+    return 1;
+}
+
+extern "C" int npsim_pymatching_decoder_decode_batch(
+    NpsimPyMatchingDecoder *decoder,
+    const NpsimPyMatchingMaskView *detector_masks,
+    size_t detector_count,
+    NpsimPyMatchingMaskMutView *observable_masks,
+    size_t observable_count,
+    size_t shots,
+    size_t word_count,
+    char *error_message,
+    size_t error_message_capacity) {
+    try {
+        validate_batch_masks(
+            decoder,
+            detector_masks,
+            detector_count,
+            observable_masks,
+            observable_count,
+            word_count);
+
+        PackedShotEvents shot_events =
+            collect_packed_shot_events(detector_masks, detector_count, shots, word_count);
+
+        if (observable_count <= sizeof(pm::obs_int) * 8) {
+            for (size_t shot = 0; shot < shots; shot++) {
+                size_t begin = shot_events.offsets[shot];
+                size_t end = shot_events.offsets[shot + 1];
+                if (begin == end) {
+                    continue;
+                }
+                DetectionEventSpan detection_events{
+                    shot_events.events.data() + begin,
+                    end - begin,
+                };
+                pm::MatchingResult packed =
+                    decode_detection_events_for_up_to_64_observables(decoder->mwpm, detection_events);
+                for (size_t observable = 0; observable < observable_count; observable++) {
+                    if (((packed.obs_mask >> observable) & 1) != 0) {
+                        xor_packed_bit(observable_masks[observable].words, shot);
+                    }
+                }
+            }
+        } else {
+            std::vector<uint8_t> temp_predictions(observable_count);
+            for (size_t shot = 0; shot < shots; shot++) {
+                size_t begin = shot_events.offsets[shot];
+                size_t end = shot_events.offsets[shot + 1];
+                if (begin == end) {
+                    continue;
+                }
+                DetectionEventSpan detection_events{
+                    shot_events.events.data() + begin,
+                    end - begin,
+                };
+                std::fill(temp_predictions.begin(), temp_predictions.end(), 0);
+                pm::total_weight_int decoded_weight = 0;
+                decode_detection_events(
+                    decoder->mwpm,
+                    detection_events,
+                    temp_predictions.data(),
+                    decoded_weight);
+                for (size_t observable = 0; observable < observable_count; observable++) {
+                    if (temp_predictions[observable] != 0) {
+                        xor_packed_bit(observable_masks[observable].words, shot);
+                    }
+                }
+            }
+        }
+        return 0;
+    } catch (const std::exception &ex) {
+        write_error(error_message, error_message_capacity, ex.what());
+    } catch (...) {
+        write_error(error_message, error_message_capacity, "unknown PyMatching batch decode error");
     }
     return 1;
 }

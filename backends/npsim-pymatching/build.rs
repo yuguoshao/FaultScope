@@ -26,6 +26,7 @@ fn main() {
     build
         .cpp(true)
         .std("c++20")
+        .define("NDEBUG", None)
         .include(&source_root)
         .include("native")
         .file("native/pymatching_shim.cc");

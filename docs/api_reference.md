@@ -430,8 +430,14 @@ estimate(
     loss_mask_fn=None,
     baseline=None,
     top_k=10,
+    aggregate_hotspots=True,
 ) -> DemHotspotResult
 ```
+
+Set `aggregate_hotspots=False` for decoder benchmarks and logic-only estimates.
+This skips DEM edge-event recording and hotspot metadata aggregation while
+keeping the same result object shape; when `decoder` is native, syndrome and
+correction masks stay in native memory.
 
 `DemBatchTrajectory` stores:
 
