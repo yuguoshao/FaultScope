@@ -479,11 +479,12 @@ metadata, and a `fusion-blossom` decoder class. The class implements
 `GraphlikeDecodingProblem`, passes that metadata to the package's Rust/PyO3
 extension, and stores external native decoder state in a PyCapsule.
 
-The current backend is a minimal serial fusion-blossom MWPM adapter. It maps
-NPSim detector indices to fusion-blossom vertices, converts graphlike DEM edges
-to weighted solver edges, runs the serial solver for each shot, and maps the
-selected edge paths back to observable correction masks. It is not yet the
-production parallel or streaming adapter.
+The current backend is a minimal serial beta fusion-blossom MWPM adapter. It
+maps NPSim detector indices to fusion-blossom vertices, converts graphlike DEM
+edges to weighted solver edges, runs the serial solver for each shot, and maps
+the selected edge paths back to observable correction masks. It safely
+compresses identical two-detector parallel edges before constructing the solver
+graph. It is not yet the production parallel or streaming adapter.
 
 The backend decoder object exposes:
 
@@ -492,6 +493,11 @@ decoder.__npsim_native_decoder_capsule__()
 decoder.name
 decoder.detector_ids
 decoder.observable_ids
+decoder.edge_count
+decoder.solver_vertex_count
+decoder.solver_edge_count
+decoder.boundary_vertex_count
+decoder.build_summary
 decoder.decode_batch_masks(batch)  # debug fallback only
 ```
 
@@ -527,22 +533,38 @@ The default package does not ship the fusion-blossom solver. After
 `npsim-fusion-blossom` is installed, the proxy delegates construction to that
 package while preserving the native fast path.
 
-The implemented minimal adapter is:
+The implemented minimal beta adapter is:
 
 1. Compile `DetectorErrorModel` to `GraphlikeDecodingProblem`.
 2. Map each NPSim detector index to a fusion-blossom vertex.
-3. Convert two-detector graphlike DEM edges to graph edges.
-4. Convert one-detector DEM edges to boundary or virtual-vertex edges.
-5. Preserve each DEM edge's fault-observable indices so the solver prediction
+3. Convert one-detector DEM edges to boundary or virtual-vertex edges.
+4. Merge two-detector parallel DEM edges only when they share both endpoints
+   and the same fault-observable set. The merged probability is the independent
+   odd-parity probability.
+5. Reject two-detector parallel edges with different fault-observable sets,
+   because choosing one correction would be ambiguous.
+6. Preserve each solver edge's contributing DEM edge indices and
+   fault-observable indices so the solver prediction
    can be converted back into observable correction masks.
-6. Convert each hot-path `DetectorMaskBatchView` shot into the solver syndrome
+7. Convert each hot-path `DetectorMaskBatchView` shot into the solver syndrome
    representation without touching Python.
-7. Return a checked `CorrectionMaskBatch`.
+8. Return a checked `CorrectionMaskBatch`.
+
+The construction summary is intentionally lightweight and safe to inspect from
+Python:
+
+```python
+summary = decoder.build_summary
+summary["dem_edge_count"]
+summary["solver_edge_count"]
+summary["merged_parallel_edge_count"]
+summary["edges"][0]["dem_edge_indices"]
+summary["edges"][0]["fault_observables"]
+```
 
 The remaining productionization items are solver reuse, parallel/streaming
-execution, erasure/dynamic weights, parallel DEM edge compression, and
-large-scale performance tuning. V1 rejects duplicate graph endpoint pairs
-instead of choosing among parallel DEM edges.
+execution, erasure/dynamic weights, compression for ambiguous parallel logical
+effects, and large-scale performance tuning.
 
 ## Validation And Performance Rules
 

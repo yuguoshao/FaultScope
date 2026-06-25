@@ -118,7 +118,8 @@ print(result.hotspot_table(top_k=5))
   `import` 或 `estimate(...)` 时隐式联网、clone 或编译。
 - 开发中的 fusion-blossom backend 可通过
   `.venv/bin/python -m pip install -e backends/npsim-fusion-blossom` 本地安装；当前是最小
-  serial MWPM adapter，尚未做 parallel/streaming/生产级性能优化。
+  serial beta MWPM adapter，支持同端点同 logical effect 的 two-detector parallel edge
+  安全合并，但尚未做 parallel/streaming/生产级性能优化。
 - `edge_sensitivities` 和 `edge_hotspots` 是按 DEM edge index keyed 的 dict。
 - `edges_by_location()` 返回 `dict[str, list[DetectorErrorEdge]]`。
 - `materialize_dem=False` 的 native DEM sampler 是轻量采样路径，`sampler.dem is None`，

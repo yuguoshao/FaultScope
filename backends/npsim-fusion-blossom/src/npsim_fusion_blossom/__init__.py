@@ -2,8 +2,8 @@
 
 This package provides the official post-install backend package shape for a
 native fusion-blossom decoder. The current implementation is a minimal serial
-MWPM adapter: it constructs Rust solver state in this package and exposes it to
-NPSim through the native decoder PyCapsule ABI.
+beta MWPM adapter: it constructs Rust solver state in this package and exposes
+it to NPSim through the native decoder PyCapsule ABI.
 """
 
 from __future__ import annotations
@@ -27,12 +27,13 @@ DEFAULT_WEIGHT_SCALE = 1_000_000
 
 
 class NativeFusionBlossomDecoder:
-    """Minimal serial fusion-blossom decoder proxy.
+    """Minimal serial beta fusion-blossom decoder proxy.
 
     This is not the production parallel or streaming fusion-blossom adapter. It
     owns Rust solver state in this backend package so the post-install PyCapsule
     path can decode graphlike DEM batches without moving hot-path syndrome or
-    correction data through Python.
+    correction data through Python. The builder safely compresses identical
+    two-detector parallel edges and rejects ambiguous parallel logical effects.
     """
 
     backend_name = BACKEND_NAME
@@ -74,6 +75,26 @@ class NativeFusionBlossomDecoder:
         return self._inner.observable_ids
 
     @property
+    def edge_count(self):
+        return self._inner.edge_count
+
+    @property
+    def solver_vertex_count(self):
+        return self._inner.solver_vertex_count
+
+    @property
+    def solver_edge_count(self):
+        return self._inner.solver_edge_count
+
+    @property
+    def boundary_vertex_count(self):
+        return self._inner.boundary_vertex_count
+
+    @property
+    def build_summary(self):
+        return self._inner.build_summary
+
+    @property
     def python_decode_call_count(self):
         return self._python_decode_call_count
 
@@ -101,7 +122,9 @@ class NativeFusionBlossomDecoder:
             "NativeFusionBlossomDecoder("
             f"name={self.name!r}, "
             f"detector_ids={self.detector_ids!r}, "
-            f"observable_ids={self.observable_ids!r})"
+            f"observable_ids={self.observable_ids!r}, "
+            f"solver_vertex_count={self.solver_vertex_count!r}, "
+            f"solver_edge_count={self.solver_edge_count!r})"
         )
 
 
@@ -112,7 +135,7 @@ def backend_manifest():
         "abi_version": NATIVE_DECODER_PLUGIN_ABI,
         "name": BACKEND_NAME,
         "version": __version__,
-        "source": "npsim-fusion-blossom minimal serial adapter",
+        "source": "npsim-fusion-blossom minimal serial beta adapter",
         "decoders": {BACKEND_NAME: NativeFusionBlossomDecoder},
     }
 

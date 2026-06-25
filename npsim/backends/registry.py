@@ -75,7 +75,9 @@ OFFICIAL_BACKEND_CATALOG: dict[str, NativeDecoderBackendCatalogEntry] = {
         repo_url="https://github.com/yuewuo/fusion-blossom.git",
         default_rev="main",
         installable=True,
-        description="Minimal serial fusion-blossom MWPM graphlike decoder backend.",
+        description=(
+            "Minimal serial beta fusion-blossom MWPM graphlike decoder backend."
+        ),
     ),
     "bposd": NativeDecoderBackendCatalogEntry(
         name="bposd",

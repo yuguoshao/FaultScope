@@ -2,10 +2,12 @@
 
 Official NPSim fusion-blossom backend.
 
-This package provides a minimal serial fusion-blossom MWPM adapter. It converts
-NPSim graphlike DEM problem views into fusion-blossom solver state and exposes
-the decoder through the NPSim native decoder PyCapsule ABI. It is not yet the
-production parallel or streaming adapter.
+This package provides a minimal serial beta fusion-blossom MWPM adapter. It
+converts NPSim graphlike DEM problem views into fusion-blossom solver state,
+safely compresses identical two-detector parallel edges, and exposes the
+decoder through the NPSim native decoder PyCapsule ABI. It is not yet the
+production parallel or streaming adapter, and it does not support erasure or
+dynamic weights.
 
 Install locally during development:
 

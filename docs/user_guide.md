@@ -576,9 +576,11 @@ the source checkout:
 NPSim does not clone, compile, or install backend code during `import npsim` or
 `estimate(...)`. The default build includes only smoke-test/template native
 backends, not fusion-blossom or BP+OSD. The local `npsim-fusion-blossom`
-package is a minimal serial solver adapter: it enters the native PyCapsule fast
-path, but it has not yet implemented parallel/streaming execution or production
-performance tuning.
+package is a minimal serial beta solver adapter: it enters the native PyCapsule
+fast path, exposes construction metadata such as `solver_edge_count`, and
+safely compresses identical two-detector parallel edges. It still rejects
+ambiguous parallel logical effects and has not implemented parallel/streaming
+execution or production performance tuning.
 
 For the full developer contract, including `from_circuit(...)`,
 `from_dem(...)`, Python prototype decoders, and native backend skeletons, see
