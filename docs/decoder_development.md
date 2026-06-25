@@ -590,14 +590,15 @@ benchmark:
 .venv/bin/python benchmarks/surface_code_decoder_performance.py --distances 3 5 7 --shots 10000
 ```
 
-It compares Stim DEM + PyMatching, NPSim DEM + Python PyMatching, NPSim DEM +
-native PyMatching, and NPSim DEM + fusion-blossom native decoding when the
-optional backend packages are installed. The benchmark uses a local graphlike
-Stim DEM converter that splits separator groups into NPSim DEM edges for native
-paths; this does not change the threshold benchmark. It reports construction
-time, sampling time where separable, native estimate time, solver-edge
-metadata, merged parallel edges, and whether native paths stayed out of Python
-callbacks.
+It compares Stim DEM + PyMatching, Stim bit-packed DEM + PyMatching bit-packed
+batch decode, NPSim DEM + Python PyMatching, NPSim DEM + native PyMatching, and
+NPSim DEM + fusion-blossom native decoding when the optional backend packages
+are installed. The bit-packed Stim/PyMatching row is the official-style
+maximum-throughput baseline. The benchmark uses a local graphlike Stim DEM
+converter that splits separator groups into NPSim DEM edges for native paths;
+this does not change the threshold benchmark. It reports construction time,
+sampling time where separable, native estimate time, solver-edge metadata,
+merged parallel edges, and whether native paths stayed out of Python callbacks.
 
 For native backend diagnosis, add `--split-native-baseline`. The native rows
 then report `sample_s` as a no-decoder native mean-loss baseline and

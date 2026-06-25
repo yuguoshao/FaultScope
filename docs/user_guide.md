@@ -738,6 +738,9 @@ require `numpy`, `scipy`, `pymatching`, and `stim`. The surface-code decoder
 performance benchmark compares PyMatching with the optional
 `npsim-pymatching` and `npsim-fusion-blossom` backends when those backends are
 installed; unavailable native backends are reported as `skip:<reason>` rows.
+The `stim-dem-pymatching-bitpacked` row uses Stim bit-packed DEM sampling plus
+PyMatching bit-packed batch decode as the official-style maximum-throughput
+baseline.
 Pass `--split-native-baseline` to show the native no-decoder mean-loss baseline
 separately from the native decoder delta.
 

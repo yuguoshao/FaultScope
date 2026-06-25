@@ -54,6 +54,7 @@ class BenchmarkSmokeTests(unittest.TestCase):
         body = [dict(zip(header, row)) for row in rows[1:]]
         rows_by_path = {row["path"]: row for row in body}
         self.assertIn("stim-dem-pymatching", rows_by_path)
+        self.assertIn("stim-dem-pymatching-bitpacked", rows_by_path)
         self.assertIn("npsim-dem-pymatching", rows_by_path)
         self.assertIn("npsim-dem-pymatching-native", rows_by_path)
         self.assertIn("npsim-dem-fusion-blossom", rows_by_path)

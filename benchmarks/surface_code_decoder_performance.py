@@ -36,11 +36,13 @@ from surface_code_threshold import (
     _load_required_modules,
     _logical_failure_stats_from_arrays,
     _logical_failure_stats_from_masks,
+    LogicalFailureStats,
 )
 
 
 PATHS = (
     "stim-dem-pymatching",
+    "stim-dem-pymatching-bitpacked",
     "npsim-dem-pymatching",
     "npsim-dem-pymatching-native",
     "npsim-dem-fusion-blossom",
@@ -161,6 +163,17 @@ def main() -> None:
                     metadata,
                     seed,
                 ),
+                "stim-dem-pymatching-bitpacked": lambda seed: run_stim_dem_pymatching_bitpacked(
+                    stim_dem,
+                    pymatching,
+                    args.basis,
+                    distance,
+                    rounds,
+                    p,
+                    args.shots,
+                    metadata,
+                    seed,
+                ),
                 "npsim-dem-pymatching": lambda seed: run_npsim_dem_pymatching(
                     stim_dem,
                     npsim_dem,
@@ -247,6 +260,54 @@ def run_stim_dem_pymatching(
         p,
         shots,
         "stim-dem-pymatching",
+        metadata,
+        solver_edges=None,
+        merged_edges=None,
+        construct_s=construct_s,
+        sample_s=sample_s,
+        decode_or_estimate_s=decode_s,
+        mean_loss=stats.rate,
+        python_decode_calls=None,
+        status="ok",
+    )
+
+
+def run_stim_dem_pymatching_bitpacked(
+    stim_dem: Any,
+    pymatching: Any,
+    basis: str,
+    distance: int,
+    rounds: int,
+    p: float,
+    shots: int,
+    metadata: ProblemMetadata,
+    seed: int,
+) -> BenchmarkRow:
+    started = time.perf_counter()
+    matcher = pymatching.Matching.from_detector_error_model(stim_dem)
+    sampler = stim_dem.compile_sampler(seed=seed)
+    construct_s = time.perf_counter() - started
+
+    started = time.perf_counter()
+    detectors, observables, _errors = sampler.sample(shots, bit_packed=True)
+    sample_s = time.perf_counter() - started
+
+    started = time.perf_counter()
+    corrections = matcher.decode_batch(
+        detectors,
+        bit_packed_shots=True,
+        bit_packed_predictions=True,
+    )
+    stats = _logical_failure_stats_from_packed_arrays(corrections, observables, shots)
+    decode_s = time.perf_counter() - started
+
+    return BenchmarkRow(
+        basis,
+        distance,
+        rounds,
+        p,
+        shots,
+        "stim-dem-pymatching-bitpacked",
         metadata,
         solver_edges=None,
         merged_edges=None,
@@ -418,6 +479,27 @@ def run_npsim_dem_fusion_blossom(
         python_decode_calls=python_decode_calls,
         status=status,
     )
+
+
+def _logical_failure_stats_from_packed_arrays(
+    corrections: Any,
+    observables: Any,
+    shots: int,
+) -> LogicalFailureStats:
+    _, _, np = _load_required_modules()
+    corrections = np.asarray(corrections, dtype=np.uint8)
+    observables = np.asarray(observables, dtype=np.uint8)
+    if corrections.ndim == 1:
+        corrections = corrections.reshape((shots, -1))
+    if observables.ndim == 1:
+        observables = observables.reshape((shots, -1))
+    if corrections.shape != observables.shape or corrections.shape[0] != shots:
+        raise ValueError(
+            f"packed correction shape {corrections.shape} does not match "
+            f"observable shape {observables.shape}"
+        )
+    failures = int(np.bitwise_xor(corrections, observables).any(axis=1).sum())
+    return LogicalFailureStats(shots=shots, failures=failures)
 
 
 def stim_dem_to_graphlike_npsim_dem(stim_dem: Any) -> DetectorErrorModel:
