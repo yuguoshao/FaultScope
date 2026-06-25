@@ -704,11 +704,15 @@ Run benchmarks from the repository root after building the native extension:
 .venv/bin/python benchmarks/dem_throughput.py --distances 9 13 21 --rounds 3
 .venv/bin/python benchmarks/hotspot_throughput.py --distances 9 13 21 --rounds 3 --shots 100000
 .venv/bin/python benchmarks/native_decoder_fast_path.py
+.venv/bin/python benchmarks/surface_code_decoder_performance.py --distances 3 5 7 --shots 10000
 .venv/bin/python benchmarks/surface_code_threshold.py --distances 3 5 7 --shots 10000
 ```
 
 Stim comparisons are reported when `stim` is installed. Threshold comparisons
-require `numpy`, `scipy`, `pymatching`, and `stim`.
+require `numpy`, `scipy`, `pymatching`, and `stim`. The surface-code decoder
+performance benchmark compares PyMatching with the optional
+`npsim-fusion-blossom` backend when that backend is installed; unavailable
+native backends are reported as `skip:<reason>` rows.
 
 ## Troubleshooting
 

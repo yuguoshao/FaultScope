@@ -164,7 +164,10 @@ NPSim 当前产品路径是 packed batch engine，不暴露通用的 per-shot ad
 .venv/bin/python benchmarks/dem_throughput.py --distances 9 13 21 --rounds 3
 .venv/bin/python benchmarks/hotspot_throughput.py --distances 9 13 21 --rounds 3 --shots 100000
 .venv/bin/python benchmarks/native_decoder_fast_path.py
+.venv/bin/python benchmarks/surface_code_decoder_performance.py --distances 3 5 7 --shots 10000
 .venv/bin/python benchmarks/surface_code_threshold.py --distances 3 5 7 --shots 10000
 ```
 
-Stim/PyMatching 相关 benchmark 会在对应可选依赖安装后启用对照。
+Stim/PyMatching 相关 benchmark 会在对应可选依赖安装后启用对照；
+surface-code decoder performance benchmark 会在安装 `npsim-fusion-blossom`
+后额外输出 fusion-blossom native path。

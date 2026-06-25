@@ -557,12 +557,17 @@ fn scaled_weight(
     }
     let scaled = (weight * weight_scale).round();
     let max_safe = (Weight::MAX as f64) / (vertex_count.max(1) as f64);
-    if !scaled.is_finite() || scaled < 0.0 || scaled > max_safe {
+    let even_scaled = if (scaled as i128) % 2 == 0 {
+        scaled
+    } else {
+        scaled + 1.0
+    };
+    if !even_scaled.is_finite() || even_scaled < 0.0 || even_scaled > max_safe {
         return Err(PyValueError::new_err(format!(
-            "fusion-blossom {edge_label} scaled weight {scaled} exceeds safe maximum {max_safe}"
+            "fusion-blossom {edge_label} scaled weight {even_scaled} exceeds safe maximum {max_safe}"
         )));
     }
-    Ok(scaled as Weight)
+    Ok(even_scaled as Weight)
 }
 
 fn odd_parity_probability(probabilities: &[f64]) -> f64 {

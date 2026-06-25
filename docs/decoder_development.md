@@ -566,6 +566,21 @@ The remaining productionization items are solver reuse, parallel/streaming
 execution, erasure/dynamic weights, compression for ambiguous parallel logical
 effects, and large-scale performance tuning.
 
+The primary beta evaluation entry point is the surface-code decoder performance
+benchmark:
+
+```bash
+.venv/bin/python benchmarks/surface_code_decoder_performance.py --distances 3 5 7 --shots 10000
+```
+
+It compares Stim DEM + PyMatching, NPSim DEM + PyMatching, and NPSim DEM +
+fusion-blossom native decoding when the optional backend package is installed.
+The benchmark uses a local graphlike Stim DEM converter that splits separator
+groups into NPSim DEM edges for the fusion-blossom path; this does not change
+the threshold benchmark. It reports construction time, sampling time where
+separable, native estimate time, solver-edge metadata, merged parallel edges,
+and whether the fusion-blossom path stayed out of Python callbacks.
+
 ## Validation And Performance Rules
 
 NPSim validates native decoder output before using it:
