@@ -13,7 +13,11 @@ from npsim.decoders import (
     get_native_decoder_class,
 )
 from npsim.dem import Detector, DetectorErrorEdge, DetectorErrorModel, LogicalObservable
-from npsim.runtime import BatchForwardNoiseAwareSimulator, generate_native_dem
+from npsim.runtime import (
+    BatchForwardNoiseAwareSimulator,
+    compile_native_dem_sampler,
+    generate_native_dem,
+)
 
 BACKEND_SRC = (
     Path(__file__).resolve().parents[1]
@@ -65,14 +69,17 @@ class FusionBlossomBackendPackageTests(unittest.TestCase):
         self.assertEqual(manifest["abi_version"], NATIVE_DECODER_PLUGIN_ABI)
         self.assertEqual(manifest["name"], "fusion-blossom")
         self.assertEqual(manifest["version"], npsim_fusion_blossom.__version__)
-        self.assertEqual(manifest["source"], "npsim-fusion-blossom scaffold")
+        self.assertEqual(
+            manifest["source"],
+            "npsim-fusion-blossom minimal serial adapter",
+        )
         self.assertIs(
             manifest["decoders"]["fusion-blossom"],
             npsim_fusion_blossom.NativeFusionBlossomDecoder,
         )
 
     @requires_native_backend
-    def test_backend_from_dem_returns_external_native_smoke_decoder(self) -> None:
+    def test_backend_from_dem_returns_external_native_solver_decoder(self) -> None:
         dem = DetectorErrorModel(
             detectors=(Detector(id=0, measurement_keys=()),),
             observables=(LogicalObservable(id=0),),
@@ -140,6 +147,86 @@ class FusionBlossomBackendPackageTests(unittest.TestCase):
         self.assertEqual(result.mean_loss, 0.0)
 
     @requires_native_backend
+    def test_backend_decodes_single_detector_boundary_edge(self) -> None:
+        dem = DetectorErrorModel(
+            detectors=(Detector(id=0, measurement_keys=()),),
+            observables=(LogicalObservable(id=0),),
+            edges=(
+                DetectorErrorEdge(
+                    probability=0.2,
+                    detectors=(0,),
+                    observables=(0,),
+                    location_id="edge0",
+                    event="X",
+                ),
+            ),
+        )
+        decoder = npsim_fusion_blossom.NativeFusionBlossomDecoder.from_dem(dem)
+
+        result = compile_native_dem_sampler(dem).estimate(
+            shots=4096,
+            seed=201,
+            decoder=decoder,
+        )
+
+        self.assertEqual(decoder.python_decode_call_count, 0)
+        self.assertEqual(result.mean_loss, 0.0)
+
+    @requires_native_backend
+    def test_backend_decodes_two_detector_edge(self) -> None:
+        dem = DetectorErrorModel(
+            detectors=(
+                Detector(id=10, measurement_keys=()),
+                Detector(id=20, measurement_keys=()),
+            ),
+            observables=(LogicalObservable(id=0),),
+            edges=(
+                DetectorErrorEdge(
+                    probability=0.2,
+                    detectors=(10, 20),
+                    observables=(0,),
+                    location_id="edge0",
+                    event="X",
+                ),
+            ),
+        )
+        decoder = npsim_fusion_blossom.NativeFusionBlossomDecoder.from_dem(dem)
+
+        result = compile_native_dem_sampler(dem).estimate(
+            shots=4096,
+            seed=202,
+            decoder=decoder,
+        )
+
+        self.assertEqual(decoder.detector_ids, (10, 20))
+        self.assertEqual(decoder.python_decode_call_count, 0)
+        self.assertEqual(result.mean_loss, 0.0)
+
+    @requires_native_backend
+    def test_backend_returns_zero_when_edge_has_no_observable_flip(self) -> None:
+        dem = DetectorErrorModel(
+            detectors=(Detector(id=0, measurement_keys=()),),
+            observables=(LogicalObservable(id=0),),
+            edges=(
+                DetectorErrorEdge(
+                    probability=0.2,
+                    detectors=(0,),
+                    observables=(),
+                    location_id="edge0",
+                    event="X",
+                ),
+            ),
+        )
+        decoder = npsim_fusion_blossom.NativeFusionBlossomDecoder.from_dem(dem)
+
+        class Batch:
+            shots = 3
+            detectors = {0: 0b111}
+
+        self.assertEqual(decoder.decode_batch_masks(Batch()), {0: 0})
+        self.assertEqual(decoder.python_decode_call_count, 1)
+
+    @requires_native_backend
     def test_backend_slow_debug_fallback_with_loss_callback(self) -> None:
         location = NoiseLocation(
             id="x0",
@@ -169,13 +256,15 @@ class FusionBlossomBackendPackageTests(unittest.TestCase):
             shots=128,
             seed=111,
             decoder=decoder,
-            loss_mask_fn=lambda batch, corrections: 0,
+            loss_mask_fn=lambda batch, corrections: batch.observables[0]
+            ^ corrections[0],
         )
 
         self.assertEqual(decoder.python_decode_call_count, 1)
         self.assertEqual(result.mean_loss, 0.0)
 
-    def test_backend_rejects_options_until_real_solver_exists(self) -> None:
+    @requires_native_backend
+    def test_backend_accepts_weight_scale_option(self) -> None:
         dem = DetectorErrorModel(
             detectors=(Detector(id=0, measurement_keys=()),),
             observables=(LogicalObservable(id=0),),
@@ -190,11 +279,61 @@ class FusionBlossomBackendPackageTests(unittest.TestCase):
             ),
         )
 
-        with self.assertRaisesRegex(ValueError, "does not accept options"):
+        decoder = npsim_fusion_blossom.NativeFusionBlossomDecoder.from_dem(
+            dem,
+            options={"weight_scale": 10_000},
+        )
+
+        self.assertEqual(decoder.name, "fusion-blossom")
+
+    @requires_native_backend
+    def test_backend_rejects_invalid_options(self) -> None:
+        dem = DetectorErrorModel(
+            detectors=(Detector(id=0, measurement_keys=()),),
+            observables=(LogicalObservable(id=0),),
+            edges=(
+                DetectorErrorEdge(
+                    probability=0.2,
+                    detectors=(0,),
+                    observables=(0,),
+                    location_id="edge0",
+                    event="X",
+                ),
+            ),
+        )
+
+        with self.assertRaisesRegex(ValueError, "unknown fusion-blossom option"):
             npsim_fusion_blossom.NativeFusionBlossomDecoder.from_dem(
                 dem,
                 options={"solver": "real"},
             )
+        with self.assertRaisesRegex(ValueError, "positive and finite"):
+            npsim_fusion_blossom.NativeFusionBlossomDecoder.from_dem(
+                dem,
+                options={"weight_scale": 0},
+            )
+        with self.assertRaisesRegex(ValueError, "scaled weight"):
+            npsim_fusion_blossom.NativeFusionBlossomDecoder.from_dem(
+                dem,
+                options={"weight_scale": 1e300},
+            )
+
+    @requires_native_backend
+    def test_backend_rejects_duplicate_graph_endpoint(self) -> None:
+        dem = DetectorErrorModel(
+            detectors=(
+                Detector(id=10, measurement_keys=()),
+                Detector(id=20, measurement_keys=()),
+            ),
+            observables=(LogicalObservable(id=0),),
+            edges=(
+                DetectorErrorEdge(0.2, (10, 20), (0,), "edge0", "X"),
+                DetectorErrorEdge(0.3, (20, 10), (), "edge1", "Z"),
+            ),
+        )
+
+        with self.assertRaisesRegex(ValueError, "duplicate graph endpoint"):
+            npsim_fusion_blossom.NativeFusionBlossomDecoder.from_dem(dem)
 
     def test_backend_from_dem_requires_built_native_extension(self) -> None:
         if npsim_fusion_blossom.native_extension_available():

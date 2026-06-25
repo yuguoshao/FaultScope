@@ -1,13 +1,14 @@
-"""NPSim fusion-blossom backend scaffold.
+"""NPSim fusion-blossom backend.
 
-This package reserves the official post-install backend package shape for a
-future native fusion-blossom decoder. The current implementation is deliberately
-a smoke backend: it constructs a small Rust graphlike detector-copy decoder in
-this package and exposes it to NPSim through the native decoder PyCapsule ABI. It
-does not run the real fusion-blossom solver.
+This package provides the official post-install backend package shape for a
+native fusion-blossom decoder. The current implementation is a minimal serial
+MWPM adapter: it constructs Rust solver state in this package and exposes it to
+NPSim through the native decoder PyCapsule ABI.
 """
 
 from __future__ import annotations
+
+import math
 
 from npsim._npsim_native import NATIVE_DECODER_PLUGIN_ABI
 from npsim.runtime import generate_native_dem
@@ -22,15 +23,16 @@ else:
 
 __version__ = "0.1.0"
 BACKEND_NAME = "fusion-blossom"
+DEFAULT_WEIGHT_SCALE = 1_000_000
 
 
 class NativeFusionBlossomDecoder:
-    """Scaffold fusion-blossom decoder proxy.
+    """Minimal serial fusion-blossom decoder proxy.
 
-    This is not a production MWPM decoder. It owns a Rust graphlike smoke
-    decoder in this backend package so the post-install PyCapsule path can be
-    validated without moving hot-path syndrome or correction data through
-    Python.
+    This is not the production parallel or streaming fusion-blossom adapter. It
+    owns Rust solver state in this backend package so the post-install PyCapsule
+    path can decode graphlike DEM batches without moving hot-path syndrome or
+    correction data through Python.
     """
 
     backend_name = BACKEND_NAME
@@ -41,23 +43,23 @@ class NativeFusionBlossomDecoder:
 
     @staticmethod
     def from_dem(dem, *, options=None):
-        _reject_options(options)
         _require_native_extension()
+        weight_scale = _parse_options(options)
         problem = dem.compile_graphlike_problem()
         inner = _native.NativeFusionBlossomNativeDecoder.from_graphlike_problem(
-            problem
+            problem,
+            weight_scale=weight_scale,
         )
         return NativeFusionBlossomDecoder(inner)
 
     @staticmethod
     def from_circuit(circuit, *, detectors=None, observables=None, options=None):
-        _reject_options(options)
         dem = generate_native_dem(
             circuit,
             detectors=detectors,
             observables=observables,
         )
-        return NativeFusionBlossomDecoder.from_dem(dem)
+        return NativeFusionBlossomDecoder.from_dem(dem, options=options)
 
     @property
     def name(self):
@@ -80,15 +82,19 @@ class NativeFusionBlossomDecoder:
 
     def decode_batch_masks(self, batch):
         self._python_decode_call_count += 1
-        corrections = {}
-        for observable_id, detector_id in zip(
-            self.observable_ids,
-            self._inner.observable_detector_ids,
-        ):
-            corrections[observable_id] = (
-                0 if detector_id is None else batch.detectors[detector_id]
-            )
-        return corrections
+        word_count = (batch.shots + 63) // 64
+        detector_words = {
+            detector_id: _int_to_words(batch.detectors[detector_id], word_count)
+            for detector_id in self.detector_ids
+        }
+        correction_words = self._inner.decode_batch_words(
+            batch.shots,
+            detector_words,
+        )
+        return {
+            observable_id: _words_to_int(words)
+            for observable_id, words in correction_words.items()
+        }
 
     def __repr__(self):
         return (
@@ -106,16 +112,27 @@ def backend_manifest():
         "abi_version": NATIVE_DECODER_PLUGIN_ABI,
         "name": BACKEND_NAME,
         "version": __version__,
-        "source": "npsim-fusion-blossom scaffold",
+        "source": "npsim-fusion-blossom minimal serial adapter",
         "decoders": {BACKEND_NAME: NativeFusionBlossomDecoder},
     }
 
 
-def _reject_options(options):
-    if options is not None:
-        raise ValueError(
-            "npsim-fusion-blossom scaffold does not accept options yet"
-        )
+def _parse_options(options):
+    if options is None:
+        return DEFAULT_WEIGHT_SCALE
+    if not isinstance(options, dict):
+        raise ValueError("fusion-blossom options must be a dict or None")
+    unknown = set(options) - {"weight_scale"}
+    if unknown:
+        names = ", ".join(sorted(unknown))
+        raise ValueError(f"unknown fusion-blossom option(s): {names}")
+    weight_scale = options.get("weight_scale", DEFAULT_WEIGHT_SCALE)
+    if isinstance(weight_scale, bool) or not isinstance(weight_scale, (int, float)):
+        raise ValueError("fusion-blossom weight_scale must be numeric")
+    weight_scale = float(weight_scale)
+    if not math.isfinite(weight_scale) or weight_scale <= 0:
+        raise ValueError("fusion-blossom weight_scale must be positive and finite")
+    return weight_scale
 
 
 def _require_native_extension():
@@ -130,8 +147,22 @@ def native_extension_available():
     return _native is not None
 
 
+def _int_to_words(value, word_count):
+    if value < 0:
+        raise ValueError("packed mask integers must be non-negative")
+    return [(value >> (64 * index)) & ((1 << 64) - 1) for index in range(word_count)]
+
+
+def _words_to_int(words):
+    value = 0
+    for index, word in enumerate(words):
+        value |= int(word) << (64 * index)
+    return value
+
+
 __all__ = [
     "BACKEND_NAME",
+    "DEFAULT_WEIGHT_SCALE",
     "NativeFusionBlossomDecoder",
     "__version__",
     "backend_manifest",

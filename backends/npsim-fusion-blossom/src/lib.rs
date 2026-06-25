@@ -1,3 +1,5 @@
+use fusion_blossom::util::{SolverInitializer, SyndromePattern, VertexIndex, VertexNum, Weight};
+use fusion_blossom::{detailed_matching, fusion_mwpm};
 use npsim_core::{
     NpsimNativeCorrectionMaskBatchMutViewV1, NpsimNativeDecoderI64SliceV1,
     NpsimNativeDecoderStatusV1, NpsimNativeDecoderStringViewV1, NpsimNativeDecoderV1,
@@ -6,70 +8,119 @@ use npsim_core::{
 };
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
-use pyo3::types::{PyIterator, PyTuple};
+use pyo3::types::{PyDict, PyIterator, PyTuple};
+use std::collections::HashMap;
 use std::ffi::{c_void, CString};
 use std::mem;
 use std::os::raw::c_char;
-use std::ptr;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::slice;
 use std::sync::Mutex;
 
 const BACKEND_NAME: &str = "fusion-blossom";
 const CAPSULE_NAME: &[u8] = b"npsim.native_decoder_plugin.v1\0";
+const DEFAULT_WEIGHT_SCALE: f64 = 1_000_000.0;
 
 #[pyclass(name = "NativeFusionBlossomNativeDecoder")]
 struct PyNativeFusionBlossomNativeDecoder {
     capsule: Py<PyAny>,
     detector_ids: Vec<i64>,
     observable_ids: Vec<i64>,
-    observable_detector_indices: Vec<Option<usize>>,
+    edge_count: usize,
 }
 
 #[pymethods]
 impl PyNativeFusionBlossomNativeDecoder {
     #[staticmethod]
-    fn from_graphlike_problem(py: Python<'_>, problem: &Bound<'_, PyAny>) -> PyResult<Self> {
+    #[pyo3(signature = (problem, *, weight_scale=DEFAULT_WEIGHT_SCALE))]
+    fn from_graphlike_problem(
+        py: Python<'_>,
+        problem: &Bound<'_, PyAny>,
+        weight_scale: f64,
+    ) -> PyResult<Self> {
+        validate_weight_scale(weight_scale)?;
         let detector_ids = problem.getattr("detector_ids")?.extract::<Vec<i64>>()?;
         let observable_ids = problem.getattr("observable_ids")?.extract::<Vec<i64>>()?;
-        let mut observable_detector_indices = vec![None; observable_ids.len()];
+        let mut weighted_edges = Vec::new();
+        let mut virtual_vertices = Vec::new();
+        let mut edge_observables = Vec::new();
+        let mut edge_lookup = HashMap::new();
+        let mut vertex_count = detector_ids.len();
 
         let edges = problem.getattr("edges")?;
         for edge in PyIterator::from_object(&edges)? {
             let edge = edge?;
             let detectors = edge.getattr("detectors")?.extract::<Vec<usize>>()?;
             let fault_observables = edge.getattr("fault_observables")?.extract::<Vec<usize>>()?;
-            if detectors.len() != 1 || fault_observables.len() != 1 {
-                continue;
+            let dem_edge_index = edge.getattr("dem_edge_index")?.extract::<usize>()?;
+            let weight = scaled_weight(
+                edge.getattr("weight")?.extract::<f64>()?,
+                weight_scale,
+                dem_edge_index,
+                detector_ids.len() + 1,
+            )?;
+            for &detector_index in &detectors {
+                if detector_index >= detector_ids.len() {
+                    return Err(PyValueError::new_err(format!(
+                        "fusion-blossom edge {dem_edge_index} references detector index {detector_index} but only {} detectors exist",
+                        detector_ids.len()
+                    )));
+                }
             }
-            let detector_index = detectors[0];
-            let observable_index = fault_observables[0];
-            if detector_index >= detector_ids.len() {
+            for &observable_index in &fault_observables {
+                if observable_index >= observable_ids.len() {
+                    return Err(PyValueError::new_err(format!(
+                        "fusion-blossom edge {dem_edge_index} references observable index {observable_index} but only {} observables exist",
+                        observable_ids.len()
+                    )));
+                }
+            }
+            let (left, right) = match detectors.as_slice() {
+                [detector] => {
+                    let virtual_vertex = vertex_count;
+                    vertex_count += 1;
+                    virtual_vertices.push(virtual_vertex as VertexIndex);
+                    (*detector, virtual_vertex)
+                }
+                [left, right] => (*left, *right),
+                _ => {
+                    return Err(PyValueError::new_err(format!(
+                        "fusion-blossom edge {dem_edge_index} has {} detectors; expected one boundary detector or two graph detectors",
+                        detectors.len()
+                    )));
+                }
+            };
+            if left == right {
                 return Err(PyValueError::new_err(format!(
-                    "fusion-blossom scaffold edge references detector index {detector_index} but only {} detectors exist",
-                    detector_ids.len()
+                    "fusion-blossom edge {dem_edge_index} has identical endpoints {left}"
                 )));
             }
-            if observable_index >= observable_ids.len() {
+            let endpoint = normalized_endpoint(left, right);
+            if let Some(existing_edge_index) = edge_lookup.get(&endpoint) {
                 return Err(PyValueError::new_err(format!(
-                    "fusion-blossom scaffold edge references observable index {observable_index} but only {} observables exist",
-                    observable_ids.len()
+                    "fusion-blossom found duplicate graph endpoint {:?}: DEM edge {} conflicts with graph edge {}",
+                    endpoint, dem_edge_index, existing_edge_index
                 )));
             }
-            if let Some(existing_detector_index) = observable_detector_indices[observable_index] {
-                return Err(PyValueError::new_err(format!(
-                    "fusion-blossom scaffold found multiple single-detector candidate edges for observable id {}; detector indices {} and {}",
-                    observable_ids[observable_index],
-                    existing_detector_index,
-                    detector_index
-                )));
-            }
-            observable_detector_indices[observable_index] = Some(detector_index);
+            edge_lookup.insert(endpoint, weighted_edges.len());
+            weighted_edges.push((left as VertexIndex, right as VertexIndex, weight));
+            edge_observables.push(fault_observables);
         }
 
+        if vertex_count < 2 {
+            return Err(PyValueError::new_err(
+                "fusion-blossom requires at least two graph vertices",
+            ));
+        }
+        let edge_count = weighted_edges.len();
+        let initializer =
+            SolverInitializer::new(vertex_count as VertexNum, weighted_edges, virtual_vertices);
         let state = Box::new(DecoderState {
             detector_ids: detector_ids.clone(),
             observable_ids: observable_ids.clone(),
-            observable_detector_indices: observable_detector_indices.clone(),
+            initializer,
+            edge_observables,
+            edge_lookup,
             last_error: Mutex::new(CString::new("").expect("empty CString")),
         });
         let descriptor = Box::new(NpsimNativeDecoderV1 {
@@ -89,7 +140,7 @@ impl PyNativeFusionBlossomNativeDecoder {
             capsule,
             detector_ids,
             observable_ids,
-            observable_detector_indices,
+            edge_count,
         })
     }
 
@@ -109,13 +160,89 @@ impl PyNativeFusionBlossomNativeDecoder {
     }
 
     #[getter]
-    fn observable_detector_ids(&self, py: Python<'_>) -> PyResult<PyObject> {
-        let ids = self
-            .observable_detector_indices
+    fn edge_count(&self) -> usize {
+        self.edge_count
+    }
+
+    fn decode_batch_words(
+        &self,
+        py: Python<'_>,
+        shots: usize,
+        detector_words: &Bound<'_, PyDict>,
+    ) -> PyResult<PyObject> {
+        let word_count = shots.div_ceil(64);
+        let mut detector_word_buffers = Vec::with_capacity(self.detector_ids.len());
+        for detector_id in &self.detector_ids {
+            let words = detector_words
+                .get_item(*detector_id)?
+                .ok_or_else(|| PyValueError::new_err(format!("missing detector id {detector_id}")))?
+                .extract::<Vec<u64>>()?;
+            if words.len() != word_count {
+                return Err(PyValueError::new_err(format!(
+                    "detector {detector_id} has {} words; expected {word_count}",
+                    words.len()
+                )));
+            }
+            detector_word_buffers.push(words);
+        }
+
+        let mut output_buffers = vec![vec![0; word_count]; self.observable_ids.len()];
+        let input_views = detector_word_buffers
             .iter()
-            .map(|index| index.map(|index| self.detector_ids[index]))
+            .map(|words| npsim_core::NpsimNativeDecoderMaskViewV1 {
+                words: words.as_ptr(),
+                word_count: words.len(),
+            })
             .collect::<Vec<_>>();
-        Ok(PyTuple::new(py, ids)?.into())
+        let mut output_views = output_buffers
+            .iter_mut()
+            .map(|words| npsim_core::NpsimNativeDecoderMaskMutViewV1 {
+                words: words.as_mut_ptr(),
+                word_count: words.len(),
+            })
+            .collect::<Vec<_>>();
+        let input = NpsimNativeDetectorMaskBatchViewV1 {
+            detector_ids: self.detector_ids.as_ptr(),
+            detector_count: self.detector_ids.len(),
+            masks: input_views.as_ptr(),
+            shots,
+            word_count,
+        };
+        let mut output = NpsimNativeCorrectionMaskBatchMutViewV1 {
+            observable_ids: self.observable_ids.as_ptr(),
+            observable_count: self.observable_ids.len(),
+            masks: output_views.as_mut_ptr(),
+            shots,
+            word_count,
+        };
+        let descriptor = unsafe {
+            &*(pyo3::ffi::PyCapsule_GetPointer(
+                self.capsule.as_ptr(),
+                CAPSULE_NAME.as_ptr().cast::<c_char>(),
+            )
+            .cast::<NpsimNativeDecoderV1>())
+        };
+        let status = unsafe {
+            descriptor
+                .decode_batch
+                .expect("fusion-blossom descriptor has decode callback")(
+                descriptor.state,
+                &input,
+                &mut output,
+            )
+        };
+        if status.code != npsim_core::NATIVE_DECODER_PLUGIN_STATUS_OK {
+            return Err(PyValueError::new_err(format!(
+                "native decoder plugin error: {}",
+                string_view_to_string(status.message)
+            )));
+        }
+
+        let out = PyDict::new(py);
+        for (observable_id, words) in self.observable_ids.iter().zip(output_buffers) {
+            out.set_item(*observable_id, words)?;
+        }
+        Ok(out.into())
     }
 
     fn __npsim_native_decoder_capsule__(&self, py: Python<'_>) -> Py<PyAny> {
@@ -142,7 +269,9 @@ impl PyInvalidNativeDecoderCapsule {
         let state = Box::new(DecoderState {
             detector_ids: vec![0],
             observable_ids: vec![0],
-            observable_detector_indices: vec![None],
+            initializer: SolverInitializer::new(2, Vec::new(), Vec::new()),
+            edge_observables: Vec::new(),
+            edge_lookup: HashMap::new(),
             last_error: Mutex::new(CString::new("").expect("empty CString")),
         });
         let mut descriptor = NpsimNativeDecoderV1 {
@@ -182,8 +311,48 @@ impl PyInvalidNativeDecoderCapsule {
 struct DecoderState {
     detector_ids: Vec<i64>,
     observable_ids: Vec<i64>,
-    observable_detector_indices: Vec<Option<usize>>,
+    initializer: SolverInitializer,
+    edge_observables: Vec<Vec<usize>>,
+    edge_lookup: HashMap<(usize, usize), usize>,
     last_error: Mutex<CString>,
+}
+
+fn validate_weight_scale(weight_scale: f64) -> PyResult<()> {
+    if !weight_scale.is_finite() || weight_scale <= 0.0 {
+        return Err(PyValueError::new_err(
+            "fusion-blossom weight_scale must be a positive finite number",
+        ));
+    }
+    Ok(())
+}
+
+fn scaled_weight(
+    weight: f64,
+    weight_scale: f64,
+    dem_edge_index: usize,
+    vertex_count_hint: usize,
+) -> PyResult<Weight> {
+    if !weight.is_finite() || weight < 0.0 {
+        return Err(PyValueError::new_err(format!(
+            "fusion-blossom edge {dem_edge_index} has non-finite or negative weight {weight}"
+        )));
+    }
+    let scaled = (weight * weight_scale).round();
+    let max_safe = (Weight::MAX as f64) / (vertex_count_hint.max(1) as f64);
+    if !scaled.is_finite() || scaled < 0.0 || scaled > max_safe {
+        return Err(PyValueError::new_err(format!(
+            "fusion-blossom edge {dem_edge_index} scaled weight {scaled} exceeds safe maximum {max_safe}"
+        )));
+    }
+    Ok(scaled as Weight)
+}
+
+fn normalized_endpoint(left: usize, right: usize) -> (usize, usize) {
+    if left < right {
+        (left, right)
+    } else {
+        (right, left)
+    }
 }
 
 unsafe extern "C" fn forced_error_decode_batch(
@@ -314,33 +483,91 @@ unsafe extern "C" fn decoder_decode_batch(
     }
     let input_masks = slice::from_raw_parts(input.masks, input.detector_count);
     let output_masks = slice::from_raw_parts_mut(output.masks, output.observable_count);
-    for (observable_index, detector_index) in state.observable_detector_indices.iter().enumerate() {
-        let Some(detector_index) = detector_index else {
-            continue;
-        };
-        let Some(input_mask) = input_masks.get(*detector_index) else {
+    for input_mask in input_masks {
+        if input_mask.word_count != input.word_count {
             return state_error(
                 state,
-                format!("fusion-blossom missing detector mask at index {detector_index}"),
-            );
-        };
-        let output_mask = &mut output_masks[observable_index];
-        if input_mask.word_count != input.word_count || output_mask.word_count != output.word_count
-        {
-            return state_error(
-                state,
-                "fusion-blossom mask word count does not match batch word count",
+                "fusion-blossom input mask word count does not match batch word count",
             );
         }
         if input.word_count > 0 && input_mask.words.is_null() {
             return state_error(state, "fusion-blossom input mask words pointer is null");
         }
+    }
+    for output_mask in output_masks.iter() {
+        if output_mask.word_count != output.word_count {
+            return state_error(
+                state,
+                "fusion-blossom output mask word count does not match batch word count",
+            );
+        }
         if output.word_count > 0 && output_mask.words.is_null() {
             return state_error(state, "fusion-blossom output mask words pointer is null");
         }
-        ptr::copy_nonoverlapping(input_mask.words, output_mask.words, input.word_count);
+    }
+    for shot in 0..input.shots {
+        let mut defect_vertices = Vec::new();
+        for (detector_index, input_mask) in input_masks.iter().enumerate() {
+            if read_bit(input_mask.words, shot) {
+                defect_vertices.push(detector_index as VertexIndex);
+            }
+        }
+        if defect_vertices.is_empty() {
+            continue;
+        }
+        let syndrome = SyndromePattern::new(defect_vertices.clone(), Vec::new());
+        let mwpm_result = match catch_unwind(AssertUnwindSafe(|| {
+            fusion_mwpm(&state.initializer, &syndrome)
+        })) {
+            Ok(result) => result,
+            Err(_) => {
+                return state_error(state, "fusion-blossom solver panicked during MWPM decode");
+            }
+        };
+        let details = match catch_unwind(AssertUnwindSafe(|| {
+            detailed_matching(&state.initializer, &defect_vertices, &mwpm_result)
+        })) {
+            Ok(details) => details,
+            Err(_) => {
+                return state_error(
+                    state,
+                    "fusion-blossom solver panicked while recovering detailed matching",
+                );
+            }
+        };
+        for detail in details {
+            let mut left = detail.a as usize;
+            for (right, _weight) in detail.path {
+                let right = right as usize;
+                let endpoint = normalized_endpoint(left, right);
+                let Some(edge_index) = state.edge_lookup.get(&endpoint).copied() else {
+                    return state_error(
+                        state,
+                        format!(
+                            "fusion-blossom detailed path used unknown graph endpoint {:?}",
+                            endpoint
+                        ),
+                    );
+                };
+                for &observable_index in &state.edge_observables[edge_index] {
+                    let output_mask = &mut output_masks[observable_index];
+                    xor_bit(output_mask.words, shot);
+                }
+                left = right;
+            }
+        }
     }
     NpsimNativeDecoderStatusV1::ok()
+}
+
+unsafe fn read_bit(words: *const u64, shot: usize) -> bool {
+    let word = *words.add(shot / 64);
+    ((word >> (shot % 64)) & 1) != 0
+}
+
+unsafe fn xor_bit(words: *mut u64, shot: usize) {
+    let word = words.add(shot / 64);
+    *word ^= 1u64 << (shot % 64);
 }
 
 unsafe fn create_decoder_capsule(
@@ -400,6 +627,17 @@ fn state_error(state: &DecoderState, message: impl Into<String>) -> NpsimNativeD
             len: last_error.as_bytes().len(),
         },
     }
+}
+
+fn string_view_to_string(view: NpsimNativeDecoderStringViewV1) -> String {
+    if view.len == 0 {
+        return String::new();
+    }
+    if view.ptr.is_null() {
+        return "<null error message>".to_string();
+    }
+    let bytes = unsafe { slice::from_raw_parts(view.ptr.cast::<u8>(), view.len) };
+    String::from_utf8_lossy(bytes).into_owned()
 }
 
 #[pymodule]

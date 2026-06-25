@@ -565,8 +565,8 @@ python -m npsim.backends install fusion-blossom --dry-run
 python -m npsim.backends install bposd --dry-run
 ```
 
-For local development, the fusion-blossom scaffold backend package can be
-installed from the source checkout:
+For local development, the fusion-blossom backend package can be installed from
+the source checkout:
 
 ```bash
 .venv/bin/python -m pip install -e backends/npsim-fusion-blossom
@@ -575,10 +575,10 @@ installed from the source checkout:
 
 NPSim does not clone, compile, or install backend code during `import npsim` or
 `estimate(...)`. The default build includes only smoke-test/template native
-backends, not a production fusion-blossom or BP+OSD decoder. The local
-`npsim-fusion-blossom` package is also a scaffold: it builds an external
-Rust/PyO3 graphlike smoke decoder and exposes it through the native PyCapsule
-ABI, but it does not run the real fusion-blossom solver.
+backends, not fusion-blossom or BP+OSD. The local `npsim-fusion-blossom`
+package is a minimal serial solver adapter: it enters the native PyCapsule fast
+path, but it has not yet implemented parallel/streaming execution or production
+performance tuning.
 
 For the full developer contract, including `from_circuit(...)`,
 `from_dem(...)`, Python prototype decoders, and native backend skeletons, see

@@ -5,7 +5,7 @@ build-backend = "maturin"
 [project]
 name = "npsim-fusion-blossom"
 version = "0.1.0"
-description = "Official NPSim fusion-blossom native decoder backend scaffold"
+description = "Official NPSim fusion-blossom native decoder backend"
 requires-python = ">=3.10"
 dependencies = [
     "npsim",

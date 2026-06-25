@@ -452,9 +452,9 @@ The post-install plugin ABI is not a general third-party stable ABI. It is a
 versioned contract for official NPSim backend packages so the core package can
 reject mismatched backend builds before any hot-path decoding begins.
 
-### Official Backend Package Scaffold
+### Official Backend Package
 
-The repository includes an official fusion-blossom backend package scaffold at:
+The repository includes an official fusion-blossom backend package at:
 
 ```text
 backends/npsim-fusion-blossom/
@@ -474,12 +474,16 @@ fusion-blossom = "npsim_fusion_blossom:backend_manifest"
 ```
 
 Its manifest returns the current NPSim native decoder plugin ABI, package
-metadata, and a `fusion-blossom` decoder class. The scaffold class implements
+metadata, and a `fusion-blossom` decoder class. The class implements
 `from_dem(...)` and `from_circuit(...)`; construction compiles the DEM to a
 `GraphlikeDecodingProblem`, passes that metadata to the package's Rust/PyO3
-extension, and stores an external native decoder state in a PyCapsule. This
-proves the post-install discovery, construction, and native fast-path chain
-without claiming to be a production fusion-blossom solver.
+extension, and stores external native decoder state in a PyCapsule.
+
+The current backend is a minimal serial fusion-blossom MWPM adapter. It maps
+NPSim detector indices to fusion-blossom vertices, converts graphlike DEM edges
+to weighted solver edges, runs the serial solver for each shot, and maps the
+selected edge paths back to observable correction masks. It is not yet the
+production parallel or streaming adapter.
 
 The backend decoder object exposes:
 
@@ -497,18 +501,18 @@ decoder's declared observables, and the backend writes into those buffers.
 Backend packages must not allocate correction masks and ask NPSim to free them
 across the dynamic-library boundary.
 
-### Fusion-Blossom Adapter Plan
+### Fusion-Blossom Adapter Status
 
 Fusion Blossom is a MWPM decoder route for QEC. The
 [paper](https://arxiv.org/abs/2305.08307) describes a parallel MWPM decoder and
 stream decoding support. The public
 [repository](https://github.com/yuewuo/fusion-blossom) presents the project as
-a fast MWPM solver for QEC and ships Rust code plus a Python binding. The
-[PyPI package](https://pypi.org/project/fusion-blossom/) currently publishes
-`fusion-blossom 0.2.13` as a Python package. The public Rust source exposes
-types such as `SolverInitializer` and `SyndromePattern` and helper functions
-such as `fusion_mwpm(...)`, but NPSim has not yet pinned that API as a stable
-Cargo dependency.
+a fast MWPM solver for QEC, ships Rust code plus a Python binding, and currently
+declares Rust package version `0.2.13`. NPSim pins the backend dependency to a
+concrete git revision because that version is not available from crates.io. The
+public Rust source exposes types such as `SolverInitializer` and
+`SyndromePattern` and helper functions such as `fusion_mwpm(...)` and
+`detailed_matching(...)`.
 
 NPSim reserves the public constructor through a post-install proxy:
 
@@ -519,11 +523,11 @@ decoder = NativeFusionBlossomDecoder.from_dem(dem)
 decoder = NativeFusionBlossomDecoder.from_circuit(circuit)
 ```
 
-The default package does not ship the fusion-blossom solver. After an official
-`npsim-fusion-blossom` backend is installed, the proxy delegates construction to
-that package while preserving the native fast path.
+The default package does not ship the fusion-blossom solver. After
+`npsim-fusion-blossom` is installed, the proxy delegates construction to that
+package while preserving the native fast path.
 
-The intended production adapter is:
+The implemented minimal adapter is:
 
 1. Compile `DetectorErrorModel` to `GraphlikeDecodingProblem`.
 2. Map each NPSim detector index to a fusion-blossom vertex.
@@ -535,12 +539,10 @@ The intended production adapter is:
    representation without touching Python.
 7. Return a checked `CorrectionMaskBatch`.
 
-The open productionization items are dependency pinning, integer weight
-scaling, per-shot solver reuse, boundary/virtual vertex semantics, and mapping
-the solver's selected error chain back through DEM edge observable flips. Until
-those are resolved, `NativeGraphlikeDetectorCopyDecoder` remains the concrete
-in-tree template backend, and the optional `npsim-fusion-blossom` package
-remains a PyCapsule ABI scaffold rather than a real solver.
+The remaining productionization items are solver reuse, parallel/streaming
+execution, erasure/dynamic weights, parallel DEM edge compression, and
+large-scale performance tuning. V1 rejects duplicate graph endpoint pairs
+instead of choosing among parallel DEM edges.
 
 ## Validation And Performance Rules
 
