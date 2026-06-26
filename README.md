@@ -4,7 +4,7 @@ FaultScope 是一个面向量子纠错工作流的噪声感知 fault attribution
 Rust core 提供，并通过 Python API 暴露；主要能力包括 bit-packed stabilizer batch
 sampling、detector error model 生成、DEM 层采样、decoder 集成和噪声热点估计。
 
-文档站点见 [FaultScope Documentation](https://yuguoshao.github.io/faultscope/)。
+文档站点见 [FaultScope Documentation](https://yuguoshao.github.io/FaultScope/)。
 本地文档入口：
 
 - [User Guide](docs/user_guide.md)：安装、示例、工作流和排错。

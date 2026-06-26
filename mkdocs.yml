@@ -1,8 +1,8 @@
 site_name: FaultScope Documentation
 site_description: Noise-aware QEC fault attribution toolkit with a Rust core and Python API
-site_url: https://yuguoshao.github.io/faultscope/
-repo_url: https://github.com/yuguoshao/faultscope
-repo_name: yuguoshao/faultscope
+site_url: https://yuguoshao.github.io/FaultScope/
+repo_url: https://github.com/yuguoshao/FaultScope
+repo_name: yuguoshao/FaultScope
 # Keep local file:// builds navigable without relying on directory index lookup.
 use_directory_urls: false
 
