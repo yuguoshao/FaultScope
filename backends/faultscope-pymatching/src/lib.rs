@@ -263,6 +263,7 @@ fn build_py_native_decoder(
         observable_ids: Some(decoder_observable_ids),
         decode_batch: Some(decoder_decode_batch),
         decode_packed_batch: Some(decoder_decode_packed_batch),
+        decode_detector_event_batch: None,
     });
     let capsule = unsafe { create_decoder_capsule(py, Box::into_raw(descriptor))? };
     Ok(PyNativePyMatchingNativeDecoder {

@@ -91,6 +91,18 @@ pub struct FaultScopeNativePackedDetectorShotBatchViewV1 {
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
+pub struct FaultScopeNativeDetectorEventShotBatchViewV1 {
+    pub detector_ids: *const i64,
+    pub detector_count: usize,
+    pub offsets: *const usize,
+    pub offsets_len: usize,
+    pub events: *const usize,
+    pub event_count: usize,
+    pub shots: usize,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
 pub struct FaultScopeNativePackedObservableShotBatchMutViewV1 {
     pub observable_ids: *const i64,
     pub observable_count: usize,
@@ -155,6 +167,13 @@ pub struct FaultScopeNativeDecoderV1 {
             *mut FaultScopeNativePackedObservableShotBatchMutViewV1,
         ) -> FaultScopeNativeDecoderStatusV1,
     >,
+    pub decode_detector_event_batch: Option<
+        unsafe extern "C" fn(
+            *mut c_void,
+            *const FaultScopeNativeDetectorEventShotBatchViewV1,
+            *mut FaultScopeNativePackedObservableShotBatchMutViewV1,
+        ) -> FaultScopeNativeDecoderStatusV1,
+    >,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -194,6 +213,59 @@ pub struct PackedDetectorShotBatchView<'a> {
     pub data: &'a [u8],
     pub shots: usize,
     pub detector_byte_count: usize,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct DetectorEventShotBatchView<'a> {
+    pub detector_ids: &'a [i64],
+    pub offsets: &'a [usize],
+    pub events: &'a [usize],
+    pub shots: usize,
+}
+
+impl<'a> DetectorEventShotBatchView<'a> {
+    pub fn new(
+        detector_ids: &'a [i64],
+        offsets: &'a [usize],
+        events: &'a [usize],
+        shots: usize,
+    ) -> NpResult<Self> {
+        if offsets.len() != shots + 1 {
+            return Err(NpError::new(format!(
+                "detector event batch offsets has length {}; expected {}",
+                offsets.len(),
+                shots + 1
+            )));
+        }
+        if offsets.first().copied().unwrap_or(0) != 0
+            || offsets.last().copied().unwrap_or(0) != events.len()
+        {
+            return Err(NpError::new(
+                "detector event batch offsets must start at 0 and end at events length",
+            ));
+        }
+        for pair in offsets.windows(2) {
+            if pair[0] > pair[1] {
+                return Err(NpError::new(
+                    "detector event batch offsets must be nondecreasing",
+                ));
+            }
+        }
+        for &event in events {
+            if event >= detector_ids.len() {
+                return Err(NpError::new(format!(
+                    "detector event index {event} exceeds detector count {}",
+                    detector_ids.len()
+                )));
+            }
+        }
+        Ok(Self {
+            detector_ids,
+            offsets,
+            events,
+            shots,
+        })
+    }
 }
 
 impl<'a> PackedDetectorShotBatchView<'a> {
@@ -404,6 +476,20 @@ pub trait NativeBatchDecoder: Send + Sync {
         )))
     }
 
+    fn supports_detector_event_batch(&self) -> bool {
+        false
+    }
+
+    fn decode_detector_event_batch(
+        &self,
+        _detectors: DetectorEventShotBatchView<'_>,
+    ) -> NpResult<PackedObservableShotBatch> {
+        Err(NpError::new(format!(
+            "{} does not support detector-event batch decode",
+            self.name()
+        )))
+    }
+
     fn decode_batch_checked(
         &self,
         detectors: DetectorMaskBatchView<'_>,
@@ -420,6 +506,16 @@ pub trait NativeBatchDecoder: Send + Sync {
     ) -> NpResult<PackedObservableShotBatch> {
         let shots = detectors.shots;
         let corrections = self.decode_packed_batch(detectors)?;
+        corrections.validate_against(self.observable_ids(), shots)?;
+        Ok(corrections)
+    }
+
+    fn decode_detector_event_batch_checked(
+        &self,
+        detectors: DetectorEventShotBatchView<'_>,
+    ) -> NpResult<PackedObservableShotBatch> {
+        let shots = detectors.shots;
+        let corrections = self.decode_detector_event_batch(detectors)?;
         corrections.validate_against(self.observable_ids(), shots)?;
         Ok(corrections)
     }

@@ -57,6 +57,7 @@ class BenchmarkSmokeTests(unittest.TestCase):
         self.assertIn("stim-dem-pymatching-bitpacked", rows_by_path)
         self.assertIn("faultscope-dem-pymatching", rows_by_path)
         self.assertIn("faultscope-dem-pymatching-native", rows_by_path)
+        self.assertIn("faultscope-dem-mwpm", rows_by_path)
         self.assertIn("faultscope-dem-fusion-blossom", rows_by_path)
 
         native_pymatching_row = rows_by_path["faultscope-dem-pymatching-native"]
@@ -70,6 +71,12 @@ class BenchmarkSmokeTests(unittest.TestCase):
             self.assertEqual(fusion_row["python_decode_calls"], "0")
         else:
             self.assertTrue(fusion_row["status"].startswith("skip:"))
+
+        mwpm_row = rows_by_path["faultscope-dem-mwpm"]
+        if mwpm_row["status"] == "ok":
+            self.assertEqual(mwpm_row["python_decode_calls"], "0")
+        else:
+            self.assertTrue(mwpm_row["status"].startswith("skip:"))
 
 
 if __name__ == "__main__":

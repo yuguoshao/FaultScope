@@ -2,13 +2,15 @@ use crate::*;
 #[cfg(feature = "decoder-fusion-blossom")]
 use faultscope_core::NativeFusionBlossomDecoder as CoreNativeFusionBlossomDecoder;
 use faultscope_core::{
-    BinaryLinearDecodingProblem, CorrectionMaskBatch, DetectorMaskBatchView,
+    BinaryLinearDecodingProblem, CorrectionMaskBatch, DetectorEventShotBatchView,
+    DetectorMaskBatchView,
     GraphlikeDecodingProblem, IndexedDem, NativeBatchDecoder as CoreNativeBatchDecoder,
     NativeGraphlikeDetectorCopyDecoder as CoreNativeGraphlikeDetectorCopyDecoder,
     NativeNoCorrectionDecoder as CoreNativeNoCorrectionDecoder,
     FaultScopeNativeCorrectionMaskBatchMutViewV1, FaultScopeNativeDecoderI64SliceV1,
     FaultScopeNativeDecoderMaskMutViewV1, FaultScopeNativeDecoderMaskViewV1, FaultScopeNativeDecoderStatusV1,
-    FaultScopeNativeDecoderStringViewV1, FaultScopeNativeDecoderV1, FaultScopeNativeDetectorMaskBatchViewV1,
+    FaultScopeNativeDecoderStringViewV1, FaultScopeNativeDecoderV1,
+    FaultScopeNativeDetectorEventShotBatchViewV1, FaultScopeNativeDetectorMaskBatchViewV1,
     FaultScopeNativePackedDetectorShotBatchViewV1, FaultScopeNativePackedObservableShotBatchMutViewV1,
     PackedDetectorShotBatchView, PackedObservableShotBatch, SparseBinaryMatrix,
     NATIVE_DECODER_PLUGIN_ABI_VERSION, NATIVE_DECODER_PLUGIN_CAPSULE_METHOD,
@@ -423,11 +425,42 @@ impl ExternalNativeBatchDecoder {
         ) -> FaultScopeNativeDecoderStatusV1,
     > {
         let descriptor = self.descriptor();
-        if descriptor.struct_size < mem::size_of::<FaultScopeNativeDecoderV1>() {
+        if descriptor.struct_size
+            < mem::offset_of!(FaultScopeNativeDecoderV1, decode_detector_event_batch)
+        {
             return None;
         }
         descriptor.decode_packed_batch
     }
+
+    fn decode_detector_event_callback(
+        &self,
+    ) -> Option<
+        unsafe extern "C" fn(
+            *mut std::ffi::c_void,
+            *const FaultScopeNativeDetectorEventShotBatchViewV1,
+            *mut FaultScopeNativePackedObservableShotBatchMutViewV1,
+        ) -> FaultScopeNativeDecoderStatusV1,
+    > {
+        let descriptor = self.descriptor();
+        if descriptor.struct_size < native_decoder_v1_decode_event_field_end() {
+            return None;
+        }
+        descriptor.decode_detector_event_batch
+    }
+}
+
+fn native_decoder_v1_decode_event_field_end() -> usize {
+    mem::offset_of!(FaultScopeNativeDecoderV1, decode_detector_event_batch)
+        + mem::size_of::<
+            Option<
+                unsafe extern "C" fn(
+                    *mut std::ffi::c_void,
+                    *const FaultScopeNativeDetectorEventShotBatchViewV1,
+                    *mut FaultScopeNativePackedObservableShotBatchMutViewV1,
+                ) -> FaultScopeNativeDecoderStatusV1,
+            >,
+        >()
 }
 
 impl CoreNativeBatchDecoder for ExternalNativeBatchDecoder {
@@ -531,6 +564,51 @@ impl CoreNativeBatchDecoder for ExternalNativeBatchDecoder {
         };
         let descriptor = self.descriptor();
         let status = unsafe { decode_packed_batch(descriptor.state, &input, &mut output) };
+        status_to_np_result(status)?;
+        PackedObservableShotBatch::new(self.observable_ids.clone(), output_data, detectors.shots)
+    }
+
+    fn supports_detector_event_batch(&self) -> bool {
+        self.decode_detector_event_callback().is_some()
+    }
+
+    fn decode_detector_event_batch(
+        &self,
+        detectors: DetectorEventShotBatchView<'_>,
+    ) -> faultscope_core::NpResult<PackedObservableShotBatch> {
+        if detectors.detector_ids != self.detector_ids.as_slice() {
+            return Err(faultscope_core::NpError::new(format!(
+                "{} received detector events in an unexpected detector order",
+                self.name
+            )));
+        }
+        let decode_detector_event_batch =
+            self.decode_detector_event_callback().ok_or_else(|| {
+                faultscope_core::NpError::new(format!(
+                    "{} does not support detector-event batch decode",
+                    self.name
+                ))
+            })?;
+        let observable_byte_count = self.observable_ids.len().div_ceil(8);
+        let mut output_data = vec![0; detectors.shots * observable_byte_count];
+        let input = FaultScopeNativeDetectorEventShotBatchViewV1 {
+            detector_ids: self.detector_ids.as_ptr(),
+            detector_count: self.detector_ids.len(),
+            offsets: detectors.offsets.as_ptr(),
+            offsets_len: detectors.offsets.len(),
+            events: detectors.events.as_ptr(),
+            event_count: detectors.events.len(),
+            shots: detectors.shots,
+        };
+        let mut output = FaultScopeNativePackedObservableShotBatchMutViewV1 {
+            observable_ids: self.observable_ids.as_ptr(),
+            observable_count: self.observable_ids.len(),
+            data: output_data.as_mut_ptr(),
+            shots: detectors.shots,
+            observable_byte_count,
+        };
+        let descriptor = self.descriptor();
+        let status = unsafe { decode_detector_event_batch(descriptor.state, &input, &mut output) };
         status_to_np_result(status)?;
         PackedObservableShotBatch::new(self.observable_ids.clone(), output_data, detectors.shots)
     }

@@ -19,7 +19,7 @@ from __future__ import annotations
 import argparse
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Callable
 
@@ -32,6 +32,7 @@ if str(BENCHMARK_DIR) not in sys.path:
 
 from faultscope.decoders import (
     NativeFusionBlossomDecoder,
+    NativeMwpmDecoder,
     NativeNoCorrectionDecoder,
     NativePyMatchingDecoder,
 )
@@ -51,6 +52,7 @@ DEFAULT_PATHS = (
     "stim-dem-pymatching-bitpacked",
     "faultscope-dem-pymatching",
     "faultscope-dem-pymatching-native",
+    "faultscope-dem-mwpm",
     "faultscope-dem-fusion-blossom",
 )
 
@@ -81,6 +83,7 @@ class BenchmarkRow:
     mean_loss: float | None
     python_decode_calls: int | None
     status: str
+    repeat: int = 0
 
     @property
     def total_s(self) -> float | None:
@@ -106,6 +109,7 @@ def main() -> None:
     parser.add_argument("--shots", type=int, default=10_000)
     parser.add_argument("--basis", choices=("x", "z"), default="x")
     parser.add_argument("--rounds", type=int, default=None)
+    parser.add_argument("--repeats", type=int, default=1)
     parser.add_argument("--seed", type=int, default=12_345)
     parser.add_argument("--paths", nargs="+", default=list(DEFAULT_PATHS))
     parser.add_argument(
@@ -140,10 +144,12 @@ def main() -> None:
         raise SystemExit("at least one physical error rate is required")
     if args.shots <= 0:
         raise SystemExit("shots must be positive")
+    if args.repeats <= 0:
+        raise SystemExit("repeats must be positive")
 
     print(
         "basis\tdistance\trounds\tp\tshots\tpath\t"
-        "dem_edges\tdetectors\tobservables\tsolver_edges\tmerged_edges\t"
+        "repeat\tdem_edges\tdetectors\tobservables\tsolver_edges\tmerged_edges\t"
         "construct_s\tsample_s\tdecode_or_estimate_s\ttotal_s\t"
         "shots_per_second\tmean_loss\tpython_decode_calls\tstatus",
         flush=True,
@@ -215,6 +221,17 @@ def main() -> None:
                     seed,
                     args.split_native_baseline,
                 ),
+                "faultscope-dem-mwpm": lambda seed: run_faultscope_dem_mwpm(
+                    faultscope_dem,
+                    args.basis,
+                    distance,
+                    rounds,
+                    p,
+                    args.shots,
+                    metadata,
+                    seed,
+                    args.split_native_baseline,
+                ),
                 "faultscope-dem-fusion-blossom": lambda seed: run_faultscope_dem_fusion_blossom(
                     faultscope_dem,
                     args.basis,
@@ -227,24 +244,33 @@ def main() -> None:
                     args.split_native_baseline,
                 ),
             }
-            for path_index, path in enumerate(paths):
-                seed = args.seed + 1_000_000 * distance + 1_000 * rate_index
-                if not args.same_seed_across_paths:
-                    seed += path_index
-                row = safe_run(
-                    runners[path],
-                    seed,
-                    args.basis,
-                    distance,
-                    rounds,
-                    p,
-                    args.shots,
-                    path,
-                    metadata,
-                )
-                print(format_row(row), flush=True)
-                if row.status == "python-callback-used":
-                    failed = True
+            for repeat in range(args.repeats):
+                for path_index, path in enumerate(paths):
+                    seed = (
+                        args.seed
+                        + 100_000_000 * repeat
+                        + 1_000_000 * distance
+                        + 1_000 * rate_index
+                    )
+                    if not args.same_seed_across_paths:
+                        seed += path_index
+                    row = replace(
+                        safe_run(
+                            runners[path],
+                            seed,
+                            args.basis,
+                            distance,
+                            rounds,
+                            p,
+                            args.shots,
+                            path,
+                            metadata,
+                        ),
+                        repeat=repeat,
+                    )
+                    print(format_row(row), flush=True)
+                    if row.status == "python-callback-used":
+                        failed = True
 
     if failed:
         raise SystemExit("native decoder path used Python decode callback")
@@ -451,6 +477,32 @@ def run_faultscope_dem_fusion_blossom(
         seed=seed,
         path_name="faultscope-dem-fusion-blossom",
         decoder_factory=NativeFusionBlossomDecoder.from_dem,
+        split_baseline=split_baseline,
+    )
+
+
+def run_faultscope_dem_mwpm(
+    faultscope_dem: Any,
+    basis: str,
+    distance: int,
+    rounds: int,
+    p: float,
+    shots: int,
+    metadata: ProblemMetadata,
+    seed: int,
+    split_baseline: bool,
+) -> BenchmarkRow:
+    return run_native_decoder(
+        faultscope_dem=faultscope_dem,
+        basis=basis,
+        distance=distance,
+        rounds=rounds,
+        p=p,
+        shots=shots,
+        metadata=metadata,
+        seed=seed,
+        path_name="faultscope-dem-mwpm",
+        decoder_factory=NativeMwpmDecoder.from_dem,
         split_baseline=split_baseline,
     )
 
@@ -679,6 +731,7 @@ def format_row(row: BenchmarkRow) -> str:
             f"{row.p:.17g}",
             str(row.shots),
             row.path,
+            str(row.repeat),
             str(row.metadata.dem_edges),
             str(row.metadata.detectors),
             str(row.metadata.observables),

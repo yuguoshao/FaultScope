@@ -579,6 +579,39 @@ impl NativeDemSampler {
                 if let Some(native_decoder) = native_decoder_from_py(decoder)? {
                     let estimate = py.allow_threads(|| {
                         let mut rng = SmallRng::new(seed.unwrap_or(0x95f2_04dc_4291_a715));
+                        if !aggregate_hotspots && native_decoder.supports_detector_event_batch() {
+                            let event_batch = self
+                                .simulator
+                                .run_detector_event_shot_batch_with_rng(
+                                    shots,
+                                    &mut rng,
+                                    native_decoder.detector_ids(),
+                                    &self.observables,
+                                )
+                                .map_err(|err| PyValueError::new_err(err.to_string()))?;
+                            let detector_view = faultscope_core::DetectorEventShotBatchView::new(
+                                native_decoder.detector_ids(),
+                                &event_batch.offsets,
+                                &event_batch.events,
+                                event_batch.shots,
+                            )
+                            .map_err(|err| PyValueError::new_err(err.to_string()))?;
+                            let corrections = native_decoder
+                                .decode_detector_event_batch_checked(detector_view)
+                                .map_err(|err| PyValueError::new_err(err.to_string()))?;
+                            let mean_loss = packed_residual_mean_loss_from_rows(
+                                &event_batch.observable_ids,
+                                &event_batch.observable_data,
+                                event_batch.observable_byte_count,
+                                &corrections,
+                                event_batch.shots,
+                            )?;
+                            return Ok::<DemEstimate, PyErr>(dem_estimate_from_mean_loss(
+                                event_batch.shots,
+                                mean_loss,
+                                baseline,
+                            ));
+                        }
                         if !aggregate_hotspots && native_decoder.supports_packed_batch() {
                             let packed_batch = self
                                 .simulator
