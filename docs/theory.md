@@ -1,10 +1,10 @@
-# NPSim 理论原理与公式细节
+# FaultScope 理论原理与公式细节
 
-本文系统整理 NPSim 的数学模型、score-function estimator、packed batch 计数公式、
+本文系统整理 FaultScope 的数学模型、score-function estimator、packed batch 计数公式、
 DEM 生成与 DEM hotspot 计算。它描述的是当前公开 runtime 的理论接口：实际 Python
 回调接收 batch mask 对象，而不是逐 shot 的可变 trajectory 对象。
 
-实现概览和运行时边界可参考 [NPSim 实现概览](implementation_overview.md)。
+实现概览和运行时边界可参考 [FaultScope 实现概览](implementation_overview.md)。
 
 ## 符号与对象
 
@@ -41,7 +41,7 @@ L_k
 这里的 \(L_k\) 表示 logical observable record，不是 loss。本文把 shot-level loss 写成
 \(L_{\mathrm{loss}}(\tau)\)，把 batch-level loss 写成 packed mask \(F\)。
 
-NPSim 的 batch representation 把每个 boolean shot value 存成一个 Python integer 或 Rust
+FaultScope 的 batch representation 把每个 boolean shot value 存成一个 Python integer 或 Rust
 `Mask`。因此：
 
 \[
@@ -136,7 +136,7 @@ O_a =
 
 `Operation.observable_include(a, keys)` 是电路内声明形式：它把这些 measurement keys 的 parity XOR
 到 `batch.observables[a]`。同一个 observable id 可以通过多条 include 逐次 XOR 累积。通过
-`BatchForwardNoiseAwareSimulator(..., observables=(LogicalObservable(...),))` 传入的
+`FaultScopeSimulator(..., observables=(LogicalObservable(...),))` 传入的
 `LogicalObservable` 则是在 batch 末尾从 `measurement_keys` 和可选 final Pauli frame projection
 计算出 \(O_a\)。
 
@@ -229,7 +229,7 @@ P_\lambda(\tau)L_{\mathrm{loss}}(\tau)
 \frac{\partial \log P_\lambda(\tau)}{\partial \lambda_l}.
 \]
 
-NPSim 的 stochastic noise locations 独立采样，且 measurement 随机性在给定噪声事件后不显式依赖
+FaultScope 的 stochastic noise locations 独立采样，且 measurement 随机性在给定噪声事件后不显式依赖
 \(\lambda_l\)。因此：
 
 \[
@@ -360,7 +360,7 @@ The event mask records flip occurrence.
 \Pr(X)=\Pr(Y)=\Pr(Z)=\frac{\lambda}{3}.
 \]
 
-NPSim records one event bit for \(X/Y/Z\) occurrence:
+FaultScope records one event bit for \(X/Y/Z\) occurrence:
 
 \[
 s =
@@ -627,7 +627,7 @@ error model 中消去，并可能引入类似 `error(0.5) D_i D_j` 的 gauge rel
 gauge detectors，不等同于把任意无法预测的裸随机测量直接保留成普通 detector。logical observables
 仍然必须是 deterministic。
 
-NPSim 当前 DEM generation 走严格路径：不暴露 Stim 式 gauge detector elimination。也就是说，
+FaultScope 当前 DEM generation 走严格路径：不暴露 Stim 式 gauge detector elimination。也就是说，
 detector 和 observable 声明必须能在 reference / injected propagation 中得到确定 effect；否则应该
 调整 detector 定义或先把随机自由度改写成确定的 syndrome relation。
 
@@ -636,7 +636,7 @@ detector 和 observable 声明必须能在 reference / injected propagation 中�
 
 ## DEM 独立 edge sampling
 
-`DemBatchHotspotSimulator` 不执行原始 stabilizer circuit，而是把每条 DEM edge 作为独立 Bernoulli
+`DemHotspotEstimator` 不执行原始 stabilizer circuit，而是把每条 DEM edge 作为独立 Bernoulli
 instruction：
 
 \[
@@ -815,10 +815,10 @@ corrections = decoder.decode_batch_masks(batch)
 
 核心实现位置：
 
-- Forward estimator: `compute_packed_estimate` in `crates/npsim-core/src/hotspot.rs`
-- DEM estimator: `compute_dem_estimate` in `crates/npsim-core/src/hotspot.rs`
-- DEM sampler: `run_dem_batch` in `crates/npsim-core/src/dem_sampling.rs`
-- Noise event masks: sampling functions in `crates/npsim-core/src/packed.rs`
+- Forward estimator: `compute_packed_estimate` in `crates/faultscope-core/src/hotspot.rs`
+- DEM estimator: `compute_dem_estimate` in `crates/faultscope-core/src/hotspot.rs`
+- DEM sampler: `run_dem_batch` in `crates/faultscope-core/src/dem_sampling.rs`
+- Noise event masks: sampling functions in `crates/faultscope-core/src/packed.rs`
 
 理论页中的 `event_count`、`loss_event_count`、`sum_loss_score`、`sum_score`、`baseline`
 和 `sensitivity` 公式逐项对应这些实现。

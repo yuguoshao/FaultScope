@@ -1,7 +1,7 @@
 # Decoder Development
 
 This page is for developers who want to prototype a decoder in Python or add a
-native decoder backend to NPSim. For user-facing workflows, see the
+native decoder backend to FaultScope. For user-facing workflows, see the
 [User Guide](user_guide.md). For exact signatures, see the
 [API Reference](api_reference.md).
 
@@ -43,13 +43,13 @@ over all declared logical observables.
 ## Python Prototype Decoders
 
 Python decoders are the quickest way to validate an algorithm. They use the
-compatibility path, where NPSim materializes a Python batch object and calls
+compatibility path, where FaultScope materializes a Python batch object and calls
 `decode_batch_masks(batch)`.
 
 Recommended shape:
 
 ```python
-from npsim.runtime import generate_native_dem
+from faultscope.runtime import generate_native_dem
 
 
 class MyDecoder:
@@ -127,7 +127,7 @@ correction masks cross the Python boundary.
 When starting from a circuit, first generate a detector error model:
 
 ```python
-from npsim.runtime import generate_native_dem
+from faultscope.runtime import generate_native_dem
 
 dem = generate_native_dem(
     circuit,
@@ -214,9 +214,9 @@ The PyO3 implementation should convert Python input into Rust core structures
 once:
 
 ```rust
-#[pyclass(name = "MyNativeDecoder", module = "npsim._npsim_native")]
+#[pyclass(name = "MyNativeDecoder", module = "faultscope._native")]
 pub struct PyMyNativeDecoder {
-    inner: Arc<dyn npsim_core::NativeBatchDecoder>,
+    inner: Arc<dyn faultscope_core::NativeBatchDecoder>,
 }
 
 #[pymethods]
@@ -267,7 +267,7 @@ correction masks during `estimate(...)`.
 The core Rust contract is `NativeBatchDecoder`:
 
 ```rust
-use npsim_core::{
+use faultscope_core::{
     CorrectionMaskBatch,
     DetectorMaskBatchView,
     Mask,
@@ -300,7 +300,7 @@ impl NativeBatchDecoder for MyNativeDecoder {
         &self,
         detectors: DetectorMaskBatchView<'_>,
     ) -> NpResult<CorrectionMaskBatch> {
-        let words = npsim_core::word_count(detectors.shots);
+        let words = faultscope_core::word_count(detectors.shots);
 
         // detectors.masks are ordered exactly like self.detector_ids().
         // Run the backend and fill one Mask per corrected observable id.
@@ -358,12 +358,12 @@ handles explicitly; a Python subclass that only implements
 native fast path.
 
 Native backends are discovered through built-in handles and post-install plugin
-entry points. The V1 plugin contract is intentionally scoped to NPSim-owned
+entry points. The V1 plugin contract is intentionally scoped to FaultScope-owned
 backend packages:
 
 ```text
-entry point group: npsim.native_decoders
-ABI name: npsim.native_decoder_plugin.v1
+entry point group: faultscope.native_decoders
+ABI name: faultscope.native_decoder_plugin.v1
 ```
 
 The plugin package returns decoder classes that construct native handles. The
@@ -380,7 +380,7 @@ BP+OSD/LDPC decoding.
 Python can inspect compiled native backend names:
 
 ```python
-from npsim.decoders import available_native_decoders
+from faultscope.decoders import available_native_decoders
 
 print(available_native_decoders())
 ```
@@ -393,14 +393,14 @@ graphlike-detector-copy
 ```
 
 These are smoke-test and template backends, not production decoders.
-Post-install backend packages may add more names. NPSim never clones, builds, or
-installs backend code during `import npsim` or `estimate(...)`; installation is
+Post-install backend packages may add more names. FaultScope never clones, builds, or
+installs backend code during `import faultscope` or `estimate(...)`; installation is
 an explicit command.
 
 Python can use either friendly proxy classes or a generic resolver:
 
 ```python
-from npsim.decoders import (
+from faultscope.decoders import (
     NativeFusionBlossomDecoder,
     NativePyMatchingDecoder,
     create_native_decoder,
@@ -422,7 +422,7 @@ It is useful for testing the native path and for copying when adding a real
 backend.
 
 ```python
-from npsim.decoders import NativeGraphlikeDetectorCopyDecoder
+from faultscope.decoders import NativeGraphlikeDetectorCopyDecoder
 
 decoder = NativeGraphlikeDetectorCopyDecoder.from_dem(dem)
 
@@ -452,19 +452,19 @@ backend.
 
 ### Post-Install Native Backends
 
-Optional native backends are installed after the core NPSim package. Users can
+Optional native backends are installed after the core FaultScope package. Users can
 inspect backend status:
 
 ```bash
-python -m npsim.backends status
+python -m faultscope.backends status
 ```
 
 Installation helpers are uniform for catalog entries:
 
 ```bash
-python -m npsim.backends install fusion-blossom --dry-run
-python -m npsim.backends install pymatching --dry-run
-python -m npsim.backends install bposd --dry-run
+python -m faultscope.backends install fusion-blossom --dry-run
+python -m faultscope.backends install pymatching --dry-run
+python -m faultscope.backends install bposd --dry-run
 ```
 
 The command reserves the install workflow and prints the clone/build/install
@@ -476,14 +476,14 @@ When the backend package is missing, the public proxy remains importable but
 construction raises an install hint:
 
 ```python
-from npsim.decoders import NativeFusionBlossomDecoder, NativePyMatchingDecoder
+from faultscope.decoders import NativeFusionBlossomDecoder, NativePyMatchingDecoder
 
 decoder = NativeFusionBlossomDecoder.from_dem(dem)  # raises until installed
 decoder = NativePyMatchingDecoder.from_dem(dem)  # raises until installed
 ```
 
 The post-install plugin ABI is not a general third-party stable ABI. It is a
-versioned contract for official NPSim backend packages so the core package can
+versioned contract for official FaultScope backend packages so the core package can
 reject mismatched backend builds before any hot-path decoding begins.
 
 ### Official Backend Packages
@@ -491,35 +491,35 @@ reject mismatched backend builds before any hot-path decoding begins.
 The repository includes official optional backend packages at:
 
 ```text
-backends/npsim-pymatching/
-backends/npsim-fusion-blossom/
+backends/faultscope-pymatching/
+backends/faultscope-fusion-blossom/
 ```
 
 Install them in editable mode during development from an activated project
 virtual environment, or with `.venv/bin` explicitly on `PATH`:
 
 ```bash
-.venv/bin/python -m pip install -e backends/npsim-pymatching --no-build-isolation
-.venv/bin/python -m pip install -e backends/npsim-fusion-blossom
+.venv/bin/python -m pip install -e backends/faultscope-pymatching --no-build-isolation
+.venv/bin/python -m pip install -e backends/faultscope-fusion-blossom
 ```
 
 The package declares:
 
 ```toml
-[project.entry-points."npsim.native_decoders"]
-pymatching = "npsim_pymatching:backend_manifest"
-fusion-blossom = "npsim_fusion_blossom:backend_manifest"
+[project.entry-points."faultscope.native_decoders"]
+pymatching = "faultscope_pymatching:backend_manifest"
+fusion-blossom = "faultscope_fusion_blossom:backend_manifest"
 ```
 
-Its manifest returns the current NPSim native decoder plugin ABI, package
+Its manifest returns the current FaultScope native decoder plugin ABI, package
 metadata, and one or more decoder classes. The class implements
 `from_dem(...)` and `from_circuit(...)`; construction compiles the DEM to a
 `GraphlikeDecodingProblem`, passes that metadata to the package's Rust/PyO3
 extension, and stores external native decoder state in a PyCapsule.
 
 The PyMatching backend links pinned PyMatching sparse-blossom C++ source in the
-`npsim-pymatching` package. It does not call the Python
-`PyMatchingBatchDecoder` hot path and does not depend on the PyPI wheel exposing
+`faultscope-pymatching` package. It does not call the Python
+`PyMatchingDecoder` hot path and does not depend on the PyPI wheel exposing
 a stable native SDK. The backend uses the same native PyCapsule boundary as the
 other official packages: Python passes construction metadata, while hot-path
 detector/correction buffers stay native. For `aggregate_hotspots=False`, it
@@ -527,7 +527,7 @@ uses the optional row-major packed batch callback so the hot input layout
 matches PyMatching's `decode_batch(..., bit_packed_shots=True)` convention.
 
 The current backend is a minimal serial-solver beta fusion-blossom MWPM
-adapter. It maps NPSim detector indices to fusion-blossom vertices, converts
+adapter. It maps FaultScope detector indices to fusion-blossom vertices, converts
 graphlike DEM edges to weighted solver edges, runs a serial solver per shot,
 and maps matched vertex pairs through cached shortest paths back to observable
 correction masks. It safely compresses identical one-detector boundary edges
@@ -559,7 +559,7 @@ small detector-layout special cases.
 The backend decoder object exposes:
 
 ```python
-decoder.__npsim_native_decoder_capsule__()
+decoder.__faultscope_native_decoder_capsule__()
 decoder.name
 decoder.detector_ids
 decoder.observable_ids
@@ -571,10 +571,10 @@ decoder.build_summary
 decoder.decode_batch_masks(batch)  # debug fallback only
 ```
 
-NPSim only calls the capsule method on the native fast path. The plugin ABI is
-host-allocated for hot outputs: NPSim allocates correction mask words for the
+FaultScope only calls the capsule method on the native fast path. The plugin ABI is
+host-allocated for hot outputs: FaultScope allocates correction mask words for the
 decoder's declared observables, and the backend writes into those buffers.
-Backend packages must not allocate correction masks and ask NPSim to free them
+Backend packages must not allocate correction masks and ask FaultScope to free them
 across the dynamic-library boundary.
 
 ### Fusion-Blossom Adapter Status
@@ -584,29 +584,29 @@ Fusion Blossom is a MWPM decoder route for QEC. The
 stream decoding support. The public
 [repository](https://github.com/yuewuo/fusion-blossom) presents the project as
 a fast MWPM solver for QEC, ships Rust code plus a Python binding, and currently
-declares Rust package version `0.2.13`. NPSim pins the backend dependency to a
+declares Rust package version `0.2.13`. FaultScope pins the backend dependency to a
 concrete git revision because that version is not available from crates.io. The
 public Rust source exposes types such as `SolverInitializer` and
 `SyndromePattern` and helper functions such as `fusion_mwpm(...)` and
 `detailed_matching(...)`.
 
-NPSim reserves the public constructor through a post-install proxy:
+FaultScope reserves the public constructor through a post-install proxy:
 
 ```python
-from npsim.decoders import NativeFusionBlossomDecoder
+from faultscope.decoders import NativeFusionBlossomDecoder
 
 decoder = NativeFusionBlossomDecoder.from_dem(dem)
 decoder = NativeFusionBlossomDecoder.from_circuit(circuit)
 ```
 
 The default package does not ship the fusion-blossom solver. After
-`npsim-fusion-blossom` is installed, the proxy delegates construction to that
+`faultscope-fusion-blossom` is installed, the proxy delegates construction to that
 package while preserving the native fast path.
 
 The implemented minimal beta adapter is:
 
 1. Compile `DetectorErrorModel` to `GraphlikeDecodingProblem`.
-2. Map each NPSim detector index to a fusion-blossom vertex.
+2. Map each FaultScope detector index to a fusion-blossom vertex.
 3. Convert one-detector DEM edges to boundary or virtual-vertex edges.
 4. Merge one-detector boundary edges only when they share the same detector and
    fault-observable set; merge two-detector parallel DEM edges only when they
@@ -648,11 +648,11 @@ benchmark:
 ```
 
 It compares Stim DEM + PyMatching, Stim bit-packed DEM + PyMatching bit-packed
-batch decode, NPSim DEM + Python PyMatching, NPSim DEM + native PyMatching, and
-NPSim DEM + fusion-blossom native decoding when the optional backend packages
+batch decode, FaultScope DEM + Python PyMatching, FaultScope DEM + native PyMatching, and
+FaultScope DEM + fusion-blossom native decoding when the optional backend packages
 are installed. The bit-packed Stim/PyMatching row is the official-style
 maximum-throughput baseline. The benchmark uses a local graphlike Stim DEM
-converter that splits separator groups into NPSim DEM edges for native paths;
+converter that splits separator groups into FaultScope DEM edges for native paths;
 this does not change the threshold benchmark. It reports construction time,
 sampling time where separable, native estimate time, solver-edge metadata,
 merged parallel edges, and whether native paths stayed out of Python callbacks.
@@ -660,7 +660,7 @@ merged parallel edges, and whether native paths stayed out of Python callbacks.
 For native backend diagnosis, add `--split-native-baseline`. Native PyMatching
 rows then report `sample_s` using a native no-correction decoder through the
 same packed-row sampler path, and `decode_or_estimate_s` as the additional
-decoder cost. This makes it clearer whether a gap is in NPSim sampling or in
+decoder cost. This makes it clearer whether a gap is in FaultScope sampling or in
 the backend decode loop.
 
 Use `--same-seed-across-paths` when comparing mean-loss differences between
@@ -669,7 +669,7 @@ per-path seed offset.
 
 ## Validation And Performance Rules
 
-NPSim validates native decoder output before using it:
+FaultScope validates native decoder output before using it:
 
 - correction `shots` must match the sampled batch;
 - correction mask word count must match the shot count;
@@ -686,10 +686,10 @@ The native fast path is used only when:
 For DEM estimates, `aggregate_hotspots=False` also allows backends that support
 the packed-row callback to receive `shots x ceil(detectors/8)` syndrome bytes
 and return `shots x ceil(observables/8)` correction bytes. With
-`aggregate_hotspots=True`, NPSim preserves the existing hotspot-capable
+`aggregate_hotspots=True`, FaultScope preserves the existing hotspot-capable
 detector-major path.
 
-If a Python loss or correction callback is supplied, NPSim uses the
+If a Python loss or correction callback is supplied, FaultScope uses the
 compatibility path and may call `decoder.decode_batch_masks(batch)`. This is
 useful for debugging and comparison, but it moves batch data through Python.
 
@@ -708,8 +708,8 @@ For a new decoder family:
 3. Add or update an official backend catalog entry with package name, problem
    kind, source repo, installability, and proxy class name.
 4. Implement an official backend package that exposes a
-   `npsim.native_decoders` entry point manifest with the matching ABI.
+   `faultscope.native_decoders` entry point manifest with the matching ABI.
 5. Expose a friendly proxy class when the backend should be importable from
-   `npsim.decoders`.
+   `faultscope.decoders`.
 6. Test both paths: Python compatibility behavior and native no-callback fast
    path.

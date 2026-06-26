@@ -9,8 +9,8 @@ standard rotated surface-code memory circuits:
 
 * Stim circuit detector sampling + PyMatching.
 * Stim DEM sampling + PyMatching.
-* NPSim native forward sampling + PyMatching.
-* NPSim native DEM sampling + PyMatching.
+* FaultScope native forward sampling + PyMatching.
+* FaultScope native DEM sampling + PyMatching.
 """
 
 from __future__ import annotations
@@ -29,18 +29,18 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from npsim.dem import Detector, DetectorErrorEdge, DetectorErrorModel, LogicalObservable
-from npsim.runtime import (
+from faultscope.dem import Detector, DetectorErrorEdge, DetectorErrorModel, LogicalObservable
+from faultscope.runtime import (
     UnsupportedNativeCircuitError,
     compile_native_dem_sampler,
     compile_native_sampler,
 )
-from npsim.runtime.loss import logical_residual_loss_mask
-from npsim.io import StimImportResult, parse_stim_circuit
+from faultscope.runtime.loss import logical_residual_loss_mask
+from faultscope.io import StimImportResult, parse_stim_circuit
 
 
 DEFAULT_RATES = (0.002, 0.004, 0.006, 0.008, 0.010, 0.012)
-PATHS = ("stim", "stim-dem", "npsim-forward", "npsim-dem")
+PATHS = ("stim", "stim-dem", "faultscope-forward", "faultscope-dem")
 
 
 @dataclass(frozen=True)
@@ -118,7 +118,7 @@ def main() -> None:
             )
             matcher = pymatching.Matching.from_detector_error_model(stim_dem)
             imported = parse_stim_circuit(str(circuit.flattened()))
-            npsim_dem = stim_dem_to_npsim_dem(stim_dem)
+            faultscope_dem = stim_dem_to_faultscope_dem(stim_dem)
 
             path_fns = (
                 (
@@ -140,8 +140,8 @@ def main() -> None:
                     ),
                 ),
                 (
-                    "npsim-forward",
-                    lambda seed: timed_npsim_forward_logical_failure(
+                    "faultscope-forward",
+                    lambda seed: timed_faultscope_forward_logical_failure(
                         imported,
                         matcher,
                         args.shots,
@@ -149,9 +149,9 @@ def main() -> None:
                     ),
                 ),
                 (
-                    "npsim-dem",
-                    lambda seed: timed_npsim_dem_logical_failure(
-                        npsim_dem,
+                    "faultscope-dem",
+                    lambda seed: timed_faultscope_dem_logical_failure(
+                        faultscope_dem,
                         matcher,
                         args.shots,
                         seed,
@@ -257,7 +257,7 @@ def timed_stim_dem_logical_failure(
     return TimedLogicalFailureStats(stats, compile_s, sample_s, decode_s)
 
 
-def timed_npsim_forward_logical_failure(
+def timed_faultscope_forward_logical_failure(
     imported: StimImportResult,
     matcher: Any,
     shots: int,
@@ -289,14 +289,14 @@ def timed_npsim_forward_logical_failure(
     return TimedLogicalFailureStats(stats, compile_s, sample_s, decode_s)
 
 
-def timed_npsim_dem_logical_failure(
-    npsim_dem: DetectorErrorModel,
+def timed_faultscope_dem_logical_failure(
+    faultscope_dem: DetectorErrorModel,
     matcher: Any,
     shots: int,
     seed: int,
 ) -> TimedLogicalFailureStats:
     started = time.perf_counter()
-    sampler = compile_native_dem_sampler(npsim_dem)
+    sampler = compile_native_dem_sampler(faultscope_dem)
     compile_s = time.perf_counter() - started
     started = time.perf_counter()
     batch = sampler.run_batch(
@@ -306,8 +306,8 @@ def timed_npsim_dem_logical_failure(
     )
     sample_s = time.perf_counter() - started
     started = time.perf_counter()
-    detector_ids = tuple(detector.id for detector in npsim_dem.detectors)
-    observable_ids = tuple(observable.id for observable in npsim_dem.observables)
+    detector_ids = tuple(detector.id for detector in faultscope_dem.detectors)
+    observable_ids = tuple(observable.id for observable in faultscope_dem.observables)
     corrections = _decode_batch_masks_with_matching(
         matcher,
         batch.detectors,
@@ -325,7 +325,7 @@ def timed_npsim_dem_logical_failure(
     return TimedLogicalFailureStats(stats, compile_s, sample_s, decode_s)
 
 
-def stim_dem_to_npsim_dem(stim_dem: Any) -> DetectorErrorModel:
+def stim_dem_to_faultscope_dem(stim_dem: Any) -> DetectorErrorModel:
     detectors_by_id: dict[int, Detector] = {}
     observable_ids: set[int] = set()
     edges: list[DetectorErrorEdge] = []
@@ -577,7 +577,7 @@ def _crossing_rate(
 def _load_required_modules() -> tuple[Any, Any, Any]:
     os.environ.setdefault(
         "MPLCONFIGDIR",
-        str(Path(tempfile.gettempdir()) / "npsim-matplotlib-cache"),
+        str(Path(tempfile.gettempdir()) / "faultscope-matplotlib-cache"),
     )
     try:
         import stim

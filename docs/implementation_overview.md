@@ -1,12 +1,12 @@
-# NPSim 实现概览
+# FaultScope 实现概览
 
-本页是 NPSim 当前 runtime 的实现概览。更完整的理论原理、公式推导和 packed/DEM 计算细节见
-[NPSim 理论原理与公式细节](theory.md)。
+本页是 FaultScope 当前 runtime 的实现概览。更完整的理论原理、公式推导和 packed/DEM 计算细节见
+[FaultScope 理论原理与公式细节](theory.md)。
 
-本页描述 NPSim 当前实现背后的数学模型和运行时边界。产品执行路径是 Rust
-`npsim-core` 中的 bit-packed batch runtime，通过 Python API 暴露为
-`BatchForwardNoiseAwareSimulator`、`DetectorErrorModelGenerator` 和
-`DemBatchHotspotSimulator`。本文中的 trajectory 是概念模型；实际 Python 回调接收的是
+本页描述 FaultScope 当前实现背后的数学模型和运行时边界。产品执行路径是 Rust
+`faultscope-core` 中的 bit-packed batch runtime，通过 Python API 暴露为
+`FaultScopeSimulator`、`DetectorErrorModelGenerator` 和
+`DemHotspotEstimator`。本文中的 trajectory 是概念模型；实际 Python 回调接收的是
 batch mask 对象，而不是逐 shot trajectory 对象。
 
 ## 目标函数
@@ -66,7 +66,7 @@ e_l ~ p_l(e; lambda_l)
 s_l(tau) = d log p_l(e_l; lambda_l) / d lambda_l
 ```
 
-NPSim 的 Pauli-compatible 噪声模型都实现同一类 score。对 Bernoulli 型事件：
+FaultScope 的 Pauli-compatible 噪声模型都实现同一类 score。对 Bernoulli 型事件：
 
 ```text
 s_l(tau) =
@@ -88,7 +88,7 @@ Monte Carlo 排序，但通常降低估计方差。
 
 ## 热点分数
 
-NPSim 输出 signed sensitivity：
+FaultScope 输出 signed sensitivity：
 
 ```text
 S_l = dJ / d lambda_l
@@ -133,7 +133,7 @@ Pauli twirling、离散化近似，或替换为 stabilizer-compatible stochastic
 
 ## Batch Runtime
 
-`BatchForwardNoiseAwareSimulator` 共享一个理想 stabilizer support，并把 per-shot 差异压入整数
+`FaultScopeSimulator` 共享一个理想 stabilizer support，并把 per-shot 差异压入整数
 mask。第 `k` 个 shot 存在整数的第 `k` 位中：
 
 - `X_frame[q]`: qubit `q` 上是否有 X frame 分量。
@@ -153,7 +153,7 @@ event_count = popcount(event_mask)
 再代入同一 score-function estimator。
 
 该 runtime 支持确定和随机 Pauli measurement，只要后续电路不依赖单个 shot 的测量结果选择不同操作。
-NPSim 当前不暴露通用 per-shot adaptive branching simulator。
+FaultScope 当前不暴露通用 per-shot adaptive branching simulator。
 
 ## Detector Error Model
 
@@ -229,7 +229,7 @@ edge 会被拒绝，因为 matching decoder 无法从 syndrome 中恢复这种�
 
 ## DEM Hotspot Mode
 
-`DemBatchHotspotSimulator` 不执行 stabilizer circuit，而是在 detector error model 上直接采样。
+`DemHotspotEstimator` 不执行 stabilizer circuit，而是在 detector error model 上直接采样。
 每条 DEM edge 是独立 Bernoulli instruction：
 
 ```text

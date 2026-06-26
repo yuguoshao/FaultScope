@@ -23,14 +23,14 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from npsim.dem import DetectorErrorModelGenerator
-from npsim.experiments import make_repetition_code_experiment
-from npsim.runtime import (
+from faultscope.dem import DetectorErrorModelGenerator
+from faultscope.experiments import make_repetition_code_experiment
+from faultscope.runtime import (
     UnsupportedNativeCircuitError,
     compile_native_dem_sampler,
     compile_native_sampler,
 )
-from npsim.runtime.loss import logical_residual_loss_mask
+from faultscope.runtime.loss import logical_residual_loss_mask
 from tests.stim_helpers import to_stim_circuit, with_dem_declarations
 
 

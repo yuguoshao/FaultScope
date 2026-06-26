@@ -3,38 +3,38 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from npsim._npsim_native import NATIVE_DECODER_PLUGIN_ABI
-from npsim.backends import clear_native_decoder_plugin_cache
-from npsim.decoders import (
+from faultscope._native import NATIVE_DECODER_PLUGIN_ABI
+from faultscope.backends import clear_native_decoder_plugin_cache
+from faultscope.decoders import (
     NativePyMatchingDecoder,
-    PyMatchingBatchDecoder,
+    PyMatchingDecoder,
     available_native_decoders,
     create_native_decoder,
     get_native_decoder_class,
 )
-from npsim.dem import Detector, DetectorErrorEdge, DetectorErrorModel, LogicalObservable
-from npsim.runtime import compile_native_dem_sampler
+from faultscope.dem import Detector, DetectorErrorEdge, DetectorErrorModel, LogicalObservable
+from faultscope.runtime import compile_native_dem_sampler
 
 BACKEND_SRC = (
     Path(__file__).resolve().parents[1]
     / "backends"
-    / "npsim-pymatching"
+    / "faultscope-pymatching"
     / "src"
 )
 if str(BACKEND_SRC) not in sys.path:
     sys.path.insert(0, str(BACKEND_SRC))
 
-import npsim_pymatching  # noqa: E402
+import faultscope_pymatching  # noqa: E402
 
 try:
-    from npsim_pymatching import _native as pymatching_native  # noqa: E402
+    from faultscope_pymatching import _native as pymatching_native  # noqa: E402
 except ImportError:  # pragma: no cover - exercised when backend is not built.
     pymatching_native = None
 
 
 requires_native_backend = unittest.skipUnless(
-    npsim_pymatching.native_extension_available(),
-    "npsim-pymatching native extension is not built",
+    faultscope_pymatching.native_extension_available(),
+    "faultscope-pymatching native extension is not built",
 )
 
 
@@ -43,7 +43,7 @@ class _FakeEntryPoints:
         self._entry_points = tuple(entry_points)
 
     def select(self, *, group):
-        if group == "npsim.native_decoders":
+        if group == "faultscope.native_decoders":
             return self._entry_points
         return ()
 
@@ -52,7 +52,7 @@ class _FakeEntryPoint:
     name = "pymatching"
 
     def load(self):
-        return npsim_pymatching.backend_manifest
+        return faultscope_pymatching.backend_manifest
 
 
 class _Batch:
@@ -66,23 +66,23 @@ class PyMatchingBackendPackageTests(unittest.TestCase):
         clear_native_decoder_plugin_cache()
 
     def test_backend_manifest_contract(self) -> None:
-        manifest = npsim_pymatching.backend_manifest()
+        manifest = faultscope_pymatching.backend_manifest()
 
         self.assertEqual(manifest["abi_version"], NATIVE_DECODER_PLUGIN_ABI)
         self.assertEqual(manifest["name"], "pymatching")
-        self.assertEqual(manifest["version"], npsim_pymatching.__version__)
+        self.assertEqual(manifest["version"], faultscope_pymatching.__version__)
         self.assertEqual(
             manifest["source"],
-            "npsim-pymatching native sparse-blossom adapter",
+            "faultscope-pymatching native sparse-blossom adapter",
         )
         self.assertIs(
             manifest["decoders"]["pymatching"],
-            npsim_pymatching.NativePyMatchingDecoder,
+            faultscope_pymatching.NativePyMatchingDecoder,
         )
 
     @requires_native_backend
     def test_backend_from_dem_returns_external_native_solver_decoder(self) -> None:
-        decoder = npsim_pymatching.NativePyMatchingDecoder.from_dem(single_boundary_dem())
+        decoder = faultscope_pymatching.NativePyMatchingDecoder.from_dem(single_boundary_dem())
 
         self.assertEqual(decoder.name, "pymatching")
         self.assertEqual(decoder.detector_ids, (0,))
@@ -92,7 +92,7 @@ class PyMatchingBackendPackageTests(unittest.TestCase):
         self.assertEqual(decoder.build_summary["dem_edge_count"], 1)
         self.assertEqual(decoder.build_summary["solver_edge_count"], 1)
         self.assertEqual(decoder.python_decode_call_count, 0)
-        self.assertIsNotNone(decoder.__npsim_native_decoder_capsule__())
+        self.assertIsNotNone(decoder.__faultscope_native_decoder_capsule__())
 
     @requires_native_backend
     def test_backend_entry_point_integrates_with_registry_and_fast_path(self) -> None:
@@ -100,14 +100,14 @@ class PyMatchingBackendPackageTests(unittest.TestCase):
         sampler = compile_native_dem_sampler(dem)
 
         with mock.patch(
-            "npsim.backends.registry.metadata.entry_points",
+            "faultscope.backends.registry.metadata.entry_points",
             return_value=_FakeEntryPoints((_FakeEntryPoint(),)),
         ):
             clear_native_decoder_plugin_cache()
             self.assertIn("pymatching", available_native_decoders())
             self.assertIs(
                 get_native_decoder_class("pymatching"),
-                npsim_pymatching.NativePyMatchingDecoder,
+                faultscope_pymatching.NativePyMatchingDecoder,
             )
             decoder = create_native_decoder("pymatching", dem=dem)
             friendly_decoder = NativePyMatchingDecoder.from_dem(dem)
@@ -143,7 +143,7 @@ class PyMatchingBackendPackageTests(unittest.TestCase):
                 ),
             ),
         )
-        decoder = npsim_pymatching.NativePyMatchingDecoder.from_dem(dem)
+        decoder = faultscope_pymatching.NativePyMatchingDecoder.from_dem(dem)
         batch = _Batch(shots=4, detectors={0: 0b1010, 1: 0b1010})
 
         corrections = decoder.decode_batch_masks(batch)
@@ -153,7 +153,7 @@ class PyMatchingBackendPackageTests(unittest.TestCase):
 
     @requires_native_backend
     def test_decode_batch_masks_reads_and_writes_multiple_packed_words(self) -> None:
-        decoder = npsim_pymatching.NativePyMatchingDecoder.from_dem(single_boundary_dem())
+        decoder = faultscope_pymatching.NativePyMatchingDecoder.from_dem(single_boundary_dem())
         mask = (1 << 0) | (1 << 65) | (1 << 129)
         batch = _Batch(shots=130, detectors={0: mask})
 
@@ -164,7 +164,7 @@ class PyMatchingBackendPackageTests(unittest.TestCase):
 
     @requires_native_backend
     def test_decode_batch_masks_handles_more_than_64_observables(self) -> None:
-        decoder = npsim_pymatching.NativePyMatchingDecoder.from_dem(many_observable_dem(65))
+        decoder = faultscope_pymatching.NativePyMatchingDecoder.from_dem(many_observable_dem(65))
         mask = 0b10101
         batch = _Batch(shots=5, detectors={0: mask})
 
@@ -176,10 +176,10 @@ class PyMatchingBackendPackageTests(unittest.TestCase):
     @requires_native_backend
     def test_matches_python_pymatching_on_small_graph(self) -> None:
         try:
-            python_decoder = PyMatchingBatchDecoder.from_dem(two_edge_dem())
+            python_decoder = PyMatchingDecoder.from_dem(two_edge_dem())
         except ImportError as exc:
             self.skipTest(str(exc))
-        native_decoder = npsim_pymatching.NativePyMatchingDecoder.from_dem(two_edge_dem())
+        native_decoder = faultscope_pymatching.NativePyMatchingDecoder.from_dem(two_edge_dem())
         batch = _Batch(shots=6, detectors={0: 0b001011, 1: 0b101010})
 
         self.assertEqual(
@@ -190,7 +190,7 @@ class PyMatchingBackendPackageTests(unittest.TestCase):
     @requires_native_backend
     def test_unknown_options_are_rejected(self) -> None:
         with self.assertRaisesRegex(ValueError, "unknown pymatching option"):
-            npsim_pymatching.NativePyMatchingDecoder.from_dem(
+            faultscope_pymatching.NativePyMatchingDecoder.from_dem(
                 single_boundary_dem(),
                 options={"enable_correlations": True},
             )

@@ -1,0 +1,19 @@
+[build-system]
+requires = ["maturin>=1.7,<2"]
+build-backend = "maturin"
+
+[project]
+name = "faultscope-pymatching"
+version = "0.1.0"
+description = "Official FaultScope PyMatching native decoder backend"
+requires-python = ">=3.10"
+dependencies = [
+    "faultscope",
+]
+
+[tool.maturin]
+module-name = "faultscope_pymatching._native"
+python-source = "src"
+
+[project.entry-points."faultscope.native_decoders"]
+pymatching = "faultscope_pymatching:backend_manifest"

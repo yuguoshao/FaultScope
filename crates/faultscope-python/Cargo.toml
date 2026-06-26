@@ -1,0 +1,24 @@
+[package]
+name = "faultscope-python"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+name = "_native"
+crate-type = ["cdylib"]
+test = false
+
+[features]
+default = []
+decoder-fusion-blossom = ["faultscope-core/decoder-fusion-blossom"]
+decoder-bposd = ["faultscope-core/decoder-bposd"]
+
+[dependencies]
+faultscope-core = { path = "../faultscope-core" }
+pyo3 = { version = "0.23", features = ["extension-module"] }
+
+[package.metadata.maturin]
+module-name = "faultscope._native"
+python-source = "../.."

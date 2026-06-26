@@ -1,3 +1,4 @@
+import importlib.util
 import io
 import os
 import random
@@ -6,9 +7,10 @@ import unittest
 from types import SimpleNamespace
 from unittest import mock
 
-from npsim.runtime import BatchForwardNoiseAwareSimulator, BatchTrajectory
-from npsim.core import Circuit, NoiseLocation, Operation
-from npsim.dem import (
+import faultscope
+from faultscope.runtime import FaultScopeSimulator, SampleBatch
+from faultscope.core import Circuit, NoiseLocation, Operation
+from faultscope.dem import (
     BinaryLinearDecodingProblem,
     Detector,
     DetectorErrorEdge,
@@ -21,22 +23,22 @@ from npsim.dem import (
     LogicalObservable,
     SparseBinaryMatrix,
 )
-from npsim.dem import (
-    DemBatchHotspotSimulator,
-    DemBatchTrajectory,
-    DemEdgeHotspotRow,
-    DemHotspotResult,
-    DemLocationHotspotRow,
+from faultscope.dem import (
+    DemHotspotEstimator,
+    DemSampleBatch,
+    DemEdgeHotspot,
+    DemHotspotEstimate,
+    DemLocationHotspot,
     DemLocationMetadata,
 )
-from npsim.core import (
+from faultscope.core import (
     BernoulliPauliNoise,
     MeasurementBitFlip,
     PauliChannel,
     SingleQubitDepolarizing,
     TwoQubitDepolarizing,
 )
-from npsim.runtime import (
+from faultscope.runtime import (
     UnsupportedNativeCircuitError,
     NativeDemSampler,
     NativePackedSampler,
@@ -46,8 +48,8 @@ from npsim.runtime import (
     compile_native_sampler,
     generate_native_dem,
 )
-from npsim.runtime.loss import logical_residual_loss_mask
-from npsim.decoders import (
+from faultscope.runtime.loss import logical_residual_loss_mask
+from faultscope.decoders import (
     NativeBatchDecoder,
     NativeBposdDecoder,
     NativeDecoderBackendUnavailable,
@@ -55,22 +57,22 @@ from npsim.decoders import (
     NativeGraphlikeDetectorCopyDecoder,
     NativeNoCorrectionDecoder,
     NativePyMatchingDecoder,
-    PyMatchingBatchDecoder,
+    PyMatchingDecoder,
     UnsupportedPyMatchingDemError,
     available_native_decoders,
     create_native_decoder,
     get_native_decoder_class,
 )
-from npsim.backends import (
+from faultscope.backends import (
     clear_native_decoder_plugin_cache,
     native_decoder_backend_statuses,
     official_native_decoder_backend_catalog,
 )
-from npsim.experiments import make_repetition_code_experiment
-from npsim.runtime import SimulationResult
-from npsim.core import PauliFrame, StabilizerState
-from npsim.io import StimImportError, parse_stim_circuit
-from npsim.viz import (
+from faultscope.experiments import make_repetition_code_experiment
+from faultscope.runtime import FailureEstimate
+from faultscope.core import PauliFrame, StabilizerState
+from faultscope.io import StimImportError, parse_stim_circuit
+from faultscope.viz import (
     VisualizationUnavailableError,
     write_rotated_surface_code_spatial_hotspot_map,
     write_repetition_gate_structure_hotspot_map,
@@ -84,7 +86,7 @@ from tests.stim_helpers import (
     dem_batch_from_stim_samples,
     final_data_measurement_circuit,
     measurement_batch_from_stim_samples,
-    npsim_dem_error_edges,
+    faultscope_dem_error_edges,
     stim_dem_error_edges,
     to_stim_circuit,
     with_dem_declarations,
@@ -108,7 +110,7 @@ class _FakeEntryPoints:
         self._entry_points = tuple(entry_points)
 
     def select(self, *, group):
-        if group == "npsim.native_decoders":
+        if group == "faultscope.native_decoders":
             return self._entry_points
         return ()
 
@@ -120,6 +122,19 @@ class _FakeEntryPoint:
 
     def load(self):
         return self._manifest_factory
+
+
+class PublicRenameTests(unittest.TestCase):
+    def test_faultscope_exports_new_public_names_only(self) -> None:
+        self.assertIs(faultscope.FaultScopeSimulator, FaultScopeSimulator)
+        self.assertIs(faultscope.SampleBatch, SampleBatch)
+        self.assertIs(faultscope.FailureEstimate, FailureEstimate)
+        self.assertIs(faultscope.PyMatchingDecoder, PyMatchingDecoder)
+        self.assertFalse(hasattr(faultscope, "BatchForwardNoiseAwareSimulator"))
+        self.assertFalse(hasattr(faultscope, "BatchTrajectory"))
+        self.assertFalse(hasattr(faultscope, "SimulationResult"))
+        self.assertFalse(hasattr(faultscope, "PyMatchingBatchDecoder"))
+        self.assertIsNone(importlib.util.find_spec("npsim"))
 
 
 class StabilizerStateTests(unittest.TestCase):
@@ -177,15 +192,15 @@ class StabilizerStateTests(unittest.TestCase):
 
 class NoiseAwareSimulatorTests(unittest.TestCase):
     def test_core_circuit_objects_are_extension_classes(self) -> None:
-        import npsim
-        import npsim.core as core
-        import npsim.decoders as decoders
-        import npsim.dem as dem_module
-        import npsim.io as io
-        import npsim.runtime as runtime_module
-        import npsim.viz as viz
-        import npsim._npsim_native as native
-        from npsim.runtime import HotspotRow
+        import faultscope
+        import faultscope.core as core
+        import faultscope.decoders as decoders
+        import faultscope.dem as dem_module
+        import faultscope.io as io
+        import faultscope.runtime as runtime_module
+        import faultscope.viz as viz
+        import faultscope._native as native
+        from faultscope.runtime import FaultHotspot
 
         self.assertNotIn("BatchStabilizerState", core.__all__)
         self.assertFalse(hasattr(core, "BatchStabilizerState"))
@@ -210,16 +225,16 @@ class NoiseAwareSimulatorTests(unittest.TestCase):
         self.assertIs(SparseBinaryMatrix, native.SparseBinaryMatrix)
         self.assertIs(DetectorGraphEdgeHotspot, native.DetectorGraphEdgeHotspot)
         self.assertIs(DetectorGraphHotspots, native.DetectorGraphHotspots)
-        self.assertIs(BatchForwardNoiseAwareSimulator, native.BatchForwardNoiseAwareSimulator)
-        self.assertIs(BatchTrajectory, native.BatchTrajectory)
-        self.assertIs(DemBatchTrajectory, native.DemBatchTrajectory)
-        self.assertIs(HotspotRow, native.HotspotRow)
-        self.assertIs(SimulationResult, native.SimulationResult)
+        self.assertIs(FaultScopeSimulator, native.FaultScopeSimulator)
+        self.assertIs(SampleBatch, native.SampleBatch)
+        self.assertIs(DemSampleBatch, native.DemSampleBatch)
+        self.assertIs(FaultHotspot, native.FaultHotspot)
+        self.assertIs(FailureEstimate, native.FailureEstimate)
         self.assertIs(DemLocationMetadata, native.DemLocationMetadata)
-        self.assertIs(DemLocationHotspotRow, native.DemLocationHotspotRow)
-        self.assertIs(DemEdgeHotspotRow, native.DemEdgeHotspotRow)
-        self.assertIs(DemHotspotResult, native.DemHotspotResult)
-        self.assertIs(DemBatchHotspotSimulator, native.DemBatchHotspotSimulator)
+        self.assertIs(DemLocationHotspot, native.DemLocationHotspot)
+        self.assertIs(DemEdgeHotspot, native.DemEdgeHotspot)
+        self.assertIs(DemHotspotEstimate, native.DemHotspotEstimate)
+        self.assertIs(DemHotspotEstimator, native.DemHotspotEstimator)
         self.assertIs(NativePackedSampler, native.NativePackedSampler)
         self.assertIs(NativeDemSampler, native.NativeDemSampler)
         self.assertIs(NativeBatchDecoder, native.NativeBatchDecoder)
@@ -228,18 +243,18 @@ class NoiseAwareSimulatorTests(unittest.TestCase):
             native.NativeGraphlikeDetectorCopyDecoder,
         )
         self.assertIs(NativeNoCorrectionDecoder, native.NativeNoCorrectionDecoder)
-        self.assertIs(npsim.Circuit, native.Circuit)
-        self.assertIs(npsim.BatchForwardNoiseAwareSimulator, native.BatchForwardNoiseAwareSimulator)
-        self.assertIs(npsim.DetectorErrorModelGenerator, native.DetectorErrorModelGenerator)
-        self.assertIs(npsim.DemBatchHotspotSimulator, native.DemBatchHotspotSimulator)
+        self.assertIs(faultscope.Circuit, native.Circuit)
+        self.assertIs(faultscope.FaultScopeSimulator, native.FaultScopeSimulator)
+        self.assertIs(faultscope.DetectorErrorModelGenerator, native.DetectorErrorModelGenerator)
+        self.assertIs(faultscope.DemHotspotEstimator, native.DemHotspotEstimator)
         self.assertIs(
-            npsim.NativeGraphlikeDetectorCopyDecoder,
+            faultscope.NativeGraphlikeDetectorCopyDecoder,
             native.NativeGraphlikeDetectorCopyDecoder,
         )
         self.assertIs(core.Circuit, native.Circuit)
-        self.assertIs(runtime_module.BatchForwardNoiseAwareSimulator, native.BatchForwardNoiseAwareSimulator)
+        self.assertIs(runtime_module.FaultScopeSimulator, native.FaultScopeSimulator)
         self.assertIs(dem_module.DetectorErrorModelGenerator, native.DetectorErrorModelGenerator)
-        self.assertIs(dem_module.DemBatchHotspotSimulator, native.DemBatchHotspotSimulator)
+        self.assertIs(dem_module.DemHotspotEstimator, native.DemHotspotEstimator)
         self.assertIs(dem_module.IndexedDem, native.IndexedDem)
         self.assertIs(
             decoders.NativeGraphlikeDetectorCopyDecoder,
@@ -247,17 +262,17 @@ class NoiseAwareSimulatorTests(unittest.TestCase):
         )
         self.assertIs(decoders.NativeNoCorrectionDecoder, native.NativeNoCorrectionDecoder)
         self.assertIs(decoders.available_native_decoders, available_native_decoders)
-        self.assertIs(npsim.available_native_decoders, available_native_decoders)
+        self.assertIs(faultscope.available_native_decoders, available_native_decoders)
         self.assertIs(decoders.NativeFusionBlossomDecoder, NativeFusionBlossomDecoder)
-        self.assertIs(npsim.NativeFusionBlossomDecoder, NativeFusionBlossomDecoder)
+        self.assertIs(faultscope.NativeFusionBlossomDecoder, NativeFusionBlossomDecoder)
         self.assertIs(decoders.NativeBposdDecoder, NativeBposdDecoder)
-        self.assertIs(npsim.NativeBposdDecoder, NativeBposdDecoder)
+        self.assertIs(faultscope.NativeBposdDecoder, NativeBposdDecoder)
         self.assertIs(decoders.create_native_decoder, create_native_decoder)
-        self.assertIs(npsim.create_native_decoder, create_native_decoder)
+        self.assertIs(faultscope.create_native_decoder, create_native_decoder)
         self.assertIs(decoders.get_native_decoder_class, get_native_decoder_class)
-        self.assertIs(npsim.get_native_decoder_class, get_native_decoder_class)
+        self.assertIs(faultscope.get_native_decoder_class, get_native_decoder_class)
         self.assertTrue(hasattr(io, "parse_stim_circuit"))
-        self.assertTrue(hasattr(decoders, "PyMatchingBatchDecoder"))
+        self.assertTrue(hasattr(decoders, "PyMatchingDecoder"))
         self.assertFalse(hasattr(native, "NativeFusionBlossomDecoder"))
         self.assertTrue(hasattr(decoders, "NativeFusionBlossomDecoder"))
         self.assertTrue(hasattr(viz, "write_repetition_hotspot_heatmap"))
@@ -310,7 +325,7 @@ class NoiseAwareSimulatorTests(unittest.TestCase):
         sampler = native.compile_sampler(native_circuit, (observable,))
         self.assertIsInstance(sampler, native.NativePackedSampler)
         sample_payload = sampler.sample(8, 123)
-        self.assertIsInstance(sample_payload, BatchTrajectory)
+        self.assertIsInstance(sample_payload, SampleBatch)
         self.assertIn("m", sample_payload.measurements)
 
         native_dem = native.generate_dem(
@@ -332,11 +347,11 @@ class NoiseAwareSimulatorTests(unittest.TestCase):
         self.assertIsInstance(dem_sampler, native.NativeDemSampler)
         self.assertEqual(dem_sampler.edge_count, 1)
         dem_batch = dem_sampler.run_batch(8, 123, True)
-        self.assertIsInstance(dem_batch, DemBatchTrajectory)
+        self.assertIsInstance(dem_batch, DemSampleBatch)
         self.assertIn(7, dem_batch.detectors)
         dem_result = dem_sampler.estimate_default(8, 123, None, 1)
-        self.assertIsInstance(dem_result, DemHotspotResult)
-        self.assertIsInstance(dem_result.top_edges(1)[0], DemEdgeHotspotRow)
+        self.assertIsInstance(dem_result, DemHotspotEstimate)
+        self.assertIsInstance(dem_result.top_edges(1)[0], DemEdgeHotspot)
 
         with self.assertRaises((TypeError, ValueError)):
             native.compile_sampler({"n_qubits": 1, "operations": []})
@@ -349,7 +364,7 @@ class NoiseAwareSimulatorTests(unittest.TestCase):
         )
 
         with mock.patch(
-            "npsim.backends.registry.metadata.entry_points",
+            "faultscope.backends.registry.metadata.entry_points",
             return_value=_FakeEntryPoints(()),
         ):
             clear_native_decoder_plugin_cache()
@@ -374,11 +389,11 @@ class NoiseAwareSimulatorTests(unittest.TestCase):
         self.assertIn("fusion-blossom", catalog)
         self.assertEqual(catalog["fusion-blossom"].problem_kind, "graphlike")
         self.assertTrue(catalog["fusion-blossom"].installable)
-        self.assertEqual(catalog["fusion-blossom"].package_name, "npsim-fusion-blossom")
+        self.assertEqual(catalog["fusion-blossom"].package_name, "faultscope-fusion-blossom")
         self.assertIn("pymatching", catalog)
         self.assertEqual(catalog["pymatching"].problem_kind, "graphlike")
         self.assertTrue(catalog["pymatching"].installable)
-        self.assertEqual(catalog["pymatching"].package_name, "npsim-pymatching")
+        self.assertEqual(catalog["pymatching"].package_name, "faultscope-pymatching")
         self.assertIn("bposd", catalog)
         self.assertEqual(catalog["bposd"].problem_kind, "binary-linear")
         self.assertFalse(catalog["bposd"].installable)
@@ -399,13 +414,13 @@ class NoiseAwareSimulatorTests(unittest.TestCase):
         )
 
         with mock.patch(
-            "npsim.backends.registry.metadata.entry_points",
+            "faultscope.backends.registry.metadata.entry_points",
             return_value=_FakeEntryPoints(()),
         ):
             clear_native_decoder_plugin_cache()
             with self.assertRaisesRegex(
                 NativeDecoderBackendUnavailable,
-                "python -m npsim.backends install fusion-blossom",
+                "python -m faultscope.backends install fusion-blossom",
             ):
                 NativeFusionBlossomDecoder.from_dem(dem)
         clear_native_decoder_plugin_cache()
@@ -426,13 +441,13 @@ class NoiseAwareSimulatorTests(unittest.TestCase):
         )
 
         with mock.patch(
-            "npsim.backends.registry.metadata.entry_points",
+            "faultscope.backends.registry.metadata.entry_points",
             return_value=_FakeEntryPoints(()),
         ):
             clear_native_decoder_plugin_cache()
             with self.assertRaisesRegex(
                 NativeDecoderBackendUnavailable,
-                "python -m npsim.backends install pymatching",
+                "python -m faultscope.backends install pymatching",
             ):
                 NativePyMatchingDecoder.from_dem(dem)
         clear_native_decoder_plugin_cache()
@@ -453,13 +468,13 @@ class NoiseAwareSimulatorTests(unittest.TestCase):
         )
 
         with mock.patch(
-            "npsim.backends.registry.metadata.entry_points",
+            "faultscope.backends.registry.metadata.entry_points",
             return_value=_FakeEntryPoints(()),
         ):
             clear_native_decoder_plugin_cache()
             with self.assertRaisesRegex(
                 NativeDecoderBackendUnavailable,
-                "python -m npsim.backends install bposd",
+                "python -m faultscope.backends install bposd",
             ):
                 NativeBposdDecoder.from_dem(dem)
         clear_native_decoder_plugin_cache()
@@ -487,7 +502,7 @@ class NoiseAwareSimulatorTests(unittest.TestCase):
                 "name": "fusion-blossom",
                 "version": "test",
                 "source": "unit-test",
-                "abi_version": "npsim.native_decoder_plugin.v1",
+                "abi_version": "faultscope.native_decoder_plugin.v1",
                 "decoders": {"fusion-blossom": MockFusionBlossomDecoder},
             }
 
@@ -511,11 +526,11 @@ class NoiseAwareSimulatorTests(unittest.TestCase):
             detectors=(Detector(id=0, measurement_keys=("m",)),),
             observables=(observable,),
         )
-        simulator = BatchForwardNoiseAwareSimulator(circuit, observables=(observable,))
+        simulator = FaultScopeSimulator(circuit, observables=(observable,))
         entry_points = _FakeEntryPoints((_FakeEntryPoint("fusion-blossom", manifest),))
 
         with mock.patch(
-            "npsim.backends.registry.metadata.entry_points",
+            "faultscope.backends.registry.metadata.entry_points",
             return_value=entry_points,
         ):
             clear_native_decoder_plugin_cache()
@@ -532,10 +547,10 @@ class NoiseAwareSimulatorTests(unittest.TestCase):
         self.assertEqual(native_result.mean_loss, default_result.mean_loss)
 
     def test_backend_cli_status_and_install_dry_run(self) -> None:
-        from npsim.backends.__main__ import main
+        from faultscope.backends.__main__ import main
 
         with mock.patch(
-            "npsim.backends.registry.metadata.entry_points",
+            "faultscope.backends.registry.metadata.entry_points",
             return_value=_FakeEntryPoints(()),
         ):
             clear_native_decoder_plugin_cache()
@@ -564,7 +579,7 @@ class NoiseAwareSimulatorTests(unittest.TestCase):
                     )
                 self.assertFalse(os.listdir(tmpdir))
             self.assertIn("git clone", stdout.getvalue())
-            self.assertIn("npsim-fusion-blossom", stdout.getvalue())
+            self.assertIn("faultscope-fusion-blossom", stdout.getvalue())
 
             stdout = io.StringIO()
             with tempfile.TemporaryDirectory() as tmpdir:
@@ -583,7 +598,7 @@ class NoiseAwareSimulatorTests(unittest.TestCase):
                     )
                 self.assertFalse(os.listdir(tmpdir))
             self.assertIn("reserved and not installable yet", stdout.getvalue())
-            self.assertIn("npsim-bposd", stdout.getvalue())
+            self.assertIn("faultscope-bposd", stdout.getvalue())
         clear_native_decoder_plugin_cache()
 
     def test_post_install_plugin_abi_mismatch_is_not_loadable(self) -> None:
@@ -596,7 +611,7 @@ class NoiseAwareSimulatorTests(unittest.TestCase):
             }
 
         with mock.patch(
-            "npsim.backends.registry.metadata.entry_points",
+            "faultscope.backends.registry.metadata.entry_points",
             return_value=_FakeEntryPoints((_FakeEntryPoint("fusion-blossom", manifest),)),
         ):
             clear_native_decoder_plugin_cache()
@@ -612,7 +627,7 @@ class NoiseAwareSimulatorTests(unittest.TestCase):
                 "name": "backend-a",
                 "version": "test",
                 "source": "unit-test",
-                "abi_version": "npsim.native_decoder_plugin.v1",
+                "abi_version": "faultscope.native_decoder_plugin.v1",
                 "decoders": {"fusion-blossom": object},
             }
 
@@ -621,12 +636,12 @@ class NoiseAwareSimulatorTests(unittest.TestCase):
                 "name": "backend-b",
                 "version": "test",
                 "source": "unit-test",
-                "abi_version": "npsim.native_decoder_plugin.v1",
+                "abi_version": "faultscope.native_decoder_plugin.v1",
                 "decoders": {"fusion-blossom": object},
             }
 
         with mock.patch(
-            "npsim.backends.registry.metadata.entry_points",
+            "faultscope.backends.registry.metadata.entry_points",
             return_value=_FakeEntryPoints(
                 (
                     _FakeEntryPoint("backend-a", first_manifest),
@@ -647,11 +662,11 @@ class NoiseAwareSimulatorTests(unittest.TestCase):
                 "name": "missing-decoders",
                 "version": "test",
                 "source": "unit-test",
-                "abi_version": "npsim.native_decoder_plugin.v1",
+                "abi_version": "faultscope.native_decoder_plugin.v1",
             }
 
         with mock.patch(
-            "npsim.backends.registry.metadata.entry_points",
+            "faultscope.backends.registry.metadata.entry_points",
             return_value=_FakeEntryPoints((_FakeEntryPoint("missing-decoders", manifest),)),
         ):
             clear_native_decoder_plugin_cache()
@@ -665,12 +680,12 @@ class NoiseAwareSimulatorTests(unittest.TestCase):
             return {
                 "name": "missing-version",
                 "source": "unit-test",
-                "abi_version": "npsim.native_decoder_plugin.v1",
+                "abi_version": "faultscope.native_decoder_plugin.v1",
                 "decoders": {"missing-version": object},
             }
 
         with mock.patch(
-            "npsim.backends.registry.metadata.entry_points",
+            "faultscope.backends.registry.metadata.entry_points",
             return_value=_FakeEntryPoints((_FakeEntryPoint("missing-version", manifest),)),
         ):
             clear_native_decoder_plugin_cache()
@@ -751,7 +766,7 @@ class BatchNoiseAwareSimulatorTests(unittest.TestCase):
                 Operation.measure(0, key="m", basis="Z"),
             ],
         )
-        result = BatchForwardNoiseAwareSimulator(circuit).estimate(
+        result = FaultScopeSimulator(circuit).estimate(
             shots=30_000,
             seed=13,
             loss_mask_fn=lambda batch: batch.measurements["m"],
@@ -768,7 +783,7 @@ class BatchNoiseAwareSimulatorTests(unittest.TestCase):
             data_error_rate={(0, 0): 0.15, (0, 1): 0.15, (0, 2): 0.01},
             measurement_error_rate=0.02,
         )
-        result = BatchForwardNoiseAwareSimulator(
+        result = FaultScopeSimulator(
             experiment.circuit,
             observables=experiment.observables,
         ).estimate(
@@ -799,7 +814,7 @@ class BatchNoiseAwareSimulatorTests(unittest.TestCase):
             ],
         )
         observables = (LogicalObservable(id=0, measurement_keys=("m",)),)
-        simulator = BatchForwardNoiseAwareSimulator(circuit, observables=observables)
+        simulator = FaultScopeSimulator(circuit, observables=observables)
         decoder = NativeNoCorrectionDecoder(observable_ids=(0,))
 
         native_result = simulator.estimate(shots=4096, seed=111, decoder=decoder)
@@ -827,7 +842,7 @@ class BatchNoiseAwareSimulatorTests(unittest.TestCase):
         decoder = NativeNoCorrectionDecoder(observable_ids=(0, 0))
 
         with self.assertRaisesRegex(ValueError, "duplicate correction observable id 0"):
-            BatchForwardNoiseAwareSimulator(
+            FaultScopeSimulator(
                 circuit,
                 observables=observables,
             ).estimate(shots=128, seed=113, decoder=decoder)
@@ -849,7 +864,7 @@ class BatchNoiseAwareSimulatorTests(unittest.TestCase):
         observables = (LogicalObservable(id=0, measurement_keys=("m",)),)
         decoder = NativeNoCorrectionDecoder(observable_ids=(0,))
 
-        result = BatchForwardNoiseAwareSimulator(
+        result = FaultScopeSimulator(
             circuit,
             observables=observables,
         ).estimate(
@@ -870,7 +885,7 @@ class BatchNoiseAwareSimulatorTests(unittest.TestCase):
                 Operation.measure(0, key="m", basis="Z"),
             ],
         )
-        batch = BatchForwardNoiseAwareSimulator(circuit).run_batch(
+        batch = FaultScopeSimulator(circuit).run_batch(
             shots=128,
             rng=random.Random(15),
         )
@@ -887,7 +902,7 @@ class BatchNoiseAwareSimulatorTests(unittest.TestCase):
                 Operation.detector(("m0", "m1"), detector_id=0),
             ],
         )
-        batch = BatchForwardNoiseAwareSimulator(circuit).run_batch(
+        batch = FaultScopeSimulator(circuit).run_batch(
             shots=128,
             rng=random.Random(20),
         )
@@ -911,7 +926,7 @@ class BatchNoiseAwareSimulatorTests(unittest.TestCase):
                 Operation.detector(("m0", "m1"), detector_id=0),
             ],
         )
-        batch = BatchForwardNoiseAwareSimulator(circuit).run_batch(
+        batch = FaultScopeSimulator(circuit).run_batch(
             shots=64,
             rng=random.Random(21),
         )
@@ -927,7 +942,7 @@ class BatchNoiseAwareSimulatorTests(unittest.TestCase):
                 Operation.measure(0, key="m", basis="Z"),
             ],
         )
-        batch = BatchForwardNoiseAwareSimulator(circuit).run_batch(
+        batch = FaultScopeSimulator(circuit).run_batch(
             shots=128,
             rng=random.Random(22),
         )
@@ -945,7 +960,7 @@ class BatchNoiseAwareSimulatorTests(unittest.TestCase):
                 Operation.observable_include(1, ("m",)),
             ],
         )
-        batch = BatchForwardNoiseAwareSimulator(circuit).run_batch(
+        batch = FaultScopeSimulator(circuit).run_batch(
             shots=8,
             rng=random.Random(17),
         )
@@ -968,7 +983,7 @@ class BatchNoiseAwareSimulatorTests(unittest.TestCase):
                 Operation.measure(0, key="m", basis="Z", noise=location),
             ],
         )
-        batch = BatchForwardNoiseAwareSimulator(circuit).run_batch(
+        batch = FaultScopeSimulator(circuit).run_batch(
             shots=7,
             rng=random.Random(19),
         )
@@ -990,7 +1005,7 @@ def _stim_batch_for_circuit(
     *,
     shots: int,
     seed: int,
-) -> BatchTrajectory:
+) -> SampleBatch:
     stim_circuit, key_order = to_stim_circuit(circuit)
     samples = stim_circuit.compile_sampler(seed=seed).sample(shots)
     detector_flips, observable_flips = stim_circuit.compile_m2d_converter().convert(
@@ -1017,7 +1032,7 @@ def _stim_batch_for_circuit(
         detectors=tuple(detectors),
         observables=observables,
     )
-    return BatchTrajectory(
+    return SampleBatch(
         shots=shots,
         all_mask=(1 << shots) - 1,
         x_frame=(),
@@ -1093,7 +1108,7 @@ class NativePackedSamplerTests(unittest.TestCase):
             operations=[Operation.measure(0, key="m", basis="Z")],
         )
         try:
-            __import__("npsim._npsim_native")
+            __import__("faultscope._native")
         except ImportError:
             with self.assertRaises(UnsupportedNativeCircuitError):
                 compile_native_sampler(circuit)
@@ -1178,7 +1193,7 @@ class NativePackedSamplerTests(unittest.TestCase):
                 Operation.measure(0, key="m", basis="Z"),
             ],
         )
-        engine = BatchForwardNoiseAwareSimulator(circuit)
+        engine = FaultScopeSimulator(circuit)
 
         self.assertIs(engine.circuit, circuit)
         self.assertEqual(engine.observables, ())
@@ -1284,7 +1299,7 @@ class NativePackedSamplerTests(unittest.TestCase):
 
     def test_forward_estimate_uses_pymatching_batch_decoder(self) -> None:
         try:
-            decoder = PyMatchingBatchDecoder.from_dem(
+            decoder = PyMatchingDecoder.from_dem(
                 DetectorErrorModel(
                     detectors=(Detector(id=0, measurement_keys=("m",)),),
                     observables=(LogicalObservable(id=0, measurement_keys=("m",)),),
@@ -1318,11 +1333,11 @@ class NativePackedSamplerTests(unittest.TestCase):
             ],
         )
 
-        raw = BatchForwardNoiseAwareSimulator(circuit).estimate(
+        raw = FaultScopeSimulator(circuit).estimate(
             shots=16,
             seed=53,
         )
-        decoded = BatchForwardNoiseAwareSimulator(circuit).estimate(
+        decoded = FaultScopeSimulator(circuit).estimate(
             shots=16,
             seed=53,
             decoder=decoder,
@@ -1480,7 +1495,7 @@ class NativePackedSamplerTests(unittest.TestCase):
             compile_native_sampler(circuit)
 
         with self.assertRaises(ValueError):
-            BatchForwardNoiseAwareSimulator(circuit).estimate(
+            FaultScopeSimulator(circuit).estimate(
                 shots=2_000,
                 seed=92,
                 loss_mask_fn=lambda batch: batch.measurements["m"],
@@ -1490,7 +1505,7 @@ class NativePackedSamplerTests(unittest.TestCase):
 class NativeDetectorErrorModelTests(unittest.TestCase):
     def _require_native_dem(self) -> None:
         try:
-            __import__("npsim._npsim_native")
+            __import__("faultscope._native")
         except ImportError as exc:
             self.skipTest(f"native extension unavailable: {exc}")
 
@@ -1523,7 +1538,7 @@ class NativeDetectorErrorModelTests(unittest.TestCase):
         )
         stim_dem = stim_circuit.detector_error_model(decompose_errors=False)
 
-        self.assertEqual(npsim_dem_error_edges(native), stim_dem_error_edges(stim_dem))
+        self.assertEqual(faultscope_dem_error_edges(native), stim_dem_error_edges(stim_dem))
 
     def test_native_dem_generator_splits_pauli_channel_edges(self) -> None:
         self._require_native_dem()
@@ -2205,7 +2220,7 @@ class DetectorErrorModelTests(unittest.TestCase):
         self.assertIn("detector(1, 2) D5", dem.to_dem_text())
 
 
-class DemBatchHotspotSimulatorTests(unittest.TestCase):
+class DemHotspotEstimatorTests(unittest.TestCase):
     def test_dem_edge_hotspot_estimates_logical_edge_gradient(self) -> None:
         dem = DetectorErrorModel(
             detectors=(),
@@ -2222,7 +2237,7 @@ class DemBatchHotspotSimulatorTests(unittest.TestCase):
             ),
         )
 
-        result = DemBatchHotspotSimulator(dem).estimate(shots=40_000, seed=51)
+        result = DemHotspotEstimator(dem).estimate(shots=40_000, seed=51)
 
         self.assertAlmostEqual(result.mean_loss, 0.2, delta=0.02)
         self.assertAlmostEqual(result.edge_sensitivities[0], 1.0, delta=0.08)
@@ -2246,7 +2261,7 @@ class DemBatchHotspotSimulatorTests(unittest.TestCase):
                 ),
             ),
         )
-        simulator = DemBatchHotspotSimulator(dem)
+        simulator = DemHotspotEstimator(dem)
 
         batch = simulator.run_batch(
             shots=16,
@@ -2281,7 +2296,7 @@ class DemBatchHotspotSimulatorTests(unittest.TestCase):
             ),
         )
 
-        result = DemBatchHotspotSimulator(dem).estimate(
+        result = DemHotspotEstimator(dem).estimate(
             shots=10_000,
             seed=52,
             decoder=CopyDetectorDecoder(),
@@ -2315,7 +2330,7 @@ class DemBatchHotspotSimulatorTests(unittest.TestCase):
             ),
         )
 
-        result = DemBatchHotspotSimulator(dem).estimate(shots=40_000, seed=53)
+        result = DemHotspotEstimator(dem).estimate(shots=40_000, seed=53)
 
         self.assertAlmostEqual(result.edge_sensitivities[0], 1.0, delta=0.08)
         self.assertAlmostEqual(result.edge_sensitivities[1], 0.0, delta=0.08)
@@ -2370,7 +2385,7 @@ class _FakePyMatching:
             return _FakeMatching()
 
 
-class PyMatchingBatchDecoderTests(unittest.TestCase):
+class PyMatchingDecoderTests(unittest.TestCase):
     def setUp(self) -> None:
         _FakePyMatching.calls.clear()
 
@@ -2400,7 +2415,7 @@ class PyMatchingBatchDecoderTests(unittest.TestCase):
         )
 
     def test_builds_pymatching_decoder_from_graphlike_dem(self) -> None:
-        decoder = PyMatchingBatchDecoder.from_dem(
+        decoder = PyMatchingDecoder.from_dem(
             self._build_dem(),
             pymatching_module=_FakePyMatching,
             numpy_module=_FakeNumpy,
@@ -2421,7 +2436,7 @@ class PyMatchingBatchDecoderTests(unittest.TestCase):
         self.assertEqual(kwargs["error_probabilities"], (0.1, 0.2))
 
     def test_decodes_single_and_batch_records(self) -> None:
-        decoder = PyMatchingBatchDecoder.from_dem(
+        decoder = PyMatchingDecoder.from_dem(
             self._build_dem(),
             pymatching_module=_FakePyMatching,
             numpy_module=_FakeNumpy,
@@ -2435,7 +2450,7 @@ class PyMatchingBatchDecoderTests(unittest.TestCase):
         )
 
     def test_decodes_bit_packed_detector_masks(self) -> None:
-        decoder = PyMatchingBatchDecoder.from_dem(
+        decoder = PyMatchingDecoder.from_dem(
             self._build_dem(),
             pymatching_module=_FakePyMatching,
             numpy_module=_FakeNumpy,
@@ -2464,7 +2479,7 @@ class PyMatchingBatchDecoderTests(unittest.TestCase):
         )
 
         with self.assertRaises(UnsupportedPyMatchingDemError):
-            PyMatchingBatchDecoder.from_dem(
+            PyMatchingDecoder.from_dem(
                 dem,
                 pymatching_module=_FakePyMatching,
                 numpy_module=_FakeNumpy,
@@ -2474,7 +2489,7 @@ class PyMatchingBatchDecoderTests(unittest.TestCase):
     def test_real_pymatching_decodes_boundary_logical_edge_when_installed(self) -> None:
         os.environ.setdefault(
             "MPLCONFIGDIR",
-            os.path.join(tempfile.gettempdir(), "npsim-matplotlib-cache"),
+            os.path.join(tempfile.gettempdir(), "faultscope-matplotlib-cache"),
         )
         try:
             import pymatching  # noqa: F401
@@ -2497,7 +2512,7 @@ class PyMatchingBatchDecoderTests(unittest.TestCase):
             ),
         )
 
-        decoder = PyMatchingBatchDecoder.from_dem(dem)
+        decoder = PyMatchingDecoder.from_dem(dem)
         self.assertEqual(decoder.decode_detector_record({0: 1}), {0: 1})
         self.assertEqual(
             decoder.decode_batch_detector_records([{0: 0}, {0: 1}]),
@@ -2508,7 +2523,7 @@ class PyMatchingBatchDecoderTests(unittest.TestCase):
     def test_real_pymatching_decodes_bit_packed_masks_from_batch_objects(self) -> None:
         os.environ.setdefault(
             "MPLCONFIGDIR",
-            os.path.join(tempfile.gettempdir(), "npsim-matplotlib-cache"),
+            os.path.join(tempfile.gettempdir(), "faultscope-matplotlib-cache"),
         )
         try:
             import pymatching  # noqa: F401
@@ -2540,7 +2555,7 @@ class PyMatchingBatchDecoderTests(unittest.TestCase):
                 ),
             ),
         )
-        decoder = PyMatchingBatchDecoder.from_dem(dem)
+        decoder = PyMatchingDecoder.from_dem(dem)
         detector_masks = {0: 0b1010, 1: 0b1100}
         expected = {0: 0b1010, 1: 0b1100}
 
@@ -2550,7 +2565,7 @@ class PyMatchingBatchDecoderTests(unittest.TestCase):
         )
         self.assertEqual(
             decoder.decode_batch_masks(
-                DemBatchTrajectory(
+                DemSampleBatch(
                     shots=4,
                     all_mask=0b1111,
                     detectors=detector_masks,
@@ -2562,7 +2577,7 @@ class PyMatchingBatchDecoderTests(unittest.TestCase):
         )
         self.assertEqual(
             decoder.decode_batch_masks(
-                BatchTrajectory(
+                SampleBatch(
                     shots=4,
                     all_mask=0b1111,
                     x_frame=(),
@@ -2603,7 +2618,7 @@ class HotspotVisualizationTests(unittest.TestCase):
             data_error_rate=data_rates,
             measurement_error_rate=measurement_rates,
         )
-        result = BatchForwardNoiseAwareSimulator(
+        result = FaultScopeSimulator(
             experiment.circuit,
             observables=experiment.observables,
         ).estimate(
@@ -2644,7 +2659,7 @@ class HotspotVisualizationTests(unittest.TestCase):
             distance=distance,
             hot_cx=hot_cx,
         )
-        result = BatchForwardNoiseAwareSimulator(
+        result = FaultScopeSimulator(
             circuit,
             observables=experiment.observables,
         ).estimate(
@@ -2698,7 +2713,7 @@ class HotspotVisualizationTests(unittest.TestCase):
     ) -> None:
         os.environ.setdefault(
             "MPLCONFIGDIR",
-            os.path.join(tempfile.gettempdir(), "npsim-matplotlib-cache"),
+            os.path.join(tempfile.gettempdir(), "faultscope-matplotlib-cache"),
         )
         try:
             import numpy as np
@@ -2730,7 +2745,7 @@ class HotspotVisualizationTests(unittest.TestCase):
             z_checks=z_checks,
             matching=matching,
         )
-        result = BatchForwardNoiseAwareSimulator(circuit).estimate(
+        result = FaultScopeSimulator(circuit).estimate(
             shots=7_000,
             seed=33,
             loss_mask_fn=loss_mask_fn,
@@ -2759,7 +2774,7 @@ class HotspotVisualizationTests(unittest.TestCase):
     def _make_synthetic_rotated_surface_code_result(
         self,
         distance: int,
-    ) -> SimulationResult:
+    ) -> FailureEstimate:
         locations: dict[str, NoiseLocation] = {}
         hotspots: dict[str, float] = {}
         sensitivities: dict[str, float] = {}
@@ -2815,7 +2830,7 @@ class HotspotVisualizationTests(unittest.TestCase):
                 hotspots[location_id] = hotspot
                 sensitivities[location_id] = hotspot
 
-        return SimulationResult(
+        return FailureEstimate(
             shots=12_000,
             mean_loss=0.071,
             baseline=0.071,

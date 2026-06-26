@@ -1,0 +1,17 @@
+[package]
+name = "faultscope-pymatching-python"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[lib]
+name = "faultscope_pymatching_native"
+crate-type = ["cdylib"]
+test = false
+
+[dependencies]
+faultscope-core = { path = "../../crates/faultscope-core" }
+pyo3 = { version = "0.23", features = ["extension-module"] }
+
+[build-dependencies]
+cc = "1"

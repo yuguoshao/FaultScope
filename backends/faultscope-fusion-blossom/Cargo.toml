@@ -1,0 +1,15 @@
+[package]
+name = "faultscope-fusion-blossom-python"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[lib]
+name = "faultscope_fusion_blossom_native"
+crate-type = ["cdylib"]
+test = false
+
+[dependencies]
+fusion-blossom = { git = "https://github.com/yuewuo/fusion-blossom.git", rev = "c536a4bdfb13e5e84ea643213510462306c9cb0f", default-features = false, features = ["disable_visualizer", "remove_blossom_v", "u32_index"] }
+faultscope-core = { path = "../../crates/faultscope-core" }
+pyo3 = { version = "0.23", features = ["extension-module"] }

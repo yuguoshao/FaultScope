@@ -1,9 +1,9 @@
-# NPSim Documentation
+# FaultScope Documentation
 
-NPSim is a Rust-core forward noise-aware stabilizer simulator with a Python
-API. It supports packed batch sampling, detector error model generation,
-detector-level sampling, decoder integration, and noise hotspot estimation for
-stabilizer-compatible quantum error correction workflows.
+FaultScope is a noise-aware QEC fault attribution toolkit with a Rust core and
+Python API. It supports packed stabilizer batch sampling, detector error model
+generation, detector-level sampling, decoder integration, and noise hotspot
+estimation for stabilizer-compatible quantum error correction workflows.
 
 ## Start Here
 
@@ -48,5 +48,5 @@ Preview this documentation site locally:
 Strict build:
 
 ```bash
-.venv/bin/mkdocs build --strict --site-dir /private/tmp/npsim-doc-review-site
+.venv/bin/mkdocs build --strict --site-dir /private/tmp/faultscope-doc-review-site
 ```

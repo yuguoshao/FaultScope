@@ -4,7 +4,7 @@ Run from the repository root after building the native extension:
 
     .venv/bin/python benchmarks/surface_code_decoder_performance.py
 
-The benchmark compares PyMatching and optional NPSim native decoder backends on
+The benchmark compares PyMatching and optional FaultScope native decoder backends on
 Stim standard rotated surface-code DEMs. It reports TSV rows for machine
 consumption and does not estimate threshold crossings. With
 ``--split-native-baseline``, native decoder paths report a no-correction
@@ -30,13 +30,13 @@ if str(ROOT) not in sys.path:
 if str(BENCHMARK_DIR) not in sys.path:
     sys.path.insert(0, str(BENCHMARK_DIR))
 
-from npsim.decoders import (
+from faultscope.decoders import (
     NativeFusionBlossomDecoder,
     NativeNoCorrectionDecoder,
     NativePyMatchingDecoder,
 )
-from npsim.dem import Detector, DetectorErrorEdge, DetectorErrorModel, LogicalObservable
-from npsim.runtime import compile_native_dem_sampler
+from faultscope.dem import Detector, DetectorErrorEdge, DetectorErrorModel, LogicalObservable
+from faultscope.runtime import compile_native_dem_sampler
 from surface_code_threshold import (
     _decode_batch_masks_with_matching,
     _load_required_modules,
@@ -49,9 +49,9 @@ from surface_code_threshold import (
 DEFAULT_PATHS = (
     "stim-dem-pymatching",
     "stim-dem-pymatching-bitpacked",
-    "npsim-dem-pymatching",
-    "npsim-dem-pymatching-native",
-    "npsim-dem-fusion-blossom",
+    "faultscope-dem-pymatching",
+    "faultscope-dem-pymatching-native",
+    "faultscope-dem-fusion-blossom",
 )
 
 PATHS = DEFAULT_PATHS
@@ -163,11 +163,11 @@ def main() -> None:
                 decompose_errors=True,
                 flatten_loops=True,
             )
-            npsim_dem = stim_dem_to_graphlike_npsim_dem(stim_dem)
+            faultscope_dem = stim_dem_to_graphlike_faultscope_dem(stim_dem)
             metadata = ProblemMetadata(
-                dem_edges=len(npsim_dem.edges),
-                detectors=len(npsim_dem.detectors),
-                observables=len(npsim_dem.observables),
+                dem_edges=len(faultscope_dem.edges),
+                detectors=len(faultscope_dem.detectors),
+                observables=len(faultscope_dem.observables),
             )
             runners: dict[str, Callable[[int], BenchmarkRow]] = {
                 "stim-dem-pymatching": lambda seed: run_stim_dem_pymatching(
@@ -192,9 +192,9 @@ def main() -> None:
                     metadata,
                     seed,
                 ),
-                "npsim-dem-pymatching": lambda seed: run_npsim_dem_pymatching(
+                "faultscope-dem-pymatching": lambda seed: run_faultscope_dem_pymatching(
                     stim_dem,
-                    npsim_dem,
+                    faultscope_dem,
                     pymatching,
                     args.basis,
                     distance,
@@ -204,8 +204,8 @@ def main() -> None:
                     metadata,
                     seed,
                 ),
-                "npsim-dem-pymatching-native": lambda seed: run_npsim_dem_pymatching_native(
-                    npsim_dem,
+                "faultscope-dem-pymatching-native": lambda seed: run_faultscope_dem_pymatching_native(
+                    faultscope_dem,
                     args.basis,
                     distance,
                     rounds,
@@ -215,8 +215,8 @@ def main() -> None:
                     seed,
                     args.split_native_baseline,
                 ),
-                "npsim-dem-fusion-blossom": lambda seed: run_npsim_dem_fusion_blossom(
-                    npsim_dem,
+                "faultscope-dem-fusion-blossom": lambda seed: run_faultscope_dem_fusion_blossom(
+                    faultscope_dem,
                     args.basis,
                     distance,
                     rounds,
@@ -341,9 +341,9 @@ def run_stim_dem_pymatching_bitpacked(
     )
 
 
-def run_npsim_dem_pymatching(
+def run_faultscope_dem_pymatching(
     stim_dem: Any,
-    npsim_dem: Any,
+    faultscope_dem: Any,
     pymatching: Any,
     basis: str,
     distance: int,
@@ -355,7 +355,7 @@ def run_npsim_dem_pymatching(
 ) -> BenchmarkRow:
     started = time.perf_counter()
     matcher = pymatching.Matching.from_detector_error_model(stim_dem)
-    sampler = compile_native_dem_sampler(npsim_dem)
+    sampler = compile_native_dem_sampler(faultscope_dem)
     construct_s = time.perf_counter() - started
 
     started = time.perf_counter()
@@ -366,8 +366,8 @@ def run_npsim_dem_pymatching(
     )
     sample_s = time.perf_counter() - started
 
-    detector_ids = tuple(detector.id for detector in npsim_dem.detectors)
-    observable_ids = tuple(observable.id for observable in npsim_dem.observables)
+    detector_ids = tuple(detector.id for detector in faultscope_dem.detectors)
+    observable_ids = tuple(observable.id for observable in faultscope_dem.observables)
     started = time.perf_counter()
     corrections = _decode_batch_masks_with_matching(
         matcher,
@@ -390,7 +390,7 @@ def run_npsim_dem_pymatching(
         rounds,
         p,
         shots,
-        "npsim-dem-pymatching",
+        "faultscope-dem-pymatching",
         metadata,
         solver_edges=None,
         merged_edges=None,
@@ -403,8 +403,8 @@ def run_npsim_dem_pymatching(
     )
 
 
-def run_npsim_dem_pymatching_native(
-    npsim_dem: Any,
+def run_faultscope_dem_pymatching_native(
+    faultscope_dem: Any,
     basis: str,
     distance: int,
     rounds: int,
@@ -414,8 +414,8 @@ def run_npsim_dem_pymatching_native(
     seed: int,
     split_baseline: bool,
 ) -> BenchmarkRow:
-    return run_npsim_native_decoder(
-        npsim_dem=npsim_dem,
+    return run_native_decoder(
+        faultscope_dem=faultscope_dem,
         basis=basis,
         distance=distance,
         rounds=rounds,
@@ -423,14 +423,14 @@ def run_npsim_dem_pymatching_native(
         shots=shots,
         metadata=metadata,
         seed=seed,
-        path_name="npsim-dem-pymatching-native",
+        path_name="faultscope-dem-pymatching-native",
         decoder_factory=NativePyMatchingDecoder.from_dem,
         split_baseline=split_baseline,
     )
 
 
-def run_npsim_dem_fusion_blossom(
-    npsim_dem: Any,
+def run_faultscope_dem_fusion_blossom(
+    faultscope_dem: Any,
     basis: str,
     distance: int,
     rounds: int,
@@ -440,8 +440,8 @@ def run_npsim_dem_fusion_blossom(
     seed: int,
     split_baseline: bool,
 ) -> BenchmarkRow:
-    return run_npsim_native_decoder(
-        npsim_dem=npsim_dem,
+    return run_native_decoder(
+        faultscope_dem=faultscope_dem,
         basis=basis,
         distance=distance,
         rounds=rounds,
@@ -449,14 +449,14 @@ def run_npsim_dem_fusion_blossom(
         shots=shots,
         metadata=metadata,
         seed=seed,
-        path_name="npsim-dem-fusion-blossom",
+        path_name="faultscope-dem-fusion-blossom",
         decoder_factory=NativeFusionBlossomDecoder.from_dem,
         split_baseline=split_baseline,
     )
 
 
-def run_npsim_native_decoder(
-    npsim_dem: Any,
+def run_native_decoder(
+    faultscope_dem: Any,
     basis: str,
     distance: int,
     rounds: int,
@@ -469,8 +469,8 @@ def run_npsim_native_decoder(
     split_baseline: bool,
 ) -> BenchmarkRow:
     started = time.perf_counter()
-    sampler = compile_native_dem_sampler(npsim_dem)
-    decoder = decoder_factory(npsim_dem)
+    sampler = compile_native_dem_sampler(faultscope_dem)
+    decoder = decoder_factory(faultscope_dem)
     construct_s = time.perf_counter() - started
 
     baseline_s = None
@@ -548,7 +548,7 @@ def _logical_failure_stats_from_packed_arrays(
     return LogicalFailureStats(shots=shots, failures=failures)
 
 
-def stim_dem_to_graphlike_npsim_dem(stim_dem: Any) -> DetectorErrorModel:
+def stim_dem_to_graphlike_faultscope_dem(stim_dem: Any) -> DetectorErrorModel:
     detectors_by_id: dict[int, Detector] = {}
     observable_ids: set[int] = set()
     edges: list[DetectorErrorEdge] = []

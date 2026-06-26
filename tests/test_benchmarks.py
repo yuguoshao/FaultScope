@@ -55,17 +55,17 @@ class BenchmarkSmokeTests(unittest.TestCase):
         rows_by_path = {row["path"]: row for row in body}
         self.assertIn("stim-dem-pymatching", rows_by_path)
         self.assertIn("stim-dem-pymatching-bitpacked", rows_by_path)
-        self.assertIn("npsim-dem-pymatching", rows_by_path)
-        self.assertIn("npsim-dem-pymatching-native", rows_by_path)
-        self.assertIn("npsim-dem-fusion-blossom", rows_by_path)
+        self.assertIn("faultscope-dem-pymatching", rows_by_path)
+        self.assertIn("faultscope-dem-pymatching-native", rows_by_path)
+        self.assertIn("faultscope-dem-fusion-blossom", rows_by_path)
 
-        native_pymatching_row = rows_by_path["npsim-dem-pymatching-native"]
+        native_pymatching_row = rows_by_path["faultscope-dem-pymatching-native"]
         if native_pymatching_row["status"] == "ok":
             self.assertEqual(native_pymatching_row["python_decode_calls"], "0")
         else:
             self.assertTrue(native_pymatching_row["status"].startswith("skip:"))
 
-        fusion_row = rows_by_path["npsim-dem-fusion-blossom"]
+        fusion_row = rows_by_path["faultscope-dem-fusion-blossom"]
         if fusion_row["status"] == "ok":
             self.assertEqual(fusion_row["python_decode_calls"], "0")
         else:

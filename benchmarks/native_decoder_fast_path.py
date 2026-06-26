@@ -18,8 +18,8 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from npsim import (
-    BatchForwardNoiseAwareSimulator,
+from faultscope import (
+    FaultScopeSimulator,
     BernoulliPauliNoise,
     Circuit,
     LogicalObservable,
@@ -40,7 +40,7 @@ def main() -> None:
             Operation.measure(0, key="m0", basis="Z"),
         ),
     )
-    simulator = BatchForwardNoiseAwareSimulator(
+    simulator = FaultScopeSimulator(
         circuit,
         observables=(LogicalObservable(0, measurement_keys=("m0",)),),
     )

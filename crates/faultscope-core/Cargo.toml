@@ -1,0 +1,17 @@
+[package]
+name = "faultscope-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+name = "faultscope_core"
+
+[features]
+default = []
+decoder-fusion-blossom = []
+decoder-bposd = []
+
+[dependencies]
+rand = { version = "0.9.2", features = ["small_rng"] }

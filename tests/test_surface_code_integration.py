@@ -2,11 +2,11 @@ import os
 import tempfile
 import unittest
 
-from npsim.core import Circuit, NoiseLocation, Operation
-from npsim.runtime import BatchForwardNoiseAwareSimulator
-from npsim.core import BernoulliPauliNoise, MeasurementBitFlip
-from npsim.dem import LogicalObservable
-from npsim.viz import (
+from faultscope.core import Circuit, NoiseLocation, Operation
+from faultscope.runtime import FaultScopeSimulator
+from faultscope.core import BernoulliPauliNoise, MeasurementBitFlip
+from faultscope.dem import LogicalObservable
+from faultscope.viz import (
     VisualizationUnavailableError,
     write_rotated_surface_code_spatial_hotspot_map,
 )
@@ -17,7 +17,7 @@ class RotatedSurfaceCodeXZIntegrationTests(unittest.TestCase):
     def test_d5_full_xz_memory_generates_spatial_hotspot_map(self) -> None:
         os.environ.setdefault(
             "MPLCONFIGDIR",
-            os.path.join(tempfile.gettempdir(), "npsim-matplotlib-cache"),
+            os.path.join(tempfile.gettempdir(), "faultscope-matplotlib-cache"),
         )
         try:
             import numpy as np
@@ -48,7 +48,7 @@ class RotatedSurfaceCodeXZIntegrationTests(unittest.TestCase):
             rounds=rounds,
         )
 
-        result = BatchForwardNoiseAwareSimulator(
+        result = FaultScopeSimulator(
             circuit,
             observables=_surface_observables(distance),
         ).estimate(

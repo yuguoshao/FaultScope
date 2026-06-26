@@ -1,9 +1,9 @@
 [workspace]
 members = [
-    "backends/npsim-fusion-blossom",
-    "backends/npsim-pymatching",
-    "crates/npsim-core",
-    "crates/npsim-python",
+    "backends/faultscope-fusion-blossom",
+    "backends/faultscope-pymatching",
+    "crates/faultscope-core",
+    "crates/faultscope-python",
 ]
 resolver = "2"
 
@@ -11,4 +11,4 @@ resolver = "2"
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
-repository = "https://github.com/npsim/npsim"
+repository = "https://github.com/yuguoshao/faultscope"

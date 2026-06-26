@@ -1,13 +1,13 @@
-# NPSim User Guide
+# FaultScope User Guide
 
-NPSim is a Rust-core stabilizer simulator with a Python API. It is designed for
+FaultScope is a Rust-core stabilizer simulator with a Python API. It is designed for
 forward noise-aware batch sampling, detector error model generation, detector
 level sampling, decoder integration, and noise hotspot estimation for quantum
 error correction workflows.
 
-For exact signatures, see [NPSim API Reference](api_reference.md). For the
+For exact signatures, see [FaultScope API Reference](api_reference.md). For the
 score-function estimator and DEM background, see
-[NPSim Theory](theory.md).
+[FaultScope Theory](theory.md).
 
 ## Contents
 
@@ -39,7 +39,7 @@ python -m venv .venv
 
 `pip install .` reads `pyproject.toml`, installs the build dependency
 `maturin>=1.7,<2` in an isolated build environment, and builds the
-`npsim._npsim_native` extension. Offline installs and `--no-build-isolation`
+`faultscope._native` extension. Offline installs and `--no-build-isolation`
 workflows must provide `maturin` ahead of time.
 
 Install optional integrations only when needed:
@@ -52,7 +52,7 @@ Install optional integrations only when needed:
 Useful checks:
 
 ```bash
-.venv/bin/python -c "import npsim; print(npsim.Circuit)"
+.venv/bin/python -c "import faultscope; print(faultscope.Circuit)"
 cargo test --workspace
 .venv/bin/python -m unittest discover -s tests -q
 ```
@@ -70,21 +70,21 @@ Optional dependency groups:
 
 The repository has three main layers:
 
-- `crates/npsim-core`: Python-independent Rust core.
-- `crates/npsim-python`: PyO3 binding crate for `npsim._npsim_native`.
-- `npsim/`: public Python import surface plus adapters and examples.
+- `crates/faultscope-core`: Python-independent Rust core.
+- `crates/faultscope-python`: PyO3 binding crate for `faultscope._native`.
+- `faultscope/`: public Python import surface plus adapters and examples.
 
 Use public modules in application code:
 
 ```python
-from npsim import Circuit, NoiseLocation, Operation
-from npsim.core import BernoulliPauliNoise, PauliFrame, StabilizerState
-from npsim.runtime import BatchForwardNoiseAwareSimulator, generate_native_dem
-from npsim.dem import Detector, LogicalObservable, DemBatchHotspotSimulator
+from faultscope import Circuit, NoiseLocation, Operation
+from faultscope.core import BernoulliPauliNoise, PauliFrame, StabilizerState
+from faultscope.runtime import FaultScopeSimulator, generate_native_dem
+from faultscope.dem import Detector, LogicalObservable, DemHotspotEstimator
 ```
 
-`PauliFrame` and `StabilizerState` are available from `npsim.core`, not from
-the top-level `npsim` package. Avoid importing from `npsim._npsim_native`
+`PauliFrame` and `StabilizerState` are available from `faultscope.core`, not from
+the top-level `faultscope` package. Avoid importing from `faultscope._native`
 directly unless you are debugging the binding layer.
 
 ## Core Concepts
@@ -126,9 +126,9 @@ This example builds a one-qubit circuit, samples it, and estimates the
 sensitivity of a measurement-loss mask to an X-noise rate.
 
 ```python
-from npsim import (
+from faultscope import (
     BernoulliPauliNoise,
-    BatchForwardNoiseAwareSimulator,
+    FaultScopeSimulator,
     Circuit,
     NoiseLocation,
     Operation,
@@ -150,7 +150,7 @@ circuit = Circuit(
     ),
 )
 
-simulator = BatchForwardNoiseAwareSimulator(circuit)
+simulator = FaultScopeSimulator(circuit)
 batch = simulator.run_batch(shots=1024, seed=1)
 
 result = simulator.estimate(
@@ -178,9 +178,9 @@ data. Use `sample_measurements(...)` when you only need measurement masks for
 throughput-oriented sampling.
 
 ```python
-from npsim import (
+from faultscope import (
     BernoulliPauliNoise,
-    BatchForwardNoiseAwareSimulator,
+    FaultScopeSimulator,
     Circuit,
     NoiseLocation,
     Operation,
@@ -189,7 +189,7 @@ from npsim import (
 noise = NoiseLocation("x0", BernoulliPauliNoise("X"), 0.1, (0,))
 circuit = Circuit(1, (Operation.noise(noise), Operation.measure(0, key="m0")))
 
-simulator = BatchForwardNoiseAwareSimulator(circuit)
+simulator = FaultScopeSimulator(circuit)
 batch = simulator.sample(shots=64, seed=3)
 measurement_masks = simulator.sample_measurements(shots=64, seed=3)
 
@@ -203,9 +203,9 @@ the default residual logical loss. With no decoder, the correction map is
 empty. With a decoder, observable masks are XORed with correction masks.
 
 ```python
-from npsim import (
+from faultscope import (
     BernoulliPauliNoise,
-    BatchForwardNoiseAwareSimulator,
+    FaultScopeSimulator,
     Circuit,
     LogicalObservable,
     NoiseLocation,
@@ -216,7 +216,7 @@ noise = NoiseLocation("x0", BernoulliPauliNoise("X"), 0.1, (0,))
 circuit = Circuit(1, (Operation.noise(noise), Operation.measure(0, key="m0")))
 observables = (LogicalObservable(id=0, pauli_qubits=(0,), pauli="Z"),)
 
-result = BatchForwardNoiseAwareSimulator(
+result = FaultScopeSimulator(
     circuit,
     observables=observables,
 ).estimate(shots=256, seed=4, top_k=1)
@@ -243,7 +243,7 @@ detector-level model. You can pass detector/observable declarations explicitly
 or embed them as circuit operations.
 
 ```python
-from npsim import (
+from faultscope import (
     BernoulliPauliNoise,
     Circuit,
     Detector,
@@ -251,7 +251,7 @@ from npsim import (
     NoiseLocation,
     Operation,
 )
-from npsim.runtime import generate_native_dem
+from faultscope.runtime import generate_native_dem
 
 noise = NoiseLocation("x0", BernoulliPauliNoise("X"), 0.125, (0,))
 circuit = Circuit(
@@ -278,8 +278,8 @@ Embedded declarations let the circuit carry its detector and observable
 semantics:
 
 ```python
-from npsim import BernoulliPauliNoise, Circuit, NoiseLocation, Operation
-from npsim.runtime import generate_native_dem
+from faultscope import BernoulliPauliNoise, Circuit, NoiseLocation, Operation
+from faultscope.runtime import generate_native_dem
 
 noise = NoiseLocation("x0", BernoulliPauliNoise("X"), 0.125, (0,))
 circuit = Circuit(
@@ -300,8 +300,8 @@ For repeated DEM generation or sampler compilation, compile a reusable native
 generator:
 
 ```python
-from npsim import BernoulliPauliNoise, Circuit, NoiseLocation, Operation
-from npsim.runtime import compile_native_dem_generator
+from faultscope import BernoulliPauliNoise, Circuit, NoiseLocation, Operation
+from faultscope.runtime import compile_native_dem_generator
 
 noise = NoiseLocation("x0", BernoulliPauliNoise("X"), 0.125, (0,))
 circuit = Circuit(
@@ -332,14 +332,14 @@ DEM sampling uses edge probabilities from a `DetectorErrorModel` instead of
 executing the full circuit.
 
 ```python
-from npsim import (
+from faultscope import (
     BernoulliPauliNoise,
     Circuit,
     NoiseLocation,
     Operation,
 )
-from npsim.dem import DemBatchHotspotSimulator
-from npsim.runtime import generate_native_dem
+from faultscope.dem import DemHotspotEstimator
+from faultscope.runtime import generate_native_dem
 
 noise = NoiseLocation("x0", BernoulliPauliNoise("X"), 0.125, (0,))
 circuit = Circuit(
@@ -353,7 +353,7 @@ circuit = Circuit(
 )
 
 dem = generate_native_dem(circuit)
-simulator = DemBatchHotspotSimulator(dem)
+simulator = DemHotspotEstimator(dem)
 batch = simulator.run_batch(shots=64, seed=5)
 result = simulator.estimate(shots=256, seed=6, top_k=1)
 
@@ -378,8 +378,8 @@ mapping.
 `materialize_dem=False` is a sampling-only path:
 
 ```python
-from npsim import BernoulliPauliNoise, Circuit, NoiseLocation, Operation
-from npsim.runtime import compile_native_dem_sampler_from_circuit
+from faultscope import BernoulliPauliNoise, Circuit, NoiseLocation, Operation
+from faultscope.runtime import compile_native_dem_sampler_from_circuit
 
 noise = NoiseLocation("x0", BernoulliPauliNoise("X"), 0.125, (0,))
 circuit = Circuit(
@@ -412,48 +412,48 @@ PyMatching integration is optional and requires `numpy`, `scipy`, and
 detectors. Pure logical edges with no detectors are rejected because a matching
 decoder cannot infer them from syndrome data.
 
-NPSim integrates with PyMatching through `PyMatchingBatchDecoder`. The decoder
+FaultScope integrates with PyMatching through `PyMatchingDecoder`. The decoder
 is built from a graphlike `DetectorErrorModel`, because PyMatching needs a
 check matrix and logical fault matrix. After construction, the decoder can be
 used in either workflow:
 
 - Forward workflow: sample the original circuit with
-  `BatchForwardNoiseAwareSimulator`, then pass `decoder=decoder` to
+  `FaultScopeSimulator`, then pass `decoder=decoder` to
   `estimate(...)`.
-- DEM workflow: sample the detector error model with `DemBatchHotspotSimulator`,
+- DEM workflow: sample the detector error model with `DemHotspotEstimator`,
   then pass the same `decoder=decoder` to `estimate(...)`.
 
 In other words, a DEM is needed to construct the PyMatching decoder, but the
 sampling path can still be forward circuit sampling.
 
-`PyMatchingBatchDecoder` is the Python compatibility path. It is useful for
+`PyMatchingDecoder` is the Python compatibility path. It is useful for
 prototyping and for environments that only install the PyMatching Python wheel,
-but NPSim packed detector masks must still be converted through Python/NumPy
+but FaultScope packed detector masks must still be converted through Python/NumPy
 before PyMatching decodes them. For the native hot path, install the optional
-`npsim-pymatching` backend and use `NativePyMatchingDecoder`:
+`faultscope-pymatching` backend and use `NativePyMatchingDecoder`:
 
 ```bash
-python -m npsim.backends install pymatching --dry-run
+python -m faultscope.backends install pymatching --dry-run
 ```
 
 ```python
-from npsim.decoders import NativePyMatchingDecoder
+from faultscope.decoders import NativePyMatchingDecoder
 
 decoder = NativePyMatchingDecoder.from_dem(dem)
 result = sampler.estimate(shots=1024, seed=1, decoder=decoder)
 ```
 
 ```python
-from npsim import (
+from faultscope import (
     BernoulliPauliNoise,
-    BatchForwardNoiseAwareSimulator,
+    FaultScopeSimulator,
     Circuit,
     NoiseLocation,
     Operation,
 )
-from npsim.decoders import PyMatchingBatchDecoder
-from npsim.dem import DemBatchHotspotSimulator
-from npsim.runtime import generate_native_dem
+from faultscope.decoders import PyMatchingDecoder
+from faultscope.dem import DemHotspotEstimator
+from faultscope.runtime import generate_native_dem
 
 noise = NoiseLocation("x0", BernoulliPauliNoise("X"), 0.1, (0,))
 circuit = Circuit(
@@ -467,15 +467,15 @@ circuit = Circuit(
 )
 
 dem = generate_native_dem(circuit)
-decoder = PyMatchingBatchDecoder.from_dem(dem)
+decoder = PyMatchingDecoder.from_dem(dem)
 
-forward_result = BatchForwardNoiseAwareSimulator(circuit).estimate(
+forward_result = FaultScopeSimulator(circuit).estimate(
     shots=256,
     seed=10,
     decoder=decoder,
 )
 
-dem_result = DemBatchHotspotSimulator(dem).estimate(
+dem_result = DemHotspotEstimator(dem).estimate(
     shots=256,
     seed=10,
     decoder=decoder,
@@ -489,8 +489,8 @@ You can also call the decoder directly when you already have packed detector
 masks:
 
 ```python
-from npsim import Detector, DetectorErrorEdge, DetectorErrorModel, LogicalObservable
-from npsim.decoders import PyMatchingBatchDecoder
+from faultscope import Detector, DetectorErrorEdge, DetectorErrorModel, LogicalObservable
+from faultscope.decoders import PyMatchingDecoder
 
 dem = DetectorErrorModel(
     detectors=(Detector(0, ()),),
@@ -498,7 +498,7 @@ dem = DetectorErrorModel(
     edges=(DetectorErrorEdge(0.1, (0,), (0,), "edge0", "X"),),
 )
 
-decoder = PyMatchingBatchDecoder.from_dem(dem)
+decoder = PyMatchingDecoder.from_dem(dem)
 corrections = decoder.decode_batch_masks({0: 0b1010}, shots=4)
 
 print(corrections[0])
@@ -519,8 +519,8 @@ avoid moving detector and correction masks through Python. A native decoder is
 still created and selected from Python:
 
 ```python
-from npsim import (
-    BatchForwardNoiseAwareSimulator,
+from faultscope import (
+    FaultScopeSimulator,
     BernoulliPauliNoise,
     Circuit,
     LogicalObservable,
@@ -528,7 +528,7 @@ from npsim import (
     NoiseLocation,
     Operation,
 )
-from npsim.decoders import available_native_decoders
+from faultscope.decoders import available_native_decoders
 
 noise = NoiseLocation("x0", BernoulliPauliNoise("X"), 0.05, (0,))
 circuit = Circuit(
@@ -541,7 +541,7 @@ circuit = Circuit(
 decoder = NativeNoCorrectionDecoder(observable_ids=(0,))
 assert decoder.name in available_native_decoders()
 
-result = BatchForwardNoiseAwareSimulator(
+result = FaultScopeSimulator(
     circuit,
     observables=(LogicalObservable(0, measurement_keys=("m0",)),),
 ).estimate(shots=1024, seed=1, decoder=decoder)
@@ -550,7 +550,7 @@ result = BatchForwardNoiseAwareSimulator(
 When `loss_mask_fn` and `correction_mask_fn` are omitted, this uses the native
 fast path: detector masks, decoder output, default residual loss, and hotspot
 aggregation all stay in Rust. If you supply a Python loss or correction
-callback, NPSim falls back to the compatibility path and calls
+callback, FaultScope falls back to the compatibility path and calls
 `decode_batch_masks(batch)`. A Python class or subclass that only implements
 `decode_batch_masks(batch)` is still a Python decoder and does not enter the
 native fast path.
@@ -568,19 +568,19 @@ binary_problem = dem.compile_binary_linear_problem()
 These native views expose stable ids, counts, `edge_summary`, and compact reprs
 for inspection, but intentionally avoid public `to_numpy_*` hot-path helpers.
 
-Optional native decoder backends are managed explicitly after installing NPSim.
+Optional native decoder backends are managed explicitly after installing FaultScope.
 Inspect the built-in backend catalog and installed backend status with:
 
 ```bash
-python -m npsim.backends status
+python -m faultscope.backends status
 ```
 
 Inspect backend installation steps with:
 
 ```bash
-python -m npsim.backends install pymatching --dry-run
-python -m npsim.backends install fusion-blossom --dry-run
-python -m npsim.backends install bposd --dry-run
+python -m faultscope.backends install pymatching --dry-run
+python -m faultscope.backends install fusion-blossom --dry-run
+python -m faultscope.backends install bposd --dry-run
 ```
 
 For local development, activate the project virtual environment, or otherwise
@@ -588,14 +588,14 @@ ensure `.venv/bin` is on `PATH`, then install optional backend packages from the
 source checkout:
 
 ```bash
-.venv/bin/python -m pip install -e backends/npsim-pymatching --no-build-isolation
-.venv/bin/python -m pip install -e backends/npsim-fusion-blossom
-.venv/bin/python -c "from npsim.decoders import available_native_decoders; print(available_native_decoders())"
+.venv/bin/python -m pip install -e backends/faultscope-pymatching --no-build-isolation
+.venv/bin/python -m pip install -e backends/faultscope-fusion-blossom
+.venv/bin/python -c "from faultscope.decoders import available_native_decoders; print(available_native_decoders())"
 ```
 
-NPSim does not clone, compile, or install backend code during `import npsim` or
+FaultScope does not clone, compile, or install backend code during `import faultscope` or
 `estimate(...)`. The default build includes only smoke-test/template native
-backends, not fusion-blossom or BP+OSD. The local `npsim-fusion-blossom`
+backends, not fusion-blossom or BP+OSD. The local `faultscope-fusion-blossom`
 package is a minimal serial-solver beta adapter: it enters the native PyCapsule
 fast path, exposes construction metadata such as `solver_edge_count`, and
 safely compresses identical boundary and two-detector parallel edges. It uses
@@ -609,10 +609,10 @@ default the backend uses available native parallelism. Set
 `NPSIM_FUSION_BLOSSOM_PROFILE=1` to print the native timing split used for
 backend performance diagnosis, including solver clear/growth/extraction costs.
 
-The local `npsim-pymatching` package links pinned PyMatching sparse-blossom C++
+The local `faultscope-pymatching` package links pinned PyMatching sparse-blossom C++
 source and exposes `NativePyMatchingDecoder`. It is graphlike-only and keeps
 hot-path detector/correction masks out of Python; the existing
-`PyMatchingBatchDecoder` remains available as the Python compatibility adapter.
+`PyMatchingDecoder` remains available as the Python compatibility adapter.
 
 For the full developer contract, including `from_circuit(...)`,
 `from_dem(...)`, Python prototype decoders, and native backend skeletons, see
@@ -620,13 +620,13 @@ For the full developer contract, including `from_circuit(...)`,
 
 ## Stim Import
 
-NPSim includes a subset importer for flattened Stim text circuits. The importer
+FaultScope includes a subset importer for flattened Stim text circuits. The importer
 also embeds `DETECTOR` and `OBSERVABLE_INCLUDE` as circuit operations, so the
 returned circuit can be used directly by batch and DEM workflows.
 
 ```python
-from npsim.io import parse_stim_circuit
-from npsim.runtime import generate_native_dem
+from faultscope.io import parse_stim_circuit
+from faultscope.runtime import generate_native_dem
 
 stim_text = """
 X_ERROR(0.01) 0
@@ -655,8 +655,8 @@ The repetition-code builder is useful for smoke tests, tutorials, and decoder
 experiments.
 
 ```python
-from npsim import BatchForwardNoiseAwareSimulator
-from npsim.experiments import make_repetition_code_experiment
+from faultscope import FaultScopeSimulator
+from faultscope.experiments import make_repetition_code_experiment
 
 experiment = make_repetition_code_experiment(
     distance=3,
@@ -665,7 +665,7 @@ experiment = make_repetition_code_experiment(
     measurement_error_rate=0.01,
 )
 
-result = BatchForwardNoiseAwareSimulator(
+result = FaultScopeSimulator(
     experiment.circuit,
     observables=experiment.observables,
 ).estimate(
@@ -683,7 +683,7 @@ by `(round, index)`.
 
 ## Packed Mask Basics
 
-NPSim stores batch values as Python integers. Bit `k` belongs to shot `k`.
+FaultScope stores batch values as Python integers. Bit `k` belongs to shot `k`.
 
 ```python
 def mask_bit(mask: int, shot: int) -> int:
@@ -696,13 +696,13 @@ print(mask_bit(0b1010, 2))
 
 Common packed fields:
 
-- `BatchTrajectory.measurements: dict[str, int]`
-- `BatchTrajectory.detectors: dict[int, int]`
-- `BatchTrajectory.observables: dict[int, int]`
-- `BatchTrajectory.noise_event_masks: dict[str, int]`
-- `DemBatchTrajectory.detectors: dict[int, int]`
-- `DemBatchTrajectory.observables: dict[int, int]`
-- `DemBatchTrajectory.edge_event_masks: dict[int, int]`
+- `SampleBatch.measurements: dict[str, int]`
+- `SampleBatch.detectors: dict[int, int]`
+- `SampleBatch.observables: dict[int, int]`
+- `SampleBatch.noise_event_masks: dict[str, int]`
+- `DemSampleBatch.detectors: dict[int, int]`
+- `DemSampleBatch.observables: dict[int, int]`
+- `DemSampleBatch.edge_event_masks: dict[int, int]`
 
 For occasional inspection, prefer helper methods such as
 `measurement_bit(...)`, `detector_bit(...)`, and `edge_event_bit(...)`.
@@ -717,13 +717,13 @@ For occasional inspection, prefer helper methods such as
 | Graphlike matching decoder | DEM + PyMatching |
 | Edge-level hotspot ranking | DEM hotspot estimate |
 | Fast repeated detector-level sampling | Generate DEM once, then DEM sampling |
-| Rust application integration | `npsim-core` |
+| Rust application integration | `faultscope-core` |
 
 Forward and DEM workflows answer related but different questions. Forward
 sampling preserves more circuit-level information. DEM sampling is usually the
 better fit once the analysis has been reduced to detector and observable masks.
 
-NPSim's product runtime is a packed batch engine. It does not expose a general
+FaultScope's product runtime is a packed batch engine. It does not expose a general
 per-shot adaptive branching simulator.
 
 ## Benchmarks
@@ -749,7 +749,7 @@ Then run benchmarks from the repository root:
 Stim comparisons are reported when `stim` is installed. Threshold comparisons
 require `numpy`, `scipy`, `pymatching`, and `stim`. The surface-code decoder
 performance benchmark compares PyMatching with the optional
-`npsim-pymatching` and `npsim-fusion-blossom` backends when those backends are
+`faultscope-pymatching` and `faultscope-fusion-blossom` backends when those backends are
 installed; unavailable native backends are reported as `skip:<reason>` rows.
 The `stim-dem-pymatching-bitpacked` row uses Stim bit-packed DEM sampling plus
 PyMatching bit-packed batch decode as the official-style maximum-throughput
@@ -761,7 +761,7 @@ native decoder configurations.
 
 ## Troubleshooting
 
-### `ModuleNotFoundError: npsim._npsim_native`
+### `ModuleNotFoundError: faultscope._native`
 
 The Rust extension has not been built for the active Python environment. From
 the repository root, run:
@@ -829,4 +829,4 @@ Python RNG objects for compatibility by deriving a native seed from
   programmatic analysis.
 - Use DEM sampling for detector-level studies and forward sampling for custom
   circuit-level losses.
-- Treat `npsim._npsim_native` as private; import from public modules instead.
+- Treat `faultscope._native` as private; import from public modules instead.

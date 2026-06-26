@@ -26,23 +26,23 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from npsim.core import (
+from faultscope.core import (
     BernoulliPauliNoise,
     Circuit,
     MeasurementBitFlip,
     NoiseLocation,
     Operation,
 )
-from npsim.dem import Detector, LogicalObservable
-from npsim.experiments import make_repetition_code_experiment
-from npsim.runtime import (
+from faultscope.dem import Detector, LogicalObservable
+from faultscope.experiments import make_repetition_code_experiment
+from faultscope.runtime import (
     UnsupportedNativeCircuitError,
     compile_native_dem_generator,
     compile_native_dem_sampler,
     generate_native_dem,
 )
 from tests.stim_helpers import (
-    npsim_dem_error_edges,
+    faultscope_dem_error_edges,
     stim_dem_error_edges,
     to_stim_circuit,
     with_dem_declarations,
@@ -363,7 +363,7 @@ def _consistency_status(
     detectors: tuple[Detector, ...],
     shots: int,
 ) -> str:
-    native_edges = _canonical_dem_error_edges(npsim_dem_error_edges(native_detector_dem))
+    native_edges = _canonical_dem_error_edges(faultscope_dem_error_edges(native_detector_dem))
     stim_edges = _canonical_dem_error_edges(stim_dem_error_edges(stim_dem))
     if native_edges != stim_edges:
         return f"dem-mismatch:native={len(native_edges)},stim={len(stim_edges)}"

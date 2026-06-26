@@ -3,9 +3,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from npsim.core import Circuit, NoiseLocation, Operation
-from npsim.core import BernoulliPauliNoise, MeasurementBitFlip
-from npsim.dem import LogicalObservable
+from faultscope.core import Circuit, NoiseLocation, Operation
+from faultscope.core import BernoulliPauliNoise, MeasurementBitFlip
+from faultscope.dem import LogicalObservable
 
 
 @dataclass(frozen=True)

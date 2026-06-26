@@ -3,9 +3,9 @@ requires = ["maturin>=1.7,<2"]
 build-backend = "maturin"
 
 [project]
-name = "npsim"
+name = "faultscope"
 version = "0.1.0"
-description = "Rust-core forward noise-aware stabilizer simulator with a Python API"
+description = "Noise-aware QEC fault attribution toolkit with a Rust core and Python API"
 requires-python = ">=3.10"
 readme = "README.md"
 
@@ -33,6 +33,6 @@ native-build = [
 ]
 
 [tool.maturin]
-manifest-path = "crates/npsim-python/Cargo.toml"
-module-name = "npsim._npsim_native"
+manifest-path = "crates/faultscope-python/Cargo.toml"
+module-name = "faultscope._native"
 python-source = "."

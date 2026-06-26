@@ -2,8 +2,8 @@ import os
 import tempfile
 import unittest
 
-from npsim.runtime import BatchForwardNoiseAwareSimulator
-from npsim.viz import (
+from faultscope.runtime import FaultScopeSimulator
+from faultscope.viz import (
     VisualizationUnavailableError,
     write_rotated_surface_code_spatial_hotspot_map,
 )
@@ -113,7 +113,7 @@ class LargeRotatedSurfaceCodeExampleTests(unittest.TestCase):
             rounds=2,
         )
         decoder = self._make_decoder_or_skip(example)
-        result = BatchForwardNoiseAwareSimulator(
+        result = FaultScopeSimulator(
             example.circuit,
             observables=example.observables,
         ).estimate(
@@ -138,7 +138,7 @@ class LargeRotatedSurfaceCodeExampleTests(unittest.TestCase):
                     rounds=1,
                 )
                 decoder = self._make_decoder_or_skip(example)
-                result = BatchForwardNoiseAwareSimulator(
+                result = FaultScopeSimulator(
                     example.circuit,
                     observables=example.observables,
                 ).estimate(
@@ -159,14 +159,14 @@ class LargeRotatedSurfaceCodeExampleTests(unittest.TestCase):
     def test_d13_example_writes_spatial_hotspot_map(self) -> None:
         os.environ.setdefault(
             "MPLCONFIGDIR",
-            os.path.join(tempfile.gettempdir(), "npsim-matplotlib-cache"),
+            os.path.join(tempfile.gettempdir(), "faultscope-matplotlib-cache"),
         )
         example = make_large_rotated_surface_code_memory_example(
             distance=13,
             rounds=1,
         )
         decoder = self._make_decoder_or_skip(example)
-        result = BatchForwardNoiseAwareSimulator(
+        result = FaultScopeSimulator(
             example.circuit,
             observables=example.observables,
         ).estimate(

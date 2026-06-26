@@ -4,19 +4,19 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from npsim._npsim_native import NATIVE_DECODER_PLUGIN_ABI
-from npsim.backends import clear_native_decoder_plugin_cache
-from npsim.core import BernoulliPauliNoise, Circuit, NoiseLocation, Operation
-from npsim.decoders import (
+from faultscope._native import NATIVE_DECODER_PLUGIN_ABI
+from faultscope.backends import clear_native_decoder_plugin_cache
+from faultscope.core import BernoulliPauliNoise, Circuit, NoiseLocation, Operation
+from faultscope.decoders import (
     NativeFusionBlossomDecoder,
-    PyMatchingBatchDecoder,
+    PyMatchingDecoder,
     available_native_decoders,
     create_native_decoder,
     get_native_decoder_class,
 )
-from npsim.dem import Detector, DetectorErrorEdge, DetectorErrorModel, LogicalObservable
-from npsim.runtime import (
-    BatchForwardNoiseAwareSimulator,
+from faultscope.dem import Detector, DetectorErrorEdge, DetectorErrorModel, LogicalObservable
+from faultscope.runtime import (
+    FaultScopeSimulator,
     compile_native_dem_sampler,
     generate_native_dem,
 )
@@ -24,23 +24,23 @@ from npsim.runtime import (
 BACKEND_SRC = (
     Path(__file__).resolve().parents[1]
     / "backends"
-    / "npsim-fusion-blossom"
+    / "faultscope-fusion-blossom"
     / "src"
 )
 if str(BACKEND_SRC) not in sys.path:
     sys.path.insert(0, str(BACKEND_SRC))
 
-import npsim_fusion_blossom  # noqa: E402
+import faultscope_fusion_blossom  # noqa: E402
 
 try:
-    from npsim_fusion_blossom import _native as fusion_native  # noqa: E402
+    from faultscope_fusion_blossom import _native as fusion_native  # noqa: E402
 except ImportError:  # pragma: no cover - exercised when backend is not built.
     fusion_native = None
 
 
 requires_native_backend = unittest.skipUnless(
-    npsim_fusion_blossom.native_extension_available(),
-    "npsim-fusion-blossom native extension is not built",
+    faultscope_fusion_blossom.native_extension_available(),
+    "faultscope-fusion-blossom native extension is not built",
 )
 
 
@@ -49,7 +49,7 @@ class _FakeEntryPoints:
         self._entry_points = tuple(entry_points)
 
     def select(self, *, group):
-        if group == "npsim.native_decoders":
+        if group == "faultscope.native_decoders":
             return self._entry_points
         return ()
 
@@ -58,7 +58,7 @@ class _FakeEntryPoint:
     name = "fusion-blossom"
 
     def load(self):
-        return npsim_fusion_blossom.backend_manifest
+        return faultscope_fusion_blossom.backend_manifest
 
 
 class FusionBlossomBackendPackageTests(unittest.TestCase):
@@ -66,18 +66,18 @@ class FusionBlossomBackendPackageTests(unittest.TestCase):
         clear_native_decoder_plugin_cache()
 
     def test_backend_manifest_contract(self) -> None:
-        manifest = npsim_fusion_blossom.backend_manifest()
+        manifest = faultscope_fusion_blossom.backend_manifest()
 
         self.assertEqual(manifest["abi_version"], NATIVE_DECODER_PLUGIN_ABI)
         self.assertEqual(manifest["name"], "fusion-blossom")
-        self.assertEqual(manifest["version"], npsim_fusion_blossom.__version__)
+        self.assertEqual(manifest["version"], faultscope_fusion_blossom.__version__)
         self.assertEqual(
             manifest["source"],
-            "npsim-fusion-blossom minimal serial beta adapter",
+            "faultscope-fusion-blossom minimal serial beta adapter",
         )
         self.assertIs(
             manifest["decoders"]["fusion-blossom"],
-            npsim_fusion_blossom.NativeFusionBlossomDecoder,
+            faultscope_fusion_blossom.NativeFusionBlossomDecoder,
         )
 
     @requires_native_backend
@@ -96,7 +96,7 @@ class FusionBlossomBackendPackageTests(unittest.TestCase):
             ),
         )
 
-        decoder = npsim_fusion_blossom.NativeFusionBlossomDecoder.from_dem(dem)
+        decoder = faultscope_fusion_blossom.NativeFusionBlossomDecoder.from_dem(dem)
 
         self.assertEqual(decoder.name, "fusion-blossom")
         self.assertEqual(decoder.detector_ids, (0,))
@@ -109,7 +109,7 @@ class FusionBlossomBackendPackageTests(unittest.TestCase):
         self.assertEqual(decoder.build_summary["dem_edge_count"], 1)
         self.assertEqual(decoder.build_summary["solver_edge_count"], 1)
         self.assertEqual(decoder.python_decode_call_count, 0)
-        self.assertIsNotNone(decoder.__npsim_native_decoder_capsule__())
+        self.assertIsNotNone(decoder.__faultscope_native_decoder_capsule__())
 
     @requires_native_backend
     def test_backend_entry_point_integrates_with_registry_and_fast_path(self) -> None:
@@ -134,17 +134,17 @@ class FusionBlossomBackendPackageTests(unittest.TestCase):
             detectors=(detector,),
             observables=(observable,),
         )
-        simulator = BatchForwardNoiseAwareSimulator(circuit, observables=(observable,))
+        simulator = FaultScopeSimulator(circuit, observables=(observable,))
 
         with mock.patch(
-            "npsim.backends.registry.metadata.entry_points",
+            "faultscope.backends.registry.metadata.entry_points",
             return_value=_FakeEntryPoints((_FakeEntryPoint(),)),
         ):
             clear_native_decoder_plugin_cache()
             self.assertIn("fusion-blossom", available_native_decoders())
             self.assertIs(
                 get_native_decoder_class("fusion-blossom"),
-                npsim_fusion_blossom.NativeFusionBlossomDecoder,
+                faultscope_fusion_blossom.NativeFusionBlossomDecoder,
             )
             decoder = create_native_decoder("fusion-blossom", dem=dem)
             friendly_decoder = NativeFusionBlossomDecoder.from_dem(dem)
@@ -170,7 +170,7 @@ class FusionBlossomBackendPackageTests(unittest.TestCase):
                 ),
             ),
         )
-        decoder = npsim_fusion_blossom.NativeFusionBlossomDecoder.from_dem(dem)
+        decoder = faultscope_fusion_blossom.NativeFusionBlossomDecoder.from_dem(dem)
 
         result = compile_native_dem_sampler(dem).estimate(
             shots=4096,
@@ -199,7 +199,7 @@ class FusionBlossomBackendPackageTests(unittest.TestCase):
                 ),
             ),
         )
-        decoder = npsim_fusion_blossom.NativeFusionBlossomDecoder.from_dem(dem)
+        decoder = faultscope_fusion_blossom.NativeFusionBlossomDecoder.from_dem(dem)
 
         result = compile_native_dem_sampler(dem).estimate(
             shots=4096,
@@ -223,7 +223,7 @@ class FusionBlossomBackendPackageTests(unittest.TestCase):
                 DetectorErrorEdge(0.2, (10, 20), (0,), "edge0", "X"),
             ),
         )
-        decoder = npsim_fusion_blossom.NativeFusionBlossomDecoder.from_dem(dem)
+        decoder = faultscope_fusion_blossom.NativeFusionBlossomDecoder.from_dem(dem)
 
         with mock.patch.dict(os.environ, {"NPSIM_FUSION_BLOSSOM_BLOCK_ROWS": "128"}):
             result = compile_native_dem_sampler(dem).estimate(
@@ -250,7 +250,7 @@ class FusionBlossomBackendPackageTests(unittest.TestCase):
                 DetectorErrorEdge(0.3, (20, 10), (0,), "edge1", "X"),
             ),
         )
-        decoder = npsim_fusion_blossom.NativeFusionBlossomDecoder.from_dem(dem)
+        decoder = faultscope_fusion_blossom.NativeFusionBlossomDecoder.from_dem(dem)
 
         summary = decoder.build_summary
         self.assertEqual(decoder.edge_count, 2)
@@ -283,7 +283,7 @@ class FusionBlossomBackendPackageTests(unittest.TestCase):
                 ),
             ),
         )
-        decoder = npsim_fusion_blossom.NativeFusionBlossomDecoder.from_dem(dem)
+        decoder = faultscope_fusion_blossom.NativeFusionBlossomDecoder.from_dem(dem)
 
         result = compile_native_dem_sampler(dem).estimate(
             shots=4096,
@@ -308,7 +308,7 @@ class FusionBlossomBackendPackageTests(unittest.TestCase):
                 DetectorErrorEdge(0.2, (1, 2), (1,), "edge1", "X"),
             ),
         )
-        decoder = npsim_fusion_blossom.NativeFusionBlossomDecoder.from_dem(dem)
+        decoder = faultscope_fusion_blossom.NativeFusionBlossomDecoder.from_dem(dem)
 
         class Batch:
             shots = 1
@@ -327,7 +327,7 @@ class FusionBlossomBackendPackageTests(unittest.TestCase):
             observables=(LogicalObservable(id=0),),
             edges=(DetectorErrorEdge(0.2, (0, 1), (0,), "edge0", "X"),),
         )
-        decoder = npsim_fusion_blossom.NativeFusionBlossomDecoder.from_dem(dem)
+        decoder = faultscope_fusion_blossom.NativeFusionBlossomDecoder.from_dem(dem)
 
         class Batch:
             shots = 2
@@ -347,7 +347,7 @@ class FusionBlossomBackendPackageTests(unittest.TestCase):
             ),
         )
 
-        decoder = npsim_fusion_blossom.NativeFusionBlossomDecoder.from_dem(dem)
+        decoder = faultscope_fusion_blossom.NativeFusionBlossomDecoder.from_dem(dem)
 
         self.assertEqual(decoder.boundary_vertex_count, 2)
         self.assertEqual(decoder.solver_edge_count, 2)
@@ -364,7 +364,7 @@ class FusionBlossomBackendPackageTests(unittest.TestCase):
             ),
         )
 
-        decoder = npsim_fusion_blossom.NativeFusionBlossomDecoder.from_dem(dem)
+        decoder = faultscope_fusion_blossom.NativeFusionBlossomDecoder.from_dem(dem)
 
         summary = decoder.build_summary
         self.assertEqual(decoder.edge_count, 2)
@@ -389,7 +389,7 @@ class FusionBlossomBackendPackageTests(unittest.TestCase):
                 ),
             ),
         )
-        decoder = npsim_fusion_blossom.NativeFusionBlossomDecoder.from_dem(dem)
+        decoder = faultscope_fusion_blossom.NativeFusionBlossomDecoder.from_dem(dem)
 
         class Batch:
             shots = 3
@@ -421,8 +421,8 @@ class FusionBlossomBackendPackageTests(unittest.TestCase):
             detectors=(detector,),
             observables=(observable,),
         )
-        simulator = BatchForwardNoiseAwareSimulator(circuit, observables=(observable,))
-        decoder = npsim_fusion_blossom.NativeFusionBlossomDecoder.from_dem(dem)
+        simulator = FaultScopeSimulator(circuit, observables=(observable,))
+        decoder = faultscope_fusion_blossom.NativeFusionBlossomDecoder.from_dem(dem)
 
         result = simulator.estimate(
             shots=128,
@@ -451,7 +451,7 @@ class FusionBlossomBackendPackageTests(unittest.TestCase):
             ),
         )
 
-        decoder = npsim_fusion_blossom.NativeFusionBlossomDecoder.from_dem(
+        decoder = faultscope_fusion_blossom.NativeFusionBlossomDecoder.from_dem(
             dem,
             options={"weight_scale": 10_000},
         )
@@ -475,17 +475,17 @@ class FusionBlossomBackendPackageTests(unittest.TestCase):
         )
 
         with self.assertRaisesRegex(ValueError, "unknown fusion-blossom option"):
-            npsim_fusion_blossom.NativeFusionBlossomDecoder.from_dem(
+            faultscope_fusion_blossom.NativeFusionBlossomDecoder.from_dem(
                 dem,
                 options={"solver": "real"},
             )
         with self.assertRaisesRegex(ValueError, "positive and finite"):
-            npsim_fusion_blossom.NativeFusionBlossomDecoder.from_dem(
+            faultscope_fusion_blossom.NativeFusionBlossomDecoder.from_dem(
                 dem,
                 options={"weight_scale": 0},
             )
         with self.assertRaisesRegex(ValueError, "scaled weight"):
-            npsim_fusion_blossom.NativeFusionBlossomDecoder.from_dem(
+            faultscope_fusion_blossom.NativeFusionBlossomDecoder.from_dem(
                 dem,
                 options={"weight_scale": 1e300},
             )
@@ -505,7 +505,7 @@ class FusionBlossomBackendPackageTests(unittest.TestCase):
         )
 
         with self.assertRaisesRegex(ValueError, "ambiguous parallel graph endpoint"):
-            npsim_fusion_blossom.NativeFusionBlossomDecoder.from_dem(dem)
+            faultscope_fusion_blossom.NativeFusionBlossomDecoder.from_dem(dem)
 
     @requires_native_backend
     def test_backend_accepts_large_equal_weights_after_gcd_normalization(self) -> None:
@@ -518,7 +518,7 @@ class FusionBlossomBackendPackageTests(unittest.TestCase):
             ),
         )
 
-        decoder = npsim_fusion_blossom.NativeFusionBlossomDecoder.from_dem(
+        decoder = faultscope_fusion_blossom.NativeFusionBlossomDecoder.from_dem(
             dem,
             options={"weight_scale": 1e18},
         )
@@ -540,10 +540,10 @@ class FusionBlossomBackendPackageTests(unittest.TestCase):
             ),
         )
         try:
-            pymatching_decoder = PyMatchingBatchDecoder.from_dem(dem)
+            pymatching_decoder = PyMatchingDecoder.from_dem(dem)
         except ImportError as exc:
             self.skipTest(str(exc))
-        fusion_decoder = npsim_fusion_blossom.NativeFusionBlossomDecoder.from_dem(dem)
+        fusion_decoder = faultscope_fusion_blossom.NativeFusionBlossomDecoder.from_dem(dem)
 
         class Batch:
             shots = 1
@@ -555,7 +555,7 @@ class FusionBlossomBackendPackageTests(unittest.TestCase):
         )
 
     def test_backend_from_dem_requires_built_native_extension(self) -> None:
-        if npsim_fusion_blossom.native_extension_available():
+        if faultscope_fusion_blossom.native_extension_available():
             self.skipTest("native extension is built")
         dem = DetectorErrorModel(
             detectors=(Detector(id=0, measurement_keys=()),),
@@ -564,21 +564,21 @@ class FusionBlossomBackendPackageTests(unittest.TestCase):
         )
 
         with self.assertRaisesRegex(ImportError, "native extension is not built"):
-            npsim_fusion_blossom.NativeFusionBlossomDecoder.from_dem(dem)
+            faultscope_fusion_blossom.NativeFusionBlossomDecoder.from_dem(dem)
 
     def test_invalid_capsule_name_is_rejected(self) -> None:
         class BadCapsuleDecoder:
-            def __npsim_native_decoder_capsule__(self):
+            def __faultscope_native_decoder_capsule__(self):
                 return object()
 
-        simulator = BatchForwardNoiseAwareSimulator(Circuit(n_qubits=1, operations=[]))
+        simulator = FaultScopeSimulator(Circuit(n_qubits=1, operations=[]))
 
         with self.assertRaisesRegex(ValueError, "capsule must be named"):
             simulator.estimate(shots=16, decoder=BadCapsuleDecoder())
 
     @requires_native_backend
     def test_invalid_capsule_descriptor_is_rejected(self) -> None:
-        simulator = BatchForwardNoiseAwareSimulator(Circuit(n_qubits=1, operations=[]))
+        simulator = FaultScopeSimulator(Circuit(n_qubits=1, operations=[]))
 
         for kind, message in (
             ("abi-mismatch", "ABI version"),
@@ -599,7 +599,7 @@ class FusionBlossomBackendPackageTests(unittest.TestCase):
                 Operation.detector(("m",), detector_id=0),
             ],
         )
-        simulator = BatchForwardNoiseAwareSimulator(circuit)
+        simulator = FaultScopeSimulator(circuit)
         decoder = fusion_native.InvalidNativeDecoderCapsule("decode-error")
 
         with self.assertRaisesRegex(ValueError, "forced native decoder decode failure"):

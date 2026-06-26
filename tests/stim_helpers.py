@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Iterable, Mapping, Sequence
 
-from npsim.core import (
+from faultscope.core import (
     BernoulliPauliNoise,
     Circuit,
     MeasurementBitFlip,
@@ -14,8 +14,8 @@ from npsim.core import (
     SingleQubitDepolarizing,
     TwoQubitDepolarizing,
 )
-from npsim.dem import Detector, LogicalObservable
-from npsim.runtime import BatchTrajectory
+from faultscope.dem import Detector, LogicalObservable
+from faultscope.runtime import SampleBatch
 
 try:
     import numpy as np
@@ -194,9 +194,9 @@ def append_noise(circuit: Any, location: NoiseLocation) -> None:
 def measurement_batch_from_stim_samples(
     samples: Any,
     key_order: Sequence[str],
-) -> BatchTrajectory:
+) -> SampleBatch:
     shots = int(samples.shape[0])
-    return BatchTrajectory(
+    return SampleBatch(
         shots=shots,
         all_mask=(1 << shots) - 1,
         x_frame=(),
@@ -217,9 +217,9 @@ def dem_batch_from_stim_samples(
     *,
     detectors: Sequence[Detector],
     observables: Sequence[LogicalObservable],
-) -> BatchTrajectory:
+) -> SampleBatch:
     shots = int(stim_detectors.shape[0])
-    return BatchTrajectory(
+    return SampleBatch(
         shots=shots,
         all_mask=(1 << shots) - 1,
         x_frame=(),
@@ -298,7 +298,7 @@ def dense_predictions_to_masks(
     }
 
 
-def npsim_dem_error_edges(dem: Any) -> tuple[tuple[float, tuple[int, ...], tuple[int, ...]], ...]:
+def faultscope_dem_error_edges(dem: Any) -> tuple[tuple[float, tuple[int, ...], tuple[int, ...]], ...]:
     return tuple(
         sorted(
             (

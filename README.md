@@ -1,10 +1,10 @@
-# NPSim
+# FaultScope
 
-NPSim 是一个面向量子纠错工作流的前向噪声感知 stabilizer 模拟器。当前产品运行时由 Rust
-core 提供，并通过 Python API 暴露；主要能力包括 bit-packed batch sampling、detector
-error model 生成、DEM 层采样、decoder 集成和噪声热点估计。
+FaultScope 是一个面向量子纠错工作流的噪声感知 fault attribution 工具包。当前产品运行时由
+Rust core 提供，并通过 Python API 暴露；主要能力包括 bit-packed stabilizer batch
+sampling、detector error model 生成、DEM 层采样、decoder 集成和噪声热点估计。
 
-文档站点见 [NPSim Documentation](https://yuguoshao.github.io/NPSim/)。
+文档站点见 [FaultScope Documentation](https://yuguoshao.github.io/faultscope/)。
 本地文档入口：
 
 - [User Guide](docs/user_guide.md)：安装、示例、工作流和排错。
@@ -13,10 +13,10 @@ error model 生成、DEM 层采样、decoder 集成和噪声热点估计。
 
 ## 项目结构
 
-- `crates/npsim-core`：Python 无关的 Rust core，包含 circuit/DEM 数据模型、packed
+- `crates/faultscope-core`：Python 无关的 Rust core，包含 circuit/DEM 数据模型、packed
   sampling 和 hotspot 聚合。
-- `crates/npsim-python`：PyO3 binding crate，构建 `npsim._npsim_native`。
-- `npsim/`：公共 Python import surface、decoder/Stim/visualization adapters 和示例构建器。
+- `crates/faultscope-python`：PyO3 binding crate，构建 `faultscope._native`。
+- `faultscope/`：公共 Python import surface、decoder/Stim/visualization adapters 和示例构建器。
 - `docs/`：MkDocs 文档站点。
 - `tests/`、`benchmarks/`：回归测试、Stim 对照和吞吐基准。
 
@@ -38,12 +38,12 @@ python -m venv .venv
 ```
 
 `pip install .` 会按 `pyproject.toml` 自动获取 build dependency `maturin>=1.7,<2`，并构建
-`npsim._npsim_native`。离线安装或使用 `--no-build-isolation` 时，需要提前准备好 maturin。
+`faultscope._native`。离线安装或使用 `--no-build-isolation` 时，需要提前准备好 maturin。
 
 常用验证：
 
 ```bash
-.venv/bin/python -c "import npsim; print(npsim.Circuit)"
+.venv/bin/python -c "import faultscope; print(faultscope.Circuit)"
 cargo test --workspace
 .venv/bin/python -m unittest discover -s tests -q
 ```
@@ -59,9 +59,9 @@ cargo test --workspace
 下面的例子构造一个单比特 X 噪声位置，采样测量结果，并估计该噪声率对 loss mask 的敏感度。
 
 ```python
-from npsim import (
+from faultscope import (
     BernoulliPauliNoise,
-    BatchForwardNoiseAwareSimulator,
+    FaultScopeSimulator,
     Circuit,
     NoiseLocation,
     Operation,
@@ -83,7 +83,7 @@ circuit = Circuit(
     ),
 )
 
-simulator = BatchForwardNoiseAwareSimulator(circuit)
+simulator = FaultScopeSimulator(circuit)
 batch = simulator.run_batch(shots=1024, seed=1)
 result = simulator.estimate(
     shots=2048,
@@ -99,27 +99,27 @@ print(result.hotspot_table(top_k=5))
 ## 当前 API 要点
 
 - `Operation.pauli_gate(...)` 是 Pauli gate 构造器；`Operation.pauli` 是只读属性。
-- `PauliFrame` 和 `StabilizerState` 从 `npsim.core` 导入，不是顶层 `npsim` export。
-- `BatchForwardNoiseAwareSimulator` 是前向 packed batch runtime 的主要入口。
+- `PauliFrame` 和 `StabilizerState` 从 `faultscope.core` 导入，不是顶层 `faultscope` export。
+- `FaultScopeSimulator` 是前向 packed batch runtime 的主要入口。
 - `DetectorErrorModelGenerator` 和 `generate_native_dem(...)` 生成 DEM；未显式传入 detector /
   observable 时，会读取 circuit 中的 `Operation.detector(...)` 和
   `Operation.observable_include(...)`。
-- `DemBatchHotspotSimulator` 在 DEM 层采样，每条 DEM edge 按独立 Bernoulli instruction 处理。
+- `DemHotspotEstimator` 在 DEM 层采样，每条 DEM edge 按独立 Bernoulli instruction 处理。
 - `NativeNoCorrectionDecoder` 和后续 native decoder handle 可通过
   `estimate(..., decoder=decoder)` 自动走 native fast path；传入 Python loss/correction
   callback 时回退到兼容路径。普通 Python decoder 或 subclass 不会自动获得 native hot path；
-  可用 native backend 通过 `npsim.decoders.available_native_decoders()` 查看。
+  可用 native backend 通过 `faultscope.decoders.available_native_decoders()` 查看。
 - `DetectorErrorModel.compile_indexed()`、`compile_graphlike_problem()` 和
   `compile_binary_linear_problem()` 提供面向后续 fusion-blossom、BP+OSD 等 decoder 的 native
   problem views。
 - 可选 native decoder backend 通过统一后装命令管理，例如
-  `python -m npsim.backends status` 查看 catalog/status，
-  `python -m npsim.backends install pymatching --dry-run` 查看安装步骤；NPSim 不会在
+  `python -m faultscope.backends status` 查看 catalog/status，
+  `python -m faultscope.backends install pymatching --dry-run` 查看安装步骤；FaultScope 不会在
   `import` 或 `estimate(...)` 时隐式联网、clone 或编译。
 - 开发中的 PyMatching 和 fusion-blossom backend 可在激活 venv 后通过
-  `.venv/bin/python -m pip install -e backends/npsim-pymatching --no-build-isolation` 和
-  `.venv/bin/python -m pip install -e backends/npsim-fusion-blossom` 本地安装；当前是最小
-  native MWPM backend；PyMatching backend 避免 NPSim batch/correction masks 经 Python 转换。
+  `.venv/bin/python -m pip install -e backends/faultscope-pymatching --no-build-isolation` 和
+  `.venv/bin/python -m pip install -e backends/faultscope-fusion-blossom` 本地安装；当前是最小
+  native MWPM backend；PyMatching backend 避免 FaultScope batch/correction masks 经 Python 转换。
 - `edge_sensitivities` 和 `edge_hotspots` 是按 DEM edge index keyed 的 dict。
 - `edges_by_location()` 返回 `dict[str, list[DetectorErrorEdge]]`。
 - `materialize_dem=False` 的 native DEM sampler 是轻量采样路径，`sampler.dem is None`，
@@ -132,12 +132,12 @@ print(result.hotspot_table(top_k=5))
 | 查看原始 measurement/noise masks | Forward sampling |
 | 自定义 measurement-history loss | Forward estimate + `loss_mask_fn` |
 | detector-level decoder | Forward 或 DEM estimate + decoder |
-| graphlike matching decoder | 原型用 `PyMatchingBatchDecoder`；高性能路径安装 `npsim-pymatching` 后使用 `NativePyMatchingDecoder` |
+| graphlike matching decoder | 原型用 `PyMatchingDecoder`；高性能路径安装 `faultscope-pymatching` 后使用 `NativePyMatchingDecoder` |
 | DEM edge 级热点排序 | DEM hotspot estimate |
 | 重复 detector-level sampling | 生成 DEM 后复用 DEM sampler |
-| Rust 集成 | `npsim-core` |
+| Rust 集成 | `faultscope-core` |
 
-NPSim 当前产品路径是 packed batch engine，不暴露通用的 per-shot adaptive branching simulator。
+FaultScope 当前产品路径是 packed batch engine，不暴露通用的 per-shot adaptive branching simulator。
 
 ## 文档开发
 
@@ -151,7 +151,7 @@ NPSim 当前产品路径是 packed batch engine，不暴露通用的 per-shot ad
 严格构建：
 
 ```bash
-.venv/bin/mkdocs build --strict --site-dir /private/tmp/npsim-doc-review-site
+.venv/bin/mkdocs build --strict --site-dir /private/tmp/faultscope-doc-review-site
 ```
 
 ## Benchmarks
@@ -175,8 +175,8 @@ NPSim 当前产品路径是 packed batch engine，不暴露通用的 per-shot ad
 ```
 
 Stim/PyMatching 相关 benchmark 会在对应可选依赖安装后启用对照；
-surface-code decoder performance benchmark 会在安装 `npsim-pymatching` 或
-`npsim-fusion-blossom` 后额外输出对应 native path。传入
+surface-code decoder performance benchmark 会在安装 `faultscope-pymatching` 或
+`faultscope-fusion-blossom` 后额外输出对应 native path。传入
 `--split-native-baseline` 可把 native no-correction packed-row baseline 与
 decoder 增量分开显示。需要比较不同 native decoder 的 mean-loss 时，使用
 `--same-seed-across-paths` 让同一个 distance/rate 点复用相同 seed。

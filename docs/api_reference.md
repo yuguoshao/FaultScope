@@ -1,10 +1,10 @@
-# NPSim API Reference
+# FaultScope API Reference
 
-NPSim is a Rust Cargo workspace with a Python API. The product runtime lives in
-`npsim-core` and is exposed to Python through the private extension module
-`npsim._npsim_native`. User code should import from the public Python modules:
-`npsim`, `npsim.core`, `npsim.runtime`, `npsim.dem`, `npsim.decoders`,
-`npsim.io`, and `npsim.viz`.
+FaultScope is a Rust Cargo workspace with a Python API. The product runtime lives in
+`faultscope-core` and is exposed to Python through the private extension module
+`faultscope._native`. User code should import from the public Python modules:
+`faultscope`, `faultscope.core`, `faultscope.runtime`, `faultscope.dem`, `faultscope.decoders`,
+`faultscope.io`, and `faultscope.viz`.
 
 The package is pre-1.0. Python source-level compatibility is the main user
 compatibility target. The Rust core API is public and typed, but may still move
@@ -13,12 +13,12 @@ while the core stabilizes.
 ## Import Surface
 
 Common runtime, circuit, DEM, decoder, IO, and visualization objects are
-re-exported from `npsim`:
+re-exported from `faultscope`:
 
 ```python
-from npsim import (
+from faultscope import (
     BernoulliPauliNoise,
-    BatchForwardNoiseAwareSimulator,
+    FaultScopeSimulator,
     Circuit,
     Detector,
     DetectorErrorModelGenerator,
@@ -26,22 +26,22 @@ from npsim import (
     NoiseLocation,
     Operation,
     NativePyMatchingDecoder,
-    PyMatchingBatchDecoder,
+    PyMatchingDecoder,
 )
 ```
 
 `PauliFrame` and `StabilizerState` are not top-level exports. Import helper
-types and functions from `npsim.core`:
+types and functions from `faultscope.core`:
 
 ```python
-from npsim.core import PauliFrame, StabilizerState, pauli_string_to_xz
+from faultscope.core import PauliFrame, StabilizerState, pauli_string_to_xz
 ```
 
 Lower-level subsystem modules expose grouped APIs:
 
 ```python
-from npsim.runtime import compile_native_sampler, generate_native_dem
-from npsim.dem import DetectorErrorModel, DemBatchHotspotSimulator
+from faultscope.runtime import compile_native_sampler, generate_native_dem
+from faultscope.dem import DetectorErrorModel, DemHotspotEstimator
 ```
 
 ## Core Circuit Objects
@@ -100,7 +100,7 @@ Read-only operation attributes include `kind`, `qubits`, `key`, `basis`,
 
 ## Noise Models
 
-NPSim provides these stochastic noise model classes:
+FaultScope provides these stochastic noise model classes:
 
 ```text
 BernoulliPauliNoise(pauli)
@@ -127,7 +127,7 @@ Additional attributes and methods:
 
 ## Pauli And Stabilizer Helpers
 
-`npsim.core` exports helper functions for Pauli representations:
+`faultscope.core` exports helper functions for Pauli representations:
 
 ```text
 pauli_to_xz(pauli)
@@ -139,12 +139,12 @@ multiply_pauli_rows(left_x, left_z, left_sign, right_x, right_z, right_sign)
 ```
 
 `PauliFrame` and `StabilizerState` are helper classes exposed from
-`npsim.core`. They are useful for tests and low-level workflows; the packed
+`faultscope.core`. They are useful for tests and low-level workflows; the packed
 runtime APIs below are the normal product path.
 
 ## Forward Runtime
 
-`BatchForwardNoiseAwareSimulator(circuit, *, observables=None)` compiles a
+`FaultScopeSimulator(circuit, *, observables=None)` compiles a
 circuit for packed batch simulation.
 
 Read-only attributes:
@@ -156,8 +156,8 @@ Read-only attributes:
 Methods:
 
 ```text
-run_batch(*, shots, rng=None, seed=None) -> BatchTrajectory
-sample(shots, seed=None, rng=None) -> BatchTrajectory
+run_batch(*, shots, rng=None, seed=None) -> SampleBatch
+sample(shots, seed=None, rng=None) -> SampleBatch
 sample_measurements(shots, seed=None, rng=None) -> dict[str, int]
 estimate(
     *,
@@ -168,10 +168,10 @@ estimate(
     seed=None,
     baseline=None,
     top_k=10,
-) -> SimulationResult
+) -> FailureEstimate
 ```
 
-`BatchTrajectory` stores bit-packed integer masks:
+`SampleBatch` stores bit-packed integer masks:
 
 - `shots: int`
 - `all_mask: int`
@@ -196,7 +196,7 @@ z_bit(qubit, shot)
 z_mask(qubit)
 ```
 
-`SimulationResult` exposes:
+`FailureEstimate` exposes:
 
 - `shots`
 - `mean_loss`
@@ -212,9 +212,9 @@ z_mask(qubit)
 Example:
 
 ```python
-from npsim import (
+from faultscope import (
     BernoulliPauliNoise,
-    BatchForwardNoiseAwareSimulator,
+    FaultScopeSimulator,
     Circuit,
     NoiseLocation,
     Operation,
@@ -229,7 +229,7 @@ circuit = Circuit(
     ),
 )
 
-sim = BatchForwardNoiseAwareSimulator(circuit)
+sim = FaultScopeSimulator(circuit)
 batch = sim.run_batch(shots=32, seed=1)
 result = sim.estimate(
     shots=128,
@@ -243,7 +243,7 @@ print(result.top_hotspots(1)[0].location_id)
 
 ## Native Runtime Handles
 
-The `npsim.runtime` wrappers expose lower-level native handles while preserving
+The `faultscope.runtime` wrappers expose lower-level native handles while preserving
 the public `UnsupportedNativeCircuitError` boundary:
 
 ```text
@@ -263,7 +263,7 @@ compile_native_dem_sampler_from_circuit(
 `NativePackedSampler` methods:
 
 ```text
-sample(shots, seed=None, rng=None) -> BatchTrajectory
+sample(shots, seed=None, rng=None) -> SampleBatch
 sample_measurements(shots, seed=None, rng=None) -> dict[str, int]
 run_native_batch(shots, seed=None) -> native batch handle
 estimate(shots, loss_mask_fn=None, decoder=None, correction_mask_fn=None, seed=None, baseline=None, top_k=10)
@@ -286,7 +286,7 @@ construction, raise `ValueError`.
 Native decoder handles:
 
 ```python
-from npsim.decoders import (
+from faultscope.decoders import (
     NativeBatchDecoder,
     NativeGraphlikeDetectorCopyDecoder,
     NativeNoCorrectionDecoder,
@@ -302,10 +302,10 @@ decoder.observable_ids
 
 Native decoders are Python-owned handles around Rust decoder objects. When a
 native decoder is passed to `estimate(..., decoder=decoder)` without
-`loss_mask_fn` or `correction_mask_fn`, NPSim uses the native fast path:
+`loss_mask_fn` or `correction_mask_fn`, FaultScope uses the native fast path:
 detector masks, correction masks, default residual loss, and hotspot
 aggregation stay in Rust. If a Python loss or correction callback is supplied,
-NPSim uses the compatibility path and may call `decoder.decode_batch_masks(...)`.
+FaultScope uses the compatibility path and may call `decoder.decode_batch_masks(...)`.
 Python classes that merely define or subclass `decode_batch_masks(...)` remain
 ordinary Python decoders and do not enter the native fast path.
 
@@ -313,13 +313,13 @@ ordinary Python decoders and do not enter the native fast path.
 backends. The default build exposes `"no-correction"` and
 `"graphlike-detector-copy"`. Optional post-install backends can add names such
 as `"pymatching"` and `"fusion-blossom"` through the
-`npsim.native_decoders` entry point group. Use
+`faultscope.native_decoders` entry point group. Use
 `get_native_decoder_class(name)` or `create_native_decoder(name, dem=dem)` for a
 uniform API. Friendly proxies such as `NativePyMatchingDecoder`,
 `NativeFusionBlossomDecoder`, and `NativeBposdDecoder` remain importable;
 construction raises an install hint until a compatible backend package is
 installed. A post-install backend enters the native fast path only when the
-constructed decoder exposes the NPSim native decoder PyCapsule ABI; otherwise it
+constructed decoder exposes the FaultScope native decoder PyCapsule ABI; otherwise it
 remains a normal Python decoder.
 
 ## Detector Error Models
@@ -373,7 +373,7 @@ project_sensitivities_to_detector_graph(sensitivities) -> DetectorGraphHotspots
 value. It returns edge values keyed by `(location_id, event)`.
 
 `DetectorErrorModelGenerator(circuit, *, detectors=None, observables=None)`
-generates a DEM from a circuit. If declarations are omitted, NPSim reads
+generates a DEM from a circuit. If declarations are omitted, FaultScope reads
 `Operation.detector(...)` and `Operation.observable_include(...)` entries from
 the circuit.
 
@@ -390,7 +390,7 @@ without moving masks through Python.
 Example:
 
 ```python
-from npsim import (
+from faultscope import (
     BernoulliPauliNoise,
     Circuit,
     DetectorErrorModelGenerator,
@@ -416,12 +416,12 @@ print(dem.edges_by_location()["x0"][0].event)
 
 ## DEM Batch Hotspot Simulation
 
-`DemBatchHotspotSimulator(dem)` samples directly from DEM edges.
+`DemHotspotEstimator(dem)` samples directly from DEM edges.
 
 Methods:
 
 ```text
-run_batch(*, shots, rng=None, seed=None, return_edge_events=True) -> DemBatchTrajectory
+run_batch(*, shots, rng=None, seed=None, return_edge_events=True) -> DemSampleBatch
 estimate(
     *,
     shots,
@@ -432,7 +432,7 @@ estimate(
     baseline=None,
     top_k=10,
     aggregate_hotspots=True,
-) -> DemHotspotResult
+) -> DemHotspotEstimate
 ```
 
 Set `aggregate_hotspots=False` for decoder benchmarks and logic-only estimates.
@@ -442,7 +442,7 @@ correction masks stay in native memory. Native decoders that implement the
 optional packed-row callback receive `shots x ceil(detectors/8)` syndrome bytes
 on this path and return `shots x ceil(observables/8)` correction bytes.
 
-`DemBatchTrajectory` stores:
+`DemSampleBatch` stores:
 
 - `shots`
 - `all_mask`
@@ -459,7 +459,7 @@ observable_bit(observable_id, shot)
 edge_event_bit(edge_index, shot)
 ```
 
-`DemHotspotResult` exposes:
+`DemHotspotEstimate` exposes:
 
 - `dem`
 - `shots`
@@ -480,8 +480,8 @@ edge_event_bit(edge_index, shot)
 Example:
 
 ```python
-from npsim import Detector, DetectorErrorEdge, DetectorErrorModel, LogicalObservable
-from npsim.dem import DemBatchHotspotSimulator
+from faultscope import Detector, DetectorErrorEdge, DetectorErrorModel, LogicalObservable
+from faultscope.dem import DemHotspotEstimator
 
 dem = DetectorErrorModel(
     detectors=(Detector(0, ()),),
@@ -489,7 +489,7 @@ dem = DetectorErrorModel(
     edges=(DetectorErrorEdge(0.125, (0,), (0,), "edge0", "X"),),
 )
 
-dem_sim = DemBatchHotspotSimulator(dem)
+dem_sim = DemHotspotEstimator(dem)
 batch = dem_sim.run_batch(shots=32, seed=3)
 result = dem_sim.estimate(shots=128, seed=4, top_k=1)
 
@@ -522,29 +522,29 @@ estimate call.
 PyMatching:
 
 ```python
-from npsim import Detector, DetectorErrorEdge, DetectorErrorModel, LogicalObservable
-from npsim.decoders import PyMatchingBatchDecoder
+from faultscope import Detector, DetectorErrorEdge, DetectorErrorModel, LogicalObservable
+from faultscope.decoders import PyMatchingDecoder
 
 dem = DetectorErrorModel(
     detectors=(Detector(0, ()),),
     observables=(LogicalObservable(0),),
     edges=(DetectorErrorEdge(0.1, (0,), (0,), "e0", "X"),),
 )
-decoder = PyMatchingBatchDecoder.from_dem(dem)
+decoder = PyMatchingDecoder.from_dem(dem)
 print(decoder.decode_batch_masks({0: 0b1010}, shots=4))
 ```
 
-`PyMatchingBatchDecoder.from_dem(...)` builds a Python compatibility decoder
+`PyMatchingDecoder.from_dem(...)` builds a Python compatibility decoder
 from a graphlike DEM. The resulting decoder implements
 `decode_batch_masks(batch)`, so it can be passed to either
-`BatchForwardNoiseAwareSimulator.estimate(..., decoder=decoder)` or
-`DemBatchHotspotSimulator.estimate(..., decoder=decoder)`, but its hot batch
+`FaultScopeSimulator.estimate(..., decoder=decoder)` or
+`DemHotspotEstimator.estimate(..., decoder=decoder)`, but its hot batch
 data crosses Python.
 
 For the native PyMatching hot path, install the optional backend and use:
 
 ```python
-from npsim.decoders import NativePyMatchingDecoder
+from faultscope.decoders import NativePyMatchingDecoder
 
 decoder = NativePyMatchingDecoder.from_dem(dem)
 ```
@@ -552,7 +552,7 @@ decoder = NativePyMatchingDecoder.from_dem(dem)
 Stim import:
 
 ```python
-from npsim.io import parse_stim_circuit
+from faultscope.io import parse_stim_circuit
 
 imported = parse_stim_circuit("X_ERROR(0.01) 0\nM 0\nDETECTOR rec[-1]\n")
 print(imported.measurement_keys)
@@ -568,12 +568,12 @@ write_rotated_surface_code_spatial_hotspot_map(result, path, *, distance)
 
 ## Rust API
 
-The Rust core crate is `npsim-core`. It is Python-independent and re-exports
+The Rust core crate is `faultscope-core`. It is Python-independent and re-exports
 its main types from the crate root:
 
 ```rust
-use npsim_core::{
-    BatchForwardNoiseAwareSimulator, Circuit, DemBatchHotspotSimulator,
+use faultscope_core::{
+    FaultScopeSimulator, Circuit, DemHotspotEstimator,
     Detector, DetectorErrorModelGenerator, LogicalObservable, NoiseLocation,
     NoiseModel, Operation,
 };
@@ -600,8 +600,8 @@ Example:
 ```rust
 use std::collections::HashMap;
 
-use npsim_core::{
-    BatchForwardNoiseAwareSimulator, Circuit, NoiseLocation, NoiseModel, Operation,
+use faultscope_core::{
+    FaultScopeSimulator, Circuit, NoiseLocation, NoiseModel, Operation,
 };
 
 let noise = NoiseLocation {
@@ -625,7 +625,7 @@ let circuit = Circuit {
     ],
 };
 
-let simulator = BatchForwardNoiseAwareSimulator::new(circuit, Vec::new())?;
+let simulator = FaultScopeSimulator::new(circuit, Vec::new())?;
 let batch = simulator.run_batch(1024, Some(1), true)?;
 let estimate = simulator.estimate_from_loss(&batch, &batch.measurements["m0"], None, 10);
 ```

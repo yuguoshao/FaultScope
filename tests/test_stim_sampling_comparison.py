@@ -1,26 +1,26 @@
 import unittest
 from typing import Any, Sequence
 
-from npsim.runtime import BatchTrajectory
-from npsim.core import Circuit, NoiseLocation, Operation
-from npsim.decoders import (
-    PyMatchingBatchDecoder,
+from faultscope.runtime import SampleBatch
+from faultscope.core import Circuit, NoiseLocation, Operation
+from faultscope.decoders import (
+    PyMatchingDecoder,
     PyMatchingUnavailableError,
     UnsupportedPyMatchingDemError,
 )
-from npsim.dem import Detector, LogicalObservable
-from npsim.io import parse_stim_circuit
-from npsim.runtime import UnsupportedNativeCircuitError, compile_native_sampler
-from npsim.runtime import compile_native_dem_sampler, generate_native_dem
-from npsim.runtime.loss import logical_residual_loss_mask
-from npsim.core import (
+from faultscope.dem import Detector, LogicalObservable
+from faultscope.io import parse_stim_circuit
+from faultscope.runtime import UnsupportedNativeCircuitError, compile_native_sampler
+from faultscope.runtime import compile_native_dem_sampler, generate_native_dem
+from faultscope.runtime.loss import logical_residual_loss_mask
+from faultscope.core import (
     BernoulliPauliNoise,
     MeasurementBitFlip,
     PauliChannel,
     SingleQubitDepolarizing,
     TwoQubitDepolarizing,
 )
-from npsim.experiments import make_repetition_code_experiment
+from faultscope.experiments import make_repetition_code_experiment
 from tests.surface_code_examples import (
     _data_index,
     _rotated_surface_code_checks,
@@ -32,7 +32,7 @@ from tests.stim_helpers import (
     final_data_measurement_circuit,
     masks_to_dense_array,
     measurement_batch_from_stim_samples,
-    npsim_dem_error_edges,
+    faultscope_dem_error_edges,
     stim_dem_error_edges,
     stim_observable_masks,
     to_stim_circuit,
@@ -140,7 +140,7 @@ class StimSamplingComparisonTests(unittest.TestCase):
                 detector.measurement_keys,
             )
 
-        npsim_loss = _repetition_final_data_loss_mask(batch, distance=5, rounds=3)
+        faultscope_loss = _repetition_final_data_loss_mask(batch, distance=5, rounds=3)
         stim_loss = _stim_repetition_final_data_loss_rate(
             stim_samples,
             key_order,
@@ -149,7 +149,7 @@ class StimSamplingComparisonTests(unittest.TestCase):
         )
         _assert_rates_close(
             self,
-            npsim_loss.bit_count() / batch.shots,
+            faultscope_loss.bit_count() / batch.shots,
             stim_loss,
             batch.shots,
             "repetition final-data logical loss",
@@ -221,7 +221,7 @@ class StimSamplingComparisonTests(unittest.TestCase):
             measurement_error_rate=0.035,
         )
         try:
-            npsim_result = compile_native_sampler(
+            faultscope_result = compile_native_sampler(
                 experiment.circuit,
                 observables=experiment.observables,
             ).estimate(
@@ -258,7 +258,7 @@ class StimSamplingComparisonTests(unittest.TestCase):
 
         _assert_rates_close(
             self,
-            npsim_result.mean_loss,
+            faultscope_result.mean_loss,
             stim_loss_rate,
             shots,
             "repetition raw-sample decoded logical error rate",
@@ -293,7 +293,7 @@ class StimSamplingComparisonTests(unittest.TestCase):
                             for observable in imported.observables
                         ),
                     )
-                    npsim_result = compile_native_sampler(
+                    faultscope_result = compile_native_sampler(
                         imported.circuit,
                     ).estimate(
                         shots=shots,
@@ -325,7 +325,7 @@ class StimSamplingComparisonTests(unittest.TestCase):
 
                 _assert_rates_close(
                     self,
-                    npsim_result.mean_loss,
+                    faultscope_result.mean_loss,
                     stim_loss_rate,
                     shots,
                     f"surface initialized memory raw logical error rate {basis}",
@@ -363,13 +363,13 @@ class StimSamplingComparisonTests(unittest.TestCase):
         )
 
         try:
-            npsim_dem = generate_native_dem(circuit)
+            faultscope_dem = generate_native_dem(circuit)
         except UnsupportedNativeCircuitError as exc:
             self.skipTest(f"native DEM generator unavailable: {exc}")
         stim_circuit, _ = to_stim_circuit(circuit)
         stim_dem = stim_circuit.detector_error_model(decompose_errors=False)
 
-        self.assertEqual(npsim_dem_error_edges(npsim_dem), stim_dem_error_edges(stim_dem))
+        self.assertEqual(faultscope_dem_error_edges(faultscope_dem), stim_dem_error_edges(stim_dem))
 
     def test_native_dem_sampler_matches_stim_dem_sampler(self) -> None:
         experiment = make_repetition_code_experiment(
@@ -384,12 +384,12 @@ class StimSamplingComparisonTests(unittest.TestCase):
             observables=(),
         )
         try:
-            npsim_dem = generate_native_dem(
+            faultscope_dem = generate_native_dem(
                 experiment.circuit,
                 detectors=experiment.detectors,
                 observables=(),
             )
-            npsim_batch = compile_native_dem_sampler(npsim_dem).run_batch(
+            faultscope_batch = compile_native_dem_sampler(faultscope_dem).run_batch(
                 shots=45_000,
                 seed=24680,
             )
@@ -399,18 +399,18 @@ class StimSamplingComparisonTests(unittest.TestCase):
         stim_circuit, _ = to_stim_circuit(circuit)
         stim_dem = stim_circuit.detector_error_model(decompose_errors=False)
         stim_detectors, stim_observables, _ = stim_dem.compile_sampler(seed=13579).sample(
-            npsim_batch.shots,
+            faultscope_batch.shots,
         )
 
         for detector in experiment.detectors:
             detector_id = detector.id
-            npsim_rate = npsim_batch.detectors[detector_id].bit_count() / npsim_batch.shots
+            faultscope_rate = faultscope_batch.detectors[detector_id].bit_count() / faultscope_batch.shots
             stim_rate = float(stim_detectors[:, detector_id].mean())
             _assert_rates_close(
                 self,
-                npsim_rate,
+                faultscope_rate,
                 stim_rate,
-                npsim_batch.shots,
+                faultscope_batch.shots,
                 f"DEM detector D{detector_id}",
             )
 
@@ -433,13 +433,13 @@ class StimSamplingComparisonTests(unittest.TestCase):
         )
 
         try:
-            npsim_dem = generate_native_dem(
+            faultscope_dem = generate_native_dem(
                 circuit,
                 detectors=experiment.detectors,
                 observables=(observable,),
             )
-            decoder = PyMatchingBatchDecoder.from_dem(npsim_dem)
-            npsim_batch = compile_native_dem_sampler(npsim_dem).run_batch(
+            decoder = PyMatchingDecoder.from_dem(faultscope_dem)
+            faultscope_batch = compile_native_dem_sampler(faultscope_dem).run_batch(
                 shots=shots,
                 seed=24680,
             )
@@ -468,7 +468,7 @@ class StimSamplingComparisonTests(unittest.TestCase):
 
         _assert_rates_close(
             self,
-            _dem_decoded_loss_rate(npsim_batch, decoder, observable_id=0),
+            _dem_decoded_loss_rate(faultscope_batch, decoder, observable_id=0),
             _dem_decoded_loss_rate(stim_batch, decoder, observable_id=0),
             shots,
             "repetition DEM decoded logical error rate",
@@ -479,13 +479,13 @@ class StimSamplingComparisonTests(unittest.TestCase):
         for label, circuit, detectors, observables in _deterministic_surface_memory_cases():
             with self.subTest(memory=label):
                 try:
-                    npsim_dem = generate_native_dem(
+                    faultscope_dem = generate_native_dem(
                         circuit,
                         detectors=detectors,
                         observables=observables,
                     )
-                    decoder = PyMatchingBatchDecoder.from_dem(npsim_dem)
-                    npsim_batch = compile_native_dem_sampler(npsim_dem).run_batch(
+                    decoder = PyMatchingDecoder.from_dem(faultscope_dem)
+                    faultscope_batch = compile_native_dem_sampler(faultscope_dem).run_batch(
                         shots=shots,
                         seed=34680,
                     )
@@ -515,7 +515,7 @@ class StimSamplingComparisonTests(unittest.TestCase):
 
                 _assert_rates_close(
                     self,
-                    _dem_decoded_loss_rate(npsim_batch, decoder, observable_id=0),
+                    _dem_decoded_loss_rate(faultscope_batch, decoder, observable_id=0),
                     _dem_decoded_loss_rate(stim_batch, decoder, observable_id=0),
                     shots,
                     f"surface DEM decoded logical error rate {label}",
@@ -528,7 +528,7 @@ def _sample_both(
     shots: int,
     native_seed: int = 12345,
     stim_seed: int = 67890,
-) -> tuple[BatchTrajectory, object, tuple[str, ...]]:
+) -> tuple[SampleBatch, object, tuple[str, ...]]:
     try:
         sampler = compile_native_sampler(circuit)
     except UnsupportedNativeCircuitError as exc:
@@ -554,7 +554,7 @@ class _StimMatcherBatchDecoder:
             for observable_id in observable_ids
         )
 
-    def decode_batch_masks(self, batch: BatchTrajectory) -> dict[int, int]:
+    def decode_batch_masks(self, batch: SampleBatch) -> dict[int, int]:
         syndromes = masks_to_dense_array(
             batch.detectors,
             self.detector_ids,
@@ -582,7 +582,7 @@ def _sample_stim_measurements_and_observables(
     observables: Sequence[LogicalObservable],
     shots: int,
     seed: int,
-) -> tuple[BatchTrajectory, dict[int, int]]:
+) -> tuple[SampleBatch, dict[int, int]]:
     stim_circuit, key_order = to_stim_circuit(circuit)
     samples = stim_circuit.compile_sampler(seed=seed).sample(shots)
     _, observable_flips = stim_circuit.compile_m2d_converter().convert(
@@ -609,8 +609,8 @@ def _residual_rate(observable_mask: int, correction_mask: int, shots: int) -> fl
 
 
 def _dem_decoded_loss_rate(
-    batch: BatchTrajectory,
-    decoder: PyMatchingBatchDecoder,
+    batch: SampleBatch,
+    decoder: PyMatchingDecoder,
     *,
     observable_id: int,
 ) -> float:
@@ -752,30 +752,30 @@ def _path_keys(prefix: str, count: int) -> tuple[str, ...]:
 
 def _assert_key_rate_close(
     testcase: unittest.TestCase,
-    batch: BatchTrajectory,
+    batch: SampleBatch,
     stim_samples: object,
     key_order: Sequence[str],
     key: str,
 ) -> None:
     key_to_col = {name: col for col, name in enumerate(key_order)}
-    npsim_rate = batch.measurements[key].bit_count() / batch.shots
+    faultscope_rate = batch.measurements[key].bit_count() / batch.shots
     stim_rate = float(stim_samples[:, key_to_col[key]].mean())
-    _assert_rates_close(testcase, npsim_rate, stim_rate, batch.shots, f"measurement {key}")
+    _assert_rates_close(testcase, faultscope_rate, stim_rate, batch.shots, f"measurement {key}")
 
 
 def _assert_parity_rate_close(
     testcase: unittest.TestCase,
-    batch: BatchTrajectory,
+    batch: SampleBatch,
     stim_samples: object,
     key_order: Sequence[str],
     keys: Sequence[str],
 ) -> None:
-    npsim_mask = 0
+    faultscope_mask = 0
     for key in keys:
-        npsim_mask ^= batch.measurements[key]
-    npsim_rate = npsim_mask.bit_count() / batch.shots
+        faultscope_mask ^= batch.measurements[key]
+    faultscope_rate = faultscope_mask.bit_count() / batch.shots
     stim_rate = _stim_parity_rate(stim_samples, key_order, keys)
-    _assert_rates_close(testcase, npsim_rate, stim_rate, batch.shots, f"parity {tuple(keys)}")
+    _assert_rates_close(testcase, faultscope_rate, stim_rate, batch.shots, f"parity {tuple(keys)}")
 
 
 def _stim_parity_rate(
@@ -793,23 +793,23 @@ def _stim_parity_rate(
 
 def _assert_rates_close(
     testcase: unittest.TestCase,
-    npsim_rate: float,
+    faultscope_rate: float,
     stim_rate: float,
     shots: int,
     label: str,
 ) -> None:
-    pooled = 0.5 * (npsim_rate + stim_rate)
+    pooled = 0.5 * (faultscope_rate + stim_rate)
     sigma = (2.0 * pooled * (1.0 - pooled) / shots) ** 0.5
     tolerance = max(0.003, 3.0 * sigma, 3.0 / shots)
     testcase.assertLessEqual(
-        abs(npsim_rate - stim_rate),
+        abs(faultscope_rate - stim_rate),
         tolerance,
-        f"{label}: NPSim={npsim_rate:.6g}, Stim={stim_rate:.6g}, tolerance={tolerance:.6g}",
+        f"{label}: FaultScope={faultscope_rate:.6g}, Stim={stim_rate:.6g}, tolerance={tolerance:.6g}",
     )
 
 
 def _repetition_final_data_loss_mask(
-    batch: BatchTrajectory,
+    batch: SampleBatch,
     *,
     distance: int,
     rounds: int,

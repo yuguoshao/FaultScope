@@ -1,4 +1,4 @@
-"""Packed sampling throughput benchmark for NPSim native sampler.
+"""Packed sampling throughput benchmark for FaultScope native sampler.
 
 Run from the repository root after building the native extension in release
 mode:
@@ -27,9 +27,9 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from npsim.core import Circuit, NoiseLocation, Operation
-from npsim.runtime import compile_native_sampler
-from npsim.core import (
+from faultscope.core import Circuit, NoiseLocation, Operation
+from faultscope.runtime import compile_native_sampler
+from faultscope.core import (
     BernoulliPauliNoise,
     MeasurementBitFlip,
     PauliChannel,
@@ -73,7 +73,7 @@ def main() -> None:
     stim_module = _load_stim()
     print(
         "case\tqubits\tdepth\trounds\tnoise\tmeas_noise\tshots\t"
-        "npsim_sps\tstim_sps\tratio\tstatus",
+        "faultscope_sps\tstim_sps\tratio\tstatus",
         flush=True,
     )
     for case in _make_cases(args):
@@ -125,7 +125,7 @@ def _run_case(
     stim_module: Any,
 ) -> None:
     sampler = compile_native_sampler(case.circuit)
-    npsim_sps = _median_samples_per_second(
+    faultscope_sps = _median_samples_per_second(
         lambda seed: sampler.sample_measurements(shots=args.shots, seed=seed),
         shots=args.shots,
         repeats=args.repeats,
@@ -140,7 +140,7 @@ def _run_case(
             shots=args.shots,
             repeats=args.repeats,
         )
-        ratio = npsim_sps / stim_sps if stim_sps else float("inf")
+        ratio = faultscope_sps / stim_sps if stim_sps else float("inf")
         status = "pass" if ratio >= 1.10 else "below-target"
     except Exception as exc:
         stim_sps = float("nan")
@@ -154,7 +154,7 @@ def _run_case(
     print(
         f"{case.label}\t{case.qubits}\t{depth_cell}\t{rounds_cell}\t"
         f"{noise_cell}\t{args.measurement_noise_rate:.17g}\t"
-        f"{args.shots}\t{npsim_sps:.3f}\t"
+        f"{args.shots}\t{faultscope_sps:.3f}\t"
         f"{stim_cell}\t{ratio_cell}\t{status}",
         flush=True,
     )
