@@ -443,6 +443,10 @@ decoder = NativePyMatchingDecoder.from_dem(dem)
 result = sampler.estimate(shots=1024, seed=1, decoder=decoder)
 ```
 
+External graphlike MWPM backends can use the same post-install mechanism. A
+`faultscope-mwpm` package that registers the `mwpm` entry point can be used
+through `NativeMwpmDecoder` or `create_native_decoder("mwpm", dem=dem)`.
+
 ```python
 from faultscope import (
     BernoulliPauliNoise,

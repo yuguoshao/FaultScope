@@ -402,6 +402,7 @@ Python can use either friendly proxy classes or a generic resolver:
 ```python
 from faultscope.decoders import (
     NativeFusionBlossomDecoder,
+    NativeMwpmDecoder,
     NativePyMatchingDecoder,
     create_native_decoder,
     get_native_decoder_class,
@@ -409,6 +410,8 @@ from faultscope.decoders import (
 
 decoder = NativePyMatchingDecoder.from_dem(dem)
 decoder = create_native_decoder("pymatching", dem=dem)
+decoder = NativeMwpmDecoder.from_dem(dem)
+decoder = create_native_decoder("mwpm", dem=dem)
 decoder = NativeFusionBlossomDecoder.from_dem(dem)
 decoder = create_native_decoder("fusion-blossom", dem=dem)
 Decoder = get_native_decoder_class("fusion-blossom")
@@ -476,9 +479,14 @@ When the backend package is missing, the public proxy remains importable but
 construction raises an install hint:
 
 ```python
-from faultscope.decoders import NativeFusionBlossomDecoder, NativePyMatchingDecoder
+from faultscope.decoders import (
+    NativeFusionBlossomDecoder,
+    NativeMwpmDecoder,
+    NativePyMatchingDecoder,
+)
 
 decoder = NativeFusionBlossomDecoder.from_dem(dem)  # raises until installed
+decoder = NativeMwpmDecoder.from_dem(dem)  # raises until installed
 decoder = NativePyMatchingDecoder.from_dem(dem)  # raises until installed
 ```
 

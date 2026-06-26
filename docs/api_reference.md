@@ -25,6 +25,7 @@ from faultscope import (
     LogicalObservable,
     NoiseLocation,
     Operation,
+    NativeMwpmDecoder,
     NativePyMatchingDecoder,
     PyMatchingDecoder,
 )
@@ -312,11 +313,11 @@ ordinary Python decoders and do not enter the native fast path.
 `available_native_decoders()` returns the names of compiled native decoder
 backends. The default build exposes `"no-correction"` and
 `"graphlike-detector-copy"`. Optional post-install backends can add names such
-as `"pymatching"` and `"fusion-blossom"` through the
+as `"pymatching"`, `"fusion-blossom"`, and `"mwpm"` through the
 `faultscope.native_decoders` entry point group. Use
 `get_native_decoder_class(name)` or `create_native_decoder(name, dem=dem)` for a
 uniform API. Friendly proxies such as `NativePyMatchingDecoder`,
-`NativeFusionBlossomDecoder`, and `NativeBposdDecoder` remain importable;
+`NativeFusionBlossomDecoder`, `NativeMwpmDecoder`, and `NativeBposdDecoder` remain importable;
 construction raises an install hint until a compatible backend package is
 installed. A post-install backend enters the native fast path only when the
 constructed decoder exposes the FaultScope native decoder PyCapsule ABI; otherwise it

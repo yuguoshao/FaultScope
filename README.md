@@ -116,6 +116,9 @@ print(result.hotspot_table(top_k=5))
   `python -m faultscope.backends status` 查看 catalog/status，
   `python -m faultscope.backends install pymatching --dry-run` 查看安装步骤；FaultScope 不会在
   `import` 或 `estimate(...)` 时隐式联网、clone 或编译。
+- 外部 MWPM 后端可作为 sibling repository 独立开发；按 `faultscope.native_decoders`
+  entry point 和 native decoder PyCapsule ABI 暴露 `mwpm` 后，FaultScope 可通过
+  `NativeMwpmDecoder` 或 `create_native_decoder("mwpm", dem=dem)` 使用。
 - 开发中的 PyMatching 和 fusion-blossom backend 可在激活 venv 后通过
   `.venv/bin/python -m pip install -e backends/faultscope-pymatching --no-build-isolation` 和
   `.venv/bin/python -m pip install -e backends/faultscope-fusion-blossom` 本地安装；当前是最小
@@ -132,7 +135,7 @@ print(result.hotspot_table(top_k=5))
 | 查看原始 measurement/noise masks | Forward sampling |
 | 自定义 measurement-history loss | Forward estimate + `loss_mask_fn` |
 | detector-level decoder | Forward 或 DEM estimate + decoder |
-| graphlike matching decoder | 原型用 `PyMatchingDecoder`；高性能路径安装 `faultscope-pymatching` 后使用 `NativePyMatchingDecoder` |
+| graphlike matching decoder | 原型用 `PyMatchingDecoder`；高性能路径安装 `faultscope-pymatching` 后使用 `NativePyMatchingDecoder`，或安装外部 `faultscope-mwpm` 后使用 `NativeMwpmDecoder` |
 | DEM edge 级热点排序 | DEM hotspot estimate |
 | 重复 detector-level sampling | 生成 DEM 后复用 DEM sampler |
 | Rust 集成 | `faultscope-core` |

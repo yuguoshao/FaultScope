@@ -116,6 +116,26 @@ class NativeBposdDecoder(_NativeDecoderProxy):
         )
 
 
+class NativeMwpmDecoder(_NativeDecoderProxy):
+    """Proxy for the optional post-install mwpm.rs native backend."""
+
+    backend_name = "mwpm"
+
+    @staticmethod
+    def from_dem(dem, *, options=None):
+        return create_native_decoder("mwpm", dem=dem, options=options)
+
+    @staticmethod
+    def from_circuit(circuit, *, detectors=None, observables=None, options=None):
+        return create_native_decoder(
+            "mwpm",
+            circuit=circuit,
+            detectors=detectors,
+            observables=observables,
+            options=options,
+        )
+
+
 class NativePyMatchingDecoder(_NativeDecoderProxy):
     """Proxy for the optional post-install PyMatching native backend."""
 
@@ -142,6 +162,7 @@ __all__ = [
     "NativeDecoderBackendUnavailable",
     "NativeFusionBlossomDecoder",
     "NativeGraphlikeDetectorCopyDecoder",
+    "NativeMwpmDecoder",
     "NativeNoCorrectionDecoder",
     "NativePyMatchingDecoder",
     "NoCorrectionDecoder",
