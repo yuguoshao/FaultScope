@@ -23,7 +23,7 @@ else:
 
 __version__ = "0.1.0"
 BACKEND_NAME = "fusion-blossom"
-DEFAULT_WEIGHT_SCALE = 1_000_000
+DEFAULT_WEIGHT_SCALE = 10_000
 
 
 class NativeFusionBlossomDecoder:
@@ -33,7 +33,8 @@ class NativeFusionBlossomDecoder:
     owns Rust solver state in this backend package so the post-install PyCapsule
     path can decode graphlike DEM batches without moving hot-path syndrome or
     correction data through Python. The builder safely compresses identical
-    two-detector parallel edges and rejects ambiguous parallel logical effects.
+    boundary and two-detector parallel edges and rejects ambiguous parallel
+    logical effects.
     """
 
     backend_name = BACKEND_NAME
@@ -45,11 +46,11 @@ class NativeFusionBlossomDecoder:
     @staticmethod
     def from_dem(dem, *, options=None):
         _require_native_extension()
-        weight_scale = _parse_options(options)
+        parsed = _parse_options(options)
         problem = dem.compile_graphlike_problem()
         inner = _native.NativeFusionBlossomNativeDecoder.from_graphlike_problem(
             problem,
-            weight_scale=weight_scale,
+            weight_scale=parsed["weight_scale"],
         )
         return NativeFusionBlossomDecoder(inner)
 
@@ -69,6 +70,10 @@ class NativeFusionBlossomDecoder:
     @property
     def detector_ids(self):
         return self._inner.detector_ids
+
+    @property
+    def detector_coords(self):
+        return self._inner.detector_coords
 
     @property
     def observable_ids(self):
@@ -141,8 +146,11 @@ def backend_manifest():
 
 
 def _parse_options(options):
+    parsed = {
+        "weight_scale": DEFAULT_WEIGHT_SCALE,
+    }
     if options is None:
-        return DEFAULT_WEIGHT_SCALE
+        return parsed
     if not isinstance(options, dict):
         raise ValueError("fusion-blossom options must be a dict or None")
     unknown = set(options) - {"weight_scale"}
@@ -155,7 +163,9 @@ def _parse_options(options):
     weight_scale = float(weight_scale)
     if not math.isfinite(weight_scale) or weight_scale <= 0:
         raise ValueError("fusion-blossom weight_scale must be positive and finite")
-    return weight_scale
+    parsed["weight_scale"] = weight_scale
+
+    return parsed
 
 
 def _require_native_extension():

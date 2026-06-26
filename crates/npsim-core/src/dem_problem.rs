@@ -14,6 +14,7 @@ pub struct IndexedDemEdge {
 #[derive(Debug, Clone, PartialEq)]
 pub struct IndexedDem {
     pub detector_ids: Vec<i64>,
+    pub detector_coords: Vec<Vec<f64>>,
     pub observable_ids: Vec<i64>,
     pub edges: Vec<IndexedDemEdge>,
 }
@@ -30,6 +31,7 @@ pub struct GraphlikeEdge {
 #[derive(Debug, Clone, PartialEq)]
 pub struct GraphlikeDecodingProblem {
     pub detector_ids: Vec<i64>,
+    pub detector_coords: Vec<Vec<f64>>,
     pub observable_ids: Vec<i64>,
     pub edges: Vec<GraphlikeEdge>,
 }
@@ -44,6 +46,7 @@ pub struct SparseBinaryMatrix {
 #[derive(Debug, Clone, PartialEq)]
 pub struct BinaryLinearDecodingProblem {
     pub detector_ids: Vec<i64>,
+    pub detector_coords: Vec<Vec<f64>>,
     pub observable_ids: Vec<i64>,
     pub edge_count: usize,
     pub h: SparseBinaryMatrix,
@@ -56,6 +59,7 @@ pub struct BinaryLinearDecodingProblem {
 impl DetectorErrorModel {
     pub fn compile_indexed(&self) -> NpResult<IndexedDem> {
         let detector_ids = stable_detector_ids(self);
+        let detector_coords = stable_detector_coords(self, &detector_ids);
         let observable_ids = stable_observable_ids(self);
         let detector_index = id_index(&detector_ids);
         let observable_index = id_index(&observable_ids);
@@ -94,6 +98,7 @@ impl DetectorErrorModel {
 
         Ok(IndexedDem {
             detector_ids,
+            detector_coords,
             observable_ids,
             edges,
         })
@@ -133,6 +138,7 @@ impl DetectorErrorModel {
         }
         Ok(GraphlikeDecodingProblem {
             detector_ids: indexed.detector_ids,
+            detector_coords: indexed.detector_coords,
             observable_ids: indexed.observable_ids,
             edges,
         })
@@ -160,6 +166,7 @@ impl DetectorErrorModel {
 
         Ok(BinaryLinearDecodingProblem {
             detector_ids: indexed.detector_ids.clone(),
+            detector_coords: indexed.detector_coords.clone(),
             observable_ids: indexed.observable_ids.clone(),
             edge_count: indexed.edges.len(),
             h: SparseBinaryMatrix {
@@ -193,6 +200,18 @@ fn stable_detector_ids(dem: &DetectorErrorModel) -> Vec<i64> {
         }
     }
     ids
+}
+
+fn stable_detector_coords(dem: &DetectorErrorModel, detector_ids: &[i64]) -> Vec<Vec<f64>> {
+    let coords_by_id = dem
+        .detectors
+        .iter()
+        .map(|detector| (detector.id, detector.coords.clone()))
+        .collect::<HashMap<_, _>>();
+    detector_ids
+        .iter()
+        .map(|detector_id| coords_by_id.get(detector_id).cloned().unwrap_or_default())
+        .collect()
 }
 
 fn stable_observable_ids(dem: &DetectorErrorModel) -> Vec<i64> {
@@ -251,12 +270,12 @@ mod tests {
                 Detector {
                     id: 5,
                     measurement_keys: Vec::new(),
-                    coords: Vec::new(),
+                    coords: vec![5.0, 0.0],
                 },
                 Detector {
                     id: 2,
                     measurement_keys: Vec::new(),
-                    coords: Vec::new(),
+                    coords: vec![2.0, 0.0],
                 },
             ],
             observables: vec![LogicalObservable {
@@ -277,6 +296,10 @@ mod tests {
         let indexed = dem().compile_indexed().unwrap();
 
         assert_eq!(indexed.detector_ids, vec![5, 2, 9]);
+        assert_eq!(
+            indexed.detector_coords,
+            vec![vec![5.0, 0.0], vec![2.0, 0.0], Vec::<f64>::new()]
+        );
         assert_eq!(indexed.observable_ids, vec![7]);
         assert_eq!(indexed.edges[0].detectors, vec![1, 2]);
         assert_eq!(indexed.edges[0].observables, vec![0]);
@@ -291,6 +314,17 @@ mod tests {
         let err = dem.compile_graphlike_problem().unwrap_err();
 
         assert!(err.message().contains("at most two detectors"));
+    }
+
+    #[test]
+    fn graphlike_problem_preserves_detector_coords() {
+        let problem = dem().compile_graphlike_problem().unwrap();
+
+        assert_eq!(problem.detector_ids, vec![5, 2, 9]);
+        assert_eq!(
+            problem.detector_coords,
+            vec![vec![5.0, 0.0], vec![2.0, 0.0], Vec::<f64>::new()]
+        );
     }
 
     #[test]
@@ -316,6 +350,10 @@ mod tests {
         let problem = dem().compile_binary_linear_problem().unwrap();
 
         assert_eq!(problem.h.row_count, 3);
+        assert_eq!(
+            problem.detector_coords,
+            vec![vec![5.0, 0.0], vec![2.0, 0.0], Vec::<f64>::new()]
+        );
         assert_eq!(problem.h.col_count, 2);
         assert_eq!(problem.h.entries, vec![(1, 0), (2, 0), (0, 1)]);
         assert_eq!(problem.f.entries, vec![(0, 0)]);

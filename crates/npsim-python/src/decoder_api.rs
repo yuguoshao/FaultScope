@@ -791,6 +791,11 @@ impl PyIndexedDem {
     }
 
     #[getter]
+    pub(crate) fn detector_coords(&self, py: Python<'_>) -> PyResult<PyObject> {
+        tuple_f64_tuples(py, &self.indexed.detector_coords)
+    }
+
+    #[getter]
     pub(crate) fn observable_ids(&self, py: Python<'_>) -> PyResult<PyObject> {
         tuple_i64(py, &self.indexed.observable_ids)
     }
@@ -894,6 +899,11 @@ impl PyGraphlikeDecodingProblem {
     #[getter]
     pub(crate) fn detector_ids(&self, py: Python<'_>) -> PyResult<PyObject> {
         tuple_i64(py, &self.problem.detector_ids)
+    }
+
+    #[getter]
+    pub(crate) fn detector_coords(&self, py: Python<'_>) -> PyResult<PyObject> {
+        tuple_f64_tuples(py, &self.problem.detector_coords)
     }
 
     #[getter]
@@ -1003,6 +1013,11 @@ impl PyBinaryLinearDecodingProblem {
     }
 
     #[getter]
+    pub(crate) fn detector_coords(&self, py: Python<'_>) -> PyResult<PyObject> {
+        tuple_f64_tuples(py, &self.problem.detector_coords)
+    }
+
+    #[getter]
     pub(crate) fn observable_ids(&self, py: Python<'_>) -> PyResult<PyObject> {
         tuple_i64(py, &self.problem.observable_ids)
     }
@@ -1076,6 +1091,14 @@ impl PyBinaryLinearDecodingProblem {
 
 fn tuple_i64(py: Python<'_>, values: &[i64]) -> PyResult<PyObject> {
     Ok(PyTuple::new(py, values.iter().copied())?.into())
+}
+
+fn tuple_f64_tuples(py: Python<'_>, values: &[Vec<f64>]) -> PyResult<PyObject> {
+    let items = values
+        .iter()
+        .map(|coords| PyTuple::new(py, coords.iter().copied()).map(|item| item.into_any().unbind()))
+        .collect::<PyResult<Vec<_>>>()?;
+    Ok(PyTuple::new(py, items.iter().map(|item| item.clone_ref(py)))?.into())
 }
 
 fn tuple_usize_local(py: Python<'_>, values: &[usize]) -> PyResult<PyObject> {

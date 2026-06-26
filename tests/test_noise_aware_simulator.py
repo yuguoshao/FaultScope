@@ -1824,8 +1824,8 @@ class NativeDetectorErrorModelTests(unittest.TestCase):
         self._require_native_dem()
         dem = DetectorErrorModel(
             detectors=(
-                Detector(id=5, measurement_keys=()),
-                Detector(id=2, measurement_keys=()),
+                Detector(id=5, measurement_keys=(), coords=(5.0, 0.0)),
+                Detector(id=2, measurement_keys=(), coords=(2.0, 0.0)),
             ),
             observables=(LogicalObservable(id=7),),
             edges=(
@@ -1842,6 +1842,7 @@ class NativeDetectorErrorModelTests(unittest.TestCase):
         self.assertIsInstance(graphlike, GraphlikeDecodingProblem)
         self.assertIsInstance(binary, BinaryLinearDecodingProblem)
         self.assertEqual(indexed.detector_ids, (5, 2, 9))
+        self.assertEqual(indexed.detector_coords, ((5.0, 0.0), (2.0, 0.0), ()))
         self.assertEqual(indexed.observable_ids, (7,))
         self.assertEqual(indexed.detector_count, 3)
         self.assertEqual(indexed.observable_count, 1)
@@ -1852,12 +1853,14 @@ class NativeDetectorErrorModelTests(unittest.TestCase):
         self.assertEqual(indexed.edge_summary[0]["observables"], (0,))
         self.assertIn("IndexedDem(detector_count=3", repr(indexed))
         self.assertEqual(graphlike.edge_count, 2)
+        self.assertEqual(graphlike.detector_coords, indexed.detector_coords)
         self.assertEqual(graphlike.detector_count, 3)
         self.assertEqual(graphlike.observable_count, 1)
         self.assertEqual(graphlike.edges[0].fault_observables, (0,))
         self.assertEqual(graphlike.edge_summary[0]["fault_observables"], (0,))
         self.assertIn("GraphlikeDecodingProblem(detector_count=3", repr(graphlike))
         self.assertIsInstance(binary.h, SparseBinaryMatrix)
+        self.assertEqual(binary.detector_coords, indexed.detector_coords)
         self.assertEqual(binary.detector_count, 3)
         self.assertEqual(binary.observable_count, 1)
         self.assertEqual(binary.h.entries, ((1, 0), (2, 0), (0, 1)))

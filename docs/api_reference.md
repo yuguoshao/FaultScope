@@ -378,9 +378,10 @@ generates a DEM from a circuit. If declarations are omitted, NPSim reads
 the circuit.
 
 `IndexedDem`, `GraphlikeDecodingProblem`, and `BinaryLinearDecodingProblem` are
-native decoder-ready views. They expose stable ids, counts, `edge_summary`, and
-compact `repr(...)` metadata for inspection. `GraphlikeDecodingProblem` targets
-MWPM-style backends such as future fusion-blossom adapters.
+native decoder-ready views. They expose stable ids, detector coordinates,
+counts, `edge_summary`, and compact `repr(...)` metadata for inspection.
+`detector_coords` follows `detector_ids` order. `GraphlikeDecodingProblem`
+targets MWPM-style backends such as future fusion-blossom adapters.
 `BinaryLinearDecodingProblem` targets BP+OSD/LDPC-style backends with sparse
 binary `H` and `F` matrices. These objects intentionally do not expose
 `to_numpy_*` hot-path helpers; native decoders should consume the native view

@@ -178,4 +178,5 @@ Stim/PyMatching 相关 benchmark 会在对应可选依赖安装后启用对照�
 surface-code decoder performance benchmark 会在安装 `npsim-pymatching` 或
 `npsim-fusion-blossom` 后额外输出对应 native path。传入
 `--split-native-baseline` 可把 native no-correction packed-row baseline 与
-decoder 增量分开显示。
+decoder 增量分开显示。需要比较不同 native decoder 的 mean-loss 时，使用
+`--same-seed-across-paths` 让同一个 distance/rate 点复用相同 seed。

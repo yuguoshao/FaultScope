@@ -8,6 +8,7 @@ repository.workspace = true
 [lib]
 name = "_npsim_native"
 crate-type = ["cdylib"]
+test = false
 
 [features]
 default = []

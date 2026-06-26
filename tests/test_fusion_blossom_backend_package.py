@@ -1,3 +1,4 @@
+import os
 import sys
 import unittest
 from pathlib import Path
@@ -82,7 +83,7 @@ class FusionBlossomBackendPackageTests(unittest.TestCase):
     @requires_native_backend
     def test_backend_from_dem_returns_external_native_solver_decoder(self) -> None:
         dem = DetectorErrorModel(
-            detectors=(Detector(id=0, measurement_keys=()),),
+            detectors=(Detector(id=0, measurement_keys=(), coords=(1.0, 2.0, 3.0)),),
             observables=(LogicalObservable(id=0),),
             edges=(
                 DetectorErrorEdge(
@@ -99,6 +100,7 @@ class FusionBlossomBackendPackageTests(unittest.TestCase):
 
         self.assertEqual(decoder.name, "fusion-blossom")
         self.assertEqual(decoder.detector_ids, (0,))
+        self.assertEqual(decoder.detector_coords, ((1.0, 2.0, 3.0),))
         self.assertEqual(decoder.observable_ids, (0,))
         self.assertEqual(decoder.edge_count, 1)
         self.assertEqual(decoder.solver_vertex_count, 2)
@@ -208,6 +210,32 @@ class FusionBlossomBackendPackageTests(unittest.TestCase):
         self.assertEqual(decoder.detector_ids, (10, 20))
         self.assertEqual(decoder.python_decode_call_count, 0)
         self.assertEqual(result.mean_loss, 0.0)
+
+    @requires_native_backend
+    def test_backend_large_packed_fast_path_uses_native_scheduler(self) -> None:
+        dem = DetectorErrorModel(
+            detectors=(
+                Detector(id=10, measurement_keys=()),
+                Detector(id=20, measurement_keys=()),
+            ),
+            observables=(LogicalObservable(id=0),),
+            edges=(
+                DetectorErrorEdge(0.2, (10, 20), (0,), "edge0", "X"),
+            ),
+        )
+        decoder = npsim_fusion_blossom.NativeFusionBlossomDecoder.from_dem(dem)
+
+        with mock.patch.dict(os.environ, {"NPSIM_FUSION_BLOSSOM_BLOCK_ROWS": "128"}):
+            result = compile_native_dem_sampler(dem).estimate(
+                shots=4096,
+                seed=1202,
+                decoder=decoder,
+                aggregate_hotspots=False,
+            )
+
+        self.assertEqual(decoder.python_decode_call_count, 0)
+        self.assertEqual(result.mean_loss, 0.0)
+        self.assertEqual(result.edge_hotspots, {})
 
     @requires_native_backend
     def test_backend_merges_identical_parallel_two_detector_edges(self) -> None:
@@ -324,6 +352,27 @@ class FusionBlossomBackendPackageTests(unittest.TestCase):
         self.assertEqual(decoder.boundary_vertex_count, 2)
         self.assertEqual(decoder.solver_edge_count, 2)
         self.assertEqual(decoder.solver_vertex_count, 3)
+
+    @requires_native_backend
+    def test_backend_merges_identical_parallel_boundary_edges(self) -> None:
+        dem = DetectorErrorModel(
+            detectors=(Detector(id=0, measurement_keys=()),),
+            observables=(LogicalObservable(id=0),),
+            edges=(
+                DetectorErrorEdge(0.1, (0,), (0,), "edge0", "X"),
+                DetectorErrorEdge(0.2, (0,), (0,), "edge1", "Z"),
+            ),
+        )
+
+        decoder = npsim_fusion_blossom.NativeFusionBlossomDecoder.from_dem(dem)
+
+        summary = decoder.build_summary
+        self.assertEqual(decoder.edge_count, 2)
+        self.assertEqual(decoder.boundary_vertex_count, 1)
+        self.assertEqual(decoder.solver_edge_count, 1)
+        self.assertEqual(summary["merged_parallel_edge_count"], 1)
+        self.assertEqual(summary["edges"][0]["dem_edge_indices"], (0, 1))
+        self.assertEqual(summary["edges"][0]["fault_observables"], (0,))
 
     @requires_native_backend
     def test_backend_returns_zero_when_edge_has_no_observable_flip(self) -> None:
@@ -459,21 +508,22 @@ class FusionBlossomBackendPackageTests(unittest.TestCase):
             npsim_fusion_blossom.NativeFusionBlossomDecoder.from_dem(dem)
 
     @requires_native_backend
-    def test_backend_rejects_final_vertex_count_weight_overflow(self) -> None:
+    def test_backend_accepts_large_equal_weights_after_gcd_normalization(self) -> None:
         dem = DetectorErrorModel(
             detectors=(Detector(id=0, measurement_keys=()),),
-            observables=(LogicalObservable(id=0),),
+            observables=tuple(LogicalObservable(id=index) for index in range(16)),
             edges=tuple(
-                DetectorErrorEdge(0.2, (0,), (0,), f"edge{index}", "X")
+                DetectorErrorEdge(0.2, (0,), (index,), f"edge{index}", "X")
                 for index in range(16)
             ),
         )
 
-        with self.assertRaisesRegex(ValueError, "scaled weight"):
-            npsim_fusion_blossom.NativeFusionBlossomDecoder.from_dem(
-                dem,
-                options={"weight_scale": 1e18},
-            )
+        decoder = npsim_fusion_blossom.NativeFusionBlossomDecoder.from_dem(
+            dem,
+            options={"weight_scale": 1e18},
+        )
+
+        self.assertEqual(decoder.solver_edge_count, 16)
 
     @requires_native_backend
     def test_backend_matches_pymatching_on_small_graphlike_dem(self) -> None:

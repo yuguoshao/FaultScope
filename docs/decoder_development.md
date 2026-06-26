@@ -157,11 +157,13 @@ edges, because matching-style backends cannot infer those errors from syndrome
 data. `BinaryLinearDecodingProblem` does not require graphlike edges; each DEM
 edge is an independent binary error variable.
 
-The problem views expose ids, counts, `edge_summary`, probabilities, weights,
-and sparse binary matrix entries for construction-time inspection. They
-intentionally do not expose `to_numpy_*` hot-path helpers. A native decoder
-should consume the native problem representation instead of moving batch data
-through Python.
+The problem views expose ids, detector coordinates, counts, `edge_summary`,
+probabilities, weights, and sparse binary matrix entries for construction-time
+inspection. `detector_coords` is ordered exactly like `detector_ids`; backend
+builders can use it for geometry-aware graph compilation or partition planning.
+They intentionally do not expose `to_numpy_*` hot-path helpers. A native
+decoder should consume the native problem representation instead of moving
+batch data through Python.
 
 ## Native Decoder Backends
 
@@ -524,12 +526,35 @@ detector/correction buffers stay native. For `aggregate_hotspots=False`, it
 uses the optional row-major packed batch callback so the hot input layout
 matches PyMatching's `decode_batch(..., bit_packed_shots=True)` convention.
 
-The current backend is a minimal serial beta fusion-blossom MWPM adapter. It
-maps NPSim detector indices to fusion-blossom vertices, converts graphlike DEM
-edges to weighted solver edges, runs the serial solver for each shot, and maps
-the selected edge paths back to observable correction masks. It safely
-compresses identical two-detector parallel edges before constructing the solver
-graph. It is not yet the production parallel or streaming adapter.
+The current backend is a minimal serial-solver beta fusion-blossom MWPM
+adapter. It maps NPSim detector indices to fusion-blossom vertices, converts
+graphlike DEM edges to weighted solver edges, runs a serial solver per shot,
+and maps matched vertex pairs through cached shortest paths back to observable
+correction masks. It safely compresses identical one-detector boundary edges
+and identical two-detector parallel edges before constructing the solver graph.
+It is not yet the production partitioned or streaming adapter. The backend
+build uses fusion-blossom's compact vertex/edge index mode and rejects graphs
+that exceed that backend index range. The default integer conversion uses
+`weight_scale=10_000`; after scaling, solver weights are normalized by their
+common even-preserving divisor, preserving the integer MWPM objective while
+reducing solver weight magnitudes when possible. Packed batch decoding reuses
+per-worker solver state and path caches across calls.
+
+For host-specific scheduling diagnostics, `NPSIM_FUSION_BLOSSOM_THREADS=<n>`
+caps the packed batch worker count; the default is to use the available native
+parallelism. `NPSIM_FUSION_BLOSSOM_PROFILE=1` prints a native per-batch timing
+split for defect collection, solver clear, solver growth, matching extraction,
+and correction application. `NPSIM_FUSION_BLOSSOM_BLOCK_ROWS=<n>` overrides the
+packed-row scheduler block size for load-balancing experiments. These diagnostics
+are intentionally environment-variable gated and do not change the public
+decoder API.
+
+Current profiling on surface-code DEMs shows the fusion backend time is
+dominated by upstream `solver.solve(...)`; defect collection, packed mask
+layout, matching extraction, and correction application are secondary costs.
+Further large-scale improvement should therefore focus on geometry-aware
+partitioning or upstream solver strategy rather than Python callback removal or
+small detector-layout special cases.
 
 The backend decoder object exposes:
 
@@ -583,17 +608,20 @@ The implemented minimal beta adapter is:
 1. Compile `DetectorErrorModel` to `GraphlikeDecodingProblem`.
 2. Map each NPSim detector index to a fusion-blossom vertex.
 3. Convert one-detector DEM edges to boundary or virtual-vertex edges.
-4. Merge two-detector parallel DEM edges only when they share both endpoints
-   and the same fault-observable set. The merged probability is the independent
-   odd-parity probability.
-5. Reject two-detector parallel edges with different fault-observable sets,
+4. Merge one-detector boundary edges only when they share the same detector and
+   fault-observable set; merge two-detector parallel DEM edges only when they
+   share both endpoints and the same fault-observable set. The merged
+   probability is the independent odd-parity probability.
+5. Keep one virtual vertex per boundary edge group.
+6. Reject two-detector parallel edges with different fault-observable sets,
    because choosing one correction would be ambiguous.
-6. Preserve each solver edge's contributing DEM edge indices and
+7. Preserve each solver edge's contributing DEM edge indices and
    fault-observable indices so the solver prediction
    can be converted back into observable correction masks.
-7. Convert each hot-path `DetectorMaskBatchView` shot into the solver syndrome
-   representation without touching Python.
-8. Return a checked `CorrectionMaskBatch`.
+8. Convert each hot-path `DetectorMaskBatchView` shot into the solver syndrome
+   representation, run serial MWPM, and recover matched-pair paths through a
+   per-worker cache without touching Python.
+9. Return a checked `CorrectionMaskBatch`.
 
 The construction summary is intentionally lightweight and safe to inspect from
 Python:
@@ -634,6 +662,10 @@ rows then report `sample_s` using a native no-correction decoder through the
 same packed-row sampler path, and `decode_or_estimate_s` as the additional
 decoder cost. This makes it clearer whether a gap is in NPSim sampling or in
 the backend decode loop.
+
+Use `--same-seed-across-paths` when comparing mean-loss differences between
+native decoder configurations; otherwise the benchmark preserves the historical
+per-path seed offset.
 
 ## Validation And Performance Rules
 

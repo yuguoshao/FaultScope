@@ -596,11 +596,18 @@ source checkout:
 NPSim does not clone, compile, or install backend code during `import npsim` or
 `estimate(...)`. The default build includes only smoke-test/template native
 backends, not fusion-blossom or BP+OSD. The local `npsim-fusion-blossom`
-package is a minimal serial beta solver adapter: it enters the native PyCapsule
+package is a minimal serial-solver beta adapter: it enters the native PyCapsule
 fast path, exposes construction metadata such as `solver_edge_count`, and
-safely compresses identical two-detector parallel edges. It still rejects
-ambiguous parallel logical effects and has not implemented parallel/streaming
-execution or production performance tuning.
+safely compresses identical boundary and two-detector parallel edges. It uses
+`weight_scale=10_000` by default for the fusion-blossom integer solver and
+normalizes scaled integer weights by a common even-preserving divisor without
+changing that integer MWPM objective. It still rejects ambiguous parallel
+logical effects and has not implemented production partitioning, streaming
+execution, or production performance tuning. For local diagnostics,
+`NPSIM_FUSION_BLOSSOM_THREADS=<n>` caps the packed batch worker count; by
+default the backend uses available native parallelism. Set
+`NPSIM_FUSION_BLOSSOM_PROFILE=1` to print the native timing split used for
+backend performance diagnosis, including solver clear/growth/extraction costs.
 
 The local `npsim-pymatching` package links pinned PyMatching sparse-blossom C++
 source and exposes `NativePyMatchingDecoder`. It is graphlike-only and keeps
@@ -749,6 +756,8 @@ PyMatching bit-packed batch decode as the official-style maximum-throughput
 baseline.
 Pass `--split-native-baseline` to show the native no-correction packed-row
 mean-loss baseline separately from the native decoder delta.
+Add `--same-seed-across-paths` when comparing mean-loss differences across
+native decoder configurations.
 
 ## Troubleshooting
 

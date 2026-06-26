@@ -5,8 +5,9 @@ edition = "2021"
 license = "MIT"
 
 [lib]
-name = "_native"
+name = "npsim_pymatching_native"
 crate-type = ["cdylib"]
+test = false
 
 [dependencies]
 npsim-core = { path = "../../crates/npsim-core" }

@@ -671,6 +671,7 @@ mod tests {
     fn graphlike_problem() -> GraphlikeDecodingProblem {
         GraphlikeDecodingProblem {
             detector_ids: vec![10, 20],
+            detector_coords: vec![Vec::new(), Vec::new()],
             observable_ids: vec![0, 1],
             edges: vec![
                 GraphlikeEdge {

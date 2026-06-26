@@ -7,8 +7,11 @@ Run from the repository root after building the native extension:
 The benchmark compares PyMatching and optional NPSim native decoder backends on
 Stim standard rotated surface-code DEMs. It reports TSV rows for machine
 consumption and does not estimate threshold crossings. With
-``--split-native-baseline``, native PyMatching reports a no-correction
+``--split-native-baseline``, native decoder paths report a no-correction
 packed-row baseline separately from the decoder delta.
+
+Use ``--same-seed-across-paths`` when comparing decoder correctness metrics on
+the same sampled native DEM shots.
 """
 
 from __future__ import annotations
@@ -43,13 +46,15 @@ from surface_code_threshold import (
 )
 
 
-PATHS = (
+DEFAULT_PATHS = (
     "stim-dem-pymatching",
     "stim-dem-pymatching-bitpacked",
     "npsim-dem-pymatching",
     "npsim-dem-pymatching-native",
     "npsim-dem-fusion-blossom",
 )
+
+PATHS = DEFAULT_PATHS
 
 
 @dataclass(frozen=True)
@@ -102,7 +107,17 @@ def main() -> None:
     parser.add_argument("--basis", choices=("x", "z"), default="x")
     parser.add_argument("--rounds", type=int, default=None)
     parser.add_argument("--seed", type=int, default=12_345)
-    parser.add_argument("--paths", nargs="+", default=list(PATHS))
+    parser.add_argument("--paths", nargs="+", default=list(DEFAULT_PATHS))
+    parser.add_argument(
+        "--same-seed-across-paths",
+        action="store_true",
+        help=(
+            "Use the same seed for every path within a distance/rate point. "
+            "This is useful when comparing decoder configurations on the same "
+            "sampled native DEM shots; the default preserves the historical "
+            "per-path seed offset."
+        ),
+    )
     parser.add_argument(
         "--split-native-baseline",
         action="store_true",
@@ -209,10 +224,13 @@ def main() -> None:
                     args.shots,
                     metadata,
                     seed,
+                    args.split_native_baseline,
                 ),
             }
             for path_index, path in enumerate(paths):
-                seed = args.seed + 1_000_000 * distance + 1_000 * rate_index + path_index
+                seed = args.seed + 1_000_000 * distance + 1_000 * rate_index
+                if not args.same_seed_across_paths:
+                    seed += path_index
                 row = safe_run(
                     runners[path],
                     seed,
@@ -396,9 +414,63 @@ def run_npsim_dem_pymatching_native(
     seed: int,
     split_baseline: bool,
 ) -> BenchmarkRow:
+    return run_npsim_native_decoder(
+        npsim_dem=npsim_dem,
+        basis=basis,
+        distance=distance,
+        rounds=rounds,
+        p=p,
+        shots=shots,
+        metadata=metadata,
+        seed=seed,
+        path_name="npsim-dem-pymatching-native",
+        decoder_factory=NativePyMatchingDecoder.from_dem,
+        split_baseline=split_baseline,
+    )
+
+
+def run_npsim_dem_fusion_blossom(
+    npsim_dem: Any,
+    basis: str,
+    distance: int,
+    rounds: int,
+    p: float,
+    shots: int,
+    metadata: ProblemMetadata,
+    seed: int,
+    split_baseline: bool,
+) -> BenchmarkRow:
+    return run_npsim_native_decoder(
+        npsim_dem=npsim_dem,
+        basis=basis,
+        distance=distance,
+        rounds=rounds,
+        p=p,
+        shots=shots,
+        metadata=metadata,
+        seed=seed,
+        path_name="npsim-dem-fusion-blossom",
+        decoder_factory=NativeFusionBlossomDecoder.from_dem,
+        split_baseline=split_baseline,
+    )
+
+
+def run_npsim_native_decoder(
+    npsim_dem: Any,
+    basis: str,
+    distance: int,
+    rounds: int,
+    p: float,
+    shots: int,
+    metadata: ProblemMetadata,
+    seed: int,
+    path_name: str,
+    decoder_factory: Callable[[Any], Any],
+    split_baseline: bool,
+) -> BenchmarkRow:
     started = time.perf_counter()
     sampler = compile_native_dem_sampler(npsim_dem)
-    decoder = NativePyMatchingDecoder.from_dem(npsim_dem)
+    decoder = decoder_factory(npsim_dem)
     construct_s = time.perf_counter() - started
 
     baseline_s = None
@@ -438,60 +510,13 @@ def run_npsim_dem_pymatching_native(
         rounds,
         p,
         shots,
-        "npsim-dem-pymatching-native",
+        path_name,
         metadata,
         solver_edges=int(getattr(decoder, "solver_edge_count")),
         merged_edges=int(summary.get("merged_parallel_edge_count", 0)),
         construct_s=construct_s,
         sample_s=baseline_s,
         decode_or_estimate_s=decoder_delta_s,
-        mean_loss=float(result.mean_loss),
-        python_decode_calls=python_decode_calls,
-        status=status,
-    )
-
-
-def run_npsim_dem_fusion_blossom(
-    npsim_dem: Any,
-    basis: str,
-    distance: int,
-    rounds: int,
-    p: float,
-    shots: int,
-    metadata: ProblemMetadata,
-    seed: int,
-) -> BenchmarkRow:
-    started = time.perf_counter()
-    sampler = compile_native_dem_sampler(npsim_dem)
-    decoder = NativeFusionBlossomDecoder.from_dem(npsim_dem)
-    construct_s = time.perf_counter() - started
-
-    started = time.perf_counter()
-    result = sampler.estimate(
-        shots=shots,
-        seed=seed,
-        decoder=decoder,
-        aggregate_hotspots=False,
-    )
-    estimate_s = time.perf_counter() - started
-
-    python_decode_calls = int(getattr(decoder, "python_decode_call_count", -1))
-    status = "ok" if python_decode_calls == 0 else "python-callback-used"
-    summary = decoder.build_summary
-
-    return BenchmarkRow(
-        basis,
-        distance,
-        rounds,
-        p,
-        shots,
-        "npsim-dem-fusion-blossom",
-        metadata,
-        solver_edges=int(getattr(decoder, "solver_edge_count")),
-        merged_edges=int(summary.get("merged_parallel_edge_count", 0)),
-        construct_s=construct_s,
-        sample_s=None,
-        decode_or_estimate_s=estimate_s,
         mean_loss=float(result.mean_loss),
         python_decode_calls=python_decode_calls,
         status=status,
@@ -528,6 +553,7 @@ def stim_dem_to_graphlike_npsim_dem(stim_dem: Any) -> DetectorErrorModel:
     observable_ids: set[int] = set()
     edges: list[DetectorErrorEdge] = []
     detector_offset = 0
+    coord_offsets: list[float] = []
 
     for instruction in stim_dem:
         instruction_type = instruction.type
@@ -560,7 +586,12 @@ def stim_dem_to_graphlike_npsim_dem(stim_dem: Any) -> DetectorErrorModel:
                     )
                 )
         elif instruction_type == "detector":
-            coords = tuple(float(coord) for coord in instruction.args_copy())
+            raw_coords = [float(coord) for coord in instruction.args_copy()]
+            if len(raw_coords) > len(coord_offsets):
+                coord_offsets.extend([0.0] * (len(raw_coords) - len(coord_offsets)))
+            coords = tuple(
+                coord + coord_offsets[index] for index, coord in enumerate(raw_coords)
+            )
             for target in instruction.targets_copy():
                 if not target.is_relative_detector_id():
                     raise ValueError(f"unsupported detector target {target!r}")
@@ -575,6 +606,11 @@ def stim_dem_to_graphlike_npsim_dem(stim_dem: Any) -> DetectorErrorModel:
                 )
         elif instruction_type == "shift_detectors":
             detector_offset += sum(int(target) for target in instruction.targets_copy())
+            coord_shift = [float(coord) for coord in instruction.args_copy()]
+            if len(coord_shift) > len(coord_offsets):
+                coord_offsets.extend([0.0] * (len(coord_shift) - len(coord_offsets)))
+            for index, shift in enumerate(coord_shift):
+                coord_offsets[index] += shift
         elif instruction_type == "logical_observable":
             for target in instruction.targets_copy():
                 if not target.is_logical_observable_id():
