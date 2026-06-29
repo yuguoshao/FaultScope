@@ -51,6 +51,7 @@ from faultscope.runtime import (
 from faultscope.runtime.loss import logical_residual_loss_mask
 from faultscope.decoders import (
     NativeBatchDecoder,
+    NativeBpDecoder,
     NativeBposdDecoder,
     NativeDecoderBackendUnavailable,
     NativeFusionBlossomDecoder,
@@ -266,6 +267,8 @@ class NoiseAwareSimulatorTests(unittest.TestCase):
         self.assertIs(faultscope.available_native_decoders, available_native_decoders)
         self.assertIs(decoders.NativeFusionBlossomDecoder, NativeFusionBlossomDecoder)
         self.assertIs(faultscope.NativeFusionBlossomDecoder, NativeFusionBlossomDecoder)
+        self.assertIs(decoders.NativeBpDecoder, NativeBpDecoder)
+        self.assertIs(faultscope.NativeBpDecoder, NativeBpDecoder)
         self.assertIs(decoders.NativeBposdDecoder, NativeBposdDecoder)
         self.assertIs(faultscope.NativeBposdDecoder, NativeBposdDecoder)
         self.assertIs(decoders.NativeMwpmDecoder, NativeMwpmDecoder)
@@ -402,6 +405,10 @@ class NoiseAwareSimulatorTests(unittest.TestCase):
         self.assertTrue(catalog["mwpm"].installable)
         self.assertEqual(catalog["mwpm"].package_name, "faultscope-mwpm")
         self.assertEqual(catalog["mwpm"].repo_url, "https://github.com/Quon-team/mwpm.rs.git")
+        self.assertIn("bpdecoder", catalog)
+        self.assertEqual(catalog["bpdecoder"].problem_kind, "binary-linear")
+        self.assertTrue(catalog["bpdecoder"].installable)
+        self.assertEqual(catalog["bpdecoder"].package_name, "faultscope-bpdecoder")
         self.assertIn("bposd", catalog)
         self.assertEqual(catalog["bposd"].problem_kind, "binary-linear")
         self.assertFalse(catalog["bposd"].installable)
@@ -485,6 +492,33 @@ class NoiseAwareSimulatorTests(unittest.TestCase):
                 "python -m faultscope.backends install mwpm",
             ):
                 NativeMwpmDecoder.from_dem(dem)
+        clear_native_decoder_plugin_cache()
+
+    def test_missing_bpdecoder_backend_has_install_hint(self) -> None:
+        dem = DetectorErrorModel(
+            detectors=(Detector(id=0, measurement_keys=()),),
+            observables=(LogicalObservable(id=0),),
+            edges=(
+                DetectorErrorEdge(
+                    probability=0.2,
+                    detectors=(0,),
+                    observables=(0,),
+                    location_id="edge0",
+                    event="X",
+                ),
+            ),
+        )
+
+        with mock.patch(
+            "faultscope.backends.registry.metadata.entry_points",
+            return_value=_FakeEntryPoints(()),
+        ):
+            clear_native_decoder_plugin_cache()
+            with self.assertRaisesRegex(
+                NativeDecoderBackendUnavailable,
+                "python -m faultscope.backends install bpdecoder",
+            ):
+                NativeBpDecoder.from_dem(dem)
         clear_native_decoder_plugin_cache()
 
     def test_reserved_bposd_backend_has_install_hint(self) -> None:
@@ -595,6 +629,7 @@ class NoiseAwareSimulatorTests(unittest.TestCase):
             self.assertIn("no-correction", stdout.getvalue())
             self.assertIn("fusion-blossom", stdout.getvalue())
             self.assertIn("mwpm", stdout.getvalue())
+            self.assertIn("bpdecoder", stdout.getvalue())
             self.assertIn("bposd", stdout.getvalue())
             self.assertIn("not-installed", stdout.getvalue())
 
@@ -616,6 +651,25 @@ class NoiseAwareSimulatorTests(unittest.TestCase):
                 self.assertFalse(os.listdir(tmpdir))
             self.assertIn("git clone", stdout.getvalue())
             self.assertIn("faultscope-fusion-blossom", stdout.getvalue())
+
+            stdout = io.StringIO()
+            with tempfile.TemporaryDirectory() as tmpdir:
+                with mock.patch("sys.stdout", stdout):
+                    self.assertEqual(
+                        main(
+                            [
+                                "install",
+                                "bpdecoder",
+                                "--dry-run",
+                                "--target-dir",
+                                tmpdir,
+                            ]
+                        ),
+                        0,
+                    )
+                self.assertFalse(os.listdir(tmpdir))
+            self.assertIn("faultscope-bpdecoder", stdout.getvalue())
+            self.assertIn("pip install --upgrade faultscope-bpdecoder", stdout.getvalue())
 
             stdout = io.StringIO()
             with tempfile.TemporaryDirectory() as tmpdir:

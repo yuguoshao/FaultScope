@@ -96,6 +96,26 @@ class NativeFusionBlossomDecoder(_NativeDecoderProxy):
         )
 
 
+class NativeBpDecoder(_NativeDecoderProxy):
+    """Proxy for the optional post-install bpdecoder.rs native backend."""
+
+    backend_name = "bpdecoder"
+
+    @staticmethod
+    def from_dem(dem, *, options=None):
+        return create_native_decoder("bpdecoder", dem=dem, options=options)
+
+    @staticmethod
+    def from_circuit(circuit, *, detectors=None, observables=None, options=None):
+        return create_native_decoder(
+            "bpdecoder",
+            circuit=circuit,
+            detectors=detectors,
+            observables=observables,
+            options=options,
+        )
+
+
 class NativeBposdDecoder(_NativeDecoderProxy):
     """Proxy for the reserved post-install BP+OSD native backend."""
 
@@ -158,6 +178,7 @@ class NativePyMatchingDecoder(_NativeDecoderProxy):
 
 __all__ = [
     "NativeBatchDecoder",
+    "NativeBpDecoder",
     "NativeBposdDecoder",
     "NativeDecoderBackendUnavailable",
     "NativeFusionBlossomDecoder",

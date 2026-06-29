@@ -48,6 +48,7 @@ from faultscope.runtime import (
 )
 from faultscope.decoders import (
     NativeBatchDecoder,
+    NativeBpDecoder,
     NativeBposdDecoder,
     NativeDecoderBackendUnavailable,
     NativeFusionBlossomDecoder,
@@ -95,6 +96,7 @@ __all__ = [
     "LogicalObservable",
     "MeasurementBitFlip",
     "NativeBatchDecoder",
+    "NativeBpDecoder",
     "NativeBposdDecoder",
     "NativeDecoderBackendUnavailable",
     "NativeFusionBlossomDecoder",
