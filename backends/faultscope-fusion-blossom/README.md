@@ -3,8 +3,9 @@
 Official FaultScope fusion-blossom backend.
 
 This package provides a minimal serial-solver beta fusion-blossom MWPM adapter. It
-converts FaultScope graphlike DEM problem views into fusion-blossom solver state,
-safely compresses identical boundary and two-detector parallel edges, and
+converts FaultScope graphlike detector error matrix problem views into
+fusion-blossom solver state, safely compresses identical boundary and
+two-detector parallel edges, and
 exposes the decoder through the FaultScope native decoder PyCapsule ABI. It is not
 yet the production partitioned or streaming adapter, and it does not support
 erasure or dynamic weights. The development build uses fusion-blossom's compact

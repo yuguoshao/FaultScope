@@ -2,8 +2,11 @@
 
 FaultScope is a Rust-core stabilizer simulator with a Python API. It is designed for
 forward noise-aware batch sampling, detector error model generation, detector
-level sampling, decoder integration, and noise hotspot estimation for quantum
-error correction workflows.
+syndrome sampling, decoder integration, and noise hotspot estimation for quantum
+error correction workflows. Its DEM terminology follows the detector error model
+formalism: detectors are parity constraints on measurement outcomes,
+\(D\) is the detector matrix, \(\Omega\) is the measurement syndrome matrix, and
+\(H=D\Omega\) is the detector error matrix.
 
 For exact signatures, see [FaultScope API Reference](api_reference.md). For the
 score-function estimator and DEM background, see
@@ -116,9 +119,11 @@ Supported noise model classes:
 - `PauliChannel({"X": 1.0, "Z": 0.5})`.
 - `MeasurementBitFlip()`.
 
-Detectors are parity checks over measurement keys. Logical observables can be
-measurement-key based, final Pauli-frame based, or both. DEM workflows use
-detector and observable masks instead of full circuit measurement history.
+Detectors are parity constraints over measurement keys. A set of detector
+declarations is the API representation of detector matrix rows. Logical
+observables can be measurement-key based, final Pauli-frame based, or both. DEM
+workflows use detector syndrome masks and logical observable flip masks instead
+of full circuit measurement history.
 
 ## Quickstart: Forward Hotspots
 
@@ -200,7 +205,8 @@ print(batch.noise_event_masks["x0"])
 
 If the simulator is constructed with observables, `estimate(...)` can compute
 the default residual logical loss. With no decoder, the correction map is
-empty. With a decoder, observable masks are XORed with correction masks.
+empty. With a decoder, logical observable flip masks are XORed with correction
+masks.
 
 ```python
 from faultscope import (
@@ -239,8 +245,11 @@ call.
 ## Detector Error Models
 
 DEM generation propagates single-error effects through a circuit and returns a
-detector-level model. You can pass detector/observable declarations explicitly
-or embed them as circuit operations.
+detector error model. Conceptually, the generator computes the measurement
+syndrome matrix \(\Omega\), multiplies it by the detector matrix \(D\), and
+materializes columns of the detector error matrix \(H=D\Omega\) as DEM edges
+with optional logical observable flips. You can pass detector/observable
+declarations explicitly or embed them as circuit operations.
 
 ```python
 from faultscope import (
@@ -413,9 +422,9 @@ detectors. Pure logical edges with no detectors are rejected because a matching
 decoder cannot infer them from syndrome data.
 
 FaultScope integrates with PyMatching through `PyMatchingDecoder`. The decoder
-is built from a graphlike `DetectorErrorModel`, because PyMatching needs a
-check matrix and logical fault matrix. After construction, the decoder can be
-used in either workflow:
+is built from a graphlike `DetectorErrorModel`, because PyMatching needs the
+detector error matrix \(H\) and a logical fault matrix. After construction, the
+decoder can be used in either workflow:
 
 - Forward workflow: sample the original circuit with
   `FaultScopeSimulator`, then pass `decoder=decoder` to
@@ -428,8 +437,8 @@ sampling path can still be forward circuit sampling.
 
 `PyMatchingDecoder` is the Python compatibility path. It is useful for
 prototyping and for environments that only install the PyMatching Python wheel,
-but FaultScope packed detector masks must still be converted through Python/NumPy
-before PyMatching decodes them. For the native hot path, install the optional
+but FaultScope packed detector syndrome masks must still be converted through
+Python/NumPy before PyMatching decodes them. For the native hot path, install the optional
 `faultscope-pymatching` backend and use `NativePyMatchingDecoder`:
 
 ```bash
@@ -552,8 +561,8 @@ result = FaultScopeSimulator(
 ```
 
 When `loss_mask_fn` and `correction_mask_fn` are omitted, this uses the native
-fast path: detector masks, decoder output, default residual loss, and hotspot
-aggregation all stay in Rust. If you supply a Python loss or correction
+fast path: detector syndrome masks, decoder output, default residual loss, and
+hotspot aggregation all stay in Rust. If you supply a Python loss or correction
 callback, FaultScope falls back to the compatibility path and calls
 `decode_batch_masks(batch)`. A Python class or subclass that only implements
 `decode_batch_masks(batch)` is still a Python decoder and does not enter the
@@ -717,15 +726,16 @@ For occasional inspection, prefer helper methods such as
 | --- | --- |
 | Inspect raw measurement masks | Forward sampling |
 | Custom loss over measurement history | Forward estimate with `loss_mask_fn` |
-| Custom decoder over detector masks | Forward or DEM estimate with decoder |
+| Custom decoder over detector syndrome masks | Forward or DEM estimate with decoder |
 | Graphlike matching decoder | DEM + PyMatching |
 | Edge-level hotspot ranking | DEM hotspot estimate |
-| Fast repeated detector-level sampling | Generate DEM once, then DEM sampling |
+| Fast repeated detector syndrome sampling | Generate DEM once, then DEM sampling |
 | Rust application integration | `faultscope-core` |
 
 Forward and DEM workflows answer related but different questions. Forward
 sampling preserves more circuit-level information. DEM sampling is usually the
-better fit once the analysis has been reduced to detector and observable masks.
+better fit once the analysis has been reduced to detector syndrome and logical
+observable flip masks.
 
 FaultScope's product runtime is a packed batch engine. It does not expose a general
 per-shot adaptive branching simulator.
@@ -810,7 +820,7 @@ detectors or whether a pure logical edge has no detector support.
 
 ### The Default Loss Raises About Missing Observables
 
-Default logical loss requires observable masks in the batch. Construct the
+Default logical loss requires logical observable flip masks in the batch. Construct the
 simulator with observables, embed observable declarations where appropriate, or
 supply `loss_mask_fn` explicitly.
 
@@ -831,6 +841,6 @@ Python RNG objects for compatibility by deriving a native seed from
   estimates.
 - Use `hotspot_table(top_k)` for reports and `top_hotspots(top_k)` for
   programmatic analysis.
-- Use DEM sampling for detector-level studies and forward sampling for custom
+- Use DEM sampling for detector-syndrome studies and forward sampling for custom
   circuit-level losses.
 - Treat `faultscope._native` as private; import from public modules instead.

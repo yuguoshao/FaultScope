@@ -7,22 +7,25 @@
 `faultscope-core` 中的 bit-packed batch runtime，通过 Python API 暴露为
 `FaultScopeSimulator`、`DetectorErrorModelGenerator` 和
 `DemHotspotEstimator`。本文中的 trajectory 是概念模型；实际 Python 回调接收的是
-batch mask 对象，而不是逐 shot trajectory 对象。
+batch mask 对象，而不是逐 shot trajectory 对象。本文的 DEM 术语使用 detector error model
+formalism：detector matrix \(D\) 表示 measurement parity constraints，measurement syndrome
+matrix \(\Omega\) 表示 circuit errors 翻转哪些 measurements，detector error matrix
+\(H=D\Omega\) 表示 circuit errors 违反哪些 detectors。
 
 ## 目标函数
 
 一次前向采样可以概念化为
 
 ```text
-tau = (e_1, e_2, ..., e_M, m_1, m_2, ..., m_R, D, L)
+tau = (e_1, e_2, ..., e_M, m_1, m_2, ..., m_R, s, o)
 ```
 
 其中：
 
 - `e_l` 是第 `l` 个 noise location 的采样事件。
 - `m_r` 是 measurement record。
-- `D` 是由 detector declarations 生成的 detector record。
-- `L` 是由 observable declarations 或最终 Pauli frame 得到的 logical observable mask。
+- `s` 是由 detector declarations 生成的 detector syndrome。
+- `o` 是由 observable declarations 或最终 Pauli frame 得到的 logical observable flip record。
 
 目标函数是 shot-level loss 的期望：
 
@@ -91,13 +94,13 @@ Monte Carlo 排序，但通常降低估计方差。
 FaultScope 输出 signed sensitivity：
 
 ```text
-S_l = dJ / d lambda_l
+sensitivity_l = dJ / d lambda_l
 ```
 
 默认热点分数用于排序：
 
 ```text
-H_l = |S_l|
+hotspot_l = |sensitivity_l|
 ```
 
 结果对象还按 `NoiseLocation.tags` 聚合：
@@ -139,8 +142,8 @@ mask。第 `k` 个 shot 存在整数的第 `k` 位中：
 - `X_frame[q]`: qubit `q` 上是否有 X frame 分量。
 - `Z_frame[q]`: qubit `q` 上是否有 Z frame 分量。
 - `M[key]`: measurement key 的测量结果。
-- `D[id]`: detector id 的 detector bit。
-- `L[id]`: logical observable id 的 observable bit。
+- `S[id]`: detector id 的 detector syndrome bit。
+- `O[id]`: logical observable id 的 observable flip bit。
 - `E[location_id]`: noise location 是否采样到 error/flip event。
 
 热点聚合在 Rust 中用 `popcount` 完成。例如 Bernoulli error location 的计数来自：
@@ -157,8 +160,11 @@ FaultScope 当前不暴露通用 per-shot adaptive branching simulator。
 
 ## Detector Error Model
 
-`DetectorErrorModelGenerator` 使用 `Detector` 和 `LogicalObservable` 声明生成 DEM。声明可以显式传入，
-也可以作为 circuit operations 存在：
+`DetectorErrorModelGenerator` 使用 `Detector` 和 `LogicalObservable` 声明生成 DEM。`Detector`
+声明是 detector matrix \(D\) 的行；每个 physical error 的 measurement flips 组成
+measurement syndrome matrix \(\Omega\) 的列；生成出的 DEM edge materialize detector error
+matrix \(H=D\Omega\) 的列及其 logical observable flips。声明可以显式传入，也可以作为 circuit
+operations 存在：
 
 ```text
 Operation.detector(measurement_keys, detector_id=...)
@@ -168,9 +174,9 @@ Operation.observable_include(observable_id, measurement_keys)
 生成器对每个 noise location 和每个非 identity/flip 事件做单错误传播：
 
 ```text
-reference effect -> D_ref, L_ref
-single injected event -> D_event, L_event
-edge = error(p_event) xor(D_ref, D_event) xor(L_ref, L_event)
+reference effect -> s_ref, o_ref
+single injected event -> s_event, o_event
+edge = error(p_event) xor(s_ref, s_event) xor(o_ref, o_event)
 ```
 
 输出为 Stim-like DEM 行：
@@ -200,22 +206,22 @@ detector parity。
 
 ## PyMatching Decoder
 
-PyMatching 接口把 detector masks 送入由 DEM 构造的 matching decoder：
+PyMatching 接口把 detector syndrome masks 送入由 DEM 构造的 matching decoder：
 
 ```text
 batch.detectors -> decoder.decode_batch_masks(batch) -> correction masks
 ```
 
-给定 DEM edge 集合 `E`，构造二元校验矩阵：
+给定 DEM edge 集合 `E`，构造 detector error matrix：
 
 ```text
-H[i,e] = 1 iff edge e flips detector D_i
+H[i,e] = 1 iff edge e violates detector i
 ```
 
-以及 logical fault 矩阵：
+以及 logical fault matrix：
 
 ```text
-F[a,e] = 1 iff edge e flips logical observable L_a
+G[a,e] = 1 iff edge e flips logical observable a
 ```
 
 边权为：
@@ -234,14 +240,14 @@ edge 会被拒绝，因为 matching decoder 无法从 syndrome 中恢复这种�
 
 ```text
 f_e ~ Bernoulli(p_e)
-D_i = xor_{e flips D_i} f_e
-L_a = xor_{e flips L_a} f_e
+s_i = xor_{e where H[i,e] = 1} f_e
+o_a = xor_{e where G[a,e] = 1} f_e
 ```
 
 默认 loss 为 residual logical failure：
 
 ```text
-failure = any_a(L_a xor C_a)
+failure = any_a(o_a xor C_a)
 ```
 
 edge-level sensitivity 为：

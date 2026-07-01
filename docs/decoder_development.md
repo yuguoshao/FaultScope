@@ -20,9 +20,11 @@ packed detector syndrome masks -> decoder -> packed observable correction masks
 ```
 
 A decoder can and usually should use circuit-derived information, but only
-during construction. The decoder object should compile that information into
-its own graph, matrices, weights, or lookup tables. Batch decoding should not
-read the original circuit or DEM again.
+during construction. In detector error model language, construction consumes
+the detector error matrix \(H=D\Omega\), logical fault matrix, probabilities,
+weights, coordinates, or edge metadata and compiles them into its own graph,
+matrices, weights, or lookup tables. Batch decoding should not read the original
+circuit or DEM again.
 
 The runtime expects detector and observable ids to be stable:
 
@@ -82,7 +84,7 @@ class MyDecoder:
         self.problem = problem
 
         # Compile the problem into the decoder's internal representation here.
-        # For example: matching graph, sparse parity-check matrix, weights, etc.
+        # For example: matching graph, sparse detector error matrix H, weights, etc.
 
     def decode_batch_masks(self, batch):
         syndrome_masks = [
@@ -119,7 +121,7 @@ packed syndrome bits. The least significant bit is shot 0. The return value
 must be `dict[int, int]`, mapping observable id to a packed correction mask.
 
 Python decoders are ideal for correctness prototypes and small experiments.
-They are not the final high-performance path, because detector masks and
+They are not the final high-performance path, because detector syndrome masks and
 correction masks cross the Python boundary.
 
 ## Getting Circuit And DEM Information
@@ -149,8 +151,8 @@ Use the view that matches the decoder family:
 | View | Intended backend |
 | --- | --- |
 | `IndexedDem` | General DEM indexing, edge metadata, and stable order inspection |
-| `GraphlikeDecodingProblem` | MWPM-style decoders, including future fusion-blossom adapters |
-| `BinaryLinearDecodingProblem` | BP+OSD/LDPC-style decoders using sparse binary `H` and `F` |
+| `GraphlikeDecodingProblem` | MWPM-style decoders using graphlike columns of the detector error matrix |
+| `BinaryLinearDecodingProblem` | BP+OSD/LDPC-style decoders using sparse binary detector error matrix `H` and logical fault matrix `F` |
 
 `GraphlikeDecodingProblem` rejects hyperedges and undetectable pure logical
 edges, because matching-style backends cannot infer those errors from syndrome
@@ -168,7 +170,7 @@ batch data through Python.
 ## Native Decoder Backends
 
 Native decoders are Python-owned handles around Rust decoder objects. They are
-the intended path for production backends because the batch syndrome masks,
+the intended path for production backends because the detector syndrome masks,
 correction masks, default residual loss, and hotspot aggregation stay in native
 memory.
 
@@ -261,8 +263,8 @@ pub struct MyNativeDecoder {
 }
 ```
 
-The Python object only owns the handle. It does not own batch detector masks or
-correction masks during `estimate(...)`.
+The Python object only owns the handle. It does not own batch detector syndrome
+masks or correction masks during `estimate(...)`.
 
 The core Rust contract is `NativeBatchDecoder`:
 

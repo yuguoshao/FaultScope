@@ -1,8 +1,12 @@
 # FaultScope
 
-FaultScope 是一个面向量子纠错工作流的噪声感知 fault attribution 工具包。当前产品运行时由
-Rust core 提供，并通过 Python API 暴露；主要能力包括 bit-packed stabilizer batch
-sampling、detector error model 生成、DEM 层采样、decoder 集成和噪声热点估计。
+FaultScope 是一个面向量子纠错工作流的噪声感知 fault attribution 工具包。它使用 detector error
+model formalism 描述 noisy Clifford circuits：detectors 是 measurement outcomes 上的 parity
+constraints，detector matrix \(D\) 汇总这些 constraints，measurement syndrome matrix
+\(\Omega\) 描述每个 circuit error 会翻转哪些 measurements，detector error matrix
+\(H=D\Omega\) 描述每个 error 会违反哪些 detectors。当前产品运行时由 Rust core 提供，并通过
+Python API 暴露；主要能力包括 bit-packed stabilizer batch sampling、detector error model
+生成、DEM 层采样、decoder 集成和噪声热点估计。
 
 文档站点见 [FaultScope Documentation](https://yuguoshao.github.io/FaultScope/)。
 本地文档入口：
@@ -13,8 +17,8 @@ sampling、detector error model 生成、DEM 层采样、decoder 集成和噪声
 
 ## 项目结构
 
-- `crates/faultscope-core`：Python 无关的 Rust core，包含 circuit/DEM 数据模型、packed
-  sampling 和 hotspot 聚合。
+- `crates/faultscope-core`：Python 无关的 Rust core，包含 circuit/DEM 数据模型、detector
+  syndrome sampling 和 hotspot 聚合。
 - `crates/faultscope-python`：PyO3 binding crate，构建 `faultscope._native`。
 - `faultscope/`：公共 Python import surface、decoder/Stim/visualization adapters 和示例构建器。
 - `docs/`：MkDocs 文档站点。
@@ -101,17 +105,19 @@ print(result.hotspot_table(top_k=5))
 - `Operation.pauli_gate(...)` 是 Pauli gate 构造器；`Operation.pauli` 是只读属性。
 - `PauliFrame` 和 `StabilizerState` 从 `faultscope.core` 导入，不是顶层 `faultscope` export。
 - `FaultScopeSimulator` 是前向 packed batch runtime 的主要入口。
-- `DetectorErrorModelGenerator` 和 `generate_native_dem(...)` 生成 DEM；未显式传入 detector /
-  observable 时，会读取 circuit 中的 `Operation.detector(...)` 和
-  `Operation.observable_include(...)`。
-- `DemHotspotEstimator` 在 DEM 层采样，每条 DEM edge 按独立 Bernoulli instruction 处理。
+- `DetectorErrorModelGenerator` 和 `generate_native_dem(...)` 生成 detector error model；未显式
+  传入 detector / observable 时，会读取 circuit 中的 `Operation.detector(...)` 和
+  `Operation.observable_include(...)`。每个 generated edge 对应 detector error matrix
+  \(H\) 的一列及其 logical observable flips。
+- `DemHotspotEstimator` 在 DEM 层采样，每条 DEM edge 按独立 Bernoulli instruction 处理，并把
+  sampled edge vector 映射成 detector syndrome 和 logical observable flip record。
 - `NativeNoCorrectionDecoder` 和后续 native decoder handle 可通过
   `estimate(..., decoder=decoder)` 自动走 native fast path；传入 Python loss/correction
   callback 时回退到兼容路径。普通 Python decoder 或 subclass 不会自动获得 native hot path；
   可用 native backend 通过 `faultscope.decoders.available_native_decoders()` 查看。
 - `DetectorErrorModel.compile_indexed()`、`compile_graphlike_problem()` 和
   `compile_binary_linear_problem()` 提供面向后续 fusion-blossom、BP+OSD 等 decoder 的 native
-  problem views。
+  problem views；这些 views 暴露 detector error matrix \(H\) 和 logical fault matrix 的稀疏结构。
 - 可选 native decoder backend 通过统一后装命令管理，例如
   `python -m faultscope.backends status` 查看 catalog/status，
   `python -m faultscope.backends install pymatching --dry-run` 查看安装步骤；FaultScope 不会在
@@ -134,10 +140,10 @@ print(result.hotspot_table(top_k=5))
 | --- | --- |
 | 查看原始 measurement/noise masks | Forward sampling |
 | 自定义 measurement-history loss | Forward estimate + `loss_mask_fn` |
-| detector-level decoder | Forward 或 DEM estimate + decoder |
+| detector-syndrome decoder | Forward 或 DEM estimate + decoder |
 | graphlike matching decoder | 原型用 `PyMatchingDecoder`；高性能路径安装 `faultscope-pymatching` 后使用 `NativePyMatchingDecoder`，或安装外部 `faultscope-mwpm` 后使用 `NativeMwpmDecoder` |
 | DEM edge 级热点排序 | DEM hotspot estimate |
-| 重复 detector-level sampling | 生成 DEM 后复用 DEM sampler |
+| 重复 detector syndrome sampling | 生成 DEM 后复用 DEM sampler |
 | Rust 集成 | `faultscope-core` |
 
 FaultScope 当前产品路径是 packed batch engine，不暴露通用的 per-shot adaptive branching simulator。
