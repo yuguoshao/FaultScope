@@ -84,7 +84,7 @@ def main() -> None:
 
 
 def _make_cases(distances: list[int], rounds: int) -> list[BenchmarkCase]:
-    cases: list[BenchmarkCase] = []
+    cases: list[BenchmarkCase] = [_make_bell_fallback_case()]
     for distance in distances:
         cases.append(_make_repetition_case(distance, rounds))
         cases.extend(_make_surface_memory_cases(distance, rounds))
@@ -120,6 +120,32 @@ def _make_repetition_case(distance: int, rounds: int) -> BenchmarkCase:
         circuit=experiment.circuit,
         detectors=tuple(experiment.detectors),
         observables=tuple(experiment.observables),
+    )
+
+
+def _make_bell_fallback_case() -> BenchmarkCase:
+    operations = (
+        Operation.h(0),
+        Operation.cx(0, 1),
+        Operation.noise(
+            NoiseLocation(
+                id="bell_x0",
+                model=BernoulliPauliNoise("X"),
+                rate=0.05,
+                qubits=(0,),
+                tags={"layout": "bell_fallback", "operation": "data_noise"},
+            )
+        ),
+        Operation.measure_pauli((0, 1), "ZZ", key="zz"),
+    )
+    detectors = (Detector(id=0, measurement_keys=("zz",), coords=(0.0,)),)
+    return BenchmarkCase(
+        label="bell-fallback",
+        distance=2,
+        rounds=1,
+        circuit=Circuit(n_qubits=2, operations=operations),
+        detectors=detectors,
+        observables=(),
     )
 
 

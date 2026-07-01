@@ -18,7 +18,7 @@ pub struct DetectorErrorModelGenerator {
     pub detectors: Vec<Detector>,
     pub observables: Vec<LogicalObservable>,
     event_plan: Arc<DemEventPlan>,
-    measurement_plan: Option<DemMeasurementPlan>,
+    measurement_plan: DemMeasurementPlan,
 }
 
 impl DetectorErrorModelGenerator {
@@ -66,15 +66,7 @@ impl DetectorErrorModelGenerator {
             observable.validate()?;
         }
         let measurement_plan =
-            if supports_product_reference_fast_path(circuit.n_qubits, &circuit.operations) {
-                Some(compile_dem_measurement_plan(
-                    &circuit.operations,
-                    &detectors,
-                    &observables,
-                )?)
-            } else {
-                None
-            };
+            compile_dem_measurement_plan(&circuit.operations, &detectors, &observables)?;
         Ok(Self {
             circuit,
             detectors,
@@ -101,37 +93,19 @@ impl DetectorErrorModelGenerator {
     }
 
     fn generate_edges(&self) -> NpResult<Vec<GeneratedDemEdge>> {
-        if let Some(measurement_plan) = &self.measurement_plan {
-            return generate_indexed_product_dem_edges_from_plan(
-                self.circuit.n_qubits,
-                &self.circuit.operations,
-                measurement_plan,
-                &self.event_plan,
-            );
-        }
-        generate_dem_edges_from_plan(
+        generate_dem_edges_from_compiled_plan(
             self.circuit.n_qubits,
             &self.circuit.operations,
-            &self.detectors,
-            &self.observables,
+            &self.measurement_plan,
             &self.event_plan,
         )
     }
 
     fn generate_edge_refs(&self) -> NpResult<Vec<GeneratedDemEdgeRef>> {
-        if let Some(measurement_plan) = &self.measurement_plan {
-            return generate_indexed_product_dem_edge_refs_from_plan(
-                self.circuit.n_qubits,
-                &self.circuit.operations,
-                measurement_plan,
-                &self.event_plan,
-            );
-        }
-        generate_dem_edge_refs_from_plan(
+        generate_dem_edge_refs_from_compiled_plan(
             self.circuit.n_qubits,
             &self.circuit.operations,
-            &self.detectors,
-            &self.observables,
+            &self.measurement_plan,
             &self.event_plan,
         )
     }
@@ -144,19 +118,10 @@ impl DetectorErrorModelGenerator {
 
     /// Generate sampling-only edges without location/event/tag metadata.
     pub fn generate_sampling_edges(&self) -> NpResult<Vec<DemSamplerEdge>> {
-        if let Some(measurement_plan) = &self.measurement_plan {
-            return generate_indexed_product_sampling_edges_from_plan(
-                self.circuit.n_qubits,
-                &self.circuit.operations,
-                measurement_plan,
-                &self.event_plan,
-            );
-        }
-        generate_sampling_edges_from_plan(
+        generate_sampling_edges_from_compiled_plan(
             self.circuit.n_qubits,
             &self.circuit.operations,
-            &self.detectors,
-            &self.observables,
+            &self.measurement_plan,
             &self.event_plan,
         )
     }
@@ -207,172 +172,158 @@ pub fn generate_dem_edges_from_plan(
     observables: &[LogicalObservable],
     event_plan: &DemEventPlan,
 ) -> NpResult<Vec<GeneratedDemEdge>> {
+    let measurement_plan = compile_dem_measurement_plan(operations, detectors, observables)?;
+    generate_dem_edges_from_compiled_plan(n_qubits, operations, &measurement_plan, event_plan)
+}
+
+fn generate_dem_edges_from_compiled_plan(
+    n_qubits: usize,
+    operations: &[Operation],
+    measurement_plan: &DemMeasurementPlan,
+    event_plan: &DemEventPlan,
+) -> NpResult<Vec<GeneratedDemEdge>> {
     if supports_product_reference_fast_path(n_qubits, operations) {
-        let measurement_plan = compile_dem_measurement_plan(operations, detectors, observables)?;
         return generate_indexed_product_dem_edges_from_plan(
             n_qubits,
             operations,
-            &measurement_plan,
+            measurement_plan,
             event_plan,
         );
     }
     let fault_events = &event_plan.fault_events;
     let fault_events_by_op = &event_plan.fault_events_by_op;
-    let mut state = DemFaultPropagationState::new(n_qubits, fault_events.len());
+    let mut state = DemFaultPropagationState::new(
+        n_qubits,
+        fault_events.len(),
+        measurement_plan.measurement_count,
+    );
     for (op_index, operation) in operations.iter().enumerate() {
         apply_fault_propagation_operation(
             operation,
             op_index,
             fault_events,
             fault_events_by_op,
+            measurement_plan,
             &mut state,
         )?;
     }
-    let detector_flip_masks =
-        evaluate_detector_flip_masks(&state.measurement_flip_masks, detectors, state.event_words)?;
-    let observable_flip_masks = evaluate_observable_flip_masks(
-        &state.measurement_flip_masks,
-        &state.x_frame,
-        &state.z_frame,
-        observables,
+    let detector_flip_masks = evaluate_indexed_detector_flip_masks(
+        &state.measurement_flip_words,
+        &measurement_plan.detectors,
         state.event_words,
     )?;
-    Ok(assemble_generated_dem_edges(
+    let observable_flip_masks = evaluate_indexed_observable_flip_masks_from_masks(
+        &state.measurement_flip_words,
+        &state.x_frame,
+        &state.z_frame,
+        &measurement_plan.observables,
+        state.event_words,
+    )?;
+    Ok(assemble_generated_dem_edges_from_flat_flip_masks(
         fault_events,
         detector_flip_masks,
         observable_flip_masks,
     ))
 }
 
-fn generate_dem_edge_refs_from_plan(
+fn generate_dem_edge_refs_from_compiled_plan(
     n_qubits: usize,
     operations: &[Operation],
-    detectors: &[Detector],
-    observables: &[LogicalObservable],
+    measurement_plan: &DemMeasurementPlan,
     event_plan: &DemEventPlan,
 ) -> NpResult<Vec<GeneratedDemEdgeRef>> {
     if supports_product_reference_fast_path(n_qubits, operations) {
-        let measurement_plan = compile_dem_measurement_plan(operations, detectors, observables)?;
         return generate_indexed_product_dem_edge_refs_from_plan(
             n_qubits,
             operations,
-            &measurement_plan,
+            measurement_plan,
             event_plan,
         );
     }
     let fault_events = &event_plan.fault_events;
     let fault_events_by_op = &event_plan.fault_events_by_op;
-    let mut state = DemFaultPropagationState::new(n_qubits, fault_events.len());
+    let mut state = DemFaultPropagationState::new(
+        n_qubits,
+        fault_events.len(),
+        measurement_plan.measurement_count,
+    );
     for (op_index, operation) in operations.iter().enumerate() {
         apply_fault_propagation_operation(
             operation,
             op_index,
             fault_events,
             fault_events_by_op,
+            measurement_plan,
             &mut state,
         )?;
     }
-    let detector_flip_masks =
-        evaluate_detector_flip_masks(&state.measurement_flip_masks, detectors, state.event_words)?;
-    let observable_flip_masks = evaluate_observable_flip_masks(
-        &state.measurement_flip_masks,
-        &state.x_frame,
-        &state.z_frame,
-        observables,
+    let detector_flip_masks = evaluate_indexed_detector_flip_masks(
+        &state.measurement_flip_words,
+        &measurement_plan.detectors,
         state.event_words,
     )?;
-    Ok(assemble_dem_edge_refs(
-        fault_events.len(),
+    let observable_flip_masks = evaluate_indexed_observable_flip_masks_from_masks(
+        &state.measurement_flip_words,
+        &state.x_frame,
+        &state.z_frame,
+        &measurement_plan.observables,
+        state.event_words,
+    )?;
+    Ok(assemble_dem_edge_refs_from_flat_flip_masks(
+        event_plan.fault_events.len(),
         detector_flip_masks,
         observable_flip_masks,
     ))
 }
 
-fn generate_sampling_edges_from_plan(
+fn generate_sampling_edges_from_compiled_plan(
     n_qubits: usize,
     operations: &[Operation],
-    detectors: &[Detector],
-    observables: &[LogicalObservable],
+    measurement_plan: &DemMeasurementPlan,
     event_plan: &DemEventPlan,
 ) -> NpResult<Vec<DemSamplerEdge>> {
     if supports_product_reference_fast_path(n_qubits, operations) {
-        let measurement_plan = compile_dem_measurement_plan(operations, detectors, observables)?;
         return generate_indexed_product_sampling_edges_from_plan(
             n_qubits,
             operations,
-            &measurement_plan,
+            measurement_plan,
             event_plan,
         );
     }
     let fault_events = &event_plan.fault_events;
     let fault_events_by_op = &event_plan.fault_events_by_op;
-    let mut state = DemFaultPropagationState::new(n_qubits, fault_events.len());
+    let mut state = DemFaultPropagationState::new(
+        n_qubits,
+        fault_events.len(),
+        measurement_plan.measurement_count,
+    );
     for (op_index, operation) in operations.iter().enumerate() {
         apply_fault_propagation_operation(
             operation,
             op_index,
             fault_events,
             fault_events_by_op,
+            measurement_plan,
             &mut state,
         )?;
     }
-    let detector_flip_masks =
-        evaluate_detector_flip_masks(&state.measurement_flip_masks, detectors, state.event_words)?;
-    let observable_flip_masks = evaluate_observable_flip_masks(
-        &state.measurement_flip_masks,
-        &state.x_frame,
-        &state.z_frame,
-        observables,
+    let detector_flip_masks = evaluate_indexed_detector_flip_masks(
+        &state.measurement_flip_words,
+        &measurement_plan.detectors,
         state.event_words,
     )?;
-    Ok(assemble_sampling_edges(
+    let observable_flip_masks = evaluate_indexed_observable_flip_masks_from_masks(
+        &state.measurement_flip_words,
+        &state.x_frame,
+        &state.z_frame,
+        &measurement_plan.observables,
+        state.event_words,
+    )?;
+    Ok(assemble_sampling_edges_from_flat_flip_masks(
         fault_events,
         detector_flip_masks,
         observable_flip_masks,
     ))
-}
-
-fn assemble_generated_dem_edges(
-    fault_events: &[DemFaultEvent],
-    detector_flip_masks: HashMap<i64, Mask>,
-    observable_flip_masks: HashMap<i64, Mask>,
-) -> Vec<GeneratedDemEdge> {
-    let detector_flip_masks = sorted_flip_masks(detector_flip_masks);
-    let observable_flip_masks = sorted_flip_masks(observable_flip_masks);
-    assemble_generated_dem_edges_from_flip_masks(
-        fault_events,
-        detector_flip_masks,
-        observable_flip_masks,
-    )
-}
-
-fn assemble_generated_dem_edges_from_flip_masks(
-    fault_events: &[DemFaultEvent],
-    detector_flip_masks: Vec<(i64, Mask)>,
-    observable_flip_masks: Vec<(i64, Mask)>,
-) -> Vec<GeneratedDemEdge> {
-    let mut detector_flips_by_event =
-        flip_ids_by_fault_event(&detector_flip_masks, fault_events.len());
-    let mut observable_flips_by_event =
-        flip_ids_by_fault_event(&observable_flip_masks, fault_events.len());
-    let mut edges = Vec::new();
-
-    for (event_index, event) in fault_events.iter().enumerate() {
-        let detector_flips = std::mem::take(&mut detector_flips_by_event[event_index]);
-        let observable_flips = std::mem::take(&mut observable_flips_by_event[event_index]);
-        if detector_flips.is_empty() && observable_flips.is_empty() {
-            continue;
-        }
-        edges.push(GeneratedDemEdge {
-            probability: event.probability,
-            detectors: detector_flips,
-            observables: observable_flips,
-            location_id: event.location_id.clone(),
-            event: event.event.clone(),
-            tags: event.tags.clone(),
-        });
-    }
-    edges
 }
 
 fn assemble_generated_dem_edges_from_flat_flip_masks(
@@ -404,41 +355,6 @@ fn assemble_generated_dem_edges_from_flat_flip_masks(
     edges
 }
 
-fn assemble_dem_edge_refs(
-    event_count: usize,
-    detector_flip_masks: HashMap<i64, Mask>,
-    observable_flip_masks: HashMap<i64, Mask>,
-) -> Vec<GeneratedDemEdgeRef> {
-    let detector_flip_masks = sorted_flip_masks(detector_flip_masks);
-    let observable_flip_masks = sorted_flip_masks(observable_flip_masks);
-    assemble_dem_edge_refs_from_flip_masks(event_count, detector_flip_masks, observable_flip_masks)
-}
-
-fn assemble_dem_edge_refs_from_flip_masks(
-    event_count: usize,
-    detector_flip_masks: Vec<(i64, Mask)>,
-    observable_flip_masks: Vec<(i64, Mask)>,
-) -> Vec<GeneratedDemEdgeRef> {
-    let mut detector_flips_by_event = flip_ids_by_fault_event(&detector_flip_masks, event_count);
-    let mut observable_flips_by_event =
-        flip_ids_by_fault_event(&observable_flip_masks, event_count);
-    let mut edges = Vec::new();
-
-    for event_index in 0..event_count {
-        let detector_flips = std::mem::take(&mut detector_flips_by_event[event_index]);
-        let observable_flips = std::mem::take(&mut observable_flips_by_event[event_index]);
-        if detector_flips.is_empty() && observable_flips.is_empty() {
-            continue;
-        }
-        edges.push(GeneratedDemEdgeRef {
-            event_index,
-            detectors: detector_flips,
-            observables: observable_flips,
-        });
-    }
-    edges
-}
-
 fn assemble_dem_edge_refs_from_flat_flip_masks(
     event_count: usize,
     detector_flip_masks: Vec<(i64, Vec<u64>)>,
@@ -460,49 +376,6 @@ fn assemble_dem_edge_refs_from_flat_flip_masks(
             event_index,
             detectors: detector_flips,
             observables: observable_flips,
-        });
-    }
-    edges
-}
-
-fn assemble_sampling_edges(
-    fault_events: &[DemFaultEvent],
-    detector_flip_masks: HashMap<i64, Mask>,
-    observable_flip_masks: HashMap<i64, Mask>,
-) -> Vec<DemSamplerEdge> {
-    let detector_flip_masks = sorted_flip_masks(detector_flip_masks);
-    let observable_flip_masks = sorted_flip_masks(observable_flip_masks);
-    assemble_sampling_edges_from_flip_masks(
-        fault_events,
-        detector_flip_masks,
-        observable_flip_masks,
-    )
-}
-
-fn assemble_sampling_edges_from_flip_masks(
-    fault_events: &[DemFaultEvent],
-    detector_flip_masks: Vec<(i64, Mask)>,
-    observable_flip_masks: Vec<(i64, Mask)>,
-) -> Vec<DemSamplerEdge> {
-    let mut detector_flips_by_event =
-        flip_ids_by_fault_event(&detector_flip_masks, fault_events.len());
-    let mut observable_flips_by_event =
-        flip_ids_by_fault_event(&observable_flip_masks, fault_events.len());
-    let mut edges = Vec::new();
-
-    for (event_index, event) in fault_events.iter().enumerate() {
-        let detector_flips = std::mem::take(&mut detector_flips_by_event[event_index]);
-        let observable_flips = std::mem::take(&mut observable_flips_by_event[event_index]);
-        if detector_flips.is_empty() && observable_flips.is_empty() {
-            continue;
-        }
-        edges.push(DemSamplerEdge {
-            probability: event.probability,
-            detectors: detector_flips,
-            observables: observable_flips,
-            location_id: String::new(),
-            event: DemEvent::Bool(false),
-            tags: HashMap::new(),
         });
     }
     edges
@@ -669,18 +542,20 @@ struct DemFaultPropagationState {
     reference: ConcreteStabilizer,
     x_frame: Vec<Mask>,
     z_frame: Vec<Mask>,
-    measurement_flip_masks: HashMap<String, Mask>,
+    measurement_flip_words: Vec<u64>,
+    measurement_recorded: Vec<bool>,
     event_words: usize,
 }
 
 impl DemFaultPropagationState {
-    fn new(n_qubits: usize, event_count: usize) -> Self {
+    fn new(n_qubits: usize, event_count: usize, measurement_count: usize) -> Self {
         let event_words = word_count(event_count);
         Self {
             reference: ConcreteStabilizer::zero(n_qubits),
             x_frame: vec![Mask::zero(event_words); n_qubits],
             z_frame: vec![Mask::zero(event_words); n_qubits],
-            measurement_flip_masks: HashMap::new(),
+            measurement_flip_words: vec![0; measurement_count * event_words],
+            measurement_recorded: vec![false; measurement_count],
             event_words,
         }
     }
@@ -1346,6 +1221,39 @@ fn record_flat_measurement_flip(
     Ok(())
 }
 
+fn record_mask_measurement_flip(
+    state: &mut DemFaultPropagationState,
+    measurement_index: usize,
+    qubits: &[usize],
+    pauli: &str,
+    fault_events: &[DemFaultEvent],
+    fault_events_by_op: &[Vec<usize>],
+    op_index: usize,
+) -> NpResult<()> {
+    if measurement_index >= state.measurement_recorded.len() {
+        return Err(NpError::new(format!(
+            "internal DEM measurement index {measurement_index} is out of range"
+        )));
+    }
+    if state.measurement_recorded[measurement_index] {
+        return Err(NpError::new(format!(
+            "duplicate DEM measurement index {measurement_index}"
+        )));
+    }
+    let mut value = frame_measurement_flip_mask(
+        &state.x_frame,
+        &state.z_frame,
+        qubits,
+        pauli,
+        state.event_words,
+    )?;
+    xor_measurement_noise_events(&mut value, fault_events, fault_events_by_op, op_index)?;
+    let range = flat_range(measurement_index, state.event_words);
+    state.measurement_flip_words[range].copy_from_slice(&value.words);
+    state.measurement_recorded[measurement_index] = true;
+    Ok(())
+}
+
 fn flat_range(index: usize, words: usize) -> std::ops::Range<usize> {
     let start = index * words;
     start..start + words
@@ -1528,6 +1436,7 @@ fn apply_fault_propagation_operation(
     op_index: usize,
     fault_events: &[DemFaultEvent],
     fault_events_by_op: &[Vec<usize>],
+    measurement_plan: &DemMeasurementPlan,
     state: &mut DemFaultPropagationState,
 ) -> NpResult<()> {
     match operation {
@@ -1570,48 +1479,55 @@ fn apply_fault_propagation_operation(
         } => {
             let qubits = vec![*qubit];
             ensure_deterministic_dem_measurement(&state.reference, &qubits, basis, key.as_deref())?;
-            let mut value = frame_measurement_flip_mask(
-                &state.x_frame,
-                &state.z_frame,
-                &qubits,
-                basis,
-                state.event_words,
-            )?;
-            xor_measurement_noise_events(&mut value, fault_events, fault_events_by_op, op_index)?;
-            let key = key
-                .clone()
-                .unwrap_or_else(|| format!("m{}", state.measurement_flip_masks.len()));
-            record_measurement_flip_mask(&mut state.measurement_flip_masks, &key, value)?;
+            if let Some(measurement_index) =
+                optional_indexed_measurement_op(measurement_plan, op_index)
+            {
+                record_mask_measurement_flip(
+                    state,
+                    measurement_index,
+                    &qubits,
+                    basis,
+                    fault_events,
+                    fault_events_by_op,
+                    op_index,
+                )?;
+            }
         }
         Operation::MeasurePauli {
             qubits, pauli, key, ..
         } => {
             ensure_deterministic_dem_measurement(&state.reference, qubits, pauli, key.as_deref())?;
-            let mut value = frame_measurement_flip_mask(
-                &state.x_frame,
-                &state.z_frame,
-                qubits,
-                pauli,
-                state.event_words,
-            )?;
-            xor_measurement_noise_events(&mut value, fault_events, fault_events_by_op, op_index)?;
-            let key = key
-                .clone()
-                .unwrap_or_else(|| format!("m{}", state.measurement_flip_masks.len()));
-            record_measurement_flip_mask(&mut state.measurement_flip_masks, &key, value)?;
+            if let Some(measurement_index) =
+                optional_indexed_measurement_op(measurement_plan, op_index)
+            {
+                record_mask_measurement_flip(
+                    state,
+                    measurement_index,
+                    qubits,
+                    pauli,
+                    fault_events,
+                    fault_events_by_op,
+                    op_index,
+                )?;
+            }
         }
         Operation::Reset { qubit, key, basis } => {
             let qubits = vec![*qubit];
             if let Some(key) = key {
                 ensure_deterministic_dem_measurement(&state.reference, &qubits, basis, Some(key))?;
-                let value = frame_measurement_flip_mask(
-                    &state.x_frame,
-                    &state.z_frame,
-                    &qubits,
-                    basis,
-                    state.event_words,
-                )?;
-                record_measurement_flip_mask(&mut state.measurement_flip_masks, key, value)?;
+                if let Some(measurement_index) =
+                    optional_indexed_measurement_op(measurement_plan, op_index)
+                {
+                    record_mask_measurement_flip(
+                        state,
+                        measurement_index,
+                        &qubits,
+                        basis,
+                        fault_events,
+                        fault_events_by_op,
+                        op_index,
+                    )?;
+                }
             }
             state.reference.reset_prepare(*qubit, basis)?;
             state.x_frame[*qubit] = Mask::zero(state.event_words);
@@ -1817,47 +1733,6 @@ fn ensure_deterministic_dem_measurement(
     Ok(())
 }
 
-fn evaluate_detector_flip_masks(
-    measurement_flip_masks: &HashMap<String, Mask>,
-    detectors: &[Detector],
-    words: usize,
-) -> NpResult<HashMap<i64, Mask>> {
-    let mut out = HashMap::new();
-    for detector in detectors {
-        out.insert(
-            detector.id,
-            measurement_flip_parity(measurement_flip_masks, &detector.measurement_keys, words)?,
-        );
-    }
-    Ok(out)
-}
-
-fn evaluate_observable_flip_masks(
-    measurement_flip_masks: &HashMap<String, Mask>,
-    x_frame: &[Mask],
-    z_frame: &[Mask],
-    observables: &[LogicalObservable],
-    words: usize,
-) -> NpResult<HashMap<i64, Mask>> {
-    let mut out = HashMap::new();
-    for observable in observables {
-        let mut value =
-            measurement_flip_parity(measurement_flip_masks, &observable.measurement_keys, words)?;
-        if !observable.pauli.is_empty() {
-            let flip = frame_measurement_flip_mask(
-                x_frame,
-                z_frame,
-                &observable.pauli_qubits,
-                &observable.pauli,
-                words,
-            )?;
-            value.xor_assign(&flip);
-        }
-        out.insert(observable.id, value);
-    }
-    Ok(out)
-}
-
 fn evaluate_indexed_detector_flip_masks(
     measurement_flip_words: &[u64],
     detectors: &[IndexedDemDetector],
@@ -1873,6 +1748,35 @@ fn evaluate_indexed_detector_flip_masks(
                 words,
             )?,
         ));
+    }
+    Ok(out)
+}
+
+fn evaluate_indexed_observable_flip_masks_from_masks(
+    measurement_flip_words: &[u64],
+    x_frame: &[Mask],
+    z_frame: &[Mask],
+    observables: &[IndexedDemObservable],
+    words: usize,
+) -> NpResult<Vec<(i64, Vec<u64>)>> {
+    let mut out = Vec::with_capacity(observables.len());
+    for observable in observables {
+        let mut value = measurement_index_flip_parity(
+            measurement_flip_words,
+            &observable.measurement_indices,
+            words,
+        )?;
+        if !observable.pauli.is_empty() {
+            let flip = frame_measurement_flip_mask(
+                x_frame,
+                z_frame,
+                &observable.pauli_qubits,
+                &observable.pauli,
+                words,
+            )?;
+            xor_word_slices(&mut value, &flip.words);
+        }
+        out.push((observable.id, value));
     }
     Ok(out)
 }
@@ -1906,21 +1810,6 @@ fn evaluate_indexed_observable_flip_masks(
     Ok(out)
 }
 
-fn measurement_flip_parity(
-    measurement_flip_masks: &HashMap<String, Mask>,
-    keys: &[String],
-    words: usize,
-) -> NpResult<Mask> {
-    let mut parity = Mask::zero(words);
-    for key in keys {
-        let value = measurement_flip_masks
-            .get(key)
-            .ok_or_else(|| NpError::new(format!("unknown measurement key {key:?}")))?;
-        parity.xor_assign(value);
-    }
-    Ok(parity)
-}
-
 fn measurement_index_flip_parity(
     measurement_flip_words: &[u64],
     indices: &[usize],
@@ -1935,42 +1824,6 @@ fn measurement_index_flip_parity(
         xor_word_slices(&mut parity, value);
     }
     Ok(parity)
-}
-
-fn record_measurement_flip_mask(
-    measurement_flip_masks: &mut HashMap<String, Mask>,
-    key: &str,
-    value: Mask,
-) -> NpResult<()> {
-    if measurement_flip_masks.contains_key(key) {
-        return Err(NpError::new(format!("duplicate measurement key {key:?}")));
-    }
-    measurement_flip_masks.insert(key.to_string(), value);
-    Ok(())
-}
-
-fn sorted_flip_masks(flip_masks: HashMap<i64, Mask>) -> Vec<(i64, Mask)> {
-    let mut out: Vec<(i64, Mask)> = flip_masks.into_iter().collect();
-    out.sort_by_key(|(id, _)| *id);
-    out
-}
-
-fn flip_ids_by_fault_event(flip_masks: &[(i64, Mask)], event_count: usize) -> Vec<Vec<i64>> {
-    let mut out = vec![Vec::new(); event_count];
-    for (id, mask) in flip_masks {
-        for (word_index, word) in mask.words.iter().enumerate() {
-            let mut remaining = *word;
-            while remaining != 0 {
-                let bit = remaining.trailing_zeros() as usize;
-                let event_index = word_index * 64 + bit;
-                if event_index < event_count {
-                    out[event_index].push(*id);
-                }
-                remaining &= remaining - 1;
-            }
-        }
-    }
-    out
 }
 
 fn flat_flip_ids_by_fault_event(
@@ -2178,5 +2031,205 @@ mod tests {
         let err = DetectorErrorModelGenerator::new(circuit, Some(detectors), None).unwrap_err();
 
         assert!(err.message().contains("detector ids must be unique"));
+    }
+
+    #[test]
+    fn fallback_generator_rejects_unknown_measurement_key_during_construction() {
+        let circuit = Circuit {
+            n_qubits: 2,
+            operations: vec![
+                Operation::H(0),
+                Operation::Cx(0, 1),
+                Operation::MeasurePauli {
+                    qubits: vec![0, 1],
+                    pauli: "ZZ".to_string(),
+                    key: Some("zz".to_string()),
+                    noise: None,
+                },
+            ],
+        };
+        let detectors = vec![Detector {
+            id: 0,
+            measurement_keys: vec!["missing".to_string()],
+            coords: Vec::new(),
+        }];
+
+        let err = DetectorErrorModelGenerator::new(circuit, Some(detectors), None).unwrap_err();
+
+        assert!(err.message().contains("unknown measurement key"));
+    }
+
+    #[test]
+    fn fallback_generator_rejects_duplicate_measurement_key_during_construction() {
+        let circuit = Circuit {
+            n_qubits: 2,
+            operations: vec![
+                Operation::H(0),
+                Operation::Cx(0, 1),
+                Operation::MeasurePauli {
+                    qubits: vec![0, 1],
+                    pauli: "ZZ".to_string(),
+                    key: Some("m".to_string()),
+                    noise: None,
+                },
+                Operation::MeasurePauli {
+                    qubits: vec![0, 1],
+                    pauli: "ZZ".to_string(),
+                    key: Some("m".to_string()),
+                    noise: None,
+                },
+            ],
+        };
+        let detectors = vec![Detector {
+            id: 0,
+            measurement_keys: vec!["m".to_string()],
+            coords: Vec::new(),
+        }];
+
+        let err = DetectorErrorModelGenerator::new(circuit, Some(detectors), None).unwrap_err();
+
+        assert!(err.message().contains("duplicate measurement key"));
+    }
+
+    #[test]
+    fn fallback_bell_state_zz_detector_tracks_single_error() {
+        let location = NoiseLocation {
+            id: "x0".to_string(),
+            model: NoiseModel::BernoulliPauli("X".to_string()),
+            rate: 0.125,
+            qubits: vec![0],
+            tags: HashMap::new(),
+        };
+        let circuit = Circuit {
+            n_qubits: 2,
+            operations: vec![
+                Operation::H(0),
+                Operation::Cx(0, 1),
+                Operation::Noise(location),
+                Operation::MeasurePauli {
+                    qubits: vec![0, 1],
+                    pauli: "ZZ".to_string(),
+                    key: Some("zz".to_string()),
+                    noise: None,
+                },
+            ],
+        };
+        let detectors = vec![Detector {
+            id: 7,
+            measurement_keys: vec!["zz".to_string()],
+            coords: Vec::new(),
+        }];
+
+        let dem = DetectorErrorModelGenerator::new(circuit, Some(detectors), None)
+            .unwrap()
+            .generate()
+            .unwrap();
+
+        assert_eq!(dem.edges.len(), 1);
+        assert_eq!(dem.edges[0].location_id, "x0");
+        assert_eq!(dem.edges[0].event, DemEvent::Pauli("X".to_string()));
+        assert_eq!(dem.edges[0].detectors, vec![7]);
+    }
+
+    #[test]
+    fn fallback_indexes_required_measurements_and_ignores_unused_measurements() {
+        let location = NoiseLocation {
+            id: "x0".to_string(),
+            model: NoiseModel::BernoulliPauli("X".to_string()),
+            rate: 0.25,
+            qubits: vec![0],
+            tags: HashMap::new(),
+        };
+        let circuit = Circuit {
+            n_qubits: 2,
+            operations: vec![
+                Operation::H(0),
+                Operation::Cx(0, 1),
+                Operation::Noise(location),
+                Operation::MeasurePauli {
+                    qubits: vec![0, 1],
+                    pauli: "ZZ".to_string(),
+                    key: Some("zz0".to_string()),
+                    noise: None,
+                },
+                Operation::MeasurePauli {
+                    qubits: vec![0, 1],
+                    pauli: "XX".to_string(),
+                    key: Some("unused".to_string()),
+                    noise: None,
+                },
+                Operation::MeasurePauli {
+                    qubits: vec![0, 1],
+                    pauli: "ZZ".to_string(),
+                    key: Some("zz1".to_string()),
+                    noise: None,
+                },
+            ],
+        };
+        let detectors = vec![Detector {
+            id: 2,
+            measurement_keys: vec!["zz0".to_string(), "zz1".to_string()],
+            coords: Vec::new(),
+        }];
+        let observables = vec![LogicalObservable {
+            id: 3,
+            measurement_keys: vec!["zz0".to_string()],
+            pauli_qubits: Vec::new(),
+            pauli: String::new(),
+        }];
+
+        let dem = DetectorErrorModelGenerator::new(circuit, Some(detectors), Some(observables))
+            .unwrap()
+            .generate()
+            .unwrap();
+
+        assert_eq!(dem.edges.len(), 1);
+        assert_eq!(dem.edges[0].detectors, Vec::<i64>::new());
+        assert_eq!(dem.edges[0].observables, vec![3]);
+    }
+
+    #[test]
+    fn fallback_measurement_bit_flip_on_indexed_measurement_generates_edge() {
+        let location = NoiseLocation {
+            id: "mflip".to_string(),
+            model: NoiseModel::MeasurementBitFlip,
+            rate: 0.2,
+            qubits: vec![0],
+            tags: HashMap::new(),
+        };
+        let circuit = Circuit {
+            n_qubits: 2,
+            operations: vec![
+                Operation::H(0),
+                Operation::Cx(0, 1),
+                Operation::MeasurePauli {
+                    qubits: vec![0, 1],
+                    pauli: "XX".to_string(),
+                    key: Some("unused".to_string()),
+                    noise: None,
+                },
+                Operation::MeasurePauli {
+                    qubits: vec![0, 1],
+                    pauli: "ZZ".to_string(),
+                    key: Some("zz".to_string()),
+                    noise: Some(location),
+                },
+            ],
+        };
+        let detectors = vec![Detector {
+            id: 5,
+            measurement_keys: vec!["zz".to_string()],
+            coords: Vec::new(),
+        }];
+
+        let dem = DetectorErrorModelGenerator::new(circuit, Some(detectors), None)
+            .unwrap()
+            .generate()
+            .unwrap();
+
+        assert_eq!(dem.edges.len(), 1);
+        assert_eq!(dem.edges[0].location_id, "mflip");
+        assert_eq!(dem.edges[0].event, DemEvent::Bool(true));
+        assert_eq!(dem.edges[0].detectors, vec![5]);
     }
 }
