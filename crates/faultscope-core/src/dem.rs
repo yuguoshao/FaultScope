@@ -178,15 +178,15 @@ fn generated_edges_to_sampler_edges(generated_edges: Vec<GeneratedDemEdge>) -> V
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct DemEventPlan {
-    events: Vec<SensitivityEvent>,
-    events_by_op: Vec<Vec<usize>>,
+    fault_events: Vec<DemFaultEvent>,
+    fault_events_by_op: Vec<Vec<usize>>,
 }
 
 pub fn collect_dem_event_plan(operations: &[Operation]) -> NpResult<DemEventPlan> {
-    let (events, events_by_op) = collect_sensitivity_events(operations)?;
+    let (fault_events, fault_events_by_op) = collect_dem_fault_events(operations)?;
     Ok(DemEventPlan {
-        events,
-        events_by_op,
+        fault_events,
+        fault_events_by_op,
     })
 }
 
@@ -216,25 +216,31 @@ pub fn generate_dem_edges_from_plan(
             event_plan,
         );
     }
-    let events = &event_plan.events;
-    let events_by_op = &event_plan.events_by_op;
-    let mut state = DemSensitivityState::new(n_qubits, events.len());
+    let fault_events = &event_plan.fault_events;
+    let fault_events_by_op = &event_plan.fault_events_by_op;
+    let mut state = DemFaultPropagationState::new(n_qubits, fault_events.len());
     for (op_index, operation) in operations.iter().enumerate() {
-        apply_sensitivity_operation(operation, op_index, events, events_by_op, &mut state)?;
+        apply_fault_propagation_operation(
+            operation,
+            op_index,
+            fault_events,
+            fault_events_by_op,
+            &mut state,
+        )?;
     }
-    let detector_sensitivities =
-        evaluate_sensitivity_detectors(&state.measurements, detectors, state.event_words)?;
-    let observable_sensitivities = evaluate_sensitivity_observables(
-        &state.measurements,
+    let detector_flip_masks =
+        evaluate_detector_flip_masks(&state.measurement_flip_masks, detectors, state.event_words)?;
+    let observable_flip_masks = evaluate_observable_flip_masks(
+        &state.measurement_flip_masks,
         &state.x_frame,
         &state.z_frame,
         observables,
         state.event_words,
     )?;
     Ok(assemble_generated_dem_edges(
-        events,
-        detector_sensitivities,
-        observable_sensitivities,
+        fault_events,
+        detector_flip_masks,
+        observable_flip_masks,
     ))
 }
 
@@ -254,25 +260,31 @@ fn generate_dem_edge_refs_from_plan(
             event_plan,
         );
     }
-    let events = &event_plan.events;
-    let events_by_op = &event_plan.events_by_op;
-    let mut state = DemSensitivityState::new(n_qubits, events.len());
+    let fault_events = &event_plan.fault_events;
+    let fault_events_by_op = &event_plan.fault_events_by_op;
+    let mut state = DemFaultPropagationState::new(n_qubits, fault_events.len());
     for (op_index, operation) in operations.iter().enumerate() {
-        apply_sensitivity_operation(operation, op_index, events, events_by_op, &mut state)?;
+        apply_fault_propagation_operation(
+            operation,
+            op_index,
+            fault_events,
+            fault_events_by_op,
+            &mut state,
+        )?;
     }
-    let detector_sensitivities =
-        evaluate_sensitivity_detectors(&state.measurements, detectors, state.event_words)?;
-    let observable_sensitivities = evaluate_sensitivity_observables(
-        &state.measurements,
+    let detector_flip_masks =
+        evaluate_detector_flip_masks(&state.measurement_flip_masks, detectors, state.event_words)?;
+    let observable_flip_masks = evaluate_observable_flip_masks(
+        &state.measurement_flip_masks,
         &state.x_frame,
         &state.z_frame,
         observables,
         state.event_words,
     )?;
     Ok(assemble_dem_edge_refs(
-        events.len(),
-        detector_sensitivities,
-        observable_sensitivities,
+        fault_events.len(),
+        detector_flip_masks,
+        observable_flip_masks,
     ))
 }
 
@@ -292,54 +304,60 @@ fn generate_sampling_edges_from_plan(
             event_plan,
         );
     }
-    let events = &event_plan.events;
-    let events_by_op = &event_plan.events_by_op;
-    let mut state = DemSensitivityState::new(n_qubits, events.len());
+    let fault_events = &event_plan.fault_events;
+    let fault_events_by_op = &event_plan.fault_events_by_op;
+    let mut state = DemFaultPropagationState::new(n_qubits, fault_events.len());
     for (op_index, operation) in operations.iter().enumerate() {
-        apply_sensitivity_operation(operation, op_index, events, events_by_op, &mut state)?;
+        apply_fault_propagation_operation(
+            operation,
+            op_index,
+            fault_events,
+            fault_events_by_op,
+            &mut state,
+        )?;
     }
-    let detector_sensitivities =
-        evaluate_sensitivity_detectors(&state.measurements, detectors, state.event_words)?;
-    let observable_sensitivities = evaluate_sensitivity_observables(
-        &state.measurements,
+    let detector_flip_masks =
+        evaluate_detector_flip_masks(&state.measurement_flip_masks, detectors, state.event_words)?;
+    let observable_flip_masks = evaluate_observable_flip_masks(
+        &state.measurement_flip_masks,
         &state.x_frame,
         &state.z_frame,
         observables,
         state.event_words,
     )?;
     Ok(assemble_sampling_edges(
-        events,
-        detector_sensitivities,
-        observable_sensitivities,
+        fault_events,
+        detector_flip_masks,
+        observable_flip_masks,
     ))
 }
 
 fn assemble_generated_dem_edges(
-    events: &[SensitivityEvent],
-    detector_sensitivities: HashMap<i64, Mask>,
-    observable_sensitivities: HashMap<i64, Mask>,
+    fault_events: &[DemFaultEvent],
+    detector_flip_masks: HashMap<i64, Mask>,
+    observable_flip_masks: HashMap<i64, Mask>,
 ) -> Vec<GeneratedDemEdge> {
-    let detector_sensitivities = sorted_sensitivities(detector_sensitivities);
-    let observable_sensitivities = sorted_sensitivities(observable_sensitivities);
-    assemble_generated_dem_edges_from_sensitivities(
-        events,
-        detector_sensitivities,
-        observable_sensitivities,
+    let detector_flip_masks = sorted_flip_masks(detector_flip_masks);
+    let observable_flip_masks = sorted_flip_masks(observable_flip_masks);
+    assemble_generated_dem_edges_from_flip_masks(
+        fault_events,
+        detector_flip_masks,
+        observable_flip_masks,
     )
 }
 
-fn assemble_generated_dem_edges_from_sensitivities(
-    events: &[SensitivityEvent],
-    detector_sensitivities: Vec<(i64, Mask)>,
-    observable_sensitivities: Vec<(i64, Mask)>,
+fn assemble_generated_dem_edges_from_flip_masks(
+    fault_events: &[DemFaultEvent],
+    detector_flip_masks: Vec<(i64, Mask)>,
+    observable_flip_masks: Vec<(i64, Mask)>,
 ) -> Vec<GeneratedDemEdge> {
     let mut detector_flips_by_event =
-        sensitivity_flips_by_event(&detector_sensitivities, events.len());
+        flip_ids_by_fault_event(&detector_flip_masks, fault_events.len());
     let mut observable_flips_by_event =
-        sensitivity_flips_by_event(&observable_sensitivities, events.len());
+        flip_ids_by_fault_event(&observable_flip_masks, fault_events.len());
     let mut edges = Vec::new();
 
-    for (event_index, event) in events.iter().enumerate() {
+    for (event_index, event) in fault_events.iter().enumerate() {
         let detector_flips = std::mem::take(&mut detector_flips_by_event[event_index]);
         let observable_flips = std::mem::take(&mut observable_flips_by_event[event_index]);
         if detector_flips.is_empty() && observable_flips.is_empty() {
@@ -357,18 +375,18 @@ fn assemble_generated_dem_edges_from_sensitivities(
     edges
 }
 
-fn assemble_generated_dem_edges_from_flat_sensitivities(
-    events: &[SensitivityEvent],
-    detector_sensitivities: Vec<(i64, Vec<u64>)>,
-    observable_sensitivities: Vec<(i64, Vec<u64>)>,
+fn assemble_generated_dem_edges_from_flat_flip_masks(
+    fault_events: &[DemFaultEvent],
+    detector_flip_masks: Vec<(i64, Vec<u64>)>,
+    observable_flip_masks: Vec<(i64, Vec<u64>)>,
 ) -> Vec<GeneratedDemEdge> {
     let mut detector_flips_by_event =
-        flat_sensitivity_flips_by_event(&detector_sensitivities, events.len());
+        flat_flip_ids_by_fault_event(&detector_flip_masks, fault_events.len());
     let mut observable_flips_by_event =
-        flat_sensitivity_flips_by_event(&observable_sensitivities, events.len());
+        flat_flip_ids_by_fault_event(&observable_flip_masks, fault_events.len());
     let mut edges = Vec::new();
 
-    for (event_index, event) in events.iter().enumerate() {
+    for (event_index, event) in fault_events.iter().enumerate() {
         let detector_flips = std::mem::take(&mut detector_flips_by_event[event_index]);
         let observable_flips = std::mem::take(&mut observable_flips_by_event[event_index]);
         if detector_flips.is_empty() && observable_flips.is_empty() {
@@ -388,27 +406,22 @@ fn assemble_generated_dem_edges_from_flat_sensitivities(
 
 fn assemble_dem_edge_refs(
     event_count: usize,
-    detector_sensitivities: HashMap<i64, Mask>,
-    observable_sensitivities: HashMap<i64, Mask>,
+    detector_flip_masks: HashMap<i64, Mask>,
+    observable_flip_masks: HashMap<i64, Mask>,
 ) -> Vec<GeneratedDemEdgeRef> {
-    let detector_sensitivities = sorted_sensitivities(detector_sensitivities);
-    let observable_sensitivities = sorted_sensitivities(observable_sensitivities);
-    assemble_dem_edge_refs_from_sensitivities(
-        event_count,
-        detector_sensitivities,
-        observable_sensitivities,
-    )
+    let detector_flip_masks = sorted_flip_masks(detector_flip_masks);
+    let observable_flip_masks = sorted_flip_masks(observable_flip_masks);
+    assemble_dem_edge_refs_from_flip_masks(event_count, detector_flip_masks, observable_flip_masks)
 }
 
-fn assemble_dem_edge_refs_from_sensitivities(
+fn assemble_dem_edge_refs_from_flip_masks(
     event_count: usize,
-    detector_sensitivities: Vec<(i64, Mask)>,
-    observable_sensitivities: Vec<(i64, Mask)>,
+    detector_flip_masks: Vec<(i64, Mask)>,
+    observable_flip_masks: Vec<(i64, Mask)>,
 ) -> Vec<GeneratedDemEdgeRef> {
-    let mut detector_flips_by_event =
-        sensitivity_flips_by_event(&detector_sensitivities, event_count);
+    let mut detector_flips_by_event = flip_ids_by_fault_event(&detector_flip_masks, event_count);
     let mut observable_flips_by_event =
-        sensitivity_flips_by_event(&observable_sensitivities, event_count);
+        flip_ids_by_fault_event(&observable_flip_masks, event_count);
     let mut edges = Vec::new();
 
     for event_index in 0..event_count {
@@ -426,15 +439,15 @@ fn assemble_dem_edge_refs_from_sensitivities(
     edges
 }
 
-fn assemble_dem_edge_refs_from_flat_sensitivities(
+fn assemble_dem_edge_refs_from_flat_flip_masks(
     event_count: usize,
-    detector_sensitivities: Vec<(i64, Vec<u64>)>,
-    observable_sensitivities: Vec<(i64, Vec<u64>)>,
+    detector_flip_masks: Vec<(i64, Vec<u64>)>,
+    observable_flip_masks: Vec<(i64, Vec<u64>)>,
 ) -> Vec<GeneratedDemEdgeRef> {
     let mut detector_flips_by_event =
-        flat_sensitivity_flips_by_event(&detector_sensitivities, event_count);
+        flat_flip_ids_by_fault_event(&detector_flip_masks, event_count);
     let mut observable_flips_by_event =
-        flat_sensitivity_flips_by_event(&observable_sensitivities, event_count);
+        flat_flip_ids_by_fault_event(&observable_flip_masks, event_count);
     let mut edges = Vec::new();
 
     for event_index in 0..event_count {
@@ -453,31 +466,31 @@ fn assemble_dem_edge_refs_from_flat_sensitivities(
 }
 
 fn assemble_sampling_edges(
-    events: &[SensitivityEvent],
-    detector_sensitivities: HashMap<i64, Mask>,
-    observable_sensitivities: HashMap<i64, Mask>,
+    fault_events: &[DemFaultEvent],
+    detector_flip_masks: HashMap<i64, Mask>,
+    observable_flip_masks: HashMap<i64, Mask>,
 ) -> Vec<DemSamplerEdge> {
-    let detector_sensitivities = sorted_sensitivities(detector_sensitivities);
-    let observable_sensitivities = sorted_sensitivities(observable_sensitivities);
-    assemble_sampling_edges_from_sensitivities(
-        events,
-        detector_sensitivities,
-        observable_sensitivities,
+    let detector_flip_masks = sorted_flip_masks(detector_flip_masks);
+    let observable_flip_masks = sorted_flip_masks(observable_flip_masks);
+    assemble_sampling_edges_from_flip_masks(
+        fault_events,
+        detector_flip_masks,
+        observable_flip_masks,
     )
 }
 
-fn assemble_sampling_edges_from_sensitivities(
-    events: &[SensitivityEvent],
-    detector_sensitivities: Vec<(i64, Mask)>,
-    observable_sensitivities: Vec<(i64, Mask)>,
+fn assemble_sampling_edges_from_flip_masks(
+    fault_events: &[DemFaultEvent],
+    detector_flip_masks: Vec<(i64, Mask)>,
+    observable_flip_masks: Vec<(i64, Mask)>,
 ) -> Vec<DemSamplerEdge> {
     let mut detector_flips_by_event =
-        sensitivity_flips_by_event(&detector_sensitivities, events.len());
+        flip_ids_by_fault_event(&detector_flip_masks, fault_events.len());
     let mut observable_flips_by_event =
-        sensitivity_flips_by_event(&observable_sensitivities, events.len());
+        flip_ids_by_fault_event(&observable_flip_masks, fault_events.len());
     let mut edges = Vec::new();
 
-    for (event_index, event) in events.iter().enumerate() {
+    for (event_index, event) in fault_events.iter().enumerate() {
         let detector_flips = std::mem::take(&mut detector_flips_by_event[event_index]);
         let observable_flips = std::mem::take(&mut observable_flips_by_event[event_index]);
         if detector_flips.is_empty() && observable_flips.is_empty() {
@@ -495,18 +508,18 @@ fn assemble_sampling_edges_from_sensitivities(
     edges
 }
 
-fn assemble_sampling_edges_from_flat_sensitivities(
-    events: &[SensitivityEvent],
-    detector_sensitivities: Vec<(i64, Vec<u64>)>,
-    observable_sensitivities: Vec<(i64, Vec<u64>)>,
+fn assemble_sampling_edges_from_flat_flip_masks(
+    fault_events: &[DemFaultEvent],
+    detector_flip_masks: Vec<(i64, Vec<u64>)>,
+    observable_flip_masks: Vec<(i64, Vec<u64>)>,
 ) -> Vec<DemSamplerEdge> {
     let mut detector_flips_by_event =
-        flat_sensitivity_flips_by_event(&detector_sensitivities, events.len());
+        flat_flip_ids_by_fault_event(&detector_flip_masks, fault_events.len());
     let mut observable_flips_by_event =
-        flat_sensitivity_flips_by_event(&observable_sensitivities, events.len());
+        flat_flip_ids_by_fault_event(&observable_flip_masks, fault_events.len());
     let mut edges = Vec::new();
 
-    for (event_index, event) in events.iter().enumerate() {
+    for (event_index, event) in fault_events.iter().enumerate() {
         let detector_flips = std::mem::take(&mut detector_flips_by_event[event_index]);
         let observable_flips = std::mem::take(&mut observable_flips_by_event[event_index]);
         if detector_flips.is_empty() && observable_flips.is_empty() {
@@ -628,7 +641,7 @@ impl LazyDetectorErrorModel {
                 .edges
                 .iter()
                 .map(|edge| {
-                    let event = &self.event_plan.events[edge.event_index];
+                    let event = &self.event_plan.fault_events[edge.event_index];
                     DetectorErrorEdge {
                         probability: event.probability,
                         detectors: edge.detectors.clone(),
@@ -644,7 +657,7 @@ impl LazyDetectorErrorModel {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-struct SensitivityEvent {
+struct DemFaultEvent {
     location_id: String,
     qubits: Vec<usize>,
     event: DemEvent,
@@ -652,22 +665,22 @@ struct SensitivityEvent {
     tags: HashMap<String, crate::TagValue>,
 }
 
-struct DemSensitivityState {
+struct DemFaultPropagationState {
     reference: ConcreteStabilizer,
     x_frame: Vec<Mask>,
     z_frame: Vec<Mask>,
-    measurements: HashMap<String, Mask>,
+    measurement_flip_masks: HashMap<String, Mask>,
     event_words: usize,
 }
 
-impl DemSensitivityState {
+impl DemFaultPropagationState {
     fn new(n_qubits: usize, event_count: usize) -> Self {
         let event_words = word_count(event_count);
         Self {
             reference: ConcreteStabilizer::zero(n_qubits),
             x_frame: vec![Mask::zero(event_words); n_qubits],
             z_frame: vec![Mask::zero(event_words); n_qubits],
-            measurements: HashMap::new(),
+            measurement_flip_masks: HashMap::new(),
             event_words,
         }
     }
@@ -720,41 +733,41 @@ struct DemMeasurementPlan {
     observables: Vec<IndexedDemObservable>,
 }
 
-struct IndexedProductSensitivityState {
+struct IndexedProductFaultPropagationState {
     basis: Vec<ProductAxis>,
     x_frame: Vec<u64>,
     z_frame: Vec<u64>,
-    measurements: Vec<u64>,
+    measurement_flip_words: Vec<u64>,
     measurement_recorded: Vec<bool>,
     event_words: usize,
 }
 
-impl IndexedProductSensitivityState {
+impl IndexedProductFaultPropagationState {
     fn new(n_qubits: usize, event_count: usize, measurement_count: usize) -> Self {
         let event_words = word_count(event_count);
         Self {
             basis: vec![ProductAxis::Z; n_qubits],
             x_frame: vec![0; n_qubits * event_words],
             z_frame: vec![0; n_qubits * event_words],
-            measurements: vec![0; measurement_count * event_words],
+            measurement_flip_words: vec![0; measurement_count * event_words],
             measurement_recorded: vec![false; measurement_count],
             event_words,
         }
     }
 }
 
-fn collect_sensitivity_events(
+fn collect_dem_fault_events(
     operations: &[Operation],
-) -> NpResult<(Vec<SensitivityEvent>, Vec<Vec<usize>>)> {
-    let mut events = Vec::new();
-    let mut events_by_op = vec![Vec::new(); operations.len()];
+) -> NpResult<(Vec<DemFaultEvent>, Vec<Vec<usize>>)> {
+    let mut fault_events = Vec::new();
+    let mut fault_events_by_op = vec![Vec::new(); operations.len()];
     let mut seen = HashSet::new();
     for (op_index, operation) in operations.iter().enumerate() {
         match operation {
             Operation::Noise(location) => {
-                collect_sensitivity_events_for_location(
-                    &mut events,
-                    &mut events_by_op,
+                collect_dem_fault_events_for_location(
+                    &mut fault_events,
+                    &mut fault_events_by_op,
                     &mut seen,
                     op_index,
                     location,
@@ -773,9 +786,9 @@ fn collect_sensitivity_events(
                         "DEM generation currently supports MeasurementBitFlip on measurement operations",
                     ));
                 }
-                collect_sensitivity_events_for_location(
-                    &mut events,
-                    &mut events_by_op,
+                collect_dem_fault_events_for_location(
+                    &mut fault_events,
+                    &mut fault_events_by_op,
                     &mut seen,
                     op_index,
                     location,
@@ -784,12 +797,12 @@ fn collect_sensitivity_events(
             _ => {}
         }
     }
-    Ok((events, events_by_op))
+    Ok((fault_events, fault_events_by_op))
 }
 
-fn collect_sensitivity_events_for_location(
-    events: &mut Vec<SensitivityEvent>,
-    events_by_op: &mut [Vec<usize>],
+fn collect_dem_fault_events_for_location(
+    fault_events: &mut Vec<DemFaultEvent>,
+    fault_events_by_op: &mut [Vec<usize>],
     seen: &mut HashSet<String>,
     op_index: usize,
     location: &NoiseLocation,
@@ -801,15 +814,15 @@ fn collect_sensitivity_events_for_location(
         )));
     }
     for (event, probability) in non_identity_events(location)? {
-        let event_index = events.len();
-        events.push(SensitivityEvent {
+        let event_index = fault_events.len();
+        fault_events.push(DemFaultEvent {
             location_id: location.id.clone(),
             qubits: location.qubits.clone(),
             event,
             probability,
             tags: location.tags.clone(),
         });
-        events_by_op[op_index].push(event_index);
+        fault_events_by_op[op_index].push(event_index);
     }
     Ok(())
 }
@@ -825,16 +838,16 @@ fn non_identity_events(location: &NoiseLocation) -> NpResult<Vec<(DemEvent, f64)
             .map(|event| (DemEvent::Pauli((*event).to_string()), location.rate / 3.0))
             .collect()),
         NoiseModel::TwoQubitDepolarizing => {
-            let events = [
+            let fault_events = [
                 "IX", "IY", "IZ", "XI", "XX", "XY", "XZ", "YI", "YX", "YY", "YZ", "ZI", "ZX", "ZY",
                 "ZZ",
             ];
-            Ok(events
+            Ok(fault_events
                 .iter()
                 .map(|event| {
                     (
                         DemEvent::Pauli((*event).to_string()),
-                        location.rate / events.len() as f64,
+                        location.rate / fault_events.len() as f64,
                     )
                 })
                 .collect())
@@ -1027,37 +1040,37 @@ fn generate_indexed_product_dem_edges_from_plan(
     measurement_plan: &DemMeasurementPlan,
     event_plan: &DemEventPlan,
 ) -> NpResult<Vec<GeneratedDemEdge>> {
-    let mut state = IndexedProductSensitivityState::new(
+    let mut state = IndexedProductFaultPropagationState::new(
         n_qubits,
-        event_plan.events.len(),
+        event_plan.fault_events.len(),
         measurement_plan.measurement_count,
     );
     for (op_index, operation) in operations.iter().enumerate() {
-        apply_indexed_product_sensitivity_operation(
+        apply_indexed_product_fault_propagation_operation(
             operation,
             op_index,
-            &event_plan.events,
-            &event_plan.events_by_op,
+            &event_plan.fault_events,
+            &event_plan.fault_events_by_op,
             measurement_plan,
             &mut state,
         )?;
     }
-    let detector_sensitivities = evaluate_indexed_sensitivity_detectors(
-        &state.measurements,
+    let detector_flip_masks = evaluate_indexed_detector_flip_masks(
+        &state.measurement_flip_words,
         &measurement_plan.detectors,
         state.event_words,
     )?;
-    let observable_sensitivities = evaluate_indexed_sensitivity_observables(
-        &state.measurements,
+    let observable_flip_masks = evaluate_indexed_observable_flip_masks(
+        &state.measurement_flip_words,
         &state.x_frame,
         &state.z_frame,
         &measurement_plan.observables,
         state.event_words,
     )?;
-    Ok(assemble_generated_dem_edges_from_flat_sensitivities(
-        &event_plan.events,
-        detector_sensitivities,
-        observable_sensitivities,
+    Ok(assemble_generated_dem_edges_from_flat_flip_masks(
+        &event_plan.fault_events,
+        detector_flip_masks,
+        observable_flip_masks,
     ))
 }
 
@@ -1067,37 +1080,37 @@ fn generate_indexed_product_dem_edge_refs_from_plan(
     measurement_plan: &DemMeasurementPlan,
     event_plan: &DemEventPlan,
 ) -> NpResult<Vec<GeneratedDemEdgeRef>> {
-    let mut state = IndexedProductSensitivityState::new(
+    let mut state = IndexedProductFaultPropagationState::new(
         n_qubits,
-        event_plan.events.len(),
+        event_plan.fault_events.len(),
         measurement_plan.measurement_count,
     );
     for (op_index, operation) in operations.iter().enumerate() {
-        apply_indexed_product_sensitivity_operation(
+        apply_indexed_product_fault_propagation_operation(
             operation,
             op_index,
-            &event_plan.events,
-            &event_plan.events_by_op,
+            &event_plan.fault_events,
+            &event_plan.fault_events_by_op,
             measurement_plan,
             &mut state,
         )?;
     }
-    let detector_sensitivities = evaluate_indexed_sensitivity_detectors(
-        &state.measurements,
+    let detector_flip_masks = evaluate_indexed_detector_flip_masks(
+        &state.measurement_flip_words,
         &measurement_plan.detectors,
         state.event_words,
     )?;
-    let observable_sensitivities = evaluate_indexed_sensitivity_observables(
-        &state.measurements,
+    let observable_flip_masks = evaluate_indexed_observable_flip_masks(
+        &state.measurement_flip_words,
         &state.x_frame,
         &state.z_frame,
         &measurement_plan.observables,
         state.event_words,
     )?;
-    Ok(assemble_dem_edge_refs_from_flat_sensitivities(
-        event_plan.events.len(),
-        detector_sensitivities,
-        observable_sensitivities,
+    Ok(assemble_dem_edge_refs_from_flat_flip_masks(
+        event_plan.fault_events.len(),
+        detector_flip_masks,
+        observable_flip_masks,
     ))
 }
 
@@ -1107,47 +1120,47 @@ fn generate_indexed_product_sampling_edges_from_plan(
     measurement_plan: &DemMeasurementPlan,
     event_plan: &DemEventPlan,
 ) -> NpResult<Vec<DemSamplerEdge>> {
-    let mut state = IndexedProductSensitivityState::new(
+    let mut state = IndexedProductFaultPropagationState::new(
         n_qubits,
-        event_plan.events.len(),
+        event_plan.fault_events.len(),
         measurement_plan.measurement_count,
     );
     for (op_index, operation) in operations.iter().enumerate() {
-        apply_indexed_product_sensitivity_operation(
+        apply_indexed_product_fault_propagation_operation(
             operation,
             op_index,
-            &event_plan.events,
-            &event_plan.events_by_op,
+            &event_plan.fault_events,
+            &event_plan.fault_events_by_op,
             measurement_plan,
             &mut state,
         )?;
     }
-    let detector_sensitivities = evaluate_indexed_sensitivity_detectors(
-        &state.measurements,
+    let detector_flip_masks = evaluate_indexed_detector_flip_masks(
+        &state.measurement_flip_words,
         &measurement_plan.detectors,
         state.event_words,
     )?;
-    let observable_sensitivities = evaluate_indexed_sensitivity_observables(
-        &state.measurements,
+    let observable_flip_masks = evaluate_indexed_observable_flip_masks(
+        &state.measurement_flip_words,
         &state.x_frame,
         &state.z_frame,
         &measurement_plan.observables,
         state.event_words,
     )?;
-    Ok(assemble_sampling_edges_from_flat_sensitivities(
-        &event_plan.events,
-        detector_sensitivities,
-        observable_sensitivities,
+    Ok(assemble_sampling_edges_from_flat_flip_masks(
+        &event_plan.fault_events,
+        detector_flip_masks,
+        observable_flip_masks,
     ))
 }
 
-fn apply_indexed_product_sensitivity_operation(
+fn apply_indexed_product_fault_propagation_operation(
     operation: &Operation,
     op_index: usize,
-    events: &[SensitivityEvent],
-    events_by_op: &[Vec<usize>],
+    fault_events: &[DemFaultEvent],
+    fault_events_by_op: &[Vec<usize>],
     measurement_plan: &DemMeasurementPlan,
-    state: &mut IndexedProductSensitivityState,
+    state: &mut IndexedProductFaultPropagationState,
 ) -> NpResult<()> {
     match operation {
         Operation::H(q) => {
@@ -1206,9 +1219,9 @@ fn apply_indexed_product_sensitivity_operation(
         }
         Operation::Pauli { .. } => {}
         Operation::Noise(_) => {
-            apply_sensitivity_events_to_flat_frames(
-                events,
-                events_by_op,
+            apply_fault_events_to_flat_frames(
+                fault_events,
+                fault_events_by_op,
                 op_index,
                 &mut state.x_frame,
                 &mut state.z_frame,
@@ -1223,13 +1236,13 @@ fn apply_indexed_product_sensitivity_operation(
             if let Some(measurement_index) =
                 optional_indexed_measurement_op(measurement_plan, op_index)
             {
-                record_flat_sensitivity_measurement(
+                record_flat_measurement_flip(
                     state,
                     measurement_index,
                     &qubits,
                     basis,
-                    events,
-                    events_by_op,
+                    fault_events,
+                    fault_events_by_op,
                     op_index,
                 )?;
             }
@@ -1241,13 +1254,13 @@ fn apply_indexed_product_sensitivity_operation(
             if let Some(measurement_index) =
                 optional_indexed_measurement_op(measurement_plan, op_index)
             {
-                record_flat_sensitivity_measurement(
+                record_flat_measurement_flip(
                     state,
                     measurement_index,
                     qubits,
                     pauli,
-                    events,
-                    events_by_op,
+                    fault_events,
+                    fault_events_by_op,
                     op_index,
                 )?;
             }
@@ -1264,13 +1277,13 @@ fn apply_indexed_product_sensitivity_operation(
                 if let Some(measurement_index) =
                     optional_indexed_measurement_op(measurement_plan, op_index)
                 {
-                    record_flat_sensitivity_measurement(
+                    record_flat_measurement_flip(
                         state,
                         measurement_index,
                         &qubits,
                         basis,
-                        events,
-                        events_by_op,
+                        fault_events,
+                        fault_events_by_op,
                         op_index,
                     )?;
                 }
@@ -1294,13 +1307,13 @@ fn optional_indexed_measurement_op(
         .and_then(|index| *index)
 }
 
-fn record_flat_sensitivity_measurement(
-    state: &mut IndexedProductSensitivityState,
+fn record_flat_measurement_flip(
+    state: &mut IndexedProductFaultPropagationState,
     measurement_index: usize,
     qubits: &[usize],
     pauli: &str,
-    events: &[SensitivityEvent],
-    events_by_op: &[Vec<usize>],
+    fault_events: &[DemFaultEvent],
+    fault_events_by_op: &[Vec<usize>],
     op_index: usize,
 ) -> NpResult<()> {
     if measurement_index >= state.measurement_recorded.len() {
@@ -1314,9 +1327,9 @@ fn record_flat_sensitivity_measurement(
         )));
     }
     let range = flat_range(measurement_index, state.event_words);
-    state.measurements[range.clone()].fill(0);
+    state.measurement_flip_words[range.clone()].fill(0);
     xor_flat_frame_measurement_flip_into(
-        &mut state.measurements[range],
+        &mut state.measurement_flip_words[range],
         &state.x_frame,
         &state.z_frame,
         qubits,
@@ -1324,9 +1337,9 @@ fn record_flat_sensitivity_measurement(
         state.event_words,
     )?;
     xor_flat_measurement_noise_events(
-        &mut state.measurements[flat_range(measurement_index, state.event_words)],
-        events,
-        events_by_op,
+        &mut state.measurement_flip_words[flat_range(measurement_index, state.event_words)],
+        fault_events,
+        fault_events_by_op,
         op_index,
     )?;
     state.measurement_recorded[measurement_index] = true;
@@ -1387,21 +1400,21 @@ fn zero_flat_row(frame: &mut [u64], index: usize, words: usize) {
     frame[flat_range(index, words)].fill(0);
 }
 
-fn apply_sensitivity_events_to_flat_frames(
-    events: &[SensitivityEvent],
-    events_by_op: &[Vec<usize>],
+fn apply_fault_events_to_flat_frames(
+    fault_events: &[DemFaultEvent],
+    fault_events_by_op: &[Vec<usize>],
     op_index: usize,
     x_frame: &mut [u64],
     z_frame: &mut [u64],
     words: usize,
 ) -> NpResult<()> {
-    for event_index in &events_by_op[op_index] {
-        if let DemEvent::Pauli(pauli) = &events[*event_index].event {
-            apply_sensitivity_pauli_string_to_flat_frames(
+    for event_index in &fault_events_by_op[op_index] {
+        if let DemEvent::Pauli(pauli) = &fault_events[*event_index].event {
+            apply_fault_event_pauli_string_to_flat_frames(
                 x_frame,
                 z_frame,
                 words,
-                &events[*event_index].qubits,
+                &fault_events[*event_index].qubits,
                 pauli,
                 *event_index,
             )?;
@@ -1410,7 +1423,7 @@ fn apply_sensitivity_events_to_flat_frames(
     Ok(())
 }
 
-fn apply_sensitivity_pauli_string_to_flat_frames(
+fn apply_fault_event_pauli_string_to_flat_frames(
     x_frame: &mut [u64],
     z_frame: &mut [u64],
     words: usize,
@@ -1443,12 +1456,12 @@ fn apply_sensitivity_pauli_string_to_flat_frames(
 
 fn xor_flat_measurement_noise_events(
     value: &mut [u64],
-    events: &[SensitivityEvent],
-    events_by_op: &[Vec<usize>],
+    fault_events: &[DemFaultEvent],
+    fault_events_by_op: &[Vec<usize>],
     op_index: usize,
 ) -> NpResult<()> {
-    for event_index in &events_by_op[op_index] {
-        match &events[*event_index].event {
+    for event_index in &fault_events_by_op[op_index] {
+        match &fault_events[*event_index].event {
             DemEvent::Bool(true) => set_event_bit_in_words(value, *event_index),
             DemEvent::Bool(false) => {}
             DemEvent::Pauli(_) => {
@@ -1510,12 +1523,12 @@ fn set_event_bit_in_words(words: &mut [u64], event_index: usize) {
     }
 }
 
-fn apply_sensitivity_operation(
+fn apply_fault_propagation_operation(
     operation: &Operation,
     op_index: usize,
-    events: &[SensitivityEvent],
-    events_by_op: &[Vec<usize>],
-    state: &mut DemSensitivityState,
+    fault_events: &[DemFaultEvent],
+    fault_events_by_op: &[Vec<usize>],
+    state: &mut DemFaultPropagationState,
 ) -> NpResult<()> {
     match operation {
         Operation::H(q) => {
@@ -1550,55 +1563,55 @@ fn apply_sensitivity_operation(
             state.reference.apply_pauli_string(&x, &z);
         }
         Operation::Noise(_) => {
-            apply_sensitivity_events(events, events_by_op, op_index, state)?;
+            apply_fault_events(fault_events, fault_events_by_op, op_index, state)?;
         }
         Operation::Measure {
             qubit, key, basis, ..
         } => {
             let qubits = vec![*qubit];
             ensure_deterministic_dem_measurement(&state.reference, &qubits, basis, key.as_deref())?;
-            let mut value = sensitivity_frame_measurement_flip(
+            let mut value = frame_measurement_flip_mask(
                 &state.x_frame,
                 &state.z_frame,
                 &qubits,
                 basis,
                 state.event_words,
             )?;
-            xor_measurement_noise_events(&mut value, events, events_by_op, op_index)?;
+            xor_measurement_noise_events(&mut value, fault_events, fault_events_by_op, op_index)?;
             let key = key
                 .clone()
-                .unwrap_or_else(|| format!("m{}", state.measurements.len()));
-            record_sensitivity_measurement(&mut state.measurements, &key, value)?;
+                .unwrap_or_else(|| format!("m{}", state.measurement_flip_masks.len()));
+            record_measurement_flip_mask(&mut state.measurement_flip_masks, &key, value)?;
         }
         Operation::MeasurePauli {
             qubits, pauli, key, ..
         } => {
             ensure_deterministic_dem_measurement(&state.reference, qubits, pauli, key.as_deref())?;
-            let mut value = sensitivity_frame_measurement_flip(
+            let mut value = frame_measurement_flip_mask(
                 &state.x_frame,
                 &state.z_frame,
                 qubits,
                 pauli,
                 state.event_words,
             )?;
-            xor_measurement_noise_events(&mut value, events, events_by_op, op_index)?;
+            xor_measurement_noise_events(&mut value, fault_events, fault_events_by_op, op_index)?;
             let key = key
                 .clone()
-                .unwrap_or_else(|| format!("m{}", state.measurements.len()));
-            record_sensitivity_measurement(&mut state.measurements, &key, value)?;
+                .unwrap_or_else(|| format!("m{}", state.measurement_flip_masks.len()));
+            record_measurement_flip_mask(&mut state.measurement_flip_masks, &key, value)?;
         }
         Operation::Reset { qubit, key, basis } => {
             let qubits = vec![*qubit];
             if let Some(key) = key {
                 ensure_deterministic_dem_measurement(&state.reference, &qubits, basis, Some(key))?;
-                let value = sensitivity_frame_measurement_flip(
+                let value = frame_measurement_flip_mask(
                     &state.x_frame,
                     &state.z_frame,
                     &qubits,
                     basis,
                     state.event_words,
                 )?;
-                record_sensitivity_measurement(&mut state.measurements, key, value)?;
+                record_measurement_flip_mask(&mut state.measurement_flip_masks, key, value)?;
             }
             state.reference.reset_prepare(*qubit, basis)?;
             state.x_frame[*qubit] = Mask::zero(state.event_words);
@@ -1609,34 +1622,34 @@ fn apply_sensitivity_operation(
     Ok(())
 }
 
-fn apply_sensitivity_events(
-    events: &[SensitivityEvent],
-    events_by_op: &[Vec<usize>],
+fn apply_fault_events(
+    fault_events: &[DemFaultEvent],
+    fault_events_by_op: &[Vec<usize>],
     op_index: usize,
-    state: &mut DemSensitivityState,
+    state: &mut DemFaultPropagationState,
 ) -> NpResult<()> {
-    apply_sensitivity_events_to_frames(
-        events,
-        events_by_op,
+    apply_fault_events_to_frames(
+        fault_events,
+        fault_events_by_op,
         op_index,
         &mut state.x_frame,
         &mut state.z_frame,
     )
 }
 
-fn apply_sensitivity_events_to_frames(
-    events: &[SensitivityEvent],
-    events_by_op: &[Vec<usize>],
+fn apply_fault_events_to_frames(
+    fault_events: &[DemFaultEvent],
+    fault_events_by_op: &[Vec<usize>],
     op_index: usize,
     x_frame: &mut [Mask],
     z_frame: &mut [Mask],
 ) -> NpResult<()> {
-    for event_index in &events_by_op[op_index] {
-        if let DemEvent::Pauli(pauli) = &events[*event_index].event {
-            apply_sensitivity_pauli_string(
+    for event_index in &fault_events_by_op[op_index] {
+        if let DemEvent::Pauli(pauli) = &fault_events[*event_index].event {
+            apply_fault_event_pauli_string(
                 x_frame,
                 z_frame,
-                &events[*event_index].qubits,
+                &fault_events[*event_index].qubits,
                 pauli,
                 *event_index,
             )?;
@@ -1690,7 +1703,7 @@ fn product_axis_from_pauli_byte(pauli: u8) -> NpResult<ProductAxis> {
     }
 }
 
-fn apply_sensitivity_pauli_string(
+fn apply_fault_event_pauli_string(
     x_frame: &mut [Mask],
     z_frame: &mut [Mask],
     qubits: &[usize],
@@ -1722,12 +1735,12 @@ fn apply_sensitivity_pauli_string(
 
 fn xor_measurement_noise_events(
     value: &mut Mask,
-    events: &[SensitivityEvent],
-    events_by_op: &[Vec<usize>],
+    fault_events: &[DemFaultEvent],
+    fault_events_by_op: &[Vec<usize>],
     op_index: usize,
 ) -> NpResult<()> {
-    for event_index in &events_by_op[op_index] {
-        match &events[*event_index].event {
+    for event_index in &fault_events_by_op[op_index] {
+        match &fault_events[*event_index].event {
             DemEvent::Bool(true) => set_event_bit(value, *event_index),
             DemEvent::Bool(false) => {}
             DemEvent::Pauli(_) => {
@@ -1738,7 +1751,7 @@ fn xor_measurement_noise_events(
     Ok(())
 }
 
-fn sensitivity_frame_measurement_flip(
+fn frame_measurement_flip_mask(
     x_frame: &[Mask],
     z_frame: &[Mask],
     qubits: &[usize],
@@ -1804,8 +1817,8 @@ fn ensure_deterministic_dem_measurement(
     Ok(())
 }
 
-fn evaluate_sensitivity_detectors(
-    measurements: &HashMap<String, Mask>,
+fn evaluate_detector_flip_masks(
+    measurement_flip_masks: &HashMap<String, Mask>,
     detectors: &[Detector],
     words: usize,
 ) -> NpResult<HashMap<i64, Mask>> {
@@ -1813,14 +1826,14 @@ fn evaluate_sensitivity_detectors(
     for detector in detectors {
         out.insert(
             detector.id,
-            sensitivity_measurement_parity(measurements, &detector.measurement_keys, words)?,
+            measurement_flip_parity(measurement_flip_masks, &detector.measurement_keys, words)?,
         );
     }
     Ok(out)
 }
 
-fn evaluate_sensitivity_observables(
-    measurements: &HashMap<String, Mask>,
+fn evaluate_observable_flip_masks(
+    measurement_flip_masks: &HashMap<String, Mask>,
     x_frame: &[Mask],
     z_frame: &[Mask],
     observables: &[LogicalObservable],
@@ -1829,9 +1842,9 @@ fn evaluate_sensitivity_observables(
     let mut out = HashMap::new();
     for observable in observables {
         let mut value =
-            sensitivity_measurement_parity(measurements, &observable.measurement_keys, words)?;
+            measurement_flip_parity(measurement_flip_masks, &observable.measurement_keys, words)?;
         if !observable.pauli.is_empty() {
-            let flip = sensitivity_frame_measurement_flip(
+            let flip = frame_measurement_flip_mask(
                 x_frame,
                 z_frame,
                 &observable.pauli_qubits,
@@ -1845,8 +1858,8 @@ fn evaluate_sensitivity_observables(
     Ok(out)
 }
 
-fn evaluate_indexed_sensitivity_detectors(
-    measurements: &[u64],
+fn evaluate_indexed_detector_flip_masks(
+    measurement_flip_words: &[u64],
     detectors: &[IndexedDemDetector],
     words: usize,
 ) -> NpResult<Vec<(i64, Vec<u64>)>> {
@@ -1854,8 +1867,8 @@ fn evaluate_indexed_sensitivity_detectors(
     for detector in detectors {
         out.push((
             detector.id,
-            sensitivity_measurement_index_parity(
-                measurements,
+            measurement_index_flip_parity(
+                measurement_flip_words,
                 &detector.measurement_indices,
                 words,
             )?,
@@ -1864,8 +1877,8 @@ fn evaluate_indexed_sensitivity_detectors(
     Ok(out)
 }
 
-fn evaluate_indexed_sensitivity_observables(
-    measurements: &[u64],
+fn evaluate_indexed_observable_flip_masks(
+    measurement_flip_words: &[u64],
     x_frame: &[u64],
     z_frame: &[u64],
     observables: &[IndexedDemObservable],
@@ -1873,8 +1886,8 @@ fn evaluate_indexed_sensitivity_observables(
 ) -> NpResult<Vec<(i64, Vec<u64>)>> {
     let mut out = Vec::with_capacity(observables.len());
     for observable in observables {
-        let mut value = sensitivity_measurement_index_parity(
-            measurements,
+        let mut value = measurement_index_flip_parity(
+            measurement_flip_words,
             &observable.measurement_indices,
             words,
         )?;
@@ -1893,14 +1906,14 @@ fn evaluate_indexed_sensitivity_observables(
     Ok(out)
 }
 
-fn sensitivity_measurement_parity(
-    measurements: &HashMap<String, Mask>,
+fn measurement_flip_parity(
+    measurement_flip_masks: &HashMap<String, Mask>,
     keys: &[String],
     words: usize,
 ) -> NpResult<Mask> {
     let mut parity = Mask::zero(words);
     for key in keys {
-        let value = measurements
+        let value = measurement_flip_masks
             .get(key)
             .ok_or_else(|| NpError::new(format!("unknown measurement key {key:?}")))?;
         parity.xor_assign(value);
@@ -1908,15 +1921,15 @@ fn sensitivity_measurement_parity(
     Ok(parity)
 }
 
-fn sensitivity_measurement_index_parity(
-    measurements: &[u64],
+fn measurement_index_flip_parity(
+    measurement_flip_words: &[u64],
     indices: &[usize],
     words: usize,
 ) -> NpResult<Vec<u64>> {
     let mut parity = vec![0; words];
     for index in indices {
         let range = flat_range(*index, words);
-        let value = measurements
+        let value = measurement_flip_words
             .get(range)
             .ok_or_else(|| NpError::new(format!("unknown measurement index {index}")))?;
         xor_word_slices(&mut parity, value);
@@ -1924,27 +1937,27 @@ fn sensitivity_measurement_index_parity(
     Ok(parity)
 }
 
-fn record_sensitivity_measurement(
-    measurements: &mut HashMap<String, Mask>,
+fn record_measurement_flip_mask(
+    measurement_flip_masks: &mut HashMap<String, Mask>,
     key: &str,
     value: Mask,
 ) -> NpResult<()> {
-    if measurements.contains_key(key) {
+    if measurement_flip_masks.contains_key(key) {
         return Err(NpError::new(format!("duplicate measurement key {key:?}")));
     }
-    measurements.insert(key.to_string(), value);
+    measurement_flip_masks.insert(key.to_string(), value);
     Ok(())
 }
 
-fn sorted_sensitivities(sensitivities: HashMap<i64, Mask>) -> Vec<(i64, Mask)> {
-    let mut out: Vec<(i64, Mask)> = sensitivities.into_iter().collect();
+fn sorted_flip_masks(flip_masks: HashMap<i64, Mask>) -> Vec<(i64, Mask)> {
+    let mut out: Vec<(i64, Mask)> = flip_masks.into_iter().collect();
     out.sort_by_key(|(id, _)| *id);
     out
 }
 
-fn sensitivity_flips_by_event(sensitivities: &[(i64, Mask)], event_count: usize) -> Vec<Vec<i64>> {
+fn flip_ids_by_fault_event(flip_masks: &[(i64, Mask)], event_count: usize) -> Vec<Vec<i64>> {
     let mut out = vec![Vec::new(); event_count];
-    for (id, mask) in sensitivities {
+    for (id, mask) in flip_masks {
         for (word_index, word) in mask.words.iter().enumerate() {
             let mut remaining = *word;
             while remaining != 0 {
@@ -1960,12 +1973,12 @@ fn sensitivity_flips_by_event(sensitivities: &[(i64, Mask)], event_count: usize)
     out
 }
 
-fn flat_sensitivity_flips_by_event(
-    sensitivities: &[(i64, Vec<u64>)],
+fn flat_flip_ids_by_fault_event(
+    flip_masks: &[(i64, Vec<u64>)],
     event_count: usize,
 ) -> Vec<Vec<i64>> {
     let mut out = vec![Vec::new(); event_count];
-    for (id, words) in sensitivities {
+    for (id, words) in flip_masks {
         for (word_index, word) in words.iter().enumerate() {
             let mut remaining = *word;
             while remaining != 0 {
