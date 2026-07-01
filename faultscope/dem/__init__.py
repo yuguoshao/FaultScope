@@ -15,6 +15,7 @@ from faultscope.dem.model import (
     UnsupportedDemCircuitError,
 )
 from faultscope.dem.sampler import (
+    DemFaultScopeSimulator,
     DemHotspotEstimator,
     DemSampleBatch,
     DemCorrectionMaskFn,
@@ -27,6 +28,7 @@ from faultscope.dem.sampler import (
 
 __all__ = [
     "DemHotspotEstimator",
+    "DemFaultScopeSimulator",
     "DemSampleBatch",
     "DemCorrectionMaskFn",
     "DemEdgeHotspot",

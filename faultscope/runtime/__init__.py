@@ -8,6 +8,7 @@ from faultscope.runtime.batch import (
     UnsupportedBatchCircuitError,
 )
 from faultscope.runtime.native import (
+    DemFaultScopeSimulator,
     NativeDemGenerator,
     NativeDemSampler,
     NativePackedSampler,
@@ -22,6 +23,7 @@ from faultscope.runtime.results import FaultHotspot, FailureEstimate
 
 __all__ = [
     "BatchCorrectionMaskFn",
+    "DemFaultScopeSimulator",
     "FaultScopeSimulator",
     "BatchLossMaskFn",
     "SampleBatch",

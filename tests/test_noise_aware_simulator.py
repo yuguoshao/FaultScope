@@ -8,7 +8,7 @@ from types import SimpleNamespace
 from unittest import mock
 
 import faultscope
-from faultscope.runtime import FaultScopeSimulator, SampleBatch
+from faultscope.runtime import DemFaultScopeSimulator, FaultScopeSimulator, SampleBatch
 from faultscope.core import Circuit, NoiseLocation, Operation
 from faultscope.dem import (
     BinaryLinearDecodingProblem,
@@ -228,6 +228,7 @@ class NoiseAwareSimulatorTests(unittest.TestCase):
         self.assertIs(DetectorGraphEdgeHotspot, native.DetectorGraphEdgeHotspot)
         self.assertIs(DetectorGraphHotspots, native.DetectorGraphHotspots)
         self.assertIs(FaultScopeSimulator, native.FaultScopeSimulator)
+        self.assertIs(DemFaultScopeSimulator, native.DemFaultScopeSimulator)
         self.assertIs(SampleBatch, native.SampleBatch)
         self.assertIs(DemSampleBatch, native.DemSampleBatch)
         self.assertIs(FaultHotspot, native.FaultHotspot)
@@ -247,6 +248,7 @@ class NoiseAwareSimulatorTests(unittest.TestCase):
         self.assertIs(NativeNoCorrectionDecoder, native.NativeNoCorrectionDecoder)
         self.assertIs(faultscope.Circuit, native.Circuit)
         self.assertIs(faultscope.FaultScopeSimulator, native.FaultScopeSimulator)
+        self.assertIs(faultscope.DemFaultScopeSimulator, native.DemFaultScopeSimulator)
         self.assertIs(faultscope.DetectorErrorModelGenerator, native.DetectorErrorModelGenerator)
         self.assertIs(faultscope.DemHotspotEstimator, native.DemHotspotEstimator)
         self.assertIs(
@@ -255,7 +257,9 @@ class NoiseAwareSimulatorTests(unittest.TestCase):
         )
         self.assertIs(core.Circuit, native.Circuit)
         self.assertIs(runtime_module.FaultScopeSimulator, native.FaultScopeSimulator)
+        self.assertIs(runtime_module.DemFaultScopeSimulator, native.DemFaultScopeSimulator)
         self.assertIs(dem_module.DetectorErrorModelGenerator, native.DetectorErrorModelGenerator)
+        self.assertIs(dem_module.DemFaultScopeSimulator, native.DemFaultScopeSimulator)
         self.assertIs(dem_module.DemHotspotEstimator, native.DemHotspotEstimator)
         self.assertIs(dem_module.IndexedDem, native.IndexedDem)
         self.assertIs(
@@ -2066,6 +2070,45 @@ class NativeDetectorErrorModelTests(unittest.TestCase):
         direct_edge = direct_result.top_edges(1)[0]
         direct_graph_edge = direct_result.detector_graph_hotspots.edge_hotspots[0]
         self.assertEqual(direct_edge.edge_index, direct_graph_edge.edge_index)
+
+    def test_dem_faultscope_simulator_compiles_from_circuit_with_faultscope_shape(self) -> None:
+        self._require_native_dem()
+        location = NoiseLocation(
+            id="x0",
+            model=BernoulliPauliNoise("X"),
+            rate=0.25,
+            qubits=(0,),
+            tags={"round": 1},
+        )
+        circuit = Circuit(
+            n_qubits=1,
+            operations=[
+                Operation.noise(location),
+                Operation.measure(0, key="m", basis="Z"),
+                Operation.detector(("m",), detector_id=0),
+                Operation.observable_include(0, ("m",)),
+            ],
+        )
+
+        simulator = DemFaultScopeSimulator(circuit)
+        direct_sampler = compile_native_dem_sampler_from_circuit(circuit)
+        direct_batch = direct_sampler.run_batch(shots=256, seed=123)
+
+        batch = simulator.run_batch(shots=256, seed=123)
+        sample_batch = simulator.sample(256, seed=123)
+        result = simulator.estimate(shots=4096, seed=123)
+
+        self.assertIs(simulator.circuit, circuit)
+        self.assertIsInstance(simulator.dem, DetectorErrorModel)
+        self.assertEqual(simulator.edge_count, direct_sampler.edge_count)
+        self.assertIsInstance(batch, DemSampleBatch)
+        self.assertEqual(batch.detectors, direct_batch.detectors)
+        self.assertEqual(batch.observables, direct_batch.observables)
+        self.assertEqual(batch.edge_event_masks, direct_batch.edge_event_masks)
+        self.assertEqual(sample_batch.detectors, direct_batch.detectors)
+        self.assertAlmostEqual(result.mean_loss, 0.25, delta=0.05)
+        self.assertEqual(result.dem.edges[0].location_id, "x0")
+        self.assertIn("DemFaultScopeSimulator", repr(simulator))
 
     def test_native_dem_reparses_mutated_duck_typed_operation(self) -> None:
         self._require_native_dem()

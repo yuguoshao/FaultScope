@@ -105,6 +105,9 @@ print(result.hotspot_table(top_k=5))
 - `Operation.pauli_gate(...)` 是 Pauli gate 构造器；`Operation.pauli` 是只读属性。
 - `PauliFrame` 和 `StabilizerState` 从 `faultscope.core` 导入，不是顶层 `faultscope` export。
 - `FaultScopeSimulator` 是前向 packed batch runtime 的主要入口。
+- `DemFaultScopeSimulator` 是同形的 DEM runtime 入口：从 circuit 直接生成 DEM sampler，
+  再按 DEM edge 概率采样 detector syndrome / logical observable flips。它不会逐门执行
+  forward trajectory，也不会返回 measurement 或 Pauli-frame masks。
 - `DetectorErrorModelGenerator` 和 `generate_native_dem(...)` 生成 detector error model；未显式
   传入 detector / observable 时，会读取 circuit 中的 `Operation.detector(...)` 和
   `Operation.observable_include(...)`。每个 generated edge 对应 detector error matrix
@@ -133,6 +136,7 @@ print(result.hotspot_table(top_k=5))
 - `edges_by_location()` 返回 `dict[str, list[DetectorErrorEdge]]`。
 - `materialize_dem=False` 的 native DEM sampler 是轻量采样路径，`sampler.dem is None`，
   需要完整 DEM metadata 的 estimate/hotspot API 会抛出 `ValueError`。
+  `DemFaultScopeSimulator(circuit, materialize_dem=False)` 暴露同样的轻量路径。
 
 ## 工作流选择
 
@@ -142,8 +146,9 @@ print(result.hotspot_table(top_k=5))
 | 自定义 measurement-history loss | Forward estimate + `loss_mask_fn` |
 | detector-syndrome decoder | Forward 或 DEM estimate + decoder |
 | graphlike matching decoder | 原型用 `PyMatchingDecoder`；高性能路径安装 `faultscope-pymatching` 后使用 `NativePyMatchingDecoder`，或安装外部 `faultscope-mwpm` 后使用 `NativeMwpmDecoder` |
-| DEM edge 级热点排序 | DEM hotspot estimate |
-| 重复 detector syndrome sampling | 生成 DEM 后复用 DEM sampler |
+| circuit 入口的 DEM 采样 | `DemFaultScopeSimulator(circuit)` |
+| DEM edge 级热点排序 | `DemFaultScopeSimulator` 或 `DemHotspotEstimator(dem)` |
+| 重复 detector syndrome sampling | `DemFaultScopeSimulator(circuit)` 或生成 DEM 后复用 DEM sampler |
 | Rust 集成 | `faultscope-core` |
 
 FaultScope 当前产品路径是 packed batch engine，不暴露通用的 per-shot adaptive branching simulator。

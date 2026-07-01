@@ -82,7 +82,7 @@ Use public modules in application code:
 ```python
 from faultscope import Circuit, NoiseLocation, Operation
 from faultscope.core import BernoulliPauliNoise, PauliFrame, StabilizerState
-from faultscope.runtime import FaultScopeSimulator, generate_native_dem
+from faultscope.runtime import DemFaultScopeSimulator, FaultScopeSimulator, generate_native_dem
 from faultscope.dem import Detector, LogicalObservable, DemHotspotEstimator
 ```
 
@@ -337,18 +337,19 @@ detector parity.
 
 ## DEM Sampling And Hotspots
 
-DEM sampling uses edge probabilities from a `DetectorErrorModel` instead of
-executing the full circuit.
+DEM sampling uses edge probabilities from a detector error model instead of
+executing the full circuit. Use `DemFaultScopeSimulator(circuit)` when you want a
+`FaultScopeSimulator`-shaped entry point that compiles the circuit to a DEM
+sampler internally.
 
 ```python
 from faultscope import (
     BernoulliPauliNoise,
     Circuit,
+    DemFaultScopeSimulator,
     NoiseLocation,
     Operation,
 )
-from faultscope.dem import DemHotspotEstimator
-from faultscope.runtime import generate_native_dem
 
 noise = NoiseLocation("x0", BernoulliPauliNoise("X"), 0.125, (0,))
 circuit = Circuit(
@@ -361,14 +362,28 @@ circuit = Circuit(
     ),
 )
 
-dem = generate_native_dem(circuit)
-simulator = DemHotspotEstimator(dem)
+simulator = DemFaultScopeSimulator(circuit)
 batch = simulator.run_batch(shots=64, seed=5)
 result = simulator.estimate(shots=256, seed=6, top_k=1)
 
 print(batch.detector_bit(0, 0))
 print(result.edge_sensitivities[0])
 print(result.top_edges(1)[0].edge_index)
+```
+
+`DemFaultScopeSimulator` returns a `DemSampleBatch`, not a forward
+`SampleBatch`: it contains detector masks, observable masks, and optional DEM
+edge-event masks, but no measurement record or Pauli-frame masks. Internally, it
+uses the same Rust path as `compile_native_dem_sampler_from_circuit(...)`.
+
+If you already have a `DetectorErrorModel`, use `DemHotspotEstimator(dem)`:
+
+```python
+from faultscope.dem import DemHotspotEstimator
+from faultscope.runtime import generate_native_dem
+
+dem = generate_native_dem(circuit)
+dem_simulator = DemHotspotEstimator(dem)
 ```
 
 `edge_sensitivities` and `edge_hotspots` are dictionaries keyed by DEM edge
@@ -388,7 +403,7 @@ mapping.
 
 ```python
 from faultscope import BernoulliPauliNoise, Circuit, NoiseLocation, Operation
-from faultscope.runtime import compile_native_dem_sampler_from_circuit
+from faultscope.runtime import DemFaultScopeSimulator, compile_native_dem_sampler_from_circuit
 
 noise = NoiseLocation("x0", BernoulliPauliNoise("X"), 0.125, (0,))
 circuit = Circuit(
@@ -411,8 +426,15 @@ print(light_sampler.dem)
 print(batch.detectors[0])
 ```
 
-Light samplers return `dem is None`; APIs that require DEM metadata reject them
-with `ValueError`.
+The same light path is available through the high-level simulator:
+
+```python
+light_simulator = DemFaultScopeSimulator(circuit, materialize_dem=False)
+batch = light_simulator.run_batch(shots=64, seed=7)
+```
+
+Light samplers and light simulators return `dem is None`; APIs that require DEM
+metadata reject them with `ValueError`.
 
 ## PyMatching Decoding
 
@@ -728,8 +750,8 @@ For occasional inspection, prefer helper methods such as
 | Custom loss over measurement history | Forward estimate with `loss_mask_fn` |
 | Custom decoder over detector syndrome masks | Forward or DEM estimate with decoder |
 | Graphlike matching decoder | DEM + PyMatching |
-| Edge-level hotspot ranking | DEM hotspot estimate |
-| Fast repeated detector syndrome sampling | Generate DEM once, then DEM sampling |
+| Edge-level hotspot ranking | `DemFaultScopeSimulator` or DEM hotspot estimate |
+| Fast repeated detector syndrome sampling | `DemFaultScopeSimulator` or generate DEM once, then DEM sampling |
 | Rust application integration | `faultscope-core` |
 
 Forward and DEM workflows answer related but different questions. Forward

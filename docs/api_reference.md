@@ -21,6 +21,7 @@ re-exported from `faultscope`:
 ```python
 from faultscope import (
     BernoulliPauliNoise,
+    DemFaultScopeSimulator,
     FaultScopeSimulator,
     Circuit,
     Detector,
@@ -45,7 +46,7 @@ Lower-level subsystem modules expose grouped APIs:
 
 ```python
 from faultscope.runtime import compile_native_sampler, generate_native_dem
-from faultscope.dem import DetectorErrorModel, DemHotspotEstimator
+from faultscope.dem import DemFaultScopeSimulator, DetectorErrorModel, DemHotspotEstimator
 ```
 
 ## Core Circuit Objects
@@ -286,6 +287,72 @@ compile_sampler(*, materialize_dem=True) -> NativeDemSampler
 Python `DetectorErrorModel`. In that mode, `sampler.dem is None`. Sampling
 works, but APIs that need DEM metadata, including estimate and hotspot result
 construction, raise `ValueError`.
+
+## DEM Runtime From Circuit
+
+`DemFaultScopeSimulator(circuit, *, detectors=None, observables=None,
+materialize_dem=True)` is the DEM-level counterpart to `FaultScopeSimulator`.
+It compiles a circuit into a detector error model sampler in Rust, then samples
+DEM edges directly. It does not run the forward stabilizer trajectory and does
+not expose measurement, `x_frame`, or `z_frame` masks.
+
+Read-only attributes:
+
+- `circuit`
+- `dem: DetectorErrorModel | None`
+- `edge_count: int`
+
+Methods:
+
+```text
+run_batch(*, shots, rng=None, seed=None, return_edge_events=True) -> DemSampleBatch
+sample(shots, seed=None, rng=None) -> DemSampleBatch
+run_native_batch(shots, seed=None) -> native DEM batch handle
+estimate_default(shots, seed=None, baseline=None, top_k=10) -> DemHotspotEstimate
+estimate(
+    *,
+    shots,
+    seed=None,
+    decoder=None,
+    correction_mask_fn=None,
+    loss_mask_fn=None,
+    baseline=None,
+    top_k=10,
+    aggregate_hotspots=True,
+) -> DemHotspotEstimate
+estimate_hotspots(batch, loss_mask, baseline=None, top_k=10) -> DemHotspotEstimate
+```
+
+`materialize_dem=False` uses the same light sampling path as
+`compile_native_dem_sampler_from_circuit(..., materialize_dem=False)`. In that
+mode `sim.dem is None`; `run_batch(...)`, `sample(...)`, and
+`run_native_batch(...)` work, while metadata-dependent estimate/hotspot APIs
+raise `ValueError`.
+
+Example:
+
+```python
+from faultscope import BernoulliPauliNoise, Circuit, DemFaultScopeSimulator
+from faultscope import NoiseLocation, Operation
+
+noise = NoiseLocation("x0", BernoulliPauliNoise("X"), 0.125, (0,))
+circuit = Circuit(
+    1,
+    (
+        Operation.noise(noise),
+        Operation.measure(0, key="m0"),
+        Operation.detector(("m0",), detector_id=0),
+        Operation.observable_include(0, ("m0",)),
+    ),
+)
+
+sim = DemFaultScopeSimulator(circuit)
+batch = sim.run_batch(shots=64, seed=5)
+result = sim.estimate(shots=256, seed=6, top_k=1)
+
+print(batch.detector_bit(0, 0))
+print(result.top_edges(1)[0].edge_index)
+```
 
 Native decoder handles:
 

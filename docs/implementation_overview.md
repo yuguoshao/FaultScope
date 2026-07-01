@@ -6,7 +6,7 @@
 本页描述 FaultScope 当前实现背后的数学模型和运行时边界。产品执行路径是 Rust
 `faultscope-core` 中的 bit-packed batch runtime，通过 Python API 暴露为
 `FaultScopeSimulator`、`DetectorErrorModelGenerator` 和
-`DemHotspotEstimator`。本文中的 trajectory 是概念模型；实际 Python 回调接收的是
+`DemFaultScopeSimulator`、`DemHotspotEstimator`。本文中的 trajectory 是概念模型；实际 Python 回调接收的是
 batch mask 对象，而不是逐 shot trajectory 对象。本文的 DEM 术语使用 detector error model
 formalism：detector matrix \(D\) 表示 measurement parity constraints，measurement syndrome
 matrix \(\Omega\) 表示 circuit errors 翻转哪些 measurements，detector error matrix
@@ -236,6 +236,8 @@ edge 会被拒绝，因为 matching decoder 无法从 syndrome 中恢复这种�
 ## DEM Hotspot Mode
 
 `DemHotspotEstimator` 不执行 stabilizer circuit，而是在 detector error model 上直接采样。
+`DemFaultScopeSimulator(circuit)` 是同一 Rust DEM sampler 的 circuit 入口：构造时先生成
+DEM sampling edges，运行时仍然只采样 DEM edges，不回到 forward packed trajectory。
 每条 DEM edge 是独立 Bernoulli instruction：
 
 ```text
