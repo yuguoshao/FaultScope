@@ -615,7 +615,26 @@ Inspect backend installation steps with:
 ```bash
 python -m faultscope.backends install pymatching --dry-run
 python -m faultscope.backends install fusion-blossom --dry-run
+python -m faultscope.backends install bpdecoder --dry-run
 python -m faultscope.backends install bposd --dry-run
+```
+
+The `bpdecoder` entry is the optional BP-family binary-linear backend. Its
+backend package is `faultscope-bpdecoder`; the install helper's dry run shows
+the concrete package command:
+
+```bash
+python -m pip install --upgrade faultscope-bpdecoder
+```
+
+After installation, construct it through the friendly proxy or the generic
+backend resolver:
+
+```python
+from faultscope.decoders import NativeBpDecoder, create_native_decoder
+
+decoder = NativeBpDecoder.from_dem(dem)
+decoder = create_native_decoder("bpdecoder", dem=dem)
 ```
 
 For local development, activate the project virtual environment, or otherwise

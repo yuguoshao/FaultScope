@@ -376,8 +376,9 @@ Official backend installation metadata lives in the built-in catalog. Each
 entry records the backend name, backend package, proxy class name, target
 problem view, source repository, default revision, installability, and a short
 description. The catalog includes `pymatching` and `fusion-blossom` for
-graphlike MWPM-style decoding and reserves `bposd` for binary-linear
-BP+OSD/LDPC decoding.
+graphlike MWPM-style decoding, includes `bpdecoder` for BP-family binary-linear
+decoding through the `faultscope-bpdecoder` package, and reserves `bposd` for
+binary-linear BP+OSD/LDPC decoding.
 
 Python can inspect compiled native backend names:
 
@@ -469,6 +470,7 @@ Installation helpers are uniform for catalog entries:
 ```bash
 python -m faultscope.backends install fusion-blossom --dry-run
 python -m faultscope.backends install pymatching --dry-run
+python -m faultscope.backends install bpdecoder --dry-run
 python -m faultscope.backends install bposd --dry-run
 ```
 
@@ -482,11 +484,13 @@ construction raises an install hint:
 
 ```python
 from faultscope.decoders import (
+    NativeBpDecoder,
     NativeFusionBlossomDecoder,
     NativeMwpmDecoder,
     NativePyMatchingDecoder,
 )
 
+decoder = NativeBpDecoder.from_dem(dem)  # raises until installed
 decoder = NativeFusionBlossomDecoder.from_dem(dem)  # raises until installed
 decoder = NativeMwpmDecoder.from_dem(dem)  # raises until installed
 decoder = NativePyMatchingDecoder.from_dem(dem)  # raises until installed
@@ -513,7 +517,15 @@ virtual environment, or with `.venv/bin` explicitly on `PATH`:
 .venv/bin/python -m pip install -e backends/faultscope-fusion-blossom
 ```
 
-The package declares:
+The `bpdecoder` backend is an official post-install backend, but its source
+checkout lives outside this repository. For local development, install the
+external `bpdecoder.rs` checkout into the same environment:
+
+```bash
+.venv/bin/python -m pip install -e /path/to/bpdecoder.rs --no-build-isolation
+```
+
+The in-repo backend packages declare:
 
 ```toml
 [project.entry-points."faultscope.native_decoders"]
@@ -521,8 +533,8 @@ pymatching = "faultscope_pymatching:backend_manifest"
 fusion-blossom = "faultscope_fusion_blossom:backend_manifest"
 ```
 
-Its manifest returns the current FaultScope native decoder plugin ABI, package
-metadata, and one or more decoder classes. The class implements
+Each manifest returns the current FaultScope native decoder plugin ABI, package
+metadata, and one or more decoder classes. Each class implements
 `from_dem(...)` and `from_circuit(...)`; construction compiles the DEM to a
 `GraphlikeDecodingProblem`, passes that metadata to the package's Rust/PyO3
 extension, and stores external native decoder state in a PyCapsule.
