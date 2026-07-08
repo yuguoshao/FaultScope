@@ -20,9 +20,11 @@ packed detector syndrome masks -> decoder -> packed observable correction masks
 ```
 
 A decoder can and usually should use circuit-derived information, but only
-during construction. The decoder object should compile that information into
-its own graph, matrices, weights, or lookup tables. Batch decoding should not
-read the original circuit or DEM again.
+during construction. In detector error model language, construction consumes
+the detector error matrix \(H=D\Omega\), logical fault matrix, probabilities,
+weights, coordinates, or edge metadata and compiles them into its own graph,
+matrices, weights, or lookup tables. Batch decoding should not read the original
+circuit or DEM again.
 
 The runtime expects detector and observable ids to be stable:
 
@@ -82,7 +84,7 @@ class MyDecoder:
         self.problem = problem
 
         # Compile the problem into the decoder's internal representation here.
-        # For example: matching graph, sparse parity-check matrix, weights, etc.
+        # For example: matching graph, sparse detector error matrix H, weights, etc.
 
     def decode_batch_masks(self, batch):
         syndrome_masks = [
@@ -119,7 +121,7 @@ packed syndrome bits. The least significant bit is shot 0. The return value
 must be `dict[int, int]`, mapping observable id to a packed correction mask.
 
 Python decoders are ideal for correctness prototypes and small experiments.
-They are not the final high-performance path, because detector masks and
+They are not the final high-performance path, because detector syndrome masks and
 correction masks cross the Python boundary.
 
 ## Getting Circuit And DEM Information
@@ -149,8 +151,8 @@ Use the view that matches the decoder family:
 | View | Intended backend |
 | --- | --- |
 | `IndexedDem` | General DEM indexing, edge metadata, and stable order inspection |
-| `GraphlikeDecodingProblem` | MWPM-style decoders, including future fusion-blossom adapters |
-| `BinaryLinearDecodingProblem` | BP+OSD/LDPC-style decoders using sparse binary `H` and `F` |
+| `GraphlikeDecodingProblem` | MWPM-style decoders using graphlike columns of the detector error matrix |
+| `BinaryLinearDecodingProblem` | BP+OSD/LDPC-style decoders using sparse binary detector error matrix `H` and logical fault matrix `F` |
 
 `GraphlikeDecodingProblem` rejects hyperedges and undetectable pure logical
 edges, because matching-style backends cannot infer those errors from syndrome
@@ -168,7 +170,7 @@ batch data through Python.
 ## Native Decoder Backends
 
 Native decoders are Python-owned handles around Rust decoder objects. They are
-the intended path for production backends because the batch syndrome masks,
+the intended path for production backends because the detector syndrome masks,
 correction masks, default residual loss, and hotspot aggregation stay in native
 memory.
 
@@ -261,8 +263,8 @@ pub struct MyNativeDecoder {
 }
 ```
 
-The Python object only owns the handle. It does not own batch detector masks or
-correction masks during `estimate(...)`.
+The Python object only owns the handle. It does not own batch detector syndrome
+masks or correction masks during `estimate(...)`.
 
 The core Rust contract is `NativeBatchDecoder`:
 
@@ -374,8 +376,9 @@ Official backend installation metadata lives in the built-in catalog. Each
 entry records the backend name, backend package, proxy class name, target
 problem view, source repository, default revision, installability, and a short
 description. The catalog includes `pymatching` and `fusion-blossom` for
-graphlike MWPM-style decoding and reserves `bposd` for binary-linear
-BP+OSD/LDPC decoding.
+graphlike MWPM-style decoding, includes `bpdecoder` for BP-family binary-linear
+decoding through the `faultscope-bpdecoder` package, and reserves `bposd` for
+binary-linear BP+OSD/LDPC decoding.
 
 Python can inspect compiled native backend names:
 
@@ -402,6 +405,7 @@ Python can use either friendly proxy classes or a generic resolver:
 ```python
 from faultscope.decoders import (
     NativeFusionBlossomDecoder,
+    NativeMwpmDecoder,
     NativePyMatchingDecoder,
     create_native_decoder,
     get_native_decoder_class,
@@ -409,6 +413,8 @@ from faultscope.decoders import (
 
 decoder = NativePyMatchingDecoder.from_dem(dem)
 decoder = create_native_decoder("pymatching", dem=dem)
+decoder = NativeMwpmDecoder.from_dem(dem)
+decoder = create_native_decoder("mwpm", dem=dem)
 decoder = NativeFusionBlossomDecoder.from_dem(dem)
 decoder = create_native_decoder("fusion-blossom", dem=dem)
 Decoder = get_native_decoder_class("fusion-blossom")
@@ -464,6 +470,7 @@ Installation helpers are uniform for catalog entries:
 ```bash
 python -m faultscope.backends install fusion-blossom --dry-run
 python -m faultscope.backends install pymatching --dry-run
+python -m faultscope.backends install bpdecoder --dry-run
 python -m faultscope.backends install bposd --dry-run
 ```
 
@@ -476,9 +483,16 @@ When the backend package is missing, the public proxy remains importable but
 construction raises an install hint:
 
 ```python
-from faultscope.decoders import NativeFusionBlossomDecoder, NativePyMatchingDecoder
+from faultscope.decoders import (
+    NativeBpDecoder,
+    NativeFusionBlossomDecoder,
+    NativeMwpmDecoder,
+    NativePyMatchingDecoder,
+)
 
+decoder = NativeBpDecoder.from_dem(dem)  # raises until installed
 decoder = NativeFusionBlossomDecoder.from_dem(dem)  # raises until installed
+decoder = NativeMwpmDecoder.from_dem(dem)  # raises until installed
 decoder = NativePyMatchingDecoder.from_dem(dem)  # raises until installed
 ```
 
@@ -503,7 +517,15 @@ virtual environment, or with `.venv/bin` explicitly on `PATH`:
 .venv/bin/python -m pip install -e backends/faultscope-fusion-blossom
 ```
 
-The package declares:
+The `bpdecoder` backend is an official post-install backend, but its source
+checkout lives outside this repository. For local development, install the
+external `bpdecoder.rs` checkout into the same environment:
+
+```bash
+.venv/bin/python -m pip install -e /path/to/bpdecoder.rs --no-build-isolation
+```
+
+The in-repo backend packages declare:
 
 ```toml
 [project.entry-points."faultscope.native_decoders"]
@@ -511,8 +533,8 @@ pymatching = "faultscope_pymatching:backend_manifest"
 fusion-blossom = "faultscope_fusion_blossom:backend_manifest"
 ```
 
-Its manifest returns the current FaultScope native decoder plugin ABI, package
-metadata, and one or more decoder classes. The class implements
+Each manifest returns the current FaultScope native decoder plugin ABI, package
+metadata, and one or more decoder classes. Each class implements
 `from_dem(...)` and `from_circuit(...)`; construction compiles the DEM to a
 `GraphlikeDecodingProblem`, passes that metadata to the package's Rust/PyO3
 extension, and stores external native decoder state in a PyCapsule.

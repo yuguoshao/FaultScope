@@ -1,6 +1,7 @@
 """Forward noise-aware stabilizer trajectory simulator."""
 
 from faultscope.runtime import (
+    DemFaultScopeSimulator,
     FaultScopeSimulator,
     SampleBatch,
     UnsupportedBatchCircuitError,
@@ -48,10 +49,12 @@ from faultscope.runtime import (
 )
 from faultscope.decoders import (
     NativeBatchDecoder,
+    NativeBpDecoder,
     NativeBposdDecoder,
     NativeDecoderBackendUnavailable,
     NativeFusionBlossomDecoder,
     NativeGraphlikeDetectorCopyDecoder,
+    NativeMwpmDecoder,
     NativeNoCorrectionDecoder,
     NativePyMatchingDecoder,
     PyMatchingDecoder,
@@ -82,6 +85,7 @@ __all__ = [
     "DemHotspotEstimate",
     "DemLocationHotspot",
     "DemLocationMetadata",
+    "DemFaultScopeSimulator",
     "Detector",
     "DetectorErrorEdge",
     "DetectorErrorModel",
@@ -94,12 +98,14 @@ __all__ = [
     "LogicalObservable",
     "MeasurementBitFlip",
     "NativeBatchDecoder",
+    "NativeBpDecoder",
     "NativeBposdDecoder",
     "NativeDecoderBackendUnavailable",
     "NativeFusionBlossomDecoder",
     "NativeDemSampler",
     "NativeDemGenerator",
     "NativeGraphlikeDetectorCopyDecoder",
+    "NativeMwpmDecoder",
     "NativeNoCorrectionDecoder",
     "NativePackedSampler",
     "NativePyMatchingDecoder",

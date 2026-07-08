@@ -1,8 +1,8 @@
 use crate::*;
 use faultscope_core::{
-    FaultScopeSimulator as CoreFaultScopeSimulator,
     DemHotspotEstimator as CoreDemHotspotEstimator,
     DetectorErrorModelGenerator as CoreDetectorErrorModelGenerator,
+    FaultScopeSimulator as CoreFaultScopeSimulator,
 };
 
 #[pyclass]
@@ -18,12 +18,15 @@ pub(crate) struct NativePackedBatch {
     pub(crate) state: RuntimeState,
 }
 
-#[pyclass(
-    name = "FaultScopeSimulator",
-    module = "faultscope._native"
-)]
+#[pyclass(name = "FaultScopeSimulator", module = "faultscope._native")]
 pub(crate) struct PyFaultScopeSimulator {
     sampler: NativePackedSampler,
+}
+
+#[pyclass(name = "DemFaultScopeSimulator", module = "faultscope._native")]
+pub(crate) struct PyDemFaultScopeSimulator {
+    py_circuit: Py<PyAny>,
+    sampler: NativeDemSampler,
 }
 
 #[pymethods]
@@ -329,6 +332,152 @@ impl PyFaultScopeSimulator {
 }
 
 #[pymethods]
+impl PyDemFaultScopeSimulator {
+    #[new]
+    #[pyo3(signature = (circuit, *, detectors=None, observables=None, materialize_dem=true))]
+    pub(crate) fn new(
+        py: Python<'_>,
+        circuit: &Bound<'_, PyAny>,
+        detectors: Option<&Bound<'_, PyAny>>,
+        observables: Option<&Bound<'_, PyAny>>,
+        materialize_dem: bool,
+    ) -> PyResult<Self> {
+        Ok(Self {
+            py_circuit: circuit.clone().unbind(),
+            sampler: native_dem_sampler_from_circuit(
+                py,
+                circuit,
+                detectors,
+                observables,
+                materialize_dem,
+            )?,
+        })
+    }
+
+    #[getter]
+    pub(crate) fn circuit(&self, py: Python<'_>) -> PyObject {
+        self.py_circuit.clone_ref(py)
+    }
+
+    #[getter]
+    pub(crate) fn dem(&self, py: Python<'_>) -> PyObject {
+        self.sampler.dem(py)
+    }
+
+    #[getter]
+    pub(crate) fn edge_count(&self) -> usize {
+        self.sampler.edge_count
+    }
+
+    #[pyo3(signature = (*, shots, rng=None, seed=None, return_edge_events=true))]
+    pub(crate) fn run_batch(
+        &self,
+        py: Python<'_>,
+        shots: usize,
+        rng: Option<&Bound<'_, PyAny>>,
+        seed: Option<u64>,
+        return_edge_events: bool,
+    ) -> PyResult<PyDemSampleBatch> {
+        let seed = seed_from_optional_rng(rng, seed)?;
+        self.sampler
+            .run_batch(py, shots, seed, return_edge_events, None)
+    }
+
+    #[pyo3(signature = (shots, seed=None, rng=None))]
+    pub(crate) fn sample(
+        &self,
+        py: Python<'_>,
+        shots: usize,
+        seed: Option<u64>,
+        rng: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<PyDemSampleBatch> {
+        let seed = seed_from_optional_rng(rng, seed)?;
+        self.sampler.run_batch(py, shots, seed, true, None)
+    }
+
+    #[pyo3(signature = (shots, seed=None))]
+    pub(crate) fn run_native_batch(
+        &self,
+        py: Python<'_>,
+        shots: usize,
+        seed: Option<u64>,
+    ) -> PyResult<NativeDemBatch> {
+        self.sampler.run_native_batch(py, shots, seed)
+    }
+
+    #[pyo3(signature = (shots, seed=None, baseline=None, top_k=10))]
+    pub(crate) fn estimate_default(
+        &self,
+        py: Python<'_>,
+        shots: usize,
+        seed: Option<u64>,
+        baseline: Option<&Bound<'_, PyAny>>,
+        top_k: usize,
+    ) -> PyResult<PyDemHotspotEstimate> {
+        self.sampler
+            .estimate_default(py, shots, seed, baseline, top_k)
+    }
+
+    #[pyo3(signature = (
+        *,
+        shots,
+        seed=None,
+        decoder=None,
+        correction_mask_fn=None,
+        loss_mask_fn=None,
+        baseline=None,
+        top_k=10,
+        aggregate_hotspots=true
+    ))]
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn estimate(
+        &self,
+        py: Python<'_>,
+        shots: usize,
+        seed: Option<u64>,
+        decoder: Option<&Bound<'_, PyAny>>,
+        correction_mask_fn: Option<&Bound<'_, PyAny>>,
+        loss_mask_fn: Option<&Bound<'_, PyAny>>,
+        baseline: Option<&Bound<'_, PyAny>>,
+        top_k: usize,
+        aggregate_hotspots: bool,
+    ) -> PyResult<PyDemHotspotEstimate> {
+        self.sampler.estimate(
+            py,
+            shots,
+            seed,
+            decoder,
+            correction_mask_fn,
+            loss_mask_fn,
+            baseline,
+            top_k,
+            aggregate_hotspots,
+        )
+    }
+
+    #[pyo3(signature = (batch, loss_mask, baseline=None, top_k=10))]
+    pub(crate) fn estimate_hotspots(
+        &self,
+        py: Python<'_>,
+        batch: PyRef<'_, NativeDemBatch>,
+        loss_mask: &Bound<'_, PyAny>,
+        baseline: Option<f64>,
+        top_k: usize,
+    ) -> PyResult<PyDemHotspotEstimate> {
+        self.sampler
+            .estimate_hotspots(py, batch, loss_mask, baseline, top_k)
+    }
+
+    pub(crate) fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
+        Ok(format!(
+            "DemFaultScopeSimulator(circuit={}, edge_count={})",
+            self.py_circuit.bind(py).repr()?,
+            self.sampler.edge_count,
+        ))
+    }
+}
+
+#[pymethods]
 impl NativePackedBatch {
     #[getter]
     pub(crate) fn shots(&self) -> usize {
@@ -579,6 +728,39 @@ impl NativeDemSampler {
                 if let Some(native_decoder) = native_decoder_from_py(decoder)? {
                     let estimate = py.allow_threads(|| {
                         let mut rng = SmallRng::new(seed.unwrap_or(0x95f2_04dc_4291_a715));
+                        if !aggregate_hotspots && native_decoder.supports_detector_event_batch() {
+                            let event_batch = self
+                                .simulator
+                                .run_detector_event_shot_batch_with_rng(
+                                    shots,
+                                    &mut rng,
+                                    native_decoder.detector_ids(),
+                                    &self.observables,
+                                )
+                                .map_err(|err| PyValueError::new_err(err.to_string()))?;
+                            let detector_view = faultscope_core::DetectorEventShotBatchView::new(
+                                native_decoder.detector_ids(),
+                                &event_batch.offsets,
+                                &event_batch.events,
+                                event_batch.shots,
+                            )
+                            .map_err(|err| PyValueError::new_err(err.to_string()))?;
+                            let corrections = native_decoder
+                                .decode_detector_event_batch_checked(detector_view)
+                                .map_err(|err| PyValueError::new_err(err.to_string()))?;
+                            let mean_loss = packed_residual_mean_loss_from_rows(
+                                &event_batch.observable_ids,
+                                &event_batch.observable_data,
+                                event_batch.observable_byte_count,
+                                &corrections,
+                                event_batch.shots,
+                            )?;
+                            return Ok::<DemEstimate, PyErr>(dem_estimate_from_mean_loss(
+                                event_batch.shots,
+                                mean_loss,
+                                baseline,
+                            ));
+                        }
                         if !aggregate_hotspots && native_decoder.supports_packed_batch() {
                             let packed_batch = self
                                 .simulator
@@ -1364,10 +1546,10 @@ pub(crate) fn core_dem_generator_from_circuit(
             Some(items) if !items.is_none() => Some(parse_dem_observable_sequence(items)?),
             _ => None,
         };
-        let detector_specs =
-            detector_specs.unwrap_or_else(|| faultscope_core::detectors_from_circuit(&core_circuit));
-        let observable_specs =
-            observable_specs.unwrap_or_else(|| faultscope_core::observables_from_circuit(&core_circuit));
+        let detector_specs = detector_specs
+            .unwrap_or_else(|| faultscope_core::detectors_from_circuit(&core_circuit));
+        let observable_specs = observable_specs
+            .unwrap_or_else(|| faultscope_core::observables_from_circuit(&core_circuit));
         return CoreDetectorErrorModelGenerator::new_with_shared_event_plan(
             core_circuit,
             detector_specs,
@@ -1389,8 +1571,8 @@ pub(crate) fn core_dem_generator_from_circuit(
     };
     let detector_specs =
         detector_specs.unwrap_or_else(|| faultscope_core::detectors_from_circuit(&core_circuit));
-    let observable_specs =
-        observable_specs.unwrap_or_else(|| faultscope_core::observables_from_circuit(&core_circuit));
+    let observable_specs = observable_specs
+        .unwrap_or_else(|| faultscope_core::observables_from_circuit(&core_circuit));
     match cached_event_plan {
         Some(event_plan) => CoreDetectorErrorModelGenerator::new_with_shared_event_plan(
             std::sync::Arc::new(core_circuit),
@@ -1591,6 +1773,7 @@ pub(crate) fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<PyDemEdgeHotspot>()?;
     module.add_class::<PyDemHotspotEstimate>()?;
     module.add_class::<PyFaultScopeSimulator>()?;
+    module.add_class::<PyDemFaultScopeSimulator>()?;
     module.add_class::<NativePackedSampler>()?;
     module.add_class::<NativePackedBatch>()?;
     module.add_class::<NativeDemSampler>()?;

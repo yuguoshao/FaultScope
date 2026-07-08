@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Callable, Mapping
 
 from faultscope._native import (
+    DemFaultScopeSimulator,
     DemHotspotEstimator,
     DemSampleBatch,
     DemEdgeHotspot,

@@ -91,6 +91,26 @@ OFFICIAL_BACKEND_CATALOG: dict[str, NativeDecoderBackendCatalogEntry] = {
             "Optional native PyMatching sparse-blossom graphlike decoder backend."
         ),
     ),
+    "mwpm": NativeDecoderBackendCatalogEntry(
+        name="mwpm",
+        package_name="faultscope-mwpm",
+        decoder_class_name="NativeMwpmDecoder",
+        problem_kind="graphlike",
+        repo_url="https://github.com/Quon-team/mwpm.rs.git",
+        default_rev="main",
+        installable=True,
+        description="Optional mwpm.rs graphlike MWPM decoder backend.",
+    ),
+    "bpdecoder": NativeDecoderBackendCatalogEntry(
+        name="bpdecoder",
+        package_name="faultscope-bpdecoder",
+        decoder_class_name="NativeBpDecoder",
+        problem_kind="binary-linear",
+        repo_url=None,
+        default_rev=None,
+        installable=True,
+        description="Optional bpdecoder.rs BP-family binary-linear decoder backend.",
+    ),
     "bposd": NativeDecoderBackendCatalogEntry(
         name="bposd",
         package_name="faultscope-bposd",

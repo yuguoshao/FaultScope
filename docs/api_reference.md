@@ -2,7 +2,10 @@
 
 FaultScope is a Rust Cargo workspace with a Python API. The product runtime lives in
 `faultscope-core` and is exposed to Python through the private extension module
-`faultscope._native`. User code should import from the public Python modules:
+`faultscope._native`. DEM APIs use detector error model terminology: detector
+declarations represent detector matrix rows, generated DEM edges are columns of
+the detector error matrix \(H=D\Omega\), and decoder-ready views expose that
+sparse binary structure. User code should import from the public Python modules:
 `faultscope`, `faultscope.core`, `faultscope.runtime`, `faultscope.dem`, `faultscope.decoders`,
 `faultscope.io`, and `faultscope.viz`.
 
@@ -18,6 +21,7 @@ re-exported from `faultscope`:
 ```python
 from faultscope import (
     BernoulliPauliNoise,
+    DemFaultScopeSimulator,
     FaultScopeSimulator,
     Circuit,
     Detector,
@@ -25,6 +29,7 @@ from faultscope import (
     LogicalObservable,
     NoiseLocation,
     Operation,
+    NativeMwpmDecoder,
     NativePyMatchingDecoder,
     PyMatchingDecoder,
 )
@@ -41,7 +46,7 @@ Lower-level subsystem modules expose grouped APIs:
 
 ```python
 from faultscope.runtime import compile_native_sampler, generate_native_dem
-from faultscope.dem import DetectorErrorModel, DemHotspotEstimator
+from faultscope.dem import DemFaultScopeSimulator, DetectorErrorModel, DemHotspotEstimator
 ```
 
 ## Core Circuit Objects
@@ -283,6 +288,72 @@ Python `DetectorErrorModel`. In that mode, `sampler.dem is None`. Sampling
 works, but APIs that need DEM metadata, including estimate and hotspot result
 construction, raise `ValueError`.
 
+## DEM Runtime From Circuit
+
+`DemFaultScopeSimulator(circuit, *, detectors=None, observables=None,
+materialize_dem=True)` is the DEM-level counterpart to `FaultScopeSimulator`.
+It compiles a circuit into a detector error model sampler in Rust, then samples
+DEM edges directly. It does not run the forward stabilizer trajectory and does
+not expose measurement, `x_frame`, or `z_frame` masks.
+
+Read-only attributes:
+
+- `circuit`
+- `dem: DetectorErrorModel | None`
+- `edge_count: int`
+
+Methods:
+
+```text
+run_batch(*, shots, rng=None, seed=None, return_edge_events=True) -> DemSampleBatch
+sample(shots, seed=None, rng=None) -> DemSampleBatch
+run_native_batch(shots, seed=None) -> native DEM batch handle
+estimate_default(shots, seed=None, baseline=None, top_k=10) -> DemHotspotEstimate
+estimate(
+    *,
+    shots,
+    seed=None,
+    decoder=None,
+    correction_mask_fn=None,
+    loss_mask_fn=None,
+    baseline=None,
+    top_k=10,
+    aggregate_hotspots=True,
+) -> DemHotspotEstimate
+estimate_hotspots(batch, loss_mask, baseline=None, top_k=10) -> DemHotspotEstimate
+```
+
+`materialize_dem=False` uses the same light sampling path as
+`compile_native_dem_sampler_from_circuit(..., materialize_dem=False)`. In that
+mode `sim.dem is None`; `run_batch(...)`, `sample(...)`, and
+`run_native_batch(...)` work, while metadata-dependent estimate/hotspot APIs
+raise `ValueError`.
+
+Example:
+
+```python
+from faultscope import BernoulliPauliNoise, Circuit, DemFaultScopeSimulator
+from faultscope import NoiseLocation, Operation
+
+noise = NoiseLocation("x0", BernoulliPauliNoise("X"), 0.125, (0,))
+circuit = Circuit(
+    1,
+    (
+        Operation.noise(noise),
+        Operation.measure(0, key="m0"),
+        Operation.detector(("m0",), detector_id=0),
+        Operation.observable_include(0, ("m0",)),
+    ),
+)
+
+sim = DemFaultScopeSimulator(circuit)
+batch = sim.run_batch(shots=64, seed=5)
+result = sim.estimate(shots=256, seed=6, top_k=1)
+
+print(batch.detector_bit(0, 0))
+print(result.top_edges(1)[0].edge_index)
+```
+
 Native decoder handles:
 
 ```python
@@ -303,7 +374,7 @@ decoder.observable_ids
 Native decoders are Python-owned handles around Rust decoder objects. When a
 native decoder is passed to `estimate(..., decoder=decoder)` without
 `loss_mask_fn` or `correction_mask_fn`, FaultScope uses the native fast path:
-detector masks, correction masks, default residual loss, and hotspot
+detector syndrome masks, correction masks, default residual loss, and hotspot
 aggregation stay in Rust. If a Python loss or correction callback is supplied,
 FaultScope uses the compatibility path and may call `decoder.decode_batch_masks(...)`.
 Python classes that merely define or subclass `decode_batch_masks(...)` remain
@@ -312,11 +383,11 @@ ordinary Python decoders and do not enter the native fast path.
 `available_native_decoders()` returns the names of compiled native decoder
 backends. The default build exposes `"no-correction"` and
 `"graphlike-detector-copy"`. Optional post-install backends can add names such
-as `"pymatching"` and `"fusion-blossom"` through the
+as `"pymatching"`, `"fusion-blossom"`, and `"mwpm"` through the
 `faultscope.native_decoders` entry point group. Use
 `get_native_decoder_class(name)` or `create_native_decoder(name, dem=dem)` for a
 uniform API. Friendly proxies such as `NativePyMatchingDecoder`,
-`NativeFusionBlossomDecoder`, and `NativeBposdDecoder` remain importable;
+`NativeFusionBlossomDecoder`, `NativeMwpmDecoder`, and `NativeBposdDecoder` remain importable;
 construction raises an install hint until a compatible backend package is
 installed. A post-install backend enters the native fast path only when the
 constructed decoder exposes the FaultScope native decoder PyCapsule ABI; otherwise it
@@ -324,7 +395,9 @@ remains a normal Python decoder.
 
 ## Detector Error Models
 
-`Detector(id, measurement_keys, coords=None)` declares one detector.
+`Detector(id, measurement_keys, coords=None)` declares one detector, meaning one
+parity constraint over measurement outcomes. A collection of `Detector`
+instances is the API representation of detector matrix \(D\).
 
 Read-only attributes:
 
@@ -337,7 +410,9 @@ declares one logical observable. Observables can be based on measurement keys,
 final Pauli-frame projection, or both.
 
 `DetectorErrorEdge(probability, detectors, observables, location_id, event, tags=None)`
-stores one DEM edge.
+stores one DEM edge. Its `detectors` field is the support of one detector error
+matrix column; its `observables` field is the support of the corresponding
+logical fault column.
 
 Read-only edge attributes:
 
@@ -353,7 +428,8 @@ Methods:
 - `to_dem_line() -> str`
 
 `DetectorErrorModel(detectors, observables, edges)` stores a typed detector
-error model.
+error model: detector declarations, logical observable declarations, and
+materialized detector error matrix columns with probabilities.
 
 Methods:
 
@@ -383,9 +459,9 @@ counts, `edge_summary`, and compact `repr(...)` metadata for inspection.
 `detector_coords` follows `detector_ids` order. `GraphlikeDecodingProblem`
 targets MWPM-style backends such as future fusion-blossom adapters.
 `BinaryLinearDecodingProblem` targets BP+OSD/LDPC-style backends with sparse
-binary `H` and `F` matrices. These objects intentionally do not expose
-`to_numpy_*` hot-path helpers; native decoders should consume the native view
-without moving masks through Python.
+binary detector error matrix `H` and logical fault matrix `F`. These objects
+intentionally do not expose `to_numpy_*` hot-path helpers; native decoders
+should consume the native view without moving masks through Python.
 
 Example:
 

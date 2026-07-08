@@ -1,8 +1,13 @@
 # FaultScope Documentation
 
 FaultScope is a noise-aware QEC fault attribution toolkit with a Rust core and
-Python API. It supports packed stabilizer batch sampling, detector error model
-generation, detector-level sampling, decoder integration, and noise hotspot
+Python API. It follows the detector error model formalism for noisy Clifford
+circuits: detectors are parity constraints on measurement outcomes, the detector
+matrix \(D\) collects those constraints, the measurement syndrome matrix
+\(\Omega\) records which measurements each circuit error flips, and the detector
+error matrix \(H = D\Omega\) records which detectors each error violates. The
+runtime supports packed stabilizer batch sampling, detector error model
+generation, detector syndrome sampling, decoder integration, and noise hotspot
 estimation for stabilizer-compatible quantum error correction workflows.
 
 ## Start Here

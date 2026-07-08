@@ -2,8 +2,9 @@
 
 Official optional FaultScope PyMatching backend.
 
-This package builds a native decoder from FaultScope graphlike DEM problem views and
-exposes it through the FaultScope native decoder PyCapsule ABI. It uses pinned
+This package builds a native decoder from FaultScope graphlike detector error
+matrix problem views and exposes it through the FaultScope native decoder
+PyCapsule ABI. It uses pinned
 PyMatching sparse-blossom C++ source internally; it does not call the Python
 `PyMatchingDecoder` hot path.
 

@@ -1,8 +1,11 @@
-# FaultScope 理论原理与公式细节
+# FaultScope 理论原理与 detector error model 公式细节
 
 本文系统整理 FaultScope 的数学模型、score-function estimator、packed batch 计数公式、
-DEM 生成与 DEM hotspot 计算。它描述的是当前公开 runtime 的理论接口：实际 Python
-回调接收 batch mask 对象，而不是逐 shot 的可变 trajectory 对象。
+detector error model 生成与 DEM hotspot 计算。术语遵循 detector error model formalism：
+detectors 是 measurement outcomes 上的 parity constraints，detector matrix \(D\) 收集这些
+constraints，measurement syndrome matrix \(\Omega\) 描述 circuit errors 会翻转哪些 measurements，
+detector error matrix \(H=D\Omega\) 描述 circuit errors 会违反哪些 detectors。本文描述的是当前公开
+runtime 的理论接口：实际 Python 回调接收 batch mask 对象，而不是逐 shot 的可变 trajectory 对象。
 
 实现概览和运行时边界可参考 [FaultScope 实现概览](implementation_overview.md)。
 
@@ -15,8 +18,8 @@ DEM 生成与 DEM hotspot 计算。它描述的是当前公开 runtime 的理论
 \left(
 e_{k,1}, \ldots, e_{k,M},
 m_{k,1}, \ldots, m_{k,R},
-D_k,
-L_k
+s_k,
+o_k
 \right).
 \]
 
@@ -28,17 +31,17 @@ L_k
 - \(E_l\)：packed event mask；第 \(k\) 位为 1 表示 shot \(k\) 在 \(l\) 发生非 identity/flip event。
 - \(m_{k,r}\)：第 \(r\) 个 measurement 在 shot \(k\) 的 classical bit。
 - \(M_{\text{key}}\)：packed measurement mask；第 \(k\) 位为 measurement key 在 shot \(k\) 的值。
-- \(D_k\)：shot \(k\) 的 detector record；它是所有 detector bits \(D_{k,i}\) 组成的向量。
-- \(D_i\)：detector \(i\) 的 packed detector mask。
-- \(D_{k,i}\)：shot \(k\) 上 detector \(i\) 的 bit，满足 \(D_{k,i}=\operatorname{bit}_k(D_i)\)。
-- \(L_k\)：shot \(k\) 的 logical observable record；它是所有 logical observable bits \(L_{k,a}\) 组成的向量。
-- \(L_{k,a}\)：shot \(k\) 上 logical observable \(a\) 的 bit，满足 \(L_{k,a}=\operatorname{bit}_k(O_a)\)。
+- \(s_k\)：shot \(k\) 的 detector syndrome；它是所有 detector bits \(s_{k,i}\) 组成的向量。
+- \(S_i\)：detector \(i\) 的 packed detector syndrome mask。
+- \(s_{k,i}\)：shot \(k\) 上 detector \(i\) 的 syndrome bit，满足 \(s_{k,i}=\operatorname{bit}_k(S_i)\)。
+- \(o_k\)：shot \(k\) 的 logical observable flip record；它是所有 logical observable bits \(o_{k,a}\) 组成的向量。
+- \(o_{k,a}\)：shot \(k\) 上 logical observable \(a\) 的 bit，满足 \(o_{k,a}=\operatorname{bit}_k(O_a)\)。
 - \(O_a\)：logical observable \(a\) 的 packed observable mask。
 - \(C_a\)：decoder 预测的 logical correction mask。
 - \(F\)：loss mask；第 \(k\) 位为 1 表示 shot \(k\) 贡献 loss。
 - \(A\)：all-shot mask，低 \(N\) 位为 1，用来裁剪未使用 bit。
 
-这里的 \(L_k\) 表示 logical observable record，不是 loss。本文把 shot-level loss 写成
+这里的 \(o_k\) 表示 logical observable flip record，不是 loss。本文把 shot-level loss 写成
 \(L_{\mathrm{loss}}(\tau)\)，把 batch-level loss 写成 packed mask \(F\)。
 
 FaultScope 的 batch representation 把每个 boolean shot value 存成一个 Python integer 或 Rust
@@ -50,7 +53,22 @@ FaultScope 的 batch representation 把每个 boolean shot value 存成一个 Py
 \operatorname{popcount}(X) = \text{number of set bits in } X.
 \]
 
-## Packed masks: measurements, detectors, observables
+## Detector formalism 与 packed masks
+
+在论文语言中，一个 detector 是一组 measurement outcomes 上的 parity constraint。若 circuit 有
+\(m\) 个 measurements、\(d\) 个 linearly independent detectors，则 detector matrix
+\(D\in\mathbb{F}_2^{d\times m}\) 的第 \(i\) 行是 detector \(i\) 的 parity vector。对单个 shot 的
+measurement vector \(m_k\)，detector syndrome 是
+
+\[
+s_k = Dm_k.
+\]
+
+这里默认已经把 noiseless deterministic value 平移为 0；也就是 \(s_{k,i}=1\) 表示 detector
+\(i\) 被违反。FaultScope 的 `Detector(id, measurement_keys=...)` 是这行 detector matrix 的
+API 表示；packed runtime 再把所有 shots 的同一个 syndrome bit 存成一个整数 mask。
+
+## Packed masks: measurements, detector syndromes, observables
 
 Python API 暴露的 batch 结果不是逐 shot 的列表，而是一组 keyed packed masks。measurement、
 detector、observable 都遵循同一个约定：dict 的 key 标识一个物理或逻辑量，dict 的 value 是一个
@@ -87,18 +105,18 @@ packed measurement mask。
 ### Detector masks
 
 `batch.detectors` 的类型是 `dict[int, int]`。每个 key 是 detector id，每个 value 是 packed
-detector mask。detector 是若干 measurement masks 的 bitwise XOR parity。若 detector \(i\)
-依赖 measurement keys \(K_i\)，则：
+detector syndrome mask。detector 是若干 measurement masks 的 bitwise XOR parity。若 detector
+\(i\) 依赖 measurement keys \(K_i\)，则：
 
 \[
-D_i = \bigoplus_{m\in K_i} M_m.
+S_i = \bigoplus_{m\in K_i} M_m.
 \]
 
-这里的 XOR 是逐 bit 的：对每个 shot \(k\)，\(D_i\) 的第 \(k\) 位等于该 shot 上所有依赖测量结果的
-parity。也就是：
+这里的 XOR 是逐 bit 的：对每个 shot \(k\)，\(S_i\) 的第 \(k\) 位等于该 shot 上 detector \(i\) 的
+syndrome bit。也就是：
 
 \[
-\operatorname{bit}_k(D_i)
+\operatorname{bit}_k(S_i)
 =
 \bigoplus_{m\in K_i}
 \operatorname{bit}_k(M_m).
@@ -525,95 +543,117 @@ These aggregations use absolute hotspot values, not signed sensitivities.
 
 ## Detector Error Model 语义
 
-Detector Error Model, 简写 DEM，是把原始 circuit 的噪声过程压缩成 detector syndrome 和 logical
-observable flips 的二进制概率模型。它不再保存完整 stabilizer state、逐 shot measurement history
-或 final Pauli frame；它只保存“哪些独立错误机制会以多大概率触发，以及触发后会翻转哪些
-detectors 和 logical observables”。
+Detector error model, 简写 DEM，是把 noisy Clifford circuit 压缩成 noise model、detector error
+matrix 和 logical observable fault information 的二进制概率模型。它不再保存完整 stabilizer state、
+逐 shot measurement history 或 final Pauli frame；它只保存“哪些独立错误机制会以多大概率触发，以及
+触发后会违反哪些 detectors、翻转哪些 logical observables”。
 
-形式上，一个 DEM 可以写成：
-
-\[
-\mathcal{M}_{\mathrm{DEM}}
-=
-(\mathcal{D},\mathcal{O},\mathcal{E}),
-\]
-
-其中：
-
-- \(\mathcal{D}\)：detector 集合。detector bit 是 syndrome bit，表示一组 measurement parity 是否异常。
-- \(\mathcal{O}\)：logical observable 集合。logical observable bit 表示错误是否导致对应 logical observable 翻转。
-- \(\mathcal{E}\)：DEM edge 集合。每条 edge 是一个独立的 Bernoulli 错误机制。
-
-在一个 DEM shot 中，模型先为每条 edge \(e\in\mathcal{E}\) 采样一个发生变量 \(f_e\)。随后所有发生的
-edges 通过 XOR 叠加出 detector syndrome \(D\) 和 logical observable flip record \(O\)：
+设 circuit 有 \(m\) 个 measurements、\(d\) 个 detectors 和 \(e\) 个可枚举 circuit errors。论文中的
+measurement syndrome matrix 是
 
 \[
-D_i = \bigoplus_{e:\ i\in\Delta D_e} f_e,
+\Omega\in\mathbb{F}_2^{m\times e},
 \qquad
-O_a = \bigoplus_{e:\ a\in\Delta L_e} f_e.
+\Omega_{r,j}=1
+\iff
+\text{error } j \text{ flips measurement } r.
 \]
 
-因此 DEM 描述的是 \(P(D,O)\)，也就是 detector syndrome 和 logical flips 的联合分布。decoder 只能
-看到 detector syndrome \(D\)，并尝试预测 logical correction \(C\)；默认 loss 比较的是 residual
-logical flips \(O\oplus C\)。
+给定 detector matrix \(D\in\mathbb{F}_2^{d\times m}\)，detector error matrix 是
 
-这里的 edge \(e\) 不是 circuit gate，也不是某个 shot 中已经发生的错误；它是 DEM 中的一条错误机制
+\[
+H = D\Omega,
+\qquad
+H_{i,j}=1
+\iff
+\text{error } j \text{ violates detector } i.
+\]
+
+如果用 \(G\in\mathbb{F}_2^{o\times e}\) 表示 logical observable fault matrix，则 \(G_{a,j}=1\)
+表示 error \(j\) 翻转 logical observable \(a\)。FaultScope 的 `DetectorErrorModel` 可以看作
+\((\mathcal{D},\mathcal{O},\mathcal{E})\) 的 typed API 表示，其中每条 edge \(j\in\mathcal{E}\)
+materialize 了 \(H\) 的一列和 \(G\) 的一列。
+
+在一个 DEM shot 中，模型先为每条 edge \(j\) 采样一个发生变量 \(f_j\)，得到 circuit error vector
+\(f\)。随后
+
+\[
+s = Hf,
+\qquad
+o = Gf.
+\]
+
+展开到单个 detector 和 observable：
+
+\[
+s_i = \bigoplus_{j:\ H_{i,j}=1} f_j,
+\qquad
+o_a = \bigoplus_{j:\ G_{a,j}=1} f_j.
+\]
+
+因此 DEM 描述的是 \(P(s,o)\)，也就是 detector syndrome 和 logical observable flips 的联合分布。
+decoder 只能看到 detector syndrome \(s\)，并尝试预测 logical correction \(C\)；默认 loss 比较的是
+residual logical flips \(o\oplus C\)。
+
+这里的 edge \(j\) 不是 circuit gate，也不是某个 shot 中已经发生的错误；它是 DEM 中的一条错误机制
 instruction。运行 DEM sampler 时，每条 edge 会被独立采样一次，决定这一类错误机制在当前 shot
 是否发生。
 
-一条 edge \(e\) 记录：
+一条 edge \(j\) 记录：
 
 \[
-e =
-(p_e,\Delta D_e,\Delta L_e,\operatorname{location\_id},\operatorname{event\_label},\operatorname{tags}).
+j =
+(p_j,\Delta S_j,\Delta O_j,\operatorname{location\_id},\operatorname{event\_label},\operatorname{tags}).
 \]
 
 各字段含义：
 
-- \(p_e\)：edge probability，即这条 DEM instruction 在一个 shot 中发生的概率。
-- \(\Delta D_e\)：如果 edge \(e\) 发生，需要翻转的 detector id 集合。
-- \(\Delta L_e\)：如果 edge \(e\) 发生，需要翻转的 logical observable id 集合。
+- \(p_j\)：edge probability，即这条 DEM instruction 在一个 shot 中发生的概率。
+- \(\Delta S_j=\{i:H_{i,j}=1\}\)：如果 edge \(j\) 发生，需要翻转的 detector syndrome ids。
+- \(\Delta O_j=\{a:G_{a,j}=1\}\)：如果 edge \(j\) 发生，需要翻转的 logical observable ids。
 - `location_id`：产生这条 edge 的原始 `NoiseLocation.id`，用于把 edge-level sensitivity 聚合回物理位置。
 - `event_label`：原始噪声事件标签，例如 Pauli event `"X"`、`"YZ"`，或 measurement bit flip 的 `true`。
 - `tags`：从原始 noise location 继承的 metadata，用于按 qubit、round、gate、operation 等维度聚合。
 
-在公式里，\(e\) 常同时被当作 edge 的索引使用。例如 `edge_event_masks[e]` 表示第 \(e\) 条 DEM
-edge 在一批 shots 中的 packed occurrence mask。若引入 Bernoulli 发生变量 \(f_e\)，则：
+在公式里，\(j\) 常同时被当作 edge 的索引使用。例如 `edge_event_masks[j]` 表示第 \(j\) 条 DEM
+edge 在一批 shots 中的 packed occurrence mask。若引入 Bernoulli 发生变量 \(f_j\)，则：
 
 \[
-f_e =
+f_j =
 \begin{cases}
-1, & \text{edge } e \text{ occurred in this shot},\\
+1, & \text{edge } j \text{ occurred in this shot},\\
 0, & \text{otherwise},
 \end{cases}
 \qquad
-f_e \sim \operatorname{Bernoulli}(p_e).
+f_j \sim \operatorname{Bernoulli}(p_j).
 \]
 
 Stim-like text:
 
 ```text
-error(p_e) D0 D3 L0
+error(p_j) D0 D3 L0
 ```
 
-含义是：这条 edge 的 \(p_e\) 是 `p_e`，\(\Delta D_e=\{0,3\}\)，\(\Delta L_e=\{0\}\)。当
-\(f_e=1\) 时，把 detector bits `D0`、`D3` 和 logical observable bit `L0` 全部 xor 一次；当
-\(f_e=0\) 时，它不产生任何 flip。
+含义是：这条 edge 的 \(p_j\) 是 `p_j`，\(\Delta S_j=\{0,3\}\)，\(\Delta O_j=\{0\}\)。当
+\(f_j=1\) 时，把 detector syndrome bits `D0`、`D3` 和 logical observable bit `L0` 全部 xor
+一次；当 \(f_j=0\) 时，它不产生任何 flip。
 
 ## 单错误传播生成 DEM
 
-`DetectorErrorModelGenerator` 对每个 physical noise event 做 single-error propagation。
-概念上：
+`DetectorErrorModelGenerator` 对每个 physical noise event 做 single-error propagation。概念上，它先
+通过 Pauli-frame propagation 得到该 error 对 measurement outcomes 的影响，也就是
+\(\Omega\) 的一列；再用 detector matrix \(D\) 把 measurement flips 投影成 detector error
+matrix \(H\) 的一列。实现也可以等价地用 reference / injected run 的 effect XOR 来计算：
 
 ```text
 reference run:
-    D_ref, L_ref
+    s_ref, o_ref
 
 single injected event (l, event):
-    D_event, L_event
+    s_event, o_event
 
-edge detectors = D_ref xor D_event
-edge observables = L_ref xor L_event
+edge detector syndrome = s_ref xor s_event
+edge logical flips = o_ref xor o_event
 edge probability = p_l(event)
 ```
 
@@ -637,14 +677,14 @@ detector 和 observable 声明必须能在 reference / injected propagation 中�
 ## DEM 独立 edge sampling
 
 `DemHotspotEstimator` 不执行原始 stabilizer circuit，而是把每条 DEM edge 作为独立 Bernoulli
-instruction：
+instruction。等价地，它采样 error vector \(f\)，再计算 \(s=Hf\) 和 \(o=Gf\)：
 
 \[
-f_e \sim \operatorname{Bernoulli}(p_e),
+f_j \sim \operatorname{Bernoulli}(p_j),
 \qquad
-D_i = \bigoplus_{e:\ i\in\Delta D_e} f_e,
+s_i = \bigoplus_{j:\ H_{i,j}=1} f_j,
 \qquad
-O_a = \bigoplus_{e:\ a\in\Delta L_e} f_e.
+o_a = \bigoplus_{j:\ G_{a,j}=1} f_j.
 \]
 
 默认 DEM loss：
@@ -772,23 +812,23 @@ DEM tag aggregations 按 `location_id` 聚合后的 \(\operatorname{hotspot}_l\)
 
 ## PyMatching 数学接口
 
-PyMatching decoder 从 graphlike DEM 构造 matching problem。给定 edges \(e=0,\ldots,E-1\)，
-check matrix 为：
+PyMatching decoder 从 graphlike DEM 构造 matching problem。给定 edges \(j=0,\ldots,E-1\)，传给
+matching decoder 的 sparse binary matrix 正是 detector error matrix：
 
 \[
-H_{i,e} =
+H_{i,j} =
 \begin{cases}
-1, & \text{if detector } D_i \text{ is flipped by edge } e,\\
+1, & \text{if detector } i \text{ is violated by edge } j,\\
 0, & \text{otherwise}.
 \end{cases}
 \]
 
-fault matrix 为：
+logical fault matrix 为：
 
 \[
-F_{a,e} =
+G_{a,j} =
 \begin{cases}
-1, & \text{if logical observable } L_a \text{ is flipped by edge } e,\\
+1, & \text{if logical observable } a \text{ is flipped by edge } j,\\
 0, & \text{otherwise}.
 \end{cases}
 \]
@@ -796,7 +836,7 @@ F_{a,e} =
 edge weight:
 
 \[
-w_e = \log \frac{1-p_e}{p_e}.
+w_j = \log \frac{1-p_j}{p_j}.
 \]
 
 PyMatching 输入 detector syndrome，输出 predicted logical correction masks：
@@ -809,7 +849,7 @@ corrections = decoder.decode_batch_masks(batch)
 
 - 每条 DEM edge 最多连接两个 detectors。
 - 没有 detector 的纯 logical edge 会被拒绝，因为 syndrome 中不可见。
-- Observable flips 通过 `faults_matrix` 传递给 PyMatching。
+- Observable flips 通过 `faults_matrix` 传递给 PyMatching；在本文符号中它对应 \(G\)。
 
 ## 公式与实现对应关系
 

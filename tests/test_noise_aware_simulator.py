@@ -8,7 +8,7 @@ from types import SimpleNamespace
 from unittest import mock
 
 import faultscope
-from faultscope.runtime import FaultScopeSimulator, SampleBatch
+from faultscope.runtime import DemFaultScopeSimulator, FaultScopeSimulator, SampleBatch
 from faultscope.core import Circuit, NoiseLocation, Operation
 from faultscope.dem import (
     BinaryLinearDecodingProblem,
@@ -51,10 +51,12 @@ from faultscope.runtime import (
 from faultscope.runtime.loss import logical_residual_loss_mask
 from faultscope.decoders import (
     NativeBatchDecoder,
+    NativeBpDecoder,
     NativeBposdDecoder,
     NativeDecoderBackendUnavailable,
     NativeFusionBlossomDecoder,
     NativeGraphlikeDetectorCopyDecoder,
+    NativeMwpmDecoder,
     NativeNoCorrectionDecoder,
     NativePyMatchingDecoder,
     PyMatchingDecoder,
@@ -226,6 +228,7 @@ class NoiseAwareSimulatorTests(unittest.TestCase):
         self.assertIs(DetectorGraphEdgeHotspot, native.DetectorGraphEdgeHotspot)
         self.assertIs(DetectorGraphHotspots, native.DetectorGraphHotspots)
         self.assertIs(FaultScopeSimulator, native.FaultScopeSimulator)
+        self.assertIs(DemFaultScopeSimulator, native.DemFaultScopeSimulator)
         self.assertIs(SampleBatch, native.SampleBatch)
         self.assertIs(DemSampleBatch, native.DemSampleBatch)
         self.assertIs(FaultHotspot, native.FaultHotspot)
@@ -245,6 +248,7 @@ class NoiseAwareSimulatorTests(unittest.TestCase):
         self.assertIs(NativeNoCorrectionDecoder, native.NativeNoCorrectionDecoder)
         self.assertIs(faultscope.Circuit, native.Circuit)
         self.assertIs(faultscope.FaultScopeSimulator, native.FaultScopeSimulator)
+        self.assertIs(faultscope.DemFaultScopeSimulator, native.DemFaultScopeSimulator)
         self.assertIs(faultscope.DetectorErrorModelGenerator, native.DetectorErrorModelGenerator)
         self.assertIs(faultscope.DemHotspotEstimator, native.DemHotspotEstimator)
         self.assertIs(
@@ -253,7 +257,9 @@ class NoiseAwareSimulatorTests(unittest.TestCase):
         )
         self.assertIs(core.Circuit, native.Circuit)
         self.assertIs(runtime_module.FaultScopeSimulator, native.FaultScopeSimulator)
+        self.assertIs(runtime_module.DemFaultScopeSimulator, native.DemFaultScopeSimulator)
         self.assertIs(dem_module.DetectorErrorModelGenerator, native.DetectorErrorModelGenerator)
+        self.assertIs(dem_module.DemFaultScopeSimulator, native.DemFaultScopeSimulator)
         self.assertIs(dem_module.DemHotspotEstimator, native.DemHotspotEstimator)
         self.assertIs(dem_module.IndexedDem, native.IndexedDem)
         self.assertIs(
@@ -265,8 +271,12 @@ class NoiseAwareSimulatorTests(unittest.TestCase):
         self.assertIs(faultscope.available_native_decoders, available_native_decoders)
         self.assertIs(decoders.NativeFusionBlossomDecoder, NativeFusionBlossomDecoder)
         self.assertIs(faultscope.NativeFusionBlossomDecoder, NativeFusionBlossomDecoder)
+        self.assertIs(decoders.NativeBpDecoder, NativeBpDecoder)
+        self.assertIs(faultscope.NativeBpDecoder, NativeBpDecoder)
         self.assertIs(decoders.NativeBposdDecoder, NativeBposdDecoder)
         self.assertIs(faultscope.NativeBposdDecoder, NativeBposdDecoder)
+        self.assertIs(decoders.NativeMwpmDecoder, NativeMwpmDecoder)
+        self.assertIs(faultscope.NativeMwpmDecoder, NativeMwpmDecoder)
         self.assertIs(decoders.create_native_decoder, create_native_decoder)
         self.assertIs(faultscope.create_native_decoder, create_native_decoder)
         self.assertIs(decoders.get_native_decoder_class, get_native_decoder_class)
@@ -394,6 +404,15 @@ class NoiseAwareSimulatorTests(unittest.TestCase):
         self.assertEqual(catalog["pymatching"].problem_kind, "graphlike")
         self.assertTrue(catalog["pymatching"].installable)
         self.assertEqual(catalog["pymatching"].package_name, "faultscope-pymatching")
+        self.assertIn("mwpm", catalog)
+        self.assertEqual(catalog["mwpm"].problem_kind, "graphlike")
+        self.assertTrue(catalog["mwpm"].installable)
+        self.assertEqual(catalog["mwpm"].package_name, "faultscope-mwpm")
+        self.assertEqual(catalog["mwpm"].repo_url, "https://github.com/Quon-team/mwpm.rs.git")
+        self.assertIn("bpdecoder", catalog)
+        self.assertEqual(catalog["bpdecoder"].problem_kind, "binary-linear")
+        self.assertTrue(catalog["bpdecoder"].installable)
+        self.assertEqual(catalog["bpdecoder"].package_name, "faultscope-bpdecoder")
         self.assertIn("bposd", catalog)
         self.assertEqual(catalog["bposd"].problem_kind, "binary-linear")
         self.assertFalse(catalog["bposd"].installable)
@@ -450,6 +469,60 @@ class NoiseAwareSimulatorTests(unittest.TestCase):
                 "python -m faultscope.backends install pymatching",
             ):
                 NativePyMatchingDecoder.from_dem(dem)
+        clear_native_decoder_plugin_cache()
+
+    def test_missing_mwpm_backend_has_install_hint(self) -> None:
+        dem = DetectorErrorModel(
+            detectors=(Detector(id=0, measurement_keys=()),),
+            observables=(LogicalObservable(id=0),),
+            edges=(
+                DetectorErrorEdge(
+                    probability=0.2,
+                    detectors=(0,),
+                    observables=(0,),
+                    location_id="edge0",
+                    event="X",
+                ),
+            ),
+        )
+
+        with mock.patch(
+            "faultscope.backends.registry.metadata.entry_points",
+            return_value=_FakeEntryPoints(()),
+        ):
+            clear_native_decoder_plugin_cache()
+            with self.assertRaisesRegex(
+                NativeDecoderBackendUnavailable,
+                "python -m faultscope.backends install mwpm",
+            ):
+                NativeMwpmDecoder.from_dem(dem)
+        clear_native_decoder_plugin_cache()
+
+    def test_missing_bpdecoder_backend_has_install_hint(self) -> None:
+        dem = DetectorErrorModel(
+            detectors=(Detector(id=0, measurement_keys=()),),
+            observables=(LogicalObservable(id=0),),
+            edges=(
+                DetectorErrorEdge(
+                    probability=0.2,
+                    detectors=(0,),
+                    observables=(0,),
+                    location_id="edge0",
+                    event="X",
+                ),
+            ),
+        )
+
+        with mock.patch(
+            "faultscope.backends.registry.metadata.entry_points",
+            return_value=_FakeEntryPoints(()),
+        ):
+            clear_native_decoder_plugin_cache()
+            with self.assertRaisesRegex(
+                NativeDecoderBackendUnavailable,
+                "python -m faultscope.backends install bpdecoder",
+            ):
+                NativeBpDecoder.from_dem(dem)
         clear_native_decoder_plugin_cache()
 
     def test_reserved_bposd_backend_has_install_hint(self) -> None:
@@ -559,6 +632,8 @@ class NoiseAwareSimulatorTests(unittest.TestCase):
                 self.assertEqual(main(["status"]), 0)
             self.assertIn("no-correction", stdout.getvalue())
             self.assertIn("fusion-blossom", stdout.getvalue())
+            self.assertIn("mwpm", stdout.getvalue())
+            self.assertIn("bpdecoder", stdout.getvalue())
             self.assertIn("bposd", stdout.getvalue())
             self.assertIn("not-installed", stdout.getvalue())
 
@@ -580,6 +655,25 @@ class NoiseAwareSimulatorTests(unittest.TestCase):
                 self.assertFalse(os.listdir(tmpdir))
             self.assertIn("git clone", stdout.getvalue())
             self.assertIn("faultscope-fusion-blossom", stdout.getvalue())
+
+            stdout = io.StringIO()
+            with tempfile.TemporaryDirectory() as tmpdir:
+                with mock.patch("sys.stdout", stdout):
+                    self.assertEqual(
+                        main(
+                            [
+                                "install",
+                                "bpdecoder",
+                                "--dry-run",
+                                "--target-dir",
+                                tmpdir,
+                            ]
+                        ),
+                        0,
+                    )
+                self.assertFalse(os.listdir(tmpdir))
+            self.assertIn("faultscope-bpdecoder", stdout.getvalue())
+            self.assertIn("pip install --upgrade faultscope-bpdecoder", stdout.getvalue())
 
             stdout = io.StringIO()
             with tempfile.TemporaryDirectory() as tmpdir:
@@ -1976,6 +2070,45 @@ class NativeDetectorErrorModelTests(unittest.TestCase):
         direct_edge = direct_result.top_edges(1)[0]
         direct_graph_edge = direct_result.detector_graph_hotspots.edge_hotspots[0]
         self.assertEqual(direct_edge.edge_index, direct_graph_edge.edge_index)
+
+    def test_dem_faultscope_simulator_compiles_from_circuit_with_faultscope_shape(self) -> None:
+        self._require_native_dem()
+        location = NoiseLocation(
+            id="x0",
+            model=BernoulliPauliNoise("X"),
+            rate=0.25,
+            qubits=(0,),
+            tags={"round": 1},
+        )
+        circuit = Circuit(
+            n_qubits=1,
+            operations=[
+                Operation.noise(location),
+                Operation.measure(0, key="m", basis="Z"),
+                Operation.detector(("m",), detector_id=0),
+                Operation.observable_include(0, ("m",)),
+            ],
+        )
+
+        simulator = DemFaultScopeSimulator(circuit)
+        direct_sampler = compile_native_dem_sampler_from_circuit(circuit)
+        direct_batch = direct_sampler.run_batch(shots=256, seed=123)
+
+        batch = simulator.run_batch(shots=256, seed=123)
+        sample_batch = simulator.sample(256, seed=123)
+        result = simulator.estimate(shots=4096, seed=123)
+
+        self.assertIs(simulator.circuit, circuit)
+        self.assertIsInstance(simulator.dem, DetectorErrorModel)
+        self.assertEqual(simulator.edge_count, direct_sampler.edge_count)
+        self.assertIsInstance(batch, DemSampleBatch)
+        self.assertEqual(batch.detectors, direct_batch.detectors)
+        self.assertEqual(batch.observables, direct_batch.observables)
+        self.assertEqual(batch.edge_event_masks, direct_batch.edge_event_masks)
+        self.assertEqual(sample_batch.detectors, direct_batch.detectors)
+        self.assertAlmostEqual(result.mean_loss, 0.25, delta=0.05)
+        self.assertEqual(result.dem.edges[0].location_id, "x0")
+        self.assertIn("DemFaultScopeSimulator", repr(simulator))
 
     def test_native_dem_reparses_mutated_duck_typed_operation(self) -> None:
         self._require_native_dem()

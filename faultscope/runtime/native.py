@@ -19,10 +19,12 @@ class UnsupportedNativeCircuitError(ValueError):
 
 try:
     _native_mod = importlib.import_module("faultscope._native")
+    DemFaultScopeSimulator = _native_mod.DemFaultScopeSimulator
     NativePackedSampler = _native_mod.NativePackedSampler
     NativeDemSampler = _native_mod.NativeDemSampler
     NativeDemGenerator = _native_mod.NativeDemGenerator
 except (AttributeError, ImportError):
+    DemFaultScopeSimulator = Any
     NativePackedSampler = Any
     NativeDemSampler = Any
     NativeDemGenerator = Any
@@ -145,6 +147,7 @@ def compile_native_dem_sampler_from_circuit(
 
 
 __all__ = [
+    "DemFaultScopeSimulator",
     "NativeDemSampler",
     "NativeDemGenerator",
     "NativePackedSampler",
