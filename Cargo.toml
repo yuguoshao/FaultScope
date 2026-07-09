@@ -2,6 +2,7 @@
 members = [
     "backends/faultscope-fusion-blossom",
     "backends/faultscope-pymatching",
+    "crates/faultscope-collection",
     "crates/faultscope-core",
     "crates/faultscope-python",
 ]
