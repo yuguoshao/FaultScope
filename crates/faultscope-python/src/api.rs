@@ -1787,6 +1787,9 @@ pub(crate) fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(generate_and_compile_dem_sampler, module)?)?;
     module.add_function(wrap_pyfunction!(compile_generated_dem_sampler, module)?)?;
     module.add_function(wrap_pyfunction!(compile_dem_sampler, module)?)?;
-    module.add_function(wrap_pyfunction!(_collect_dem_logical_error_stats, module)?)?;
+    module.add_function(wrap_pyfunction!(
+        _collect_dem_logical_error_stats_many,
+        module
+    )?)?;
     Ok(())
 }

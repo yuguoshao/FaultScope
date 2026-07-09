@@ -1,26 +1,111 @@
 use std::collections::HashMap;
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::io::{BufRead, BufReader, Read, Write};
+use std::sync::Arc;
+use std::time::Instant;
 
-use faultscope_core::{
-    logical_residual_loss_mask_native, DemHotspotEstimator, DetectorEventShotBatchView,
-    DetectorMaskBatchView, Mask, NativeBatchDecoder, NpError, NpResult,
-    PackedDetectorShotBatchView, PackedObservableShotBatch, SmallRng,
-};
+use crate::counting::{sample_dem_logical_error_stats_with_rng, validate_mask_shape, CountOptions};
+use crate::scheduler::{batch_seed, collect_task_set, next_batch_size};
+use faultscope_core::{DemHotspotEstimator, NativeBatchDecoder, NpError, NpResult, SmallRng};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub const DEM_LOGICAL_COLLECTION_CSV_HEADER: &str =
+    "shots,errors,discards,seconds,decoder,strong_id,json_metadata,custom_counts";
+
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct DemLogicalCollectionOptions {
     pub max_shots: usize,
     pub max_errors: Option<usize>,
     pub batch_size: usize,
     pub seed: Option<u64>,
+    pub start_batch_size: Option<usize>,
+    pub max_batch_size: Option<usize>,
+    pub max_batch_seconds: Option<f64>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct DemLogicalCollectionStats {
+    pub task_id: String,
+    pub strong_id: String,
+    pub decoder: Option<String>,
+    pub metadata_json: String,
     pub shots: usize,
     pub errors: usize,
     pub discards: usize,
     pub seconds: f64,
+    pub custom_counts: HashMap<String, usize>,
+}
+
+impl DemLogicalCollectionStats {
+    pub fn empty_for_task(task: &DemLogicalCollectionTask) -> Self {
+        Self {
+            task_id: task.task_id.clone(),
+            strong_id: task.strong_id.clone(),
+            decoder: task.decoder_name.clone(),
+            metadata_json: task.metadata_json.clone(),
+            shots: 0,
+            errors: 0,
+            discards: 0,
+            seconds: 0.0,
+            custom_counts: HashMap::new(),
+        }
+    }
+
+    pub fn with_identity(
+        mut self,
+        task_id: String,
+        strong_id: String,
+        decoder: Option<String>,
+        metadata_json: String,
+    ) -> Self {
+        self.task_id = task_id;
+        self.strong_id = strong_id;
+        self.decoder = decoder;
+        self.metadata_json = metadata_json;
+        self
+    }
+
+    pub fn add_assign_checked(&mut self, other: &Self) -> NpResult<()> {
+        if self.strong_id != other.strong_id {
+            return Err(NpError::new(format!(
+                "cannot merge stats with different strong_id values: {:?} != {:?}",
+                self.strong_id, other.strong_id
+            )));
+        }
+        if self.decoder != other.decoder || self.metadata_json != other.metadata_json {
+            return Err(NpError::new(
+                "stats with the same strong_id have different decoder or metadata",
+            ));
+        }
+        self.shots += other.shots;
+        self.errors += other.errors;
+        self.discards += other.discards;
+        self.seconds += other.seconds;
+        for (key, value) in &other.custom_counts {
+            *self.custom_counts.entry(key.clone()).or_insert(0) += *value;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone)]
+pub struct DemLogicalCollectionTask {
+    pub task_id: String,
+    pub strong_id: String,
+    pub sampler: Arc<DemHotspotEstimator>,
+    pub decoder: Option<Arc<dyn NativeBatchDecoder>>,
+    pub decoder_name: Option<String>,
+    pub metadata_json: String,
+    pub options: DemLogicalCollectionOptions,
+    pub postselection_mask: Option<Vec<u8>>,
+    pub postselected_observables_mask: Option<Vec<u8>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DemLogicalCollectionRunOptions {
+    pub num_workers: usize,
+    pub seed: Option<u64>,
+    pub count_observable_error_combos: bool,
+    pub count_detection_events: bool,
+    pub custom_error_count_key: Option<String>,
 }
 
 pub fn collect_dem_logical_error_stats(
@@ -28,41 +113,46 @@ pub fn collect_dem_logical_error_stats(
     options: DemLogicalCollectionOptions,
     decoder: Option<&dyn NativeBatchDecoder>,
 ) -> NpResult<DemLogicalCollectionStats> {
-    if options.max_shots == 0 {
-        return Err(NpError::new("max_shots must be positive"));
-    }
-    if options.batch_size == 0 {
-        return Err(NpError::new("batch_size must be positive"));
-    }
+    validate_collection_options(options)?;
 
     let started = Instant::now();
-    let mut collection_rng = SmallRng::new(collection_seed(options.seed));
     let mut shots_done = 0usize;
     let mut errors = 0usize;
+    let mut batch_ordinal = 0usize;
+    let mut last_batch: Option<(usize, f64)> = None;
 
     while shots_done < options.max_shots {
-        let batch_shots = options.batch_size.min(options.max_shots - shots_done);
-        let batch_seed = collection_rng.next_u64();
-        let mut batch_rng = SmallRng::new(batch_seed);
+        let batch_shots = next_batch_size(options, shots_done, last_batch);
+        let mut batch_rng = SmallRng::new(batch_seed(options.seed, 0, batch_ordinal));
+        let batch_started = Instant::now();
         let batch_stats = sample_dem_logical_error_stats_with_rng(
             sampler,
             batch_shots,
             &mut batch_rng,
             decoder,
             None,
+            &CountOptions::default(),
         )?;
+        let elapsed = batch_started.elapsed().as_secs_f64();
         shots_done += batch_stats.shots;
         errors += batch_stats.errors;
+        last_batch = Some((batch_shots, elapsed));
+        batch_ordinal += 1;
         if options.max_errors.is_some_and(|limit| errors >= limit) {
             break;
         }
     }
 
     Ok(DemLogicalCollectionStats {
+        task_id: String::new(),
+        strong_id: String::new(),
+        decoder: decoder.map(|decoder| decoder.name().to_string()),
+        metadata_json: "null".to_string(),
         shots: shots_done,
         errors,
         discards: 0,
         seconds: started.elapsed().as_secs_f64(),
+        custom_counts: HashMap::new(),
     })
 }
 
@@ -77,210 +167,295 @@ pub fn sample_dem_logical_error_stats(
     }
     let started = Instant::now();
     let mut rng = SmallRng::new(seed.unwrap_or(0x95f2_04dc_4291_a715));
-    sample_dem_logical_error_stats_with_rng(sampler, shots, &mut rng, decoder, Some(started))
-}
-
-fn sample_dem_logical_error_stats_with_rng(
-    sampler: &DemHotspotEstimator,
-    shots: usize,
-    rng: &mut SmallRng,
-    decoder: Option<&dyn NativeBatchDecoder>,
-    started: Option<Instant>,
-) -> NpResult<DemLogicalCollectionStats> {
-    let errors = match decoder {
-        Some(decoder) => sample_dem_logical_error_count_with_decoder(sampler, shots, rng, decoder)?,
-        None => {
-            let batch = sampler.run_batch_with_rng(shots, rng, false);
-            batch.loss_mask.bit_count()
-        }
-    };
-    Ok(DemLogicalCollectionStats {
+    let batch = sample_dem_logical_error_stats_with_rng(
+        sampler,
         shots,
-        errors,
-        discards: 0,
-        seconds: started
-            .map(|started| started.elapsed().as_secs_f64())
-            .unwrap_or(0.0),
+        &mut rng,
+        decoder,
+        Some(started),
+        &CountOptions::default(),
+    )?;
+    Ok(DemLogicalCollectionStats {
+        task_id: String::new(),
+        strong_id: String::new(),
+        decoder: decoder.map(|decoder| decoder.name().to_string()),
+        metadata_json: "null".to_string(),
+        shots: batch.shots,
+        errors: batch.errors,
+        discards: batch.discards,
+        seconds: batch.seconds,
+        custom_counts: batch.custom_counts,
     })
 }
 
-fn sample_dem_logical_error_count_with_decoder(
-    sampler: &DemHotspotEstimator,
-    shots: usize,
-    rng: &mut SmallRng,
-    decoder: &dyn NativeBatchDecoder,
-) -> NpResult<usize> {
-    if decoder.supports_detector_event_batch() {
-        let event_batch = sampler.run_detector_event_shot_batch_with_rng(
-            shots,
-            rng,
-            decoder.detector_ids(),
-            &sampler.observable_ids,
-        )?;
-        let detector_view = DetectorEventShotBatchView::new(
-            decoder.detector_ids(),
-            &event_batch.offsets,
-            &event_batch.events,
-            event_batch.shots,
-        )?;
-        let corrections = decoder.decode_detector_event_batch_checked(detector_view)?;
-        return collection_packed_residual_failure_count_from_rows(
-            &event_batch.observable_ids,
-            &event_batch.observable_data,
-            event_batch.observable_byte_count,
-            &corrections,
-            event_batch.shots,
-        );
-    }
-
-    if decoder.supports_packed_batch() {
-        let packed_batch = sampler.run_packed_shot_batch_with_rng(
-            shots,
-            rng,
-            decoder.detector_ids(),
-            &sampler.observable_ids,
-        )?;
-        let detector_view = PackedDetectorShotBatchView::new(
-            decoder.detector_ids(),
-            &packed_batch.detector_data,
-            packed_batch.shots,
-        )?;
-        let corrections = decoder.decode_packed_batch_checked(detector_view)?;
-        return collection_packed_residual_failure_count_from_rows(
-            &packed_batch.observable_ids,
-            &packed_batch.observable_data,
-            packed_batch.observable_byte_count,
-            &corrections,
-            packed_batch.shots,
-        );
-    }
-
-    let batch = sampler.run_batch_with_rng(shots, rng, false);
-    let detector_masks = detector_mask_view_from_map(&batch.detectors, decoder.detector_ids())?;
-    let view = DetectorMaskBatchView::new(decoder.detector_ids(), &detector_masks, shots)?;
-    let corrections = decoder.decode_batch_checked(view)?;
-    let loss_mask = logical_residual_loss_mask_native(
-        &batch.observables,
-        &corrections,
-        &sampler.observable_ids,
-        &batch.all_mask,
-    );
-    Ok(loss_mask.bit_count())
+pub fn collect_dem_logical_error_tasks(
+    tasks: Vec<DemLogicalCollectionTask>,
+    run_options: DemLogicalCollectionRunOptions,
+    existing_data: HashMap<String, DemLogicalCollectionStats>,
+) -> NpResult<Vec<DemLogicalCollectionStats>> {
+    collect_task_set(tasks, run_options, existing_data)
 }
 
-fn detector_mask_view_from_map(
-    detectors: &HashMap<i64, Mask>,
-    detector_ids: &[i64],
-) -> NpResult<Vec<Mask>> {
-    detector_ids
-        .iter()
-        .map(|detector_id| {
-            detectors
-                .get(detector_id)
-                .cloned()
-                .ok_or_else(|| NpError::new(format!("missing detector id {detector_id}")))
-        })
-        .collect()
+pub fn write_dem_logical_collection_csv_header<W: Write>(writer: &mut W) -> NpResult<()> {
+    writeln!(writer, "{DEM_LOGICAL_COLLECTION_CSV_HEADER}").map_err(io_error)
 }
 
-fn collection_packed_residual_failure_count_from_rows(
-    observable_ids: &[i64],
-    observable_data: &[u8],
-    observable_byte_count: usize,
-    corrections: &PackedObservableShotBatch,
-    shots: usize,
-) -> NpResult<usize> {
-    if corrections.observable_ids.as_slice() == observable_ids
-        && corrections.observable_byte_count == observable_byte_count
+pub fn write_dem_logical_collection_csv_row<W: Write>(
+    writer: &mut W,
+    stats: &DemLogicalCollectionStats,
+) -> NpResult<()> {
+    writeln!(
+        writer,
+        "{},{},{},{:.12},{},{},{},{}",
+        stats.shots,
+        stats.errors,
+        stats.discards,
+        stats.seconds,
+        csv_escape(stats.decoder.as_deref().unwrap_or("")),
+        csv_escape(&stats.strong_id),
+        csv_escape(&stats.metadata_json),
+        csv_escape(&custom_counts_to_json(&stats.custom_counts)),
+    )
+    .map_err(io_error)
+}
+
+pub fn read_dem_logical_collection_csv<R: Read>(
+    reader: R,
+) -> NpResult<HashMap<String, DemLogicalCollectionStats>> {
+    let mut lines = BufReader::new(reader).lines();
+    let Some(header) = lines.next() else {
+        return Ok(HashMap::new());
+    };
+    let header = header.map_err(io_error)?;
+    if header.trim_end() != DEM_LOGICAL_COLLECTION_CSV_HEADER {
+        return Err(NpError::new("collection CSV header does not match"));
+    }
+
+    let mut out = HashMap::<String, DemLogicalCollectionStats>::new();
+    for (line_index, line) in lines.enumerate() {
+        let line = line.map_err(io_error)?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        let fields = parse_csv_line(&line)?;
+        if fields.len() != 8 {
+            return Err(NpError::new(format!(
+                "collection CSV line {} has {} fields; expected 8",
+                line_index + 2,
+                fields.len()
+            )));
+        }
+        let decoder = if fields[4].is_empty() {
+            None
+        } else {
+            Some(fields[4].clone())
+        };
+        let stats = DemLogicalCollectionStats {
+            task_id: fields[5].clone(),
+            strong_id: fields[5].clone(),
+            decoder,
+            metadata_json: fields[6].clone(),
+            shots: parse_usize(&fields[0], "shots")?,
+            errors: parse_usize(&fields[1], "errors")?,
+            discards: parse_usize(&fields[2], "discards")?,
+            seconds: fields[3]
+                .parse::<f64>()
+                .map_err(|_| NpError::new("invalid seconds value in collection CSV"))?,
+            custom_counts: parse_custom_counts(&fields[7])?,
+        };
+        if let Some(existing) = out.get_mut(&stats.strong_id) {
+            existing.add_assign_checked(&stats)?;
+        } else {
+            out.insert(stats.strong_id.clone(), stats);
+        }
+    }
+    Ok(out)
+}
+
+pub(crate) fn validate_task(task: &DemLogicalCollectionTask) -> NpResult<()> {
+    validate_collection_options(task.options)?;
+    validate_mask_shape(
+        task.postselection_mask.as_deref(),
+        task.sampler.detector_ids.len(),
+        "postselection_mask",
+    )?;
+    validate_mask_shape(
+        task.postselected_observables_mask.as_deref(),
+        task.sampler.observable_ids.len(),
+        "postselected_observables_mask",
+    )?;
+    if task.strong_id.is_empty() {
+        return Err(NpError::new("strong_id must not be empty"));
+    }
+    Ok(())
+}
+
+fn validate_collection_options(options: DemLogicalCollectionOptions) -> NpResult<()> {
+    if options.max_shots == 0 {
+        return Err(NpError::new("max_shots must be positive"));
+    }
+    if options.batch_size == 0 {
+        return Err(NpError::new("batch_size must be positive"));
+    }
+    if options.start_batch_size.is_some_and(|value| value == 0) {
+        return Err(NpError::new("start_batch_size must be positive"));
+    }
+    if options.max_batch_size.is_some_and(|value| value == 0) {
+        return Err(NpError::new("max_batch_size must be positive"));
+    }
+    if options
+        .max_batch_seconds
+        .is_some_and(|value| value <= 0.0 || !value.is_finite())
     {
-        let failures = (0..shots)
-            .filter(|shot| {
-                let begin = shot * observable_byte_count;
-                let end = begin + observable_byte_count;
-                observable_data[begin..end]
-                    .iter()
-                    .zip(&corrections.data[begin..end])
-                    .any(|(actual, correction)| (actual ^ correction) != 0)
-            })
-            .count();
-        return Ok(failures);
+        return Err(NpError::new("max_batch_seconds must be positive"));
     }
+    Ok(())
+}
 
-    let mut ids = observable_ids.to_vec();
-    for observable_id in &corrections.observable_ids {
-        if !ids.contains(observable_id) {
-            ids.push(*observable_id);
-        }
+pub(crate) fn stop_error_count(
+    stats: &DemLogicalCollectionStats,
+    custom_error_count_key: &Option<String>,
+) -> usize {
+    match custom_error_count_key {
+        Some(key) => stats.custom_counts.get(key).copied().unwrap_or(0),
+        None => stats.errors,
     }
-    let actual_index = observable_ids
-        .iter()
-        .enumerate()
-        .map(|(index, id)| (*id, index))
-        .collect::<HashMap<_, _>>();
-    let correction_index = corrections
-        .observable_ids
-        .iter()
-        .enumerate()
-        .map(|(index, id)| (*id, index))
-        .collect::<HashMap<_, _>>();
+}
 
-    let mut failures = 0usize;
-    for shot in 0..shots {
-        let mut failed = false;
-        for observable_id in &ids {
-            let actual = actual_index
-                .get(observable_id)
-                .map(|index| {
-                    let offset = shot * observable_byte_count + (index >> 3);
-                    ((observable_data[offset] >> (index & 7)) & 1) != 0
-                })
-                .unwrap_or(false);
-            let correction = correction_index
-                .get(observable_id)
-                .map(|index| {
-                    let offset = shot * corrections.observable_byte_count + (index >> 3);
-                    ((corrections.data[offset] >> (index & 7)) & 1) != 0
-                })
-                .unwrap_or(false);
-            if actual ^ correction {
-                failed = true;
-                break;
+fn csv_escape(value: &str) -> String {
+    let escaped = value.replace('"', "\"\"");
+    format!("\"{escaped}\"")
+}
+
+fn parse_csv_line(line: &str) -> NpResult<Vec<String>> {
+    let mut fields = Vec::new();
+    let mut current = String::new();
+    let mut chars = line.chars().peekable();
+    let mut quoted = false;
+    while let Some(ch) = chars.next() {
+        match ch {
+            '"' if quoted && chars.peek() == Some(&'"') => {
+                chars.next();
+                current.push('"');
             }
+            '"' => quoted = !quoted,
+            ',' if !quoted => {
+                fields.push(current);
+                current = String::new();
+            }
+            _ => current.push(ch),
         }
-        failures += usize::from(failed);
     }
-    Ok(failures)
+    if quoted {
+        return Err(NpError::new("unterminated quoted field in collection CSV"));
+    }
+    fields.push(current);
+    Ok(fields)
 }
 
-fn collection_seed(seed: Option<u64>) -> u64 {
-    seed.unwrap_or_else(|| {
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|duration| duration.as_nanos() as u64)
-            .unwrap_or(0x95f2_04dc_4291_a715)
-    })
+fn custom_counts_to_json(counts: &HashMap<String, usize>) -> String {
+    let mut keys = counts.keys().collect::<Vec<_>>();
+    keys.sort();
+    let terms = keys
+        .into_iter()
+        .map(|key| {
+            format!(
+                "\"{}\":{}",
+                key.replace('\\', "\\\\").replace('"', "\\\""),
+                counts[key]
+            )
+        })
+        .collect::<Vec<_>>();
+    format!("{{{}}}", terms.join(","))
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use faultscope_core::PackedObservableShotBatch;
-
-    #[test]
-    fn collection_counts_packed_residual_failures_locally() {
-        let corrections =
-            PackedObservableShotBatch::new(vec![1], vec![0b0000_0000, 0b0000_0001, 0b0000_0000], 3)
-                .unwrap();
-
-        let failures = collection_packed_residual_failure_count_from_rows(
-            &[0],
-            &[0b0000_0000, 0b0000_0001, 0b0000_0001],
-            1,
-            &corrections,
-            3,
-        )
-        .unwrap();
-
-        assert_eq!(failures, 2);
+fn parse_custom_counts(text: &str) -> NpResult<HashMap<String, usize>> {
+    let text = text.trim();
+    if text.is_empty() || text == "{}" {
+        return Ok(HashMap::new());
     }
+    if !text.starts_with('{') || !text.ends_with('}') {
+        return Err(NpError::new("invalid custom_counts JSON in collection CSV"));
+    }
+    let body = &text[1..text.len() - 1];
+    if body.trim().is_empty() {
+        return Ok(HashMap::new());
+    }
+    let mut out = HashMap::new();
+    for term in split_json_object_terms(body)? {
+        let Some((key, value)) = term.split_once(':') else {
+            return Err(NpError::new(
+                "invalid custom_counts entry in collection CSV",
+            ));
+        };
+        let key = parse_json_string(key.trim())?;
+        let value = parse_usize(value.trim(), "custom_counts value")?;
+        out.insert(key, value);
+    }
+    Ok(out)
+}
+
+fn split_json_object_terms(body: &str) -> NpResult<Vec<String>> {
+    let mut terms = Vec::new();
+    let mut current = String::new();
+    let mut quoted = false;
+    let mut escaped = false;
+    for ch in body.chars() {
+        if escaped {
+            current.push(ch);
+            escaped = false;
+            continue;
+        }
+        match ch {
+            '\\' if quoted => {
+                current.push(ch);
+                escaped = true;
+            }
+            '"' => {
+                quoted = !quoted;
+                current.push(ch);
+            }
+            ',' if !quoted => {
+                terms.push(current.trim().to_string());
+                current.clear();
+            }
+            _ => current.push(ch),
+        }
+    }
+    if quoted {
+        return Err(NpError::new("unterminated custom_counts string"));
+    }
+    terms.push(current.trim().to_string());
+    Ok(terms)
+}
+
+fn parse_json_string(text: &str) -> NpResult<String> {
+    if !text.starts_with('"') || !text.ends_with('"') {
+        return Err(NpError::new("custom_counts key must be a JSON string"));
+    }
+    let mut out = String::new();
+    let mut escaped = false;
+    for ch in text[1..text.len() - 1].chars() {
+        if escaped {
+            out.push(ch);
+            escaped = false;
+        } else if ch == '\\' {
+            escaped = true;
+        } else {
+            out.push(ch);
+        }
+    }
+    if escaped {
+        return Err(NpError::new("unterminated escape in custom_counts key"));
+    }
+    Ok(out)
+}
+
+fn parse_usize(text: &str, name: &str) -> NpResult<usize> {
+    text.parse::<usize>()
+        .map_err(|_| NpError::new(format!("invalid {name} value in collection CSV")))
+}
+
+fn io_error(err: std::io::Error) -> NpError {
+    NpError::new(err.to_string())
 }

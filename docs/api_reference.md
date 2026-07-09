@@ -6,8 +6,9 @@ FaultScope is a Rust Cargo workspace with a Python API. The product runtime live
 declarations represent detector matrix rows, generated DEM edges are columns of
 the detector error matrix \(H=D\Omega\), and decoder-ready views expose that
 sparse binary structure. User code should import from the public Python modules:
-`faultscope`, `faultscope.core`, `faultscope.runtime`, `faultscope.dem`, `faultscope.decoders`,
-`faultscope.io`, and `faultscope.viz`.
+`faultscope`, `faultscope.core`, `faultscope.runtime`, `faultscope.dem`,
+`faultscope.collection`, `faultscope.decoders`, `faultscope.io`, and
+`faultscope.viz`.
 
 The package is pre-1.0. Python source-level compatibility is the main user
 compatibility target. The Rust core API is public and typed, but may still move
@@ -32,6 +33,11 @@ from faultscope import (
     NativeMwpmDecoder,
     NativePyMatchingDecoder,
     PyMatchingDecoder,
+    CollectionOptions,
+    CollectionTask,
+    TaskStats,
+    collect,
+    iter_collect,
 )
 ```
 
@@ -572,6 +578,156 @@ result = dem_sim.estimate(shots=128, seed=4, top_k=1)
 print(batch.detector_bit(0, 0))
 print(result.top_edges(1)[0].edge_index)
 ```
+
+## Collection API
+
+`faultscope.collection` provides native-first logical error-rate collection for
+threshold sweeps. The public Python API is:
+
+```python
+from faultscope.collection import (
+    CollectionOptions,
+    CollectionTask,
+    TaskStats,
+    collect,
+    iter_collect,
+)
+```
+
+The same names are top-level `faultscope` exports.
+
+`CollectionOptions` is a frozen dataclass:
+
+```text
+CollectionOptions(
+    max_shots: int | None = None,
+    max_errors: int | None = None,
+    batch_size: int = 10_000,
+    seed: int | None = None,
+    start_batch_size: int | None = None,
+    max_batch_size: int | None = None,
+    max_batch_seconds: float | None = None,
+)
+```
+
+`max_shots`, `batch_size`, `start_batch_size`, `max_batch_size`, and
+`max_batch_seconds` must be positive when set. `max_errors` must be
+non-negative when set. `max_shots` is required after merging call-level options
+with per-task options.
+
+`CollectionTask` is a frozen dataclass:
+
+```text
+CollectionTask(
+    circuit: Circuit | None = None,
+    dem: DetectorErrorModel | None = None,
+    detectors: tuple[Detector, ...] | None = None,
+    observables: tuple[LogicalObservable, ...] | None = None,
+    decoder: object | str | None = None,
+    decoder_options: Mapping[str, object] | None = None,
+    metadata: Mapping[str, object] | None = None,
+    collection_options: CollectionOptions | None = None,
+    task_id: str | None = None,
+    postselection_mask: bytes | bytearray | memoryview | None = None,
+    postselected_observables_mask: bytes | bytearray | memoryview | None = None,
+)
+```
+
+Exactly one of `circuit` or `dem` is required. Circuit tasks compile a
+materialized native DEM sampler, using embedded declarations unless explicit
+`detectors` or `observables` are supplied. String decoders are resolved with
+`create_native_decoder(name, dem=dem, options=decoder_options)`. Object decoders
+must be native decoder handles; Python decoders are rejected by collection.
+
+`TaskStats` is a frozen dataclass:
+
+```text
+TaskStats(
+    task_id: str,
+    shots: int,
+    errors: int,
+    discards: int,
+    seconds: float,
+    decoder: str | None,
+    metadata: Mapping[str, object],
+    strong_id: str = "",
+    custom_counts: Mapping[str, int] = {},
+)
+```
+
+Properties:
+
+- `accepted_shots = shots - discards`
+- `error_rate = errors / shots`
+- `logical_error_rate = errors / accepted_shots`
+- `stderr = sqrt(p * (1 - p) / accepted_shots)` where `p` is
+  `logical_error_rate`
+
+If `accepted_shots` is zero, `logical_error_rate` and `stderr` return `nan`.
+
+Collection functions:
+
+```text
+iter_collect(
+    tasks,
+    *,
+    options=None,
+    max_shots=None,
+    max_errors=None,
+    batch_size=None,
+    seed=None,
+    start_batch_size=None,
+    max_batch_size=None,
+    max_batch_seconds=None,
+    num_workers=None,
+    existing_data_filepaths=(),
+    save_resume_filepath=None,
+    progress_callback=None,
+    print_progress=False,
+    count_observable_error_combos=False,
+    count_detection_events=False,
+    custom_error_count_key=None,
+) -> Iterator[TaskStats]
+
+collect(...) -> list[TaskStats]
+```
+
+Effective options are defaults, then call-level `options` and keyword
+overrides, then each task's `collection_options`. The final batch is capped to
+the remaining shot budget. `max_errors` and `custom_error_count_key` stopping
+are checked after each completed batch.
+
+`num_workers` defaults to `1`. With fixed batch settings, the Rust scheduler can
+parallelize both multiple tasks and a single large task. Fixed seed plus fixed
+batch settings gives deterministic stats independent of worker count.
+Adaptive-batch tasks using `max_batch_seconds` remain task-granular.
+
+`save_resume_filepath` and `existing_data_filepaths` use CSV rows with this
+header:
+
+```text
+shots,errors,discards,seconds,decoder,strong_id,json_metadata,custom_counts
+```
+
+CSV/resume orchestration is Python-owned and outside the native sampling hot
+path. Existing rows are merged by `strong_id`; mismatched decoder or metadata
+for the same `strong_id` raises `ValueError`. A completed resume task is not
+sampled again, and only newly collected deltas are appended.
+
+Postselection masks are bytes-like bit-packed masks over the native detector or
+observable order. Detector postselection discards any shot where a selected
+detector fired. Observable postselection discards any shot where the decoder
+residual is nonzero on a selected observable. Logical errors are counted only on
+accepted shots and only on non-postselected residual observables.
+
+Custom counts:
+
+- `count_observable_error_combos=True` records accepted residual observable
+  combinations under keys such as `obs_mistake_mask=E_E__`.
+- `count_detection_events=True` records `detection_events` and
+  `detectors_checked`.
+- `custom_error_count_key="..."` makes `max_errors` use that custom count
+  instead of `errors`.
 
 ## Callback Contracts
 

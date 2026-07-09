@@ -21,6 +21,7 @@ score-function estimator and DEM background, see
 - [Forward Sampling And Estimates](#forward-sampling-and-estimates)
 - [Detector Error Models](#detector-error-models)
 - [DEM Sampling And Hotspots](#dem-sampling-and-hotspots)
+- [Logical Error-Rate Collection](#logical-error-rate-collection)
 - [PyMatching Decoding](#pymatching-decoding)
 - [Stim Import](#stim-import)
 - [Repetition-code Experiments](#repetition-code-experiments)
@@ -436,6 +437,163 @@ batch = light_simulator.run_batch(shots=64, seed=7)
 Light samplers and light simulators return `dem is None`; APIs that require DEM
 metadata reject them with `ValueError`.
 
+## Logical Error-Rate Collection
+
+`faultscope.collection` is the threshold-style sampling entry point. It collects
+`shots`, `errors`, `discards`, and elapsed seconds for one or more DEM-oriented
+tasks. The hot path stays native: Rust owns DEM sampling, native decoder calls,
+batch scheduling, postselection, and counting. Python owns task construction,
+strong ids, CSV resume files, and `TaskStats` wrappers.
+
+For an existing `DetectorErrorModel`, create a `CollectionTask` with `dem=...`
+and call `collect(...)`:
+
+```python
+from faultscope import DetectorErrorEdge, DetectorErrorModel, LogicalObservable
+from faultscope.collection import CollectionTask, collect
+
+dem = DetectorErrorModel(
+    detectors=(),
+    observables=(LogicalObservable(id=0),),
+    edges=(
+        DetectorErrorEdge(
+            probability=0.125,
+            detectors=(),
+            observables=(0,),
+            location_id="logical_edge",
+            event="L",
+        ),
+    ),
+)
+
+stats = collect(
+    [CollectionTask(dem=dem, task_id="p=0.125", metadata={"p": 0.125})],
+    max_shots=10_000,
+    max_errors=200,
+    batch_size=1_000,
+    seed=1,
+)[0]
+
+print(stats.shots, stats.errors, stats.logical_error_rate, stats.stderr)
+```
+
+A task may also start from a circuit. In that case FaultScope compiles a
+materialized DEM sampler from the circuit, using embedded detector and
+observable declarations unless explicit `detectors=` or `observables=` are
+provided:
+
+```python
+from faultscope.collection import CollectionTask, collect
+
+stats = collect(
+    [CollectionTask(circuit=circuit, task_id="from-circuit")],
+    max_shots=20_000,
+    batch_size=2_000,
+    seed=2,
+)
+```
+
+Each `CollectionTask` must provide exactly one of `dem` or `circuit`.
+`max_shots` is required after combining call-level options with per-task
+`collection_options`. The final batch is capped so collection never exceeds
+`max_shots`. `max_errors` stops after a completed batch reaches the threshold,
+which means the returned `errors` can be greater than `max_errors`.
+
+Native decoders can be passed directly or resolved by name:
+
+```python
+from faultscope import NativeGraphlikeDetectorCopyDecoder
+from faultscope.collection import CollectionTask, collect
+
+decoder = NativeGraphlikeDetectorCopyDecoder.from_dem(dem)
+stats = collect(
+    [CollectionTask(dem=dem, decoder=decoder)],
+    max_shots=10_000,
+    batch_size=1_000,
+    seed=3,
+)
+```
+
+The default collection API is native-only. Python decoders are still useful for
+`estimate(...)` prototypes, but `faultscope.collection` rejects them because it
+does not move detector batches or correction masks through Python.
+
+Use `num_workers` to enable the Rust global worker pool. With fixed-size
+batches, one large task and many independent tasks both share the same worker
+cap. With a fixed seed and fixed batch settings, `num_workers=1`, `2`, and `4`
+produce the same `shots`, `errors`, `discards`, and `custom_counts`. If
+`max_batch_seconds` is set, adaptive-batch tasks remain task-granular to keep
+batch sizing deterministic.
+
+```python
+stats = collect(
+    tasks,
+    max_shots=100_000,
+    batch_size=2_000,
+    seed=4,
+    num_workers=4,
+)
+```
+
+Resume files are CSV files managed in Python. `save_resume_filepath` reads any
+existing file, skips tasks already satisfying their stop condition, and appends
+only newly collected deltas. `existing_data_filepaths` contributes prior data to
+stop decisions without appending to those files.
+
+```python
+stats = collect(
+    tasks,
+    max_shots=100_000,
+    batch_size=5_000,
+    seed=5,
+    existing_data_filepaths=["previous_threshold.csv"],
+    save_resume_filepath="threshold_resume.csv",
+)
+```
+
+The CSV header is:
+
+```text
+shots,errors,discards,seconds,decoder,strong_id,json_metadata,custom_counts
+```
+
+`strong_id` is stable for the sampled problem identity. It includes the source
+DEM/circuit identity, decoder identity, metadata, and postselection masks, but
+not runtime limits such as `max_shots`, `batch_size`, seed, or worker count.
+Task metadata must be JSON serializable when using strong-id and CSV paths.
+
+Postselection masks are bytes-like bit-packed masks over the sampler detector or
+observable order. A fired postselected detector discards the shot before logical
+error counting. A nonzero residual on a postselected observable also discards
+the shot. Logical error rate uses accepted shots:
+
+```python
+task = CollectionTask(
+    dem=dem,
+    postselection_mask=bytes([0b0000_0001]),
+    postselected_observables_mask=None,
+)
+```
+
+Optional custom counts are accumulated in `TaskStats.custom_counts`:
+
+```python
+stats = collect(
+    [CollectionTask(dem=dem)],
+    max_shots=10_000,
+    batch_size=1_000,
+    count_observable_error_combos=True,
+    count_detection_events=True,
+)[0]
+
+print(stats.custom_counts)
+```
+
+`count_observable_error_combos=True` records accepted residual observable masks
+with keys such as `obs_mistake_mask=E_E__`. `count_detection_events=True`
+records total detection events and detector checks. `custom_error_count_key`
+can use one custom count as the `max_errors` stop counter.
+
 ## PyMatching Decoding
 
 PyMatching integration is optional and requires `numpy`, `scipy`, and
@@ -769,6 +927,7 @@ For occasional inspection, prefer helper methods such as
 | Custom loss over measurement history | Forward estimate with `loss_mask_fn` |
 | Custom decoder over detector syndrome masks | Forward or DEM estimate with decoder |
 | Graphlike matching decoder | DEM + PyMatching |
+| Threshold-style logical error rates | `faultscope.collection.collect` |
 | Edge-level hotspot ranking | `DemFaultScopeSimulator` or DEM hotspot estimate |
 | Fast repeated detector syndrome sampling | `DemFaultScopeSimulator` or generate DEM once, then DEM sampling |
 | Rust application integration | `faultscope-core` |
@@ -796,6 +955,7 @@ Then run benchmarks from the repository root:
 .venv/bin/python benchmarks/sampling_throughput.py --family random-clifford --qubits 128 256 512 --depth 20
 .venv/bin/python benchmarks/dem_throughput.py --distances 9 13 21 --rounds 3
 .venv/bin/python benchmarks/hotspot_throughput.py --distances 9 13 21 --rounds 3 --shots 100000
+.venv/bin/python benchmarks/collection_throughput.py --shots 10000 --batch-size 1000 --workers 1 2 4
 .venv/bin/python benchmarks/native_decoder_fast_path.py
 .venv/bin/python benchmarks/surface_code_decoder_performance.py --distances 3 5 7 --shots 10000
 .venv/bin/python benchmarks/surface_code_threshold.py --distances 3 5 7 --shots 10000
