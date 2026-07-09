@@ -16,6 +16,7 @@ decoder-fusion-blossom = ["faultscope-core/decoder-fusion-blossom"]
 decoder-bposd = ["faultscope-core/decoder-bposd"]
 
 [dependencies]
+faultscope-collection = { path = "../faultscope-collection" }
 faultscope-core = { path = "../faultscope-core" }
 pyo3 = { version = "0.23", features = ["extension-module"] }
 

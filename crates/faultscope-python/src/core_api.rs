@@ -1290,7 +1290,10 @@ impl PyDetectorErrorModel {
         }
     }
 
-    pub(crate) fn to_core_dem(&self, py: Python<'_>) -> PyResult<faultscope_core::DetectorErrorModel> {
+    pub(crate) fn to_core_dem(
+        &self,
+        py: Python<'_>,
+    ) -> PyResult<faultscope_core::DetectorErrorModel> {
         if let Some(dem) = &self.core_dem {
             return Ok(dem.clone());
         }
@@ -1377,7 +1380,10 @@ fn detector_dem_line(py: Python<'_>, detector_id: i64, coords: &[f64]) -> PyResu
     }
 }
 
-fn core_edge_dem_line(py: Python<'_>, edge: &faultscope_core::DetectorErrorEdge) -> PyResult<String> {
+fn core_edge_dem_line(
+    py: Python<'_>,
+    edge: &faultscope_core::DetectorErrorEdge,
+) -> PyResult<String> {
     let mut targets: Vec<String> = edge
         .detectors
         .iter()

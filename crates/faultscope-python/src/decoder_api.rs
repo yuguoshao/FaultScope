@@ -3,19 +3,19 @@ use crate::*;
 use faultscope_core::NativeFusionBlossomDecoder as CoreNativeFusionBlossomDecoder;
 use faultscope_core::{
     BinaryLinearDecodingProblem, CorrectionMaskBatch, DetectorEventShotBatchView,
-    DetectorMaskBatchView,
-    GraphlikeDecodingProblem, IndexedDem, NativeBatchDecoder as CoreNativeBatchDecoder,
-    NativeGraphlikeDetectorCopyDecoder as CoreNativeGraphlikeDetectorCopyDecoder,
-    NativeNoCorrectionDecoder as CoreNativeNoCorrectionDecoder,
-    FaultScopeNativeCorrectionMaskBatchMutViewV1, FaultScopeNativeDecoderI64SliceV1,
-    FaultScopeNativeDecoderMaskMutViewV1, FaultScopeNativeDecoderMaskViewV1, FaultScopeNativeDecoderStatusV1,
+    DetectorMaskBatchView, FaultScopeNativeCorrectionMaskBatchMutViewV1,
+    FaultScopeNativeDecoderI64SliceV1, FaultScopeNativeDecoderMaskMutViewV1,
+    FaultScopeNativeDecoderMaskViewV1, FaultScopeNativeDecoderStatusV1,
     FaultScopeNativeDecoderStringViewV1, FaultScopeNativeDecoderV1,
     FaultScopeNativeDetectorEventShotBatchViewV1, FaultScopeNativeDetectorMaskBatchViewV1,
-    FaultScopeNativePackedDetectorShotBatchViewV1, FaultScopeNativePackedObservableShotBatchMutViewV1,
-    PackedDetectorShotBatchView, PackedObservableShotBatch, SparseBinaryMatrix,
-    NATIVE_DECODER_PLUGIN_ABI_VERSION, NATIVE_DECODER_PLUGIN_CAPSULE_METHOD,
-    NATIVE_DECODER_PLUGIN_CAPSULE_NAME, NATIVE_DECODER_PLUGIN_FLAG_THREAD_SAFE,
-    NATIVE_DECODER_PLUGIN_STATUS_OK,
+    FaultScopeNativePackedDetectorShotBatchViewV1,
+    FaultScopeNativePackedObservableShotBatchMutViewV1, GraphlikeDecodingProblem, IndexedDem,
+    NativeBatchDecoder as CoreNativeBatchDecoder,
+    NativeGraphlikeDetectorCopyDecoder as CoreNativeGraphlikeDetectorCopyDecoder,
+    NativeNoCorrectionDecoder as CoreNativeNoCorrectionDecoder, PackedDetectorShotBatchView,
+    PackedObservableShotBatch, SparseBinaryMatrix, NATIVE_DECODER_PLUGIN_ABI_VERSION,
+    NATIVE_DECODER_PLUGIN_CAPSULE_METHOD, NATIVE_DECODER_PLUGIN_CAPSULE_NAME,
+    NATIVE_DECODER_PLUGIN_FLAG_THREAD_SAFE, NATIVE_DECODER_PLUGIN_STATUS_OK,
 };
 use std::ffi::CString;
 use std::mem;
@@ -392,9 +392,10 @@ impl ExternalNativeBatchDecoder {
         }
         let pointer =
             unsafe { pyo3::ffi::PyCapsule_GetPointer(capsule.as_ptr(), capsule_name.as_ptr()) };
-        let descriptor = NonNull::new(pointer.cast::<FaultScopeNativeDecoderV1>()).ok_or_else(|| {
-            PyValueError::new_err("native decoder capsule contained a null descriptor pointer")
-        })?;
+        let descriptor =
+            NonNull::new(pointer.cast::<FaultScopeNativeDecoderV1>()).ok_or_else(|| {
+                PyValueError::new_err("native decoder capsule contained a null descriptor pointer")
+            })?;
         let descriptor_ref = unsafe { descriptor.as_ref() };
         validate_external_decoder_descriptor(descriptor_ref)?;
         let name = unsafe { call_decoder_name(descriptor_ref)? };

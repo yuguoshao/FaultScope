@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 
 use faultscope_core::{
-    FaultScopeSimulator, Circuit, DemHotspotEstimator, Detector,
-    DetectorErrorModelGenerator, LogicalObservable, NoiseLocation, NoiseModel, Operation,
+    Circuit, DemHotspotEstimator, Detector, DetectorErrorModelGenerator, FaultScopeSimulator,
+    LogicalObservable, NoiseLocation, NoiseModel, Operation,
 };
 
 fn x_noise(id: &str, rate: f64) -> NoiseLocation {
