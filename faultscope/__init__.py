@@ -72,9 +72,18 @@ from faultscope.viz import (
     write_repetition_gate_structure_hotspot_map,
     write_repetition_hotspot_heatmap,
 )
+from faultscope.collection import (
+    CollectionOptions,
+    CollectionTask,
+    TaskStats,
+    collect,
+    iter_collect,
+)
 
 __all__ = [
     "BernoulliPauliNoise",
+    "CollectionOptions",
+    "CollectionTask",
     "FaultScopeSimulator",
     "SampleBatch",
     "BinaryLinearDecodingProblem",
@@ -119,6 +128,7 @@ __all__ = [
     "SparseBinaryMatrix",
     "StimImportError",
     "StimImportResult",
+    "TaskStats",
     "TwoQubitDepolarizing",
     "UnsupportedBatchCircuitError",
     "UnsupportedDemCircuitError",
@@ -130,9 +140,11 @@ __all__ = [
     "compile_native_dem_sampler",
     "compile_native_dem_sampler_from_circuit",
     "compile_native_sampler",
+    "collect",
     "create_native_decoder",
     "generate_native_dem",
     "get_native_decoder_class",
+    "iter_collect",
     "load_stim_file",
     "parse_stim_circuit",
     "write_rotated_surface_code_spatial_hotspot_map",
