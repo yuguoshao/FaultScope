@@ -758,6 +758,22 @@ class CollectionTests(unittest.TestCase):
         self.assertEqual(parallel.discards, serial.discards)
         self.assertEqual(parallel.custom_counts, serial.custom_counts)
 
+    def test_adaptive_num_workers_completes_single_task_with_exact_shot_cap(self) -> None:
+        stats = collect(
+            [CollectionTask(dem=_logical_edge_dem(), task_id="adaptive-single")],
+            max_shots=64,
+            batch_size=8,
+            start_batch_size=1,
+            max_batch_size=8,
+            max_batch_seconds=0.001,
+            seed=125,
+            num_workers=4,
+        )[0]
+
+        self.assertEqual(stats.shots, 64)
+        self.assertEqual(stats.errors, 64)
+        self.assertEqual(stats.discards, 0)
+
     def test_num_workers_parallelizes_multiple_tasks_without_changing_stats(self) -> None:
         tasks = [
             CollectionTask(dem=_logical_edge_dem(probability=0.25), task_id="a"),
@@ -915,6 +931,67 @@ class CollectionTests(unittest.TestCase):
         self.assertEqual(first.shots, 8)
         self.assertEqual(second.shots, 8)
         self.assertEqual(second.errors, 8)
+
+    def test_adaptive_stream_interruption_resumes_from_committed_calibration_delta(self) -> None:
+        task = CollectionTask(dem=_logical_edge_dem(), task_id="adaptive-stream-resume")
+        seen: list[Progress] = []
+
+        def callback(progress: Progress) -> None:
+            seen.append(progress)
+            if len(seen) == 1:
+                raise RuntimeError("stop adaptive stream")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "adaptive-resume.csv"
+            with self.assertRaisesRegex(RuntimeError, "stop adaptive stream"):
+                collect(
+                    [task],
+                    max_shots=10,
+                    batch_size=4,
+                    start_batch_size=1,
+                    max_batch_size=4,
+                    max_batch_seconds=1.0,
+                    seed=126,
+                    num_workers=4,
+                    progress_mode="stream",
+                    progress_callback=callback,
+                    save_resume_filepath=path,
+                )
+            partial = read_stats_from_csv_files(path)[0]
+            resumed = collect(
+                [task],
+                max_shots=10,
+                batch_size=4,
+                start_batch_size=1,
+                max_batch_size=4,
+                max_batch_seconds=1.0,
+                seed=126,
+                num_workers=4,
+                save_resume_filepath=path,
+            )[0]
+
+        self.assertEqual(partial.shots, 1)
+        self.assertEqual(partial.errors, 1)
+        self.assertEqual(resumed.shots, 10)
+        self.assertEqual(resumed.errors, 10)
+
+    def test_adaptive_parallel_collection_uses_custom_stop_counter(self) -> None:
+        stats = collect(
+            [CollectionTask(dem=_graphlike_dem(), task_id="adaptive-custom-stop")],
+            max_shots=20,
+            max_errors=6,
+            batch_size=4,
+            start_batch_size=1,
+            max_batch_size=4,
+            max_batch_seconds=1.0,
+            seed=127,
+            num_workers=4,
+            count_detection_events=True,
+            custom_error_count_key="detection_events",
+        )[0]
+
+        self.assertEqual(stats.shots, 9)
+        self.assertEqual(stats.custom_counts["detection_events"], 9)
 
     def test_progress_callback_receives_incremental_stats(self) -> None:
         seen = []

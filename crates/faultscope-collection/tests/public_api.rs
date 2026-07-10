@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, ThreadId};
 use std::time::{Duration, Instant};
@@ -105,6 +106,98 @@ impl NativeBatchDecoder for CountingDecoder {
         detectors: DetectorMaskBatchView<'_>,
     ) -> faultscope_core::NpResult<CorrectionMaskBatch> {
         *self.calls.lock().unwrap() += 1;
+        Ok(CorrectionMaskBatch::empty(detectors.shots))
+    }
+}
+
+#[derive(Debug)]
+struct MaskRecordingDecoder {
+    batches: Mutex<Vec<Vec<u64>>>,
+    detector_ids: Vec<i64>,
+    observable_ids: Vec<i64>,
+}
+
+impl MaskRecordingDecoder {
+    fn new() -> Self {
+        Self {
+            batches: Mutex::new(Vec::new()),
+            detector_ids: vec![0],
+            observable_ids: vec![0],
+        }
+    }
+
+    fn batches(&self) -> Vec<Vec<u64>> {
+        self.batches.lock().unwrap().clone()
+    }
+}
+
+impl NativeBatchDecoder for MaskRecordingDecoder {
+    fn name(&self) -> &str {
+        "mask_recording"
+    }
+
+    fn detector_ids(&self) -> &[i64] {
+        &self.detector_ids
+    }
+
+    fn observable_ids(&self) -> &[i64] {
+        &self.observable_ids
+    }
+
+    fn decode_batch(
+        &self,
+        detectors: DetectorMaskBatchView<'_>,
+    ) -> faultscope_core::NpResult<CorrectionMaskBatch> {
+        self.batches
+            .lock()
+            .unwrap()
+            .push(detectors.masks[0].words.clone());
+        Ok(CorrectionMaskBatch::empty(detectors.shots))
+    }
+}
+
+#[derive(Debug)]
+struct CalibrationCorrectingDecoder {
+    calls: AtomicUsize,
+    detector_ids: Vec<i64>,
+    observable_ids: Vec<i64>,
+}
+
+impl CalibrationCorrectingDecoder {
+    fn new() -> Self {
+        Self {
+            calls: AtomicUsize::new(0),
+            detector_ids: vec![0],
+            observable_ids: vec![0],
+        }
+    }
+}
+
+impl NativeBatchDecoder for CalibrationCorrectingDecoder {
+    fn name(&self) -> &str {
+        "calibration_correcting"
+    }
+
+    fn detector_ids(&self) -> &[i64] {
+        &self.detector_ids
+    }
+
+    fn observable_ids(&self) -> &[i64] {
+        &self.observable_ids
+    }
+
+    fn decode_batch(
+        &self,
+        detectors: DetectorMaskBatchView<'_>,
+    ) -> faultscope_core::NpResult<CorrectionMaskBatch> {
+        let call = self.calls.fetch_add(1, Ordering::SeqCst);
+        if call < 2 {
+            return Ok(CorrectionMaskBatch {
+                observable_ids: self.observable_ids.clone(),
+                masks: vec![detectors.masks[0].clone()],
+                shots: detectors.shots,
+            });
+        }
         Ok(CorrectionMaskBatch::empty(detectors.shots))
     }
 }
@@ -951,8 +1044,12 @@ fn progress_callback_error_propagates_after_joining_workers() {
 }
 
 #[test]
-fn adaptive_batch_task_keeps_task_granular_execution() {
-    let decoder = Arc::new(ThreadRecordingDecoder::new(vec![0], vec![0]));
+fn adaptive_batch_task_uses_multiple_workers_after_calibration() {
+    let decoder = Arc::new(ThreadRecordingDecoder::new_with_sleep(
+        vec![0],
+        vec![0],
+        Duration::from_millis(5),
+    ));
     let task = DemLogicalCollectionTask {
         task_id: "adaptive".to_string(),
         strong_id: "adaptive-strong".to_string(),
@@ -961,13 +1058,13 @@ fn adaptive_batch_task_keeps_task_granular_execution() {
         decoder_name: Some(decoder.name().to_string()),
         metadata_json: "{}".to_string(),
         options: DemLogicalCollectionOptions {
-            max_shots: 32,
+            max_shots: 64,
             max_errors: None,
-            batch_size: 8,
+            batch_size: 4,
             seed: Some(47),
-            start_batch_size: None,
-            max_batch_size: None,
-            max_batch_seconds: Some(0.01),
+            start_batch_size: Some(1),
+            max_batch_size: Some(4),
+            max_batch_seconds: Some(0.005),
         },
         postselection_mask: None,
         postselected_observables_mask: None,
@@ -986,8 +1083,306 @@ fn adaptive_batch_task_keeps_task_granular_execution() {
     )
     .unwrap();
 
-    assert_eq!(stats[0].shots, 32);
-    assert_eq!(decoder.thread_count(), 1);
+    assert_eq!(stats[0].shots, 64);
+    assert!(
+        decoder.thread_count() > 1,
+        "adaptive work should use multiple worker threads after calibration"
+    );
+}
+
+#[test]
+fn adaptive_parallel_phase_stops_at_first_committed_error_batch() {
+    let decoder = Arc::new(CalibrationCorrectingDecoder::new());
+    let task = DemLogicalCollectionTask {
+        task_id: "adaptive-parallel-stop".to_string(),
+        strong_id: "adaptive-parallel-stop-strong".to_string(),
+        sampler: Arc::new(DemHotspotEstimator::new(graphlike_dem(1.0)).unwrap()),
+        decoder: Some(decoder.clone()),
+        decoder_name: Some(decoder.name().to_string()),
+        metadata_json: "{}".to_string(),
+        options: DemLogicalCollectionOptions {
+            max_shots: 20,
+            max_errors: Some(1),
+            batch_size: 4,
+            seed: Some(191),
+            start_batch_size: Some(1),
+            max_batch_size: Some(4),
+            max_batch_seconds: Some(1.0),
+        },
+        postselection_mask: None,
+        postselected_observables_mask: None,
+    };
+    let mut deltas = Vec::new();
+
+    let stats = collect_dem_logical_error_tasks_with_progress(
+        vec![task],
+        DemLogicalCollectionRunOptions {
+            num_workers: 4,
+            seed: None,
+            count_observable_error_combos: false,
+            count_detection_events: false,
+            custom_error_count_key: None,
+        },
+        HashMap::new(),
+        |delta| {
+            deltas.push(delta.clone());
+            Ok(())
+        },
+    )
+    .unwrap();
+
+    assert_eq!(stats[0].shots, 9);
+    assert_eq!(stats[0].errors, 4);
+    assert_eq!(
+        deltas.iter().map(|delta| delta.shots).collect::<Vec<_>>(),
+        vec![1, 4, 4]
+    );
+    assert_eq!(
+        deltas.iter().map(|delta| delta.errors).collect::<Vec<_>>(),
+        vec![0, 0, 4]
+    );
+}
+
+#[test]
+fn adaptive_calibration_stops_immediately_at_error_limit() {
+    let task = DemLogicalCollectionTask {
+        task_id: "adaptive-calibration-stop".to_string(),
+        strong_id: "adaptive-calibration-stop-strong".to_string(),
+        sampler: Arc::new(DemHotspotEstimator::new(logical_edge_dem(1.0)).unwrap()),
+        decoder: None,
+        decoder_name: None,
+        metadata_json: "{}".to_string(),
+        options: DemLogicalCollectionOptions {
+            max_shots: 20,
+            max_errors: Some(1),
+            batch_size: 4,
+            seed: Some(193),
+            start_batch_size: Some(3),
+            max_batch_size: Some(4),
+            max_batch_seconds: Some(1.0),
+        },
+        postselection_mask: None,
+        postselected_observables_mask: None,
+    };
+    let mut deltas = Vec::new();
+
+    let stats = collect_dem_logical_error_tasks_with_progress(
+        vec![task],
+        DemLogicalCollectionRunOptions {
+            num_workers: 4,
+            seed: None,
+            count_observable_error_combos: false,
+            count_detection_events: false,
+            custom_error_count_key: None,
+        },
+        HashMap::new(),
+        |delta| {
+            deltas.push(delta.clone());
+            Ok(())
+        },
+    )
+    .unwrap();
+
+    assert_eq!(stats[0].shots, 3);
+    assert_eq!(stats[0].errors, 3);
+    assert_eq!(deltas.len(), 1);
+    assert_eq!(deltas[0].shots, 3);
+}
+
+#[test]
+fn adaptive_task_resumes_partial_existing_stats_to_target() {
+    let task = DemLogicalCollectionTask {
+        task_id: "adaptive-resume".to_string(),
+        strong_id: "adaptive-resume-strong".to_string(),
+        sampler: Arc::new(DemHotspotEstimator::new(logical_edge_dem(1.0)).unwrap()),
+        decoder: None,
+        decoder_name: None,
+        metadata_json: "{}".to_string(),
+        options: DemLogicalCollectionOptions {
+            max_shots: 20,
+            max_errors: None,
+            batch_size: 4,
+            seed: Some(197),
+            start_batch_size: Some(1),
+            max_batch_size: Some(4),
+            max_batch_seconds: Some(1.0),
+        },
+        postselection_mask: None,
+        postselected_observables_mask: None,
+    };
+    let existing = DemLogicalCollectionStats {
+        task_id: task.task_id.clone(),
+        strong_id: task.strong_id.clone(),
+        decoder: None,
+        metadata_json: task.metadata_json.clone(),
+        shots: 5,
+        errors: 5,
+        discards: 0,
+        seconds: 0.25,
+        custom_counts: HashMap::new(),
+    };
+
+    let stats = collect_dem_logical_error_tasks(
+        vec![task],
+        DemLogicalCollectionRunOptions {
+            num_workers: 4,
+            seed: None,
+            count_observable_error_combos: false,
+            count_detection_events: false,
+            custom_error_count_key: None,
+        },
+        HashMap::from([("adaptive-resume-strong".to_string(), existing)]),
+    )
+    .unwrap();
+
+    assert_eq!(stats[0].shots, 20);
+    assert_eq!(stats[0].errors, 20);
+    assert!(stats[0].seconds >= 0.25);
+}
+
+#[test]
+fn adaptive_seconds_and_progress_deltas_track_calibration_plus_parallel_wall_time() {
+    let decoder = Arc::new(ThreadRecordingDecoder::new_with_sleep(
+        vec![0],
+        vec![0],
+        Duration::from_millis(20),
+    ));
+    let task = DemLogicalCollectionTask {
+        task_id: "adaptive-wall-time".to_string(),
+        strong_id: "adaptive-wall-time-strong".to_string(),
+        sampler: Arc::new(DemHotspotEstimator::new(graphlike_dem(1.0)).unwrap()),
+        decoder: Some(decoder.clone()),
+        decoder_name: Some(decoder.name().to_string()),
+        metadata_json: "{}".to_string(),
+        options: DemLogicalCollectionOptions {
+            max_shots: 10,
+            max_errors: None,
+            batch_size: 1,
+            seed: Some(211),
+            start_batch_size: Some(1),
+            max_batch_size: Some(1),
+            max_batch_seconds: Some(0.02),
+        },
+        postselection_mask: None,
+        postselected_observables_mask: None,
+    };
+    let mut deltas = Vec::new();
+
+    let started = Instant::now();
+    let stats = collect_dem_logical_error_tasks_with_progress(
+        vec![task],
+        DemLogicalCollectionRunOptions {
+            num_workers: 4,
+            seed: None,
+            count_observable_error_combos: false,
+            count_detection_events: false,
+            custom_error_count_key: None,
+        },
+        HashMap::new(),
+        |delta| {
+            deltas.push(delta.clone());
+            thread::sleep(Duration::from_millis(10));
+            Ok(())
+        },
+    )
+    .unwrap();
+    let wall_seconds = started.elapsed().as_secs_f64();
+
+    assert_eq!(stats[0].shots, 10);
+    assert_eq!(deltas.iter().map(|delta| delta.shots).sum::<usize>(), 10);
+    assert!(decoder.thread_count() > 1);
+    let delta_seconds: f64 = deltas.iter().map(|delta| delta.seconds).sum();
+    assert!(
+        (delta_seconds - stats[0].seconds).abs() <= 0.005,
+        "progress seconds {delta_seconds} should sum to final seconds {}",
+        stats[0].seconds
+    );
+    assert!(
+        stats[0].seconds <= wall_seconds * 1.75 + 0.01,
+        "adaptive seconds {} should track wall time {wall_seconds}",
+        stats[0].seconds
+    );
+}
+
+#[test]
+fn adaptive_parallel_phase_honors_custom_error_stop_counter() {
+    let task = DemLogicalCollectionTask {
+        task_id: "adaptive-custom-stop".to_string(),
+        strong_id: "adaptive-custom-stop-strong".to_string(),
+        sampler: Arc::new(DemHotspotEstimator::new(graphlike_dem(1.0)).unwrap()),
+        decoder: None,
+        decoder_name: None,
+        metadata_json: "{}".to_string(),
+        options: DemLogicalCollectionOptions {
+            max_shots: 20,
+            max_errors: Some(6),
+            batch_size: 4,
+            seed: Some(223),
+            start_batch_size: Some(1),
+            max_batch_size: Some(4),
+            max_batch_seconds: Some(1.0),
+        },
+        postselection_mask: None,
+        postselected_observables_mask: None,
+    };
+
+    let stats = collect_dem_logical_error_tasks(
+        vec![task],
+        DemLogicalCollectionRunOptions {
+            num_workers: 4,
+            seed: None,
+            count_observable_error_combos: false,
+            count_detection_events: true,
+            custom_error_count_key: Some("detection_events".to_string()),
+        },
+        HashMap::new(),
+    )
+    .unwrap();
+
+    assert_eq!(stats[0].shots, 9);
+    assert_eq!(stats[0].custom_counts["detection_events"], 9);
+}
+
+#[test]
+fn adaptive_calibration_propagates_decoder_errors() {
+    let decoder = Arc::new(FailingDecoder {
+        detector_ids: vec![0],
+        observable_ids: vec![0],
+    });
+    let task = DemLogicalCollectionTask {
+        task_id: "adaptive-failing".to_string(),
+        strong_id: "adaptive-failing-strong".to_string(),
+        sampler: Arc::new(DemHotspotEstimator::new(graphlike_dem(1.0)).unwrap()),
+        decoder: Some(decoder.clone()),
+        decoder_name: Some(decoder.name().to_string()),
+        metadata_json: "{}".to_string(),
+        options: DemLogicalCollectionOptions {
+            max_shots: 20,
+            max_errors: None,
+            batch_size: 4,
+            seed: Some(199),
+            start_batch_size: Some(1),
+            max_batch_size: Some(4),
+            max_batch_seconds: Some(1.0),
+        },
+        postselection_mask: None,
+        postselected_observables_mask: None,
+    };
+
+    let err = collect_dem_logical_error_tasks(
+        vec![task],
+        DemLogicalCollectionRunOptions {
+            num_workers: 4,
+            seed: None,
+            count_observable_error_combos: false,
+            count_detection_events: false,
+            custom_error_count_key: None,
+        },
+        HashMap::new(),
+    )
+    .unwrap_err();
+
+    assert!(err.message().contains("intentional decoder failure"));
 }
 
 #[test]
@@ -1038,6 +1433,62 @@ fn global_scheduler_resumes_partial_existing_stats() {
 
     assert_eq!(stats[0].shots, 16);
     assert_eq!(stats[0].errors, 16);
+}
+
+#[test]
+fn seeded_resume_does_not_replay_the_original_detector_batch() {
+    let decoder = Arc::new(MaskRecordingDecoder::new());
+    let make_task = |max_shots| DemLogicalCollectionTask {
+        task_id: "seeded-resume".to_string(),
+        strong_id: "seeded-resume-strong".to_string(),
+        sampler: Arc::new(DemHotspotEstimator::new(graphlike_dem(0.5)).unwrap()),
+        decoder: Some(decoder.clone()),
+        decoder_name: Some(decoder.name().to_string()),
+        metadata_json: "{}".to_string(),
+        options: DemLogicalCollectionOptions {
+            max_shots,
+            max_errors: None,
+            batch_size: 128,
+            seed: Some(229),
+            start_batch_size: None,
+            max_batch_size: None,
+            max_batch_seconds: None,
+        },
+        postselection_mask: None,
+        postselected_observables_mask: None,
+    };
+    let first = collect_dem_logical_error_tasks(
+        vec![make_task(128)],
+        DemLogicalCollectionRunOptions {
+            num_workers: 1,
+            seed: None,
+            count_observable_error_combos: false,
+            count_detection_events: false,
+            custom_error_count_key: None,
+        },
+        HashMap::new(),
+    )
+    .unwrap();
+
+    collect_dem_logical_error_tasks(
+        vec![make_task(256)],
+        DemLogicalCollectionRunOptions {
+            num_workers: 1,
+            seed: None,
+            count_observable_error_combos: false,
+            count_detection_events: false,
+            custom_error_count_key: None,
+        },
+        HashMap::from([("seeded-resume-strong".to_string(), first[0].clone())]),
+    )
+    .unwrap();
+
+    let batches = decoder.batches();
+    assert_eq!(batches.len(), 2);
+    assert_ne!(
+        batches[0], batches[1],
+        "resumed seeded collection must not replay the original random batch"
+    );
 }
 
 #[test]

@@ -736,7 +736,12 @@ are checked after each completed batch.
 `num_workers` defaults to `1`. With fixed batch settings, the Rust scheduler can
 parallelize both multiple tasks and a single large task. Fixed seed plus fixed
 batch settings gives deterministic stats independent of worker count.
-Adaptive-batch tasks using `max_batch_seconds` remain task-granular.
+Adaptive tasks using `max_batch_seconds` execute two or three serial calibration
+batches, freeze the median-throughput batch estimate, and parallelize the
+remaining fixed-size batches through the same worker pool. Calibration and
+parallel deltas are committed in order and obey the same shot/error limits.
+Because calibration uses elapsed time, adaptive runs do not promise identical
+error counts across worker counts or machine loads.
 
 `progress_mode="final"` is the compatibility default. `iter_collect(...)` yields
 final `TaskStats`, and `progress_callback` receives final `TaskStats`.

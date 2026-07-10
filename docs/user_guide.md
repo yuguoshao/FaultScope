@@ -525,8 +525,12 @@ Use `num_workers` to enable the Rust global worker pool. With fixed-size
 batches, one large task and many independent tasks both share the same worker
 cap. With a fixed seed and fixed batch settings, `num_workers=1`, `2`, and `4`
 produce the same `shots`, `errors`, `discards`, and `custom_counts`. If
-`max_batch_seconds` is set, adaptive-batch tasks remain task-granular to keep
-batch sizing deterministic.
+`max_batch_seconds` is set, each adaptive task runs two or three serial
+calibration batches, freezes the estimated batch size, and sends the remaining
+work through the same global worker pool. Adaptive runs preserve ordered
+commits and shot/stop limits, but elapsed-time feedback means different worker
+counts or machine loads need not produce identical error counts for the same
+seed.
 
 ```python
 stats = collect(
@@ -1081,7 +1085,7 @@ Then run benchmarks from the repository root:
 .venv/bin/python benchmarks/sampling_throughput.py --family random-clifford --qubits 128 256 512 --depth 20
 .venv/bin/python benchmarks/dem_throughput.py --distances 9 13 21 --rounds 3
 .venv/bin/python benchmarks/hotspot_throughput.py --distances 9 13 21 --rounds 3 --shots 100000
-.venv/bin/python benchmarks/collection_throughput.py --shots 10000 --batch-size 1000 --workers 1 2 4
+.venv/bin/python benchmarks/collection_throughput.py --shots 10000 --batch-size 1000 --adaptive-start-batch-size 100 --adaptive-max-batch-size 1000 --max-batch-seconds 0.25 --workers 1 2 4
 .venv/bin/python benchmarks/native_decoder_fast_path.py
 .venv/bin/python benchmarks/surface_code_decoder_performance.py --distances 3 5 7 --shots 10000
 .venv/bin/python benchmarks/surface_code_threshold.py --distances 3 5 7 --shots 10000

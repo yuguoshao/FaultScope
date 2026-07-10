@@ -16,6 +16,72 @@ def _has_module(name: str) -> bool:
 
 
 class BenchmarkSmokeTests(unittest.TestCase):
+    def test_collection_throughput_includes_adaptive_scenarios(self) -> None:
+        script = ROOT / "benchmarks" / "collection_throughput.py"
+        completed = subprocess.run(
+            [
+                sys.executable,
+                str(script),
+                "--shots",
+                "64",
+                "--batch-size",
+                "16",
+                "--small-batch-size",
+                "4",
+                "--adaptive-start-batch-size",
+                "1",
+                "--adaptive-max-batch-size",
+                "8",
+                "--max-batch-seconds",
+                "0.001",
+                "--workers",
+                "1",
+                "2",
+                "--tasks",
+                "2",
+                "--repeats",
+                "1",
+            ],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+
+        self.assertEqual(
+            completed.returncode,
+            0,
+            msg=f"stdout:\n{completed.stdout}\nstderr:\n{completed.stderr}",
+        )
+        modes = {
+            line.split("\t", 1)[0]
+            for line in completed.stdout.splitlines()[1:]
+            if line.strip()
+        }
+        self.assertEqual(
+            modes,
+            {"single", "multi", "multi-small", "adaptive-single", "adaptive-multi"},
+        )
+
+    def test_collection_throughput_rejects_zero_adaptive_max_batch_size(self) -> None:
+        script = ROOT / "benchmarks" / "collection_throughput.py"
+        completed = subprocess.run(
+            [
+                sys.executable,
+                str(script),
+                "--adaptive-max-batch-size",
+                "0",
+                "--repeats",
+                "1",
+            ],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("adaptive-max-batch-size must be positive", completed.stderr)
     def test_surface_code_threshold_uses_public_threshold_analysis(self) -> None:
         script = ROOT / "benchmarks" / "surface_code_threshold.py"
         source = script.read_text(encoding="utf-8")

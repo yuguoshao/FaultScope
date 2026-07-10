@@ -4,9 +4,9 @@
 //! Fixed-size tasks are split into deterministic batch work items; the main
 //! scheduler commits finished batches by task-local ordinal, so worker completion
 //! order cannot affect shots, errors, discards, custom counts, or stop points.
-//! Adaptive batch tasks remain task-granular because their next batch size depends
-//! on elapsed time feedback. Batch seeds are derived from the run/task seed and
-//! ordinal, not from the worker that happens to execute the work.
+//! Adaptive tasks calibrate serially, freeze a batch size, and then use the same
+//! batch-granular worker pool. Batch seeds are derived from the run/task seed,
+//! seed stream, and ordinal, not from the worker that executes the work.
 
 use std::collections::HashMap;
 use std::sync::mpsc;
@@ -27,20 +27,27 @@ struct BatchWork {
     ordinal: usize,
     shots: usize,
     seed: Option<u64>,
+    seed_stream: usize,
     task: Arc<DemLogicalCollectionTask>,
     run_options: Arc<DemLogicalCollectionRunOptions>,
 }
 
 #[derive(Clone)]
-struct TaskWork {
+struct AdaptiveCalibrationWork {
     state_index: usize,
-    task: DemLogicalCollectionTask,
+    task: Arc<DemLogicalCollectionTask>,
     run_options: Arc<DemLogicalCollectionRunOptions>,
+    seed_stream: usize,
+}
+
+struct AdaptiveCalibrationResult {
+    stats: DemLogicalCollectionStats,
+    frozen_batch_size: usize,
 }
 
 enum Work {
     Batch(BatchWork),
-    Task(TaskWork),
+    AdaptiveCalibration(AdaptiveCalibrationWork),
     Shutdown,
 }
 
@@ -50,20 +57,26 @@ enum WorkResult {
         ordinal: usize,
         stats: BatchStats,
     },
-    TaskDelta {
+    AdaptiveDelta {
         stats: DemLogicalCollectionStats,
         ack: mpsc::Sender<NpResult<()>>,
     },
-    Task {
+    AdaptiveCalibrated {
         state_index: usize,
-        stats: DemLogicalCollectionStats,
+        result: AdaptiveCalibrationResult,
     },
 }
 
 impl WorkResult {
     fn completes_work(&self) -> bool {
-        !matches!(self, WorkResult::TaskDelta { .. })
+        !matches!(self, WorkResult::AdaptiveDelta { .. })
     }
+}
+
+enum TaskPhase {
+    Calibrating { scheduled: bool },
+    Parallel { seed_stream: usize },
+    Complete,
 }
 
 struct TaskState {
@@ -77,27 +90,32 @@ struct TaskState {
     next_committed: usize,
     pending: HashMap<usize, BatchStats>,
     in_flight: usize,
-    scheduled_task_work: bool,
-    completed: bool,
-    adaptive: bool,
+    phase: TaskPhase,
     seed: Option<u64>,
+    resume_shots: usize,
     started: Option<Instant>,
     committed_elapsed: Duration,
 }
 
 impl TaskState {
-    fn runnable_capacity(&self) -> usize {
-        if self.completed {
-            0
-        } else if self.adaptive {
-            usize::from(!self.scheduled_task_work)
-        } else {
-            self.specs.len().saturating_sub(self.next_scheduled)
+    fn potential_capacity(&self, worker_limit: usize) -> usize {
+        match self.phase {
+            TaskPhase::Complete => 0,
+            TaskPhase::Calibrating { .. } => worker_limit,
+            TaskPhase::Parallel { .. } => self.specs.len().saturating_sub(self.next_scheduled),
         }
     }
 
     fn can_schedule(&self) -> bool {
-        self.runnable_capacity() > 0
+        match self.phase {
+            TaskPhase::Calibrating { scheduled } => !scheduled,
+            TaskPhase::Parallel { .. } => self.next_scheduled < self.specs.len(),
+            TaskPhase::Complete => false,
+        }
+    }
+
+    fn is_complete(&self) -> bool {
+        matches!(self.phase, TaskPhase::Complete)
     }
 }
 
@@ -151,7 +169,7 @@ fn collect_task_set_inner(
 
         let stats = existing.unwrap_or_else(|| DemLogicalCollectionStats::empty_for_task(&task));
         let state = make_task_state(output_index, task, stats, &run_options)?;
-        if state.completed {
+        if state.is_complete() {
             results[output_index] = Some(state.stats);
         } else {
             states.push(state);
@@ -162,10 +180,9 @@ fn collect_task_set_inner(
         return collect_results(results);
     }
 
-    let runnable_capacity = states
-        .iter()
-        .map(TaskState::runnable_capacity)
-        .sum::<usize>();
+    let runnable_capacity = states.iter().fold(0usize, |capacity, state| {
+        capacity.saturating_add(state.potential_capacity(run_options.num_workers))
+    });
     let worker_count = run_options.num_workers.min(runnable_capacity).max(1);
     let run_options = Arc::new(run_options);
     let (work_tx, work_rx) = mpsc::channel::<Work>();
@@ -191,8 +208,11 @@ fn collect_task_set_inner(
                         break;
                     }
                 }
-                Work::Task(work) => {
-                    if result_tx.send(run_task_work(work, &result_tx)).is_err() {
+                Work::AdaptiveCalibration(work) => {
+                    if result_tx
+                        .send(run_adaptive_calibration_work(work, &result_tx))
+                        .is_err()
+                    {
                         break;
                     }
                 }
@@ -282,6 +302,7 @@ fn make_task_state(
 ) -> NpResult<TaskState> {
     let target_shots = task.options.max_shots;
     let stop_error_limit = task.options.max_errors;
+    let resume_shots = stats.shots;
     let remaining_shots = target_shots.saturating_sub(stats.shots);
     if remaining_shots == 0 {
         return Ok(TaskState {
@@ -295,10 +316,9 @@ fn make_task_state(
             next_committed: 0,
             pending: HashMap::new(),
             in_flight: 0,
-            scheduled_task_work: false,
-            completed: true,
-            adaptive: false,
+            phase: TaskPhase::Complete,
             seed: None,
+            resume_shots,
             started: None,
             committed_elapsed: Duration::ZERO,
         });
@@ -310,6 +330,13 @@ fn make_task_state(
         Vec::new()
     } else {
         fixed_batch_specs(adjusted.options)
+    };
+    let phase = if adaptive {
+        TaskPhase::Calibrating { scheduled: false }
+    } else {
+        TaskPhase::Parallel {
+            seed_stream: task_seed_stream(resume_shots, 0),
+        }
     };
     let seed = task_run_seed(&adjusted, run_options);
     Ok(TaskState {
@@ -323,10 +350,9 @@ fn make_task_state(
         next_committed: 0,
         pending: HashMap::new(),
         in_flight: 0,
-        scheduled_task_work: false,
-        completed: false,
-        adaptive,
+        phase,
         seed,
+        resume_shots,
         started: None,
         committed_elapsed: Duration::ZERO,
     })
@@ -395,14 +421,23 @@ fn next_work_for_state(
     state: &mut TaskState,
     run_options: &Arc<DemLogicalCollectionRunOptions>,
 ) -> NpResult<Work> {
-    if state.adaptive {
-        state.scheduled_task_work = true;
-        return Ok(Work::Task(TaskWork {
+    if let TaskPhase::Calibrating { scheduled } = &mut state.phase {
+        *scheduled = true;
+        return Ok(Work::AdaptiveCalibration(AdaptiveCalibrationWork {
             state_index,
-            task: (*state.task).clone(),
+            task: state.task.clone(),
             run_options: run_options.clone(),
+            seed_stream: task_seed_stream(state.resume_shots, 0),
         }));
     }
+
+    let seed_stream = match state.phase {
+        TaskPhase::Parallel { seed_stream } => seed_stream,
+        TaskPhase::Complete => return Err(NpError::new("cannot schedule completed task")),
+        TaskPhase::Calibrating { .. } => {
+            return Err(NpError::new("adaptive calibration is already scheduled"));
+        }
+    };
 
     if state.started.is_none() {
         state.started = Some(Instant::now());
@@ -418,6 +453,7 @@ fn next_work_for_state(
         ordinal,
         shots,
         seed: state.seed,
+        seed_stream,
         task: state.task.clone(),
         run_options: run_options.clone(),
     }))
@@ -440,24 +476,44 @@ fn handle_work_result(
                 .get_mut(state_index)
                 .ok_or_else(|| NpError::new("collection returned invalid task index"))?;
             state.in_flight = state.in_flight.saturating_sub(1);
-            if state.completed {
+            if state.is_complete() {
                 return Ok(());
             }
             state.pending.insert(ordinal, stats);
             commit_ready_batches(state, run_options, results, progress_callback)
         }
-        WorkResult::TaskDelta { stats, ack } => {
+        WorkResult::AdaptiveDelta { stats, ack } => {
             let result = emit_progress(progress_callback, &stats);
             let _ = ack.send(result.clone());
             result
         }
-        WorkResult::Task { state_index, stats } => {
+        WorkResult::AdaptiveCalibrated {
+            state_index,
+            result,
+        } => {
             let state = states
                 .get_mut(state_index)
                 .ok_or_else(|| NpError::new("collection returned invalid task index"))?;
             state.in_flight = state.in_flight.saturating_sub(1);
-            if !state.completed {
-                state.stats.add_assign_checked(&stats)?;
+            if state.is_complete() {
+                return Ok(());
+            }
+            state.stats.add_assign_checked(&result.stats)?;
+            if reached_task_limit(state, run_options) {
+                return mark_state_complete(state, results);
+            }
+
+            let remaining_shots = state.target_shots.saturating_sub(state.stats.shots);
+            state.specs = fixed_batch_specs_for_size(remaining_shots, result.frozen_batch_size);
+            state.next_scheduled = 0;
+            state.next_committed = 0;
+            state.pending.clear();
+            state.phase = TaskPhase::Parallel {
+                seed_stream: task_seed_stream(state.resume_shots, 1),
+            };
+            state.started = None;
+            state.committed_elapsed = Duration::ZERO;
+            if state.specs.is_empty() {
                 mark_state_complete(state, results)?;
             }
             Ok(())
@@ -508,7 +564,7 @@ fn mark_state_complete(
     state: &mut TaskState,
     results: &mut [Option<DemLogicalCollectionStats>],
 ) -> NpResult<()> {
-    state.completed = true;
+    state.phase = TaskPhase::Complete;
     let slot = results
         .get_mut(state.output_index)
         .ok_or_else(|| NpError::new("collection returned invalid output index"))?;
@@ -519,7 +575,7 @@ fn mark_state_complete(
 }
 
 fn run_batch_work(work: BatchWork) -> NpResult<WorkResult> {
-    let mut rng = SmallRng::new(batch_seed(work.seed, 0, work.ordinal));
+    let mut rng = SmallRng::new(batch_seed(work.seed, work.seed_stream, work.ordinal));
     let count_options = CountOptions {
         postselection_mask: work.task.postselection_mask.as_deref(),
         postselected_observables_mask: work.task.postselected_observables_mask.as_deref(),
@@ -541,35 +597,48 @@ fn run_batch_work(work: BatchWork) -> NpResult<WorkResult> {
     })
 }
 
-fn run_task_work(
-    work: TaskWork,
+fn run_adaptive_calibration_work(
+    work: AdaptiveCalibrationWork,
     result_tx: &mpsc::Sender<NpResult<WorkResult>>,
 ) -> NpResult<WorkResult> {
-    let stats = collect_task_increment_serial(
-        &work.task,
+    let result = calibrate_adaptive_task(
+        work.task.as_ref(),
         &work.run_options,
+        work.seed_stream,
         Some(work.state_index),
         Some(result_tx),
     )?;
-    Ok(WorkResult::Task {
+    Ok(WorkResult::AdaptiveCalibrated {
         state_index: work.state_index,
-        stats,
+        result,
     })
 }
 
-fn collect_task_increment_serial(
+fn calibrate_adaptive_task(
     task: &DemLogicalCollectionTask,
     run_options: &DemLogicalCollectionRunOptions,
+    seed_stream: usize,
     state_index: Option<usize>,
     delta_tx: Option<&mpsc::Sender<NpResult<WorkResult>>>,
-) -> NpResult<DemLogicalCollectionStats> {
+) -> NpResult<AdaptiveCalibrationResult> {
     validate_task(task)?;
-    let started = Instant::now();
     let mut stats = DemLogicalCollectionStats::empty_for_task(task);
     let mut shots_done = 0usize;
     let mut batch_ordinal = 0usize;
-    let mut last_batch: Option<(usize, f64)> = None;
+    let mut observations = Vec::with_capacity(3);
     let seed = task_run_seed(task, run_options);
+    let cap = task
+        .options
+        .max_batch_size
+        .unwrap_or(task.options.batch_size);
+    let mut batch_shots = task
+        .options
+        .start_batch_size
+        .unwrap_or(task.options.batch_size)
+        .min(cap)
+        .min(task.options.max_shots)
+        .max(1);
+    let mut frozen_batch_size = batch_shots;
     let count_options = CountOptions {
         postselection_mask: task.postselection_mask.as_deref(),
         postselected_observables_mask: task.postselected_observables_mask.as_deref(),
@@ -577,9 +646,9 @@ fn collect_task_increment_serial(
         count_detection_events: run_options.count_detection_events,
     };
 
-    while shots_done < task.options.max_shots {
-        let batch_shots = next_batch_size(task.options, shots_done, last_batch);
-        let mut rng = SmallRng::new(batch_seed(seed, 0, batch_ordinal));
+    while shots_done < task.options.max_shots && batch_ordinal < 3 {
+        batch_shots = batch_shots.min(task.options.max_shots - shots_done).max(1);
+        let mut rng = SmallRng::new(batch_seed(seed, seed_stream, batch_ordinal));
         let batch_started = Instant::now();
         let batch_stats = sample_dem_logical_error_stats_with_rng(
             &task.sampler,
@@ -595,7 +664,7 @@ fn collect_task_increment_serial(
         if let (Some(_state_index), Some(delta_tx)) = (state_index, delta_tx) {
             let (ack_tx, ack_rx) = mpsc::channel();
             delta_tx
-                .send(Ok(WorkResult::TaskDelta {
+                .send(Ok(WorkResult::AdaptiveDelta {
                     stats: delta,
                     ack: ack_tx,
                 }))
@@ -605,7 +674,7 @@ fn collect_task_increment_serial(
                 .map_err(|_| NpError::new("adaptive collection progress cancelled"))??;
         }
         shots_done += batch_shots;
-        last_batch = Some((batch_shots, elapsed));
+        observations.push((batch_shots, elapsed));
         batch_ordinal += 1;
 
         if task.options.max_errors.is_some_and(|limit| {
@@ -613,9 +682,21 @@ fn collect_task_increment_serial(
         }) {
             break;
         }
+        if shots_done >= task.options.max_shots {
+            break;
+        }
+
+        let target = calibration_target_batch_size(task.options, &observations);
+        frozen_batch_size = target;
+        if should_finish_calibration(batch_ordinal, batch_shots, target) {
+            break;
+        }
+        batch_shots = target;
     }
-    stats.seconds = started.elapsed().as_secs_f64();
-    Ok(stats)
+    Ok(AdaptiveCalibrationResult {
+        stats,
+        frozen_batch_size,
+    })
 }
 
 fn stats_delta_from_batch(
@@ -670,12 +751,60 @@ pub(crate) fn next_batch_size(
     remaining.min(batch.min(cap).max(1))
 }
 
+fn calibration_target_batch_size(
+    options: DemLogicalCollectionOptions,
+    observations: &[(usize, f64)],
+) -> usize {
+    let mut throughputs = observations
+        .iter()
+        .filter_map(|(shots, seconds)| {
+            if *shots > 0 && seconds.is_finite() && *seconds > 0.0 {
+                Some((*shots as f64) / *seconds)
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>();
+    throughputs.sort_by(f64::total_cmp);
+    let estimated = if throughputs.is_empty() {
+        options.batch_size
+    } else {
+        let midpoint = throughputs.len() / 2;
+        let median = if throughputs.len() % 2 == 0 {
+            0.5 * (throughputs[midpoint - 1] + throughputs[midpoint])
+        } else {
+            throughputs[midpoint]
+        };
+        let target_seconds = options.max_batch_seconds.unwrap_or(0.0);
+        (median * target_seconds).floor().max(1.0) as usize
+    };
+    estimated
+        .min(options.max_batch_size.unwrap_or(options.batch_size))
+        .max(1)
+}
+
+fn should_finish_calibration(batch_count: usize, current: usize, target: usize) -> bool {
+    if batch_count >= 3 {
+        return true;
+    }
+    batch_count >= 2 && (current.abs_diff(target) as u128) * 5 <= current as u128
+}
+
 pub(crate) fn batch_seed(seed: Option<u64>, task_index: usize, batch_ordinal: usize) -> u64 {
     let base = collection_seed(seed);
     mix_seed(
         mix_seed(base, task_index as u64),
         batch_ordinal as u64 ^ 0x517c_c1b7_2722_0a95,
     )
+}
+
+fn task_seed_stream(resume_shots: usize, phase: usize) -> usize {
+    if resume_shots == 0 {
+        return phase;
+    }
+    (mix_seed(resume_shots as u64, 0x7a6d_4f21_c953_8b17) as usize).wrapping_shl(2)
+        | 2
+        | (phase & 1)
 }
 
 pub(crate) fn task_run_seed(
@@ -694,6 +823,17 @@ fn fixed_batch_specs(options: DemLogicalCollectionOptions) -> Vec<usize> {
     let mut shots_done = 0usize;
     while shots_done < options.max_shots {
         let batch_shots = next_batch_size(options, shots_done, None);
+        specs.push(batch_shots);
+        shots_done += batch_shots;
+    }
+    specs
+}
+
+fn fixed_batch_specs_for_size(shots: usize, batch_size: usize) -> Vec<usize> {
+    let mut specs = Vec::new();
+    let mut shots_done = 0usize;
+    while shots_done < shots {
+        let batch_shots = (shots - shots_done).min(batch_size).max(1);
         specs.push(batch_shots);
         shots_done += batch_shots;
     }
@@ -757,4 +897,74 @@ fn stable_string_hash(value: &str) -> u64 {
         .fold(0xcbf2_9ce4_8422_2325, |acc, byte| {
             (acc ^ (*byte as u64)).wrapping_mul(0x1000_0000_01b3)
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        batch_seed, calibration_target_batch_size, fixed_batch_specs, should_finish_calibration,
+        task_seed_stream, DemLogicalCollectionOptions,
+    };
+
+    fn options() -> DemLogicalCollectionOptions {
+        DemLogicalCollectionOptions {
+            max_shots: 1_000,
+            max_errors: None,
+            batch_size: 40,
+            seed: Some(1),
+            start_batch_size: Some(10),
+            max_batch_size: Some(30),
+            max_batch_seconds: Some(0.1),
+        }
+    }
+
+    #[test]
+    fn calibration_target_uses_median_positive_throughput_and_cap() {
+        assert_eq!(
+            calibration_target_batch_size(options(), &[(10, 0.1), (20, 0.1), (30, 0.1)]),
+            20
+        );
+        assert_eq!(
+            calibration_target_batch_size(options(), &[(100, 0.1), (200, 0.1)]),
+            30
+        );
+    }
+
+    #[test]
+    fn calibration_target_falls_back_when_elapsed_is_not_positive() {
+        assert_eq!(
+            calibration_target_batch_size(options(), &[(10, 0.0), (20, -1.0)]),
+            30
+        );
+    }
+
+    #[test]
+    fn calibration_requires_two_batches_and_stops_by_three() {
+        assert!(!should_finish_calibration(1, 100, 100));
+        assert!(should_finish_calibration(2, 100, 120));
+        assert!(!should_finish_calibration(2, 100, 121));
+        assert!(should_finish_calibration(3, 100, 200));
+    }
+
+    #[test]
+    fn fixed_specs_preserve_start_batch_size_for_only_the_first_batch() {
+        let mut options = options();
+        options.max_shots = 100;
+        options.max_batch_size = None;
+        options.max_batch_seconds = None;
+        assert_eq!(fixed_batch_specs(options), vec![10, 40, 40, 10]);
+    }
+
+    #[test]
+    fn resumed_tasks_use_distinct_seed_streams_for_each_phase() {
+        assert_eq!(task_seed_stream(0, 0), 0);
+        assert_eq!(task_seed_stream(0, 1), 1);
+        assert_ne!(task_seed_stream(5, 0), 0);
+        assert_ne!(task_seed_stream(5, 1), 1);
+        assert_ne!(task_seed_stream(5, 0), task_seed_stream(5, 1));
+        assert_ne!(
+            batch_seed(Some(7), task_seed_stream(0, 0), 0),
+            batch_seed(Some(7), task_seed_stream(5, 0), 0)
+        );
+    }
 }
