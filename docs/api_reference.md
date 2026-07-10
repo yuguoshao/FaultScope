@@ -35,6 +35,7 @@ from faultscope import (
     PyMatchingDecoder,
     CollectionOptions,
     CollectionTask,
+    Progress,
     TaskStats,
     collect,
     iter_collect,
@@ -586,15 +587,22 @@ threshold sweeps. The public Python API is:
 
 ```python
 from faultscope.collection import (
+    COLLECTION_CSV_FIELDS,
+    COLLECTION_CSV_HEADER,
+    CollectionData,
     CollectionOptions,
     CollectionTask,
+    Progress,
     TaskStats,
     collect,
     iter_collect,
+    read_stats_from_csv_files,
+    write_stats_to_csv_file,
 )
 ```
 
-The same names are top-level `faultscope` exports.
+The top-level `faultscope` collection exports are `CollectionOptions`,
+`CollectionTask`, `Progress`, `TaskStats`, `collect`, and `iter_collect`.
 
 `CollectionOptions` is a frozen dataclass:
 
@@ -664,6 +672,23 @@ Properties:
   `logical_error_rate`
 
 If `accepted_shots` is zero, `logical_error_rate` and `stderr` return `nan`.
+`TaskStats` also provides `with_edits(...)`, `to_csv_row()`,
+`to_csv_line()`, `from_csv_row(...)`, and `__add__` for validated merging by
+`strong_id`, decoder, and metadata. Normal `TaskStats` equality is the frozen
+dataclass field equality. `__add__` treats `task_id` as display-only: stats may
+merge with different display ids when `strong_id`, decoder, and metadata match.
+
+`Progress` is a frozen dataclass used by streaming collection:
+
+```text
+Progress(
+    new_stats: tuple[TaskStats, ...],
+    status_message: str,
+)
+```
+
+`new_stats` contains committed batch-delta `TaskStats` objects, not detector or
+correction batch data.
 
 Collection functions:
 
@@ -687,7 +712,9 @@ iter_collect(
     count_observable_error_combos=False,
     count_detection_events=False,
     custom_error_count_key=None,
-) -> Iterator[TaskStats]
+    progress_mode="final",
+    decoders=None,
+) -> Iterator[TaskStats | Progress]
 
 collect(...) -> list[TaskStats]
 ```
@@ -702,6 +729,19 @@ parallelize both multiple tasks and a single large task. Fixed seed plus fixed
 batch settings gives deterministic stats independent of worker count.
 Adaptive-batch tasks using `max_batch_seconds` remain task-granular.
 
+`progress_mode="final"` is the compatibility default. `iter_collect(...)` yields
+final `TaskStats`, and `progress_callback` receives final `TaskStats`.
+`progress_mode="stream"` makes `iter_collect(...)` yield `Progress`; `collect`
+still returns final `list[TaskStats]`, while `progress_callback` receives
+`Progress`. Stream deltas are emitted only after Rust commits batches in
+task-local ordinal order. Deltas that complete after a stop condition are not
+emitted or counted.
+
+`decoders=` may be a decoder name, native decoder object, or iterable of names
+and native objects. Tasks with `decoder is None` are expanded once per fanout
+decoder; tasks that already specify `decoder=` keep their own decoder. String
+decoders are resolved through `create_native_decoder(...)`.
+
 `save_resume_filepath` and `existing_data_filepaths` use CSV rows with this
 header:
 
@@ -712,7 +752,36 @@ shots,errors,discards,seconds,decoder,strong_id,json_metadata,custom_counts
 CSV/resume orchestration is Python-owned and outside the native sampling hot
 path. Existing rows are merged by `strong_id`; mismatched decoder or metadata
 for the same `strong_id` raises `ValueError`. A completed resume task is not
-sampled again, and only newly collected deltas are appended.
+sampled again, and only newly collected deltas are appended. CSV rows do not
+persist a display `task_id`, so `TaskStats.from_csv_row(...)` reconstructs
+`task_id` from `strong_id`.
+
+Public CSV utilities:
+
+```text
+COLLECTION_CSV_FIELDS
+COLLECTION_CSV_HEADER
+CollectionData(stats=())
+read_stats_from_csv_files(*filepaths) -> list[TaskStats]
+write_stats_to_csv_file(filepath, stats, *, append=False) -> None
+```
+
+`CollectionData` merges samples by `strong_id` using the same validation as
+`TaskStats.__add__`. `read_stats_from_csv_files(...)` rejects malformed headers,
+negative `shots`/`errors`/`discards`/`seconds`, negative custom counts,
+non-object `custom_counts`, and non-integer custom count values.
+
+Analysis helpers are available from `faultscope.collection.analysis`:
+
+```text
+error_rate_points(stats, *, x_key, group_key=None, count_key=None)
+fit_log_error_rate_lines(points, *, x_key, group_key)
+predict_error_rate(fit, x)
+plot_error_rates(stats, *, x_key, group_key=None, output=None, ax=None, count_key=None)
+```
+
+Plotting lazily imports matplotlib and raises an install hint when the optional
+collection plotting dependencies are unavailable.
 
 Postselection masks are bytes-like bit-packed masks over the native detector or
 observable order. Detector postselection discards any shot where a selected

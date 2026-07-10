@@ -75,6 +75,7 @@ from faultscope.viz import (
 from faultscope.collection import (
     CollectionOptions,
     CollectionTask,
+    Progress,
     TaskStats,
     collect,
     iter_collect,
@@ -123,6 +124,7 @@ __all__ = [
     "PauliChannel",
     "PyMatchingDecoder",
     "PyMatchingUnavailableError",
+    "Progress",
     "FailureEstimate",
     "SingleQubitDepolarizing",
     "SparseBinaryMatrix",

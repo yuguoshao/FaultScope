@@ -1,14 +1,14 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, ThreadId};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use faultscope_collection::api::{
     collect_dem_logical_error_stats, collect_dem_logical_error_tasks,
-    read_dem_logical_collection_csv, sample_dem_logical_error_stats,
-    write_dem_logical_collection_csv_header, write_dem_logical_collection_csv_row,
-    DemLogicalCollectionOptions, DemLogicalCollectionRunOptions, DemLogicalCollectionStats,
-    DemLogicalCollectionTask,
+    collect_dem_logical_error_tasks_with_progress, read_dem_logical_collection_csv,
+    sample_dem_logical_error_stats, write_dem_logical_collection_csv_header,
+    write_dem_logical_collection_csv_row, DemLogicalCollectionOptions,
+    DemLogicalCollectionRunOptions, DemLogicalCollectionStats, DemLogicalCollectionTask,
 };
 use faultscope_core::{
     CorrectionMaskBatch, DemEvent, DemHotspotEstimator, Detector, DetectorErrorEdge,
@@ -21,14 +21,20 @@ struct ThreadRecordingDecoder {
     threads: Mutex<HashSet<ThreadId>>,
     detector_ids: Vec<i64>,
     observable_ids: Vec<i64>,
+    sleep: Duration,
 }
 
 impl ThreadRecordingDecoder {
     fn new(detector_ids: Vec<i64>, observable_ids: Vec<i64>) -> Self {
+        Self::new_with_sleep(detector_ids, observable_ids, Duration::from_millis(5))
+    }
+
+    fn new_with_sleep(detector_ids: Vec<i64>, observable_ids: Vec<i64>, sleep: Duration) -> Self {
         Self {
             threads: Mutex::new(HashSet::new()),
             detector_ids,
             observable_ids,
+            sleep,
         }
     }
 
@@ -55,7 +61,50 @@ impl NativeBatchDecoder for ThreadRecordingDecoder {
         detectors: DetectorMaskBatchView<'_>,
     ) -> faultscope_core::NpResult<CorrectionMaskBatch> {
         self.threads.lock().unwrap().insert(thread::current().id());
-        thread::sleep(Duration::from_millis(5));
+        thread::sleep(self.sleep);
+        Ok(CorrectionMaskBatch::empty(detectors.shots))
+    }
+}
+
+#[derive(Debug)]
+struct CountingDecoder {
+    calls: Mutex<usize>,
+    detector_ids: Vec<i64>,
+    observable_ids: Vec<i64>,
+}
+
+impl CountingDecoder {
+    fn new(detector_ids: Vec<i64>, observable_ids: Vec<i64>) -> Self {
+        Self {
+            calls: Mutex::new(0),
+            detector_ids,
+            observable_ids,
+        }
+    }
+
+    fn call_count(&self) -> usize {
+        *self.calls.lock().unwrap()
+    }
+}
+
+impl NativeBatchDecoder for CountingDecoder {
+    fn name(&self) -> &str {
+        "counting"
+    }
+
+    fn detector_ids(&self) -> &[i64] {
+        &self.detector_ids
+    }
+
+    fn observable_ids(&self) -> &[i64] {
+        &self.observable_ids
+    }
+
+    fn decode_batch(
+        &self,
+        detectors: DetectorMaskBatchView<'_>,
+    ) -> faultscope_core::NpResult<CorrectionMaskBatch> {
+        *self.calls.lock().unwrap() += 1;
         Ok(CorrectionMaskBatch::empty(detectors.shots))
     }
 }
@@ -512,10 +561,9 @@ fn fixed_batch_scheduler_preserves_committed_order_with_custom_counts() {
         custom_error_count_key: None,
     };
 
-    let serial = collect_dem_logical_error_tasks(tasks.clone(), run_options(1), HashMap::new())
-        .unwrap();
-    let parallel =
-        collect_dem_logical_error_tasks(tasks, run_options(4), HashMap::new()).unwrap();
+    let serial =
+        collect_dem_logical_error_tasks(tasks.clone(), run_options(1), HashMap::new()).unwrap();
+    let parallel = collect_dem_logical_error_tasks(tasks, run_options(4), HashMap::new()).unwrap();
 
     assert_eq!(
         parallel
@@ -578,6 +626,328 @@ fn single_parallel_task_stops_after_completed_max_error_batch() {
 
     assert_eq!(stats[0].shots, 8);
     assert_eq!(stats[0].errors, 8);
+}
+
+#[test]
+fn progress_callback_receives_committed_fixed_batch_deltas_in_order() {
+    let task = DemLogicalCollectionTask {
+        task_id: "fixed-progress".to_string(),
+        strong_id: "fixed-progress-strong".to_string(),
+        sampler: Arc::new(DemHotspotEstimator::new(logical_edge_dem(1.0)).unwrap()),
+        decoder: None,
+        decoder_name: None,
+        metadata_json: "{}".to_string(),
+        options: DemLogicalCollectionOptions {
+            max_shots: 10,
+            max_errors: None,
+            batch_size: 4,
+            seed: Some(151),
+            start_batch_size: None,
+            max_batch_size: None,
+            max_batch_seconds: None,
+        },
+        postselection_mask: None,
+        postselected_observables_mask: None,
+    };
+    let mut deltas = Vec::new();
+
+    let stats = collect_dem_logical_error_tasks_with_progress(
+        vec![task],
+        DemLogicalCollectionRunOptions {
+            num_workers: 4,
+            seed: None,
+            count_observable_error_combos: false,
+            count_detection_events: false,
+            custom_error_count_key: None,
+        },
+        HashMap::new(),
+        |delta| {
+            deltas.push(delta.clone());
+            Ok(())
+        },
+    )
+    .unwrap();
+
+    assert_eq!(stats[0].shots, 10);
+    assert_eq!(
+        deltas
+            .iter()
+            .map(|delta| (delta.task_id.as_str(), delta.shots, delta.errors))
+            .collect::<Vec<_>>(),
+        vec![
+            ("fixed-progress", 4, 4),
+            ("fixed-progress", 4, 4),
+            ("fixed-progress", 2, 2),
+        ]
+    );
+}
+
+#[test]
+fn fixed_batch_seconds_track_wall_time_and_preserve_resume_seconds() {
+    let decoder = Arc::new(ThreadRecordingDecoder::new_with_sleep(
+        vec![0],
+        vec![0],
+        Duration::from_millis(40),
+    ));
+    let task = DemLogicalCollectionTask {
+        task_id: "fixed-wall-time".to_string(),
+        strong_id: "fixed-wall-time-strong".to_string(),
+        sampler: Arc::new(DemHotspotEstimator::new(graphlike_dem(1.0)).unwrap()),
+        decoder: Some(decoder.clone()),
+        decoder_name: Some(decoder.name().to_string()),
+        metadata_json: "{}".to_string(),
+        options: DemLogicalCollectionOptions {
+            max_shots: 8,
+            max_errors: None,
+            batch_size: 1,
+            seed: Some(173),
+            start_batch_size: None,
+            max_batch_size: None,
+            max_batch_seconds: None,
+        },
+        postselection_mask: None,
+        postselected_observables_mask: None,
+    };
+    let existing_seconds = 0.25;
+    let existing = DemLogicalCollectionStats {
+        task_id: "fixed-wall-time".to_string(),
+        strong_id: "fixed-wall-time-strong".to_string(),
+        decoder: Some(decoder.name().to_string()),
+        metadata_json: "{}".to_string(),
+        shots: 4,
+        errors: 4,
+        discards: 0,
+        seconds: existing_seconds,
+        custom_counts: HashMap::new(),
+    };
+    let mut deltas = Vec::new();
+
+    let started = Instant::now();
+    let stats = collect_dem_logical_error_tasks_with_progress(
+        vec![task],
+        DemLogicalCollectionRunOptions {
+            num_workers: 4,
+            seed: None,
+            count_observable_error_combos: false,
+            count_detection_events: false,
+            custom_error_count_key: None,
+        },
+        HashMap::from([("fixed-wall-time-strong".to_string(), existing)]),
+        |delta| {
+            deltas.push(delta.clone());
+            Ok(())
+        },
+    )
+    .unwrap();
+    let wall_seconds = started.elapsed().as_secs_f64();
+
+    assert_eq!(stats[0].shots, 8);
+    assert_eq!(deltas.len(), 4);
+    assert_eq!(deltas.iter().map(|delta| delta.shots).sum::<usize>(), 4);
+    assert!(
+        decoder.thread_count() > 1,
+        "fixed batches should overlap across workers"
+    );
+
+    let current_run_seconds = stats[0].seconds - existing_seconds;
+    let delta_seconds: f64 = deltas.iter().map(|delta| delta.seconds).sum();
+    assert!(
+        current_run_seconds > 0.0,
+        "current run seconds should be positive"
+    );
+    assert!(
+        (delta_seconds - current_run_seconds).abs()
+            <= 0.005_f64.max(current_run_seconds * 0.10),
+        "progress delta seconds {delta_seconds} should sum to current run seconds {current_run_seconds}"
+    );
+    assert!(
+        current_run_seconds <= wall_seconds * 1.75 + 0.005,
+        "fixed task seconds {current_run_seconds} should track wall time {wall_seconds}, not summed worker time"
+    );
+}
+
+#[test]
+fn progress_callback_stops_at_first_max_error_batch() {
+    let task = DemLogicalCollectionTask {
+        task_id: "fixed-stop-progress".to_string(),
+        strong_id: "fixed-stop-progress-strong".to_string(),
+        sampler: Arc::new(DemHotspotEstimator::new(logical_edge_dem(1.0)).unwrap()),
+        decoder: None,
+        decoder_name: None,
+        metadata_json: "{}".to_string(),
+        options: DemLogicalCollectionOptions {
+            max_shots: 64,
+            max_errors: Some(1),
+            batch_size: 8,
+            seed: Some(157),
+            start_batch_size: None,
+            max_batch_size: None,
+            max_batch_seconds: None,
+        },
+        postselection_mask: None,
+        postselected_observables_mask: None,
+    };
+    let mut deltas = Vec::new();
+
+    let stats = collect_dem_logical_error_tasks_with_progress(
+        vec![task],
+        DemLogicalCollectionRunOptions {
+            num_workers: 4,
+            seed: None,
+            count_observable_error_combos: false,
+            count_detection_events: false,
+            custom_error_count_key: None,
+        },
+        HashMap::new(),
+        |delta| {
+            deltas.push(delta.clone());
+            Ok(())
+        },
+    )
+    .unwrap();
+
+    assert_eq!(stats[0].shots, 8);
+    assert_eq!(deltas.len(), 1);
+    assert_eq!(deltas[0].shots, 8);
+}
+
+#[test]
+fn progress_callback_receives_adaptive_task_deltas() {
+    let task = DemLogicalCollectionTask {
+        task_id: "adaptive-progress".to_string(),
+        strong_id: "adaptive-progress-strong".to_string(),
+        sampler: Arc::new(DemHotspotEstimator::new(logical_edge_dem(1.0)).unwrap()),
+        decoder: None,
+        decoder_name: None,
+        metadata_json: "{}".to_string(),
+        options: DemLogicalCollectionOptions {
+            max_shots: 9,
+            max_errors: None,
+            batch_size: 3,
+            seed: Some(163),
+            start_batch_size: None,
+            max_batch_size: None,
+            max_batch_seconds: Some(1.0),
+        },
+        postselection_mask: None,
+        postselected_observables_mask: None,
+    };
+    let mut deltas = Vec::new();
+
+    let stats = collect_dem_logical_error_tasks_with_progress(
+        vec![task],
+        DemLogicalCollectionRunOptions {
+            num_workers: 2,
+            seed: None,
+            count_observable_error_combos: false,
+            count_detection_events: false,
+            custom_error_count_key: None,
+        },
+        HashMap::new(),
+        |delta| {
+            deltas.push(delta.clone());
+            Ok(())
+        },
+    )
+    .unwrap();
+
+    assert_eq!(stats[0].shots, 9);
+    assert!(deltas.len() > 1);
+    assert_eq!(deltas.iter().map(|delta| delta.shots).sum::<usize>(), 9);
+}
+
+#[test]
+fn adaptive_progress_error_stops_before_next_batch() {
+    let decoder = Arc::new(CountingDecoder::new(vec![0], vec![0]));
+    let task = DemLogicalCollectionTask {
+        task_id: "adaptive-cancel".to_string(),
+        strong_id: "adaptive-cancel-strong".to_string(),
+        sampler: Arc::new(DemHotspotEstimator::new(graphlike_dem(1.0)).unwrap()),
+        decoder: Some(decoder.clone()),
+        decoder_name: Some(decoder.name().to_string()),
+        metadata_json: "{}".to_string(),
+        options: DemLogicalCollectionOptions {
+            max_shots: 4,
+            max_errors: None,
+            batch_size: 1,
+            seed: Some(181),
+            start_batch_size: Some(1),
+            max_batch_size: Some(1),
+            max_batch_seconds: Some(1.0),
+        },
+        postselection_mask: None,
+        postselected_observables_mask: None,
+    };
+    let mut calls = 0usize;
+
+    let err = collect_dem_logical_error_tasks_with_progress(
+        vec![task],
+        DemLogicalCollectionRunOptions {
+            num_workers: 1,
+            seed: None,
+            count_observable_error_combos: false,
+            count_detection_events: false,
+            custom_error_count_key: None,
+        },
+        HashMap::new(),
+        |_delta| {
+            calls += 1;
+            Err(faultscope_core::NpError::new("stop adaptive progress"))
+        },
+    )
+    .unwrap_err();
+
+    assert_eq!(calls, 1);
+    assert!(err.message().contains("stop adaptive progress"));
+    assert_eq!(
+        decoder.call_count(),
+        1,
+        "adaptive worker must wait for progress acknowledgement before starting another batch"
+    );
+}
+
+#[test]
+fn progress_callback_error_propagates_after_joining_workers() {
+    let task = DemLogicalCollectionTask {
+        task_id: "progress-error".to_string(),
+        strong_id: "progress-error-strong".to_string(),
+        sampler: Arc::new(DemHotspotEstimator::new(logical_edge_dem(1.0)).unwrap()),
+        decoder: None,
+        decoder_name: None,
+        metadata_json: "{}".to_string(),
+        options: DemLogicalCollectionOptions {
+            max_shots: 32,
+            max_errors: None,
+            batch_size: 4,
+            seed: Some(167),
+            start_batch_size: None,
+            max_batch_size: None,
+            max_batch_seconds: None,
+        },
+        postselection_mask: None,
+        postselected_observables_mask: None,
+    };
+    let mut calls = 0usize;
+
+    let err = collect_dem_logical_error_tasks_with_progress(
+        vec![task],
+        DemLogicalCollectionRunOptions {
+            num_workers: 4,
+            seed: None,
+            count_observable_error_combos: false,
+            count_detection_events: false,
+            custom_error_count_key: None,
+        },
+        HashMap::new(),
+        |_delta| {
+            calls += 1;
+            Err(faultscope_core::NpError::new("intentional progress stop"))
+        },
+    )
+    .unwrap_err();
+
+    assert_eq!(calls, 1);
+    assert!(err.message().contains("intentional progress stop"));
 }
 
 #[test]

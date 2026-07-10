@@ -22,9 +22,15 @@ benchmark = [
     "numpy",
     "stim",
 ]
+collection = [
+    "numpy",
+    "scipy",
+    "matplotlib",
+]
 test = [
     "numpy",
     "scipy",
+    "matplotlib",
     "pymatching",
     "stim",
 ]

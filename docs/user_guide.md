@@ -50,6 +50,7 @@ Install optional integrations only when needed:
 
 ```bash
 .venv/bin/python -m pip install ".[pymatching,visualization]"
+.venv/bin/python -m pip install ".[collection]"
 .venv/bin/python -m pip install ".[test]"
 ```
 
@@ -69,6 +70,7 @@ Optional dependency groups:
 | Visualization | `pillow` |
 | Stim import/comparison | `stim` |
 | Benchmarks | `numpy`, optionally `stim`, `pymatching`, `scipy` |
+| Collection plotting/fitting | `numpy`, `scipy`, `matplotlib` |
 
 ## Imports And Package Layout
 
@@ -557,6 +559,43 @@ The CSV header is:
 shots,errors,discards,seconds,decoder,strong_id,json_metadata,custom_counts
 ```
 
+By default, progress is final-only: `iter_collect(...)` yields final
+`TaskStats`, and `progress_callback` receives final `TaskStats`. Set
+`progress_mode="stream"` to receive committed batch deltas. In stream mode,
+`iter_collect(...)` yields `Progress(new_stats=(...), status_message=...)`,
+`progress_callback` receives `Progress`, and resume CSV rows are appended and
+flushed as each delta commits:
+
+```python
+from faultscope.collection import Progress, iter_collect
+
+for progress in iter_collect(
+    tasks,
+    max_shots=100_000,
+    batch_size=2_000,
+    save_resume_filepath="threshold_resume.csv",
+    progress_mode="stream",
+):
+    assert isinstance(progress, Progress)
+    for delta in progress.new_stats:
+        print(delta.task_id, delta.shots, delta.errors)
+```
+
+Use the public CSV utilities when you want to summarize, merge, or write
+collection data yourself:
+
+```python
+from faultscope.collection import (
+    CollectionData,
+    read_stats_from_csv_files,
+    write_stats_to_csv_file,
+)
+
+stats = read_stats_from_csv_files("old.csv", "new.csv")
+data = CollectionData(stats)
+write_stats_to_csv_file("merged.csv", data.values())
+```
+
 `strong_id` is stable for the sampled problem identity. It includes the source
 DEM/circuit identity, decoder identity, metadata, and postselection masks, but
 not runtime limits such as `max_shots`, `batch_size`, seed, or worker count.
@@ -593,6 +632,48 @@ print(stats.custom_counts)
 with keys such as `obs_mistake_mask=E_E__`. `count_detection_events=True`
 records total detection events and detector checks. `custom_error_count_key`
 can use one custom count as the `max_errors` stop counter.
+
+Decoder fanout expands tasks that do not already specify a decoder:
+
+```python
+stats = collect(
+    [CollectionTask(dem=dem, task_id="surface-d3")],
+    max_shots=20_000,
+    batch_size=1_000,
+    decoders=["no-correction", "graphlike-detector-copy"],
+)
+```
+
+Tasks with their own `decoder=` keep it. When multiple fanout decoders are
+provided, generated task ids append the decoder name, for example
+`surface-d3:graphlike-detector-copy`.
+
+The module also has a small command line interface:
+
+```bash
+python -m faultscope.collection collect \
+  --tasks-factory experiments.threshold:make_tasks \
+  --factory-arg distance=5 \
+  --max-shots 100000 \
+  --batch-size 2000 \
+  --decoder graphlike-detector-copy \
+  --save-resume-filepath stats.csv
+
+python -m faultscope.collection summarize stats.csv
+python -m faultscope.collection merge merged.csv stats-a.csv stats-b.csv
+python -m faultscope.collection fit stats.csv --x-key p --group-key d
+python -m faultscope.collection plot stats.csv --x-key p --group-key d --out plot.png
+```
+
+Task factories are called as `factory(**factory_kwargs)` and may return either
+a single `CollectionTask` or an iterable of `CollectionTask` values. Each
+`--factory-arg key=value` value is JSON-decoded when possible, so inputs such
+as numbers, booleans, arrays, and objects arrive at the factory as structured
+Python values. Plotting requires the optional collection extra:
+
+```bash
+python -m pip install "faultscope[collection]"
+```
 
 ## PyMatching Decoding
 

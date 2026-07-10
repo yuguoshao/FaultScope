@@ -12,7 +12,7 @@ use std::collections::HashMap;
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::api::{
     stop_error_count, validate_task, DemLogicalCollectionOptions, DemLogicalCollectionRunOptions,
@@ -50,10 +50,20 @@ enum WorkResult {
         ordinal: usize,
         stats: BatchStats,
     },
+    TaskDelta {
+        stats: DemLogicalCollectionStats,
+        ack: mpsc::Sender<NpResult<()>>,
+    },
     Task {
         state_index: usize,
         stats: DemLogicalCollectionStats,
     },
+}
+
+impl WorkResult {
+    fn completes_work(&self) -> bool {
+        !matches!(self, WorkResult::TaskDelta { .. })
+    }
 }
 
 struct TaskState {
@@ -71,8 +81,8 @@ struct TaskState {
     completed: bool,
     adaptive: bool,
     seed: Option<u64>,
-    started: Instant,
-    add_elapsed_on_complete: bool,
+    started: Option<Instant>,
+    committed_elapsed: Duration,
 }
 
 impl TaskState {
@@ -95,6 +105,26 @@ pub(crate) fn collect_task_set(
     tasks: Vec<DemLogicalCollectionTask>,
     run_options: DemLogicalCollectionRunOptions,
     existing_data: HashMap<String, DemLogicalCollectionStats>,
+) -> NpResult<Vec<DemLogicalCollectionStats>> {
+    collect_task_set_inner(tasks, run_options, existing_data, None)
+}
+
+pub(crate) type ProgressCallback<'a> = dyn FnMut(&DemLogicalCollectionStats) -> NpResult<()> + 'a;
+
+pub(crate) fn collect_task_set_with_progress(
+    tasks: Vec<DemLogicalCollectionTask>,
+    run_options: DemLogicalCollectionRunOptions,
+    existing_data: HashMap<String, DemLogicalCollectionStats>,
+    progress_callback: &mut ProgressCallback<'_>,
+) -> NpResult<Vec<DemLogicalCollectionStats>> {
+    collect_task_set_inner(tasks, run_options, existing_data, Some(progress_callback))
+}
+
+fn collect_task_set_inner(
+    tasks: Vec<DemLogicalCollectionTask>,
+    run_options: DemLogicalCollectionRunOptions,
+    existing_data: HashMap<String, DemLogicalCollectionStats>,
+    mut progress_callback: Option<&mut ProgressCallback<'_>>,
 ) -> NpResult<Vec<DemLogicalCollectionStats>> {
     if run_options.num_workers == 0 {
         return Err(NpError::new("num_workers must be positive"));
@@ -162,7 +192,7 @@ pub(crate) fn collect_task_set(
                     }
                 }
                 Work::Task(work) => {
-                    if result_tx.send(run_task_work(work)).is_err() {
+                    if result_tx.send(run_task_work(work, &result_tx)).is_err() {
                         break;
                     }
                 }
@@ -187,19 +217,37 @@ pub(crate) fn collect_task_set(
         let result = result_rx
             .recv()
             .map_err(|_| NpError::new("collection worker result channel closed"))?;
-        in_flight -= 1;
+        let completes_work = match &result {
+            Ok(result) => result.completes_work(),
+            Err(_) => true,
+        };
+        if completes_work {
+            in_flight -= 1;
+        }
+        if first_error.is_some() {
+            continue;
+        }
         match result {
             Ok(result) => {
-                handle_work_result(result, &mut states, &run_options, &mut results)?;
-                if first_error.is_none() {
-                    schedule_available_work(
-                        &mut states,
-                        &mut next_state_to_schedule,
-                        worker_count,
-                        &work_tx,
-                        &run_options,
-                        &mut in_flight,
-                    )?;
+                if let Err(err) = handle_work_result(
+                    result,
+                    &mut states,
+                    &run_options,
+                    &mut results,
+                    &mut progress_callback,
+                ) {
+                    first_error = Some(err);
+                    continue;
+                }
+                if let Err(err) = schedule_available_work(
+                    &mut states,
+                    &mut next_state_to_schedule,
+                    worker_count,
+                    &work_tx,
+                    &run_options,
+                    &mut in_flight,
+                ) {
+                    first_error = Some(err);
                 }
             }
             Err(err) => {
@@ -251,8 +299,8 @@ fn make_task_state(
             completed: true,
             adaptive: false,
             seed: None,
-            started: Instant::now(),
-            add_elapsed_on_complete: false,
+            started: None,
+            committed_elapsed: Duration::ZERO,
         });
     }
 
@@ -279,8 +327,8 @@ fn make_task_state(
         completed: false,
         adaptive,
         seed,
-        started: Instant::now(),
-        add_elapsed_on_complete: !adaptive,
+        started: None,
+        committed_elapsed: Duration::ZERO,
     })
 }
 
@@ -356,6 +404,9 @@ fn next_work_for_state(
         }));
     }
 
+    if state.started.is_none() {
+        state.started = Some(Instant::now());
+    }
     let ordinal = state.next_scheduled;
     let shots = *state
         .specs
@@ -377,6 +428,7 @@ fn handle_work_result(
     states: &mut [TaskState],
     run_options: &DemLogicalCollectionRunOptions,
     results: &mut [Option<DemLogicalCollectionStats>],
+    progress_callback: &mut Option<&mut ProgressCallback<'_>>,
 ) -> NpResult<()> {
     match result {
         WorkResult::Batch {
@@ -392,7 +444,12 @@ fn handle_work_result(
                 return Ok(());
             }
             state.pending.insert(ordinal, stats);
-            commit_ready_batches(state, run_options, results)
+            commit_ready_batches(state, run_options, results, progress_callback)
+        }
+        WorkResult::TaskDelta { stats, ack } => {
+            let result = emit_progress(progress_callback, &stats);
+            let _ = ack.send(result.clone());
+            result
         }
         WorkResult::Task { state_index, stats } => {
             let state = states
@@ -412,15 +469,22 @@ fn commit_ready_batches(
     state: &mut TaskState,
     run_options: &DemLogicalCollectionRunOptions,
     results: &mut [Option<DemLogicalCollectionStats>],
+    progress_callback: &mut Option<&mut ProgressCallback<'_>>,
 ) -> NpResult<()> {
     while let Some(batch_stats) = state.pending.remove(&state.next_committed) {
-        state.stats.shots += batch_stats.shots;
-        state.stats.errors += batch_stats.errors;
-        state.stats.discards += batch_stats.discards;
-        for (key, value) in batch_stats.custom_counts {
-            *state.stats.custom_counts.entry(key).or_insert(0) += value;
-        }
+        let elapsed = state
+            .started
+            .map(|started| started.elapsed())
+            .unwrap_or(Duration::ZERO);
+        let delta_seconds = elapsed
+            .checked_sub(state.committed_elapsed)
+            .unwrap_or(Duration::ZERO)
+            .as_secs_f64();
+        state.committed_elapsed = elapsed;
+        let delta = stats_delta_from_batch(state.task.as_ref(), batch_stats, delta_seconds);
+        state.stats.add_assign_checked(&delta)?;
         state.next_committed += 1;
+        emit_progress(progress_callback, &delta)?;
 
         if reached_task_limit(state, run_options) {
             return mark_state_complete(state, results);
@@ -445,10 +509,6 @@ fn mark_state_complete(
     results: &mut [Option<DemLogicalCollectionStats>],
 ) -> NpResult<()> {
     state.completed = true;
-    if state.add_elapsed_on_complete {
-        state.stats.seconds += state.started.elapsed().as_secs_f64();
-        state.add_elapsed_on_complete = false;
-    }
     let slot = results
         .get_mut(state.output_index)
         .ok_or_else(|| NpError::new("collection returned invalid output index"))?;
@@ -481,8 +541,16 @@ fn run_batch_work(work: BatchWork) -> NpResult<WorkResult> {
     })
 }
 
-fn run_task_work(work: TaskWork) -> NpResult<WorkResult> {
-    let stats = collect_task_increment_serial(&work.task, &work.run_options)?;
+fn run_task_work(
+    work: TaskWork,
+    result_tx: &mpsc::Sender<NpResult<WorkResult>>,
+) -> NpResult<WorkResult> {
+    let stats = collect_task_increment_serial(
+        &work.task,
+        &work.run_options,
+        Some(work.state_index),
+        Some(result_tx),
+    )?;
     Ok(WorkResult::Task {
         state_index: work.state_index,
         stats,
@@ -492,6 +560,8 @@ fn run_task_work(work: TaskWork) -> NpResult<WorkResult> {
 fn collect_task_increment_serial(
     task: &DemLogicalCollectionTask,
     run_options: &DemLogicalCollectionRunOptions,
+    state_index: Option<usize>,
+    delta_tx: Option<&mpsc::Sender<NpResult<WorkResult>>>,
 ) -> NpResult<DemLogicalCollectionStats> {
     validate_task(task)?;
     let started = Instant::now();
@@ -516,15 +586,23 @@ fn collect_task_increment_serial(
             batch_shots,
             &mut rng,
             task.decoder.as_deref(),
-            None,
+            Some(batch_started),
             &count_options,
         )?;
-        let elapsed = batch_started.elapsed().as_secs_f64();
-        stats.shots += batch_stats.shots;
-        stats.errors += batch_stats.errors;
-        stats.discards += batch_stats.discards;
-        for (key, value) in batch_stats.custom_counts {
-            *stats.custom_counts.entry(key).or_insert(0) += value;
+        let elapsed = batch_stats.seconds;
+        let delta = stats_delta_from_batch(task, batch_stats, elapsed);
+        stats.add_assign_checked(&delta)?;
+        if let (Some(_state_index), Some(delta_tx)) = (state_index, delta_tx) {
+            let (ack_tx, ack_rx) = mpsc::channel();
+            delta_tx
+                .send(Ok(WorkResult::TaskDelta {
+                    stats: delta,
+                    ack: ack_tx,
+                }))
+                .map_err(|_| NpError::new("collection worker result channel closed"))?;
+            ack_rx
+                .recv()
+                .map_err(|_| NpError::new("adaptive collection progress cancelled"))??;
         }
         shots_done += batch_shots;
         last_batch = Some((batch_shots, elapsed));
@@ -538,6 +616,34 @@ fn collect_task_increment_serial(
     }
     stats.seconds = started.elapsed().as_secs_f64();
     Ok(stats)
+}
+
+fn stats_delta_from_batch(
+    task: &DemLogicalCollectionTask,
+    batch_stats: BatchStats,
+    seconds: f64,
+) -> DemLogicalCollectionStats {
+    DemLogicalCollectionStats {
+        task_id: task.task_id.clone(),
+        strong_id: task.strong_id.clone(),
+        decoder: task.decoder_name.clone(),
+        metadata_json: task.metadata_json.clone(),
+        shots: batch_stats.shots,
+        errors: batch_stats.errors,
+        discards: batch_stats.discards,
+        seconds,
+        custom_counts: batch_stats.custom_counts,
+    }
+}
+
+fn emit_progress(
+    progress_callback: &mut Option<&mut ProgressCallback<'_>>,
+    delta: &DemLogicalCollectionStats,
+) -> NpResult<()> {
+    if let Some(callback) = progress_callback.as_deref_mut() {
+        callback(delta)?;
+    }
+    Ok(())
 }
 
 pub(crate) fn next_batch_size(

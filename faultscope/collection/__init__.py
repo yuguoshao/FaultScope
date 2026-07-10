@@ -1,12 +1,28 @@
 """Logical error-rate and threshold-style collection APIs."""
 
 from faultscope.collection._collect import collect, iter_collect
-from faultscope.collection._types import CollectionOptions, CollectionTask, TaskStats
+from faultscope.collection._types import (
+    COLLECTION_CSV_FIELDS,
+    COLLECTION_CSV_HEADER,
+    CollectionData,
+    CollectionOptions,
+    CollectionTask,
+    Progress,
+    TaskStats,
+    read_stats_from_csv_files,
+    write_stats_to_csv_file,
+)
 
 __all__ = [
+    "COLLECTION_CSV_FIELDS",
+    "COLLECTION_CSV_HEADER",
+    "CollectionData",
     "CollectionOptions",
     "CollectionTask",
+    "Progress",
     "TaskStats",
     "collect",
     "iter_collect",
+    "read_stats_from_csv_files",
+    "write_stats_to_csv_file",
 ]

@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use crate::*;
+use pyo3::exceptions::PyRuntimeError;
 
 #[pyfunction]
 #[pyo3(signature = (
@@ -10,7 +11,8 @@ use crate::*;
     count_observable_error_combos=false,
     count_detection_events=false,
     custom_error_count_key=None,
-    existing_stats=None
+    existing_stats=None,
+    progress_callback=None
 ))]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn _collect_dem_logical_error_stats_many(
@@ -22,6 +24,7 @@ pub(crate) fn _collect_dem_logical_error_stats_many(
     count_detection_events: bool,
     custom_error_count_key: Option<String>,
     existing_stats: Option<&Bound<'_, PyAny>>,
+    progress_callback: Option<Py<PyAny>>,
 ) -> PyResult<Vec<PyObject>> {
     let rust_tasks = py_collection_tasks_to_rust(tasks)?;
     let existing = py_existing_stats_to_rust(existing_stats)?;
@@ -33,20 +36,57 @@ pub(crate) fn _collect_dem_logical_error_stats_many(
         custom_error_count_key,
     };
 
-    let stats = py
-        .allow_threads(|| {
+    let stats = if let Some(progress_callback) = progress_callback {
+        py.allow_threads(move || {
+            let progress = move |stats: &faultscope_collection::api::DemLogicalCollectionStats| {
+                Python::with_gil(|py| {
+                    let py_stats = collection_stats_to_py(py, stats).map_err(|err| {
+                        faultscope_core::NpError::new(format!(
+                            "collection progress callback failed: {err}"
+                        ))
+                    })?;
+                    progress_callback
+                        .bind(py)
+                        .call1((py_stats,))
+                        .map_err(|err| {
+                            faultscope_core::NpError::new(format!(
+                                "collection progress callback failed: {err}"
+                            ))
+                        })?;
+                    Ok(())
+                })
+            };
+            faultscope_collection::api::collect_dem_logical_error_tasks_with_progress(
+                rust_tasks,
+                run_options,
+                existing,
+                progress,
+            )
+        })
+    } else {
+        py.allow_threads(|| {
             faultscope_collection::api::collect_dem_logical_error_tasks(
                 rust_tasks,
                 run_options,
                 existing,
             )
         })
-        .map_err(|err| PyValueError::new_err(err.to_string()))?;
+    }
+    .map_err(collection_error_to_py)?;
 
     stats
         .iter()
         .map(|stats| collection_stats_to_py(py, stats))
         .collect()
+}
+
+fn collection_error_to_py(err: faultscope_core::NpError) -> PyErr {
+    let message = err.to_string();
+    if message.contains("collection progress callback failed") {
+        PyRuntimeError::new_err(message)
+    } else {
+        PyValueError::new_err(message)
+    }
 }
 
 fn py_collection_tasks_to_rust(

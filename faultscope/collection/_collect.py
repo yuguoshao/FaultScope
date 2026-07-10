@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Iterator, Mapping
-import csv
+from dataclasses import replace
 import hashlib
 import json
 from pathlib import Path
 import sys
-from typing import Any
+import threading
+from typing import Any, Literal
 
 from faultscope._native import _collect_dem_logical_error_stats_many
 from faultscope.decoders import create_native_decoder
@@ -17,21 +18,20 @@ from faultscope.runtime import (
     compile_native_dem_sampler_from_circuit,
 )
 
-from faultscope.collection._types import CollectionOptions, CollectionTask, TaskStats
+from faultscope.collection._types import (
+    CollectionData,
+    CollectionOptions,
+    CollectionTask,
+    Progress,
+    TaskStats,
+    read_stats_from_csv_files,
+    write_stats_to_csv_file,
+)
 
 
 # Python owns task parsing, strong-id construction, and CSV resume orchestration.
 # Native sampling, decoding, batch scheduling, and counting stay in Rust.
-CSV_HEADER = [
-    "shots",
-    "errors",
-    "discards",
-    "seconds",
-    "decoder",
-    "strong_id",
-    "json_metadata",
-    "custom_counts",
-]
+ProgressMode = Literal["final", "stream"]
 
 
 def iter_collect(
@@ -48,87 +48,17 @@ def iter_collect(
     num_workers: int | None = None,
     existing_data_filepaths: Iterable[str | Path] = (),
     save_resume_filepath: str | Path | None = None,
-    progress_callback: Callable[[TaskStats], object] | None = None,
+    progress_callback: Callable[[TaskStats | Progress], object] | None = None,
     print_progress: bool = False,
     count_observable_error_combos: bool = False,
     count_detection_events: bool = False,
     custom_error_count_key: str | None = None,
-) -> Iterator[TaskStats]:
-    call_options = _call_options(
-        options=options,
-        max_shots=max_shots,
-        max_errors=max_errors,
-        batch_size=batch_size,
-        seed=seed,
-        start_batch_size=start_batch_size,
-        max_batch_size=max_batch_size,
-        max_batch_seconds=max_batch_seconds,
-    )
-    task_list = list(tasks)
-    native_tasks = []
-    for index, task in enumerate(task_list):
-        effective = _merge_options(call_options, task.collection_options)
-        if effective.max_shots is None:
-            raise ValueError("max_shots is required")
-        native_tasks.append(_native_task(task, index, effective))
-
-    existing = _read_existing_stats(existing_data_filepaths, save_resume_filepath)
-    native_stats = _collect_dem_logical_error_stats_many(
-        native_tasks,
-        num_workers=1 if num_workers is None else num_workers,
-        seed=seed,
-        count_observable_error_combos=count_observable_error_combos,
-        count_detection_events=count_detection_events,
-        custom_error_count_key=custom_error_count_key,
-        existing_stats=list(existing.values()),
-    )
-
-    resume_path = Path(save_resume_filepath) if save_resume_filepath is not None else None
-    if resume_path is not None:
-        _ensure_resume_header(resume_path)
-
-    for item in native_stats:
-        stat = _task_stats_from_native(item)
-        if resume_path is not None:
-            delta = _native_stats_delta(item, existing.get(item["strong_id"]))
-            if delta is not None:
-                _append_native_stats(resume_path, delta)
-                existing[item["strong_id"]] = _merge_native_stats(
-                    existing.get(item["strong_id"]), item
-                )
-        if print_progress:
-            print(
-                f"{stat.task_id}: shots={stat.shots} errors={stat.errors} "
-                f"discards={stat.discards}",
-                file=sys.stderr,
-            )
-        if progress_callback is not None:
-            progress_callback(stat)
-        yield stat
-
-
-def collect(
-    tasks: Iterable[CollectionTask],
-    *,
-    options: CollectionOptions | None = None,
-    max_shots: int | None = None,
-    max_errors: int | None = None,
-    batch_size: int | None = None,
-    seed: int | None = None,
-    start_batch_size: int | None = None,
-    max_batch_size: int | None = None,
-    max_batch_seconds: float | None = None,
-    num_workers: int | None = None,
-    existing_data_filepaths: Iterable[str | Path] = (),
-    save_resume_filepath: str | Path | None = None,
-    progress_callback: Callable[[TaskStats], object] | None = None,
-    print_progress: bool = False,
-    count_observable_error_combos: bool = False,
-    count_detection_events: bool = False,
-    custom_error_count_key: str | None = None,
-) -> list[TaskStats]:
-    return list(
-        iter_collect(
+    progress_mode: ProgressMode = "final",
+    decoders: Iterable[str | object] | str | object | None = None,
+) -> Iterator[TaskStats | Progress]:
+    _validate_progress_mode(progress_mode)
+    if progress_mode == "stream":
+        yield from _iter_collect_stream(
             tasks,
             options=options,
             max_shots=max_shots,
@@ -146,8 +76,262 @@ def collect(
             count_observable_error_combos=count_observable_error_combos,
             count_detection_events=count_detection_events,
             custom_error_count_key=custom_error_count_key,
+            decoders=decoders,
         )
+        return
+    final_stats = _run_collect(
+        tasks,
+        options=options,
+        max_shots=max_shots,
+        max_errors=max_errors,
+        batch_size=batch_size,
+        seed=seed,
+        start_batch_size=start_batch_size,
+        max_batch_size=max_batch_size,
+        max_batch_seconds=max_batch_seconds,
+        num_workers=num_workers,
+        existing_data_filepaths=existing_data_filepaths,
+        save_resume_filepath=save_resume_filepath,
+        progress_callback=progress_callback,
+        print_progress=print_progress,
+        count_observable_error_combos=count_observable_error_combos,
+        count_detection_events=count_detection_events,
+        custom_error_count_key=custom_error_count_key,
+        progress_mode="final",
+        decoders=decoders,
     )
+    yield from final_stats
+
+
+def collect(
+    tasks: Iterable[CollectionTask],
+    *,
+    options: CollectionOptions | None = None,
+    max_shots: int | None = None,
+    max_errors: int | None = None,
+    batch_size: int | None = None,
+    seed: int | None = None,
+    start_batch_size: int | None = None,
+    max_batch_size: int | None = None,
+    max_batch_seconds: float | None = None,
+    num_workers: int | None = None,
+    existing_data_filepaths: Iterable[str | Path] = (),
+    save_resume_filepath: str | Path | None = None,
+    progress_callback: Callable[[TaskStats | Progress], object] | None = None,
+    print_progress: bool = False,
+    count_observable_error_combos: bool = False,
+    count_detection_events: bool = False,
+    custom_error_count_key: str | None = None,
+    progress_mode: ProgressMode = "final",
+    decoders: Iterable[str | object] | str | object | None = None,
+) -> list[TaskStats]:
+    final_stats = _run_collect(
+        tasks,
+        options=options,
+        max_shots=max_shots,
+        max_errors=max_errors,
+        batch_size=batch_size,
+        seed=seed,
+        start_batch_size=start_batch_size,
+        max_batch_size=max_batch_size,
+        max_batch_seconds=max_batch_seconds,
+        num_workers=num_workers,
+        existing_data_filepaths=existing_data_filepaths,
+        save_resume_filepath=save_resume_filepath,
+        progress_callback=progress_callback,
+        print_progress=print_progress,
+        count_observable_error_combos=count_observable_error_combos,
+        count_detection_events=count_detection_events,
+        custom_error_count_key=custom_error_count_key,
+        progress_mode=progress_mode,
+        decoders=decoders,
+    )
+    return final_stats
+
+
+def _run_collect(
+    tasks: Iterable[CollectionTask],
+    *,
+    options: CollectionOptions | None,
+    max_shots: int | None,
+    max_errors: int | None,
+    batch_size: int | None,
+    seed: int | None,
+    start_batch_size: int | None,
+    max_batch_size: int | None,
+    max_batch_seconds: float | None,
+    num_workers: int | None,
+    existing_data_filepaths: Iterable[str | Path],
+    save_resume_filepath: str | Path | None,
+    progress_callback: Callable[[TaskStats | Progress], object] | None,
+    print_progress: bool,
+    count_observable_error_combos: bool,
+    count_detection_events: bool,
+    custom_error_count_key: str | None,
+    progress_mode: str,
+    decoders: Iterable[str | object] | str | object | None,
+) -> list[TaskStats]:
+    _validate_progress_mode(progress_mode)
+    call_options = _call_options(
+        options=options,
+        max_shots=max_shots,
+        max_errors=max_errors,
+        batch_size=batch_size,
+        seed=seed,
+        start_batch_size=start_batch_size,
+        max_batch_size=max_batch_size,
+        max_batch_seconds=max_batch_seconds,
+    )
+    task_list = _expand_tasks_for_decoders(list(tasks), decoders)
+    native_tasks = []
+    for index, task in enumerate(task_list):
+        effective = _merge_options(call_options, task.collection_options)
+        if effective.max_shots is None:
+            raise ValueError("max_shots is required")
+        native_tasks.append(_native_task(task, index, effective))
+
+    existing = _read_existing_stats(existing_data_filepaths, save_resume_filepath)
+    resume_path = Path(save_resume_filepath) if save_resume_filepath is not None else None
+    existing_data = CollectionData(existing.values())
+
+    def on_stream_delta(item: Mapping[str, object]) -> None:
+        stat = _task_stats_from_native(item)
+        if resume_path is not None:
+            write_stats_to_csv_file(resume_path, [stat], append=True)
+        existing_data.add_sample(stat)
+        progress = Progress((stat,), _status_message(stat))
+        if print_progress:
+            print(progress.status_message, file=sys.stderr)
+        if progress_callback is not None:
+            progress_callback(progress)
+
+    native_stats = _collect_dem_logical_error_stats_many(
+        native_tasks,
+        num_workers=1 if num_workers is None else num_workers,
+        seed=seed,
+        count_observable_error_combos=count_observable_error_combos,
+        count_detection_events=count_detection_events,
+        custom_error_count_key=custom_error_count_key,
+        existing_stats=[_native_stats_from_task_stats(stat) for stat in existing.values()],
+        progress_callback=on_stream_delta if progress_mode == "stream" else None,
+    )
+    final_stats = [_task_stats_from_native(item) for item in native_stats]
+
+    if progress_mode == "final":
+        for stat in final_stats:
+            if resume_path is not None:
+                delta = _stats_delta(stat, existing.get(stat.strong_id))
+                if delta is not None:
+                    write_stats_to_csv_file(resume_path, [delta], append=True)
+            if print_progress:
+                print(_status_message(stat), file=sys.stderr)
+            if progress_callback is not None:
+                progress_callback(stat)
+
+    return final_stats
+
+
+class _CollectStreamCancelled(Exception):
+    pass
+
+
+def _iter_collect_stream(
+    tasks: Iterable[CollectionTask],
+    **kwargs: object,
+) -> Iterator[Progress]:
+    user_callback = kwargs.pop("progress_callback")
+    condition = threading.Condition()
+    pending: Progress | None = None
+    failure: BaseException | None = None
+    done = False
+    cancelled = False
+
+    def progress_bridge(progress: TaskStats | Progress) -> None:
+        nonlocal pending
+        if not isinstance(progress, Progress):
+            raise TypeError("stream collection expected Progress callbacks")
+        if user_callback is not None:
+            user_callback(progress)  # type: ignore[misc]
+        with condition:
+            if cancelled:
+                raise _CollectStreamCancelled
+            while pending is not None and not cancelled:
+                condition.wait()
+            if cancelled:
+                raise _CollectStreamCancelled
+            pending = progress
+            condition.notify_all()
+            while pending is progress and not cancelled:
+                condition.wait()
+            if cancelled:
+                raise _CollectStreamCancelled
+
+    def worker() -> None:
+        nonlocal failure, done
+        try:
+            _run_collect(
+                tasks,
+                progress_callback=progress_bridge,
+                progress_mode="stream",
+                **kwargs,  # type: ignore[arg-type]
+            )
+        except _CollectStreamCancelled:
+            with condition:
+                done = True
+                condition.notify_all()
+        except BaseException as exc:  # Propagate callback and native errors.
+            with condition:
+                if cancelled:
+                    done = True
+                else:
+                    failure = exc
+                condition.notify_all()
+        else:
+            with condition:
+                done = True
+                condition.notify_all()
+
+    thread = threading.Thread(target=worker, name="faultscope-collect-stream")
+    thread.start()
+    try:
+        while True:
+            with condition:
+                while pending is None and failure is None and not done:
+                    condition.wait()
+                if pending is not None:
+                    progress = pending
+                elif failure is not None:
+                    raise failure
+                else:
+                    return
+            try:
+                yield progress
+            except GeneratorExit:
+                with condition:
+                    cancelled = True
+                    if pending is progress:
+                        pending = None
+                    condition.notify_all()
+                raise
+            finally:
+                with condition:
+                    if not cancelled and pending is progress:
+                        pending = None
+                    condition.notify_all()
+    finally:
+        with condition:
+            cancelled = True
+            pending = None
+            condition.notify_all()
+        thread.join()
+
+
+def _validate_progress_mode(progress_mode: str) -> ProgressMode:
+    if progress_mode == "final":
+        return "final"
+    if progress_mode == "stream":
+        return "stream"
+    raise ValueError('progress_mode must be "final" or "stream"')
 
 
 def _merge_options(
@@ -365,121 +549,93 @@ def _task_stats_from_native(item: Mapping[str, object]) -> TaskStats:
 def _read_existing_stats(
     existing_data_filepaths: Iterable[str | Path],
     save_resume_filepath: str | Path | None,
-) -> dict[str, dict[str, object]]:
-    out: dict[str, dict[str, object]] = {}
+) -> dict[str, TaskStats]:
     paths = [Path(path) for path in existing_data_filepaths]
     if save_resume_filepath is not None:
         resume = Path(save_resume_filepath)
         if resume.exists() and resume not in paths:
             paths.append(resume)
-    for path in paths:
-        if not path.exists():
-            continue
-        with path.open(newline="") as f:
-            reader = csv.DictReader(f)
-            if reader.fieldnames != CSV_HEADER:
-                raise ValueError(f"collection CSV header does not match in {path}")
-            for row in reader:
-                stats = _native_stats_from_csv_row(row)
-                out[stats["strong_id"]] = _merge_native_stats(
-                    out.get(stats["strong_id"]), stats
-                )
-    return out
+    return {stat.strong_id: stat for stat in read_stats_from_csv_files(paths)}
 
 
-def _native_stats_from_csv_row(row: Mapping[str, str]) -> dict[str, object]:
+def _native_stats_from_task_stats(stat: TaskStats) -> dict[str, object]:
     return {
-        "task_id": row["strong_id"],
-        "strong_id": row["strong_id"],
-        "decoder": row["decoder"] or None,
-        "metadata_json": row["json_metadata"],
-        "shots": int(row["shots"]),
-        "errors": int(row["errors"]),
-        "discards": int(row["discards"]),
-        "seconds": float(row["seconds"]),
-        "custom_counts": json.loads(row["custom_counts"] or "{}"),
+        "task_id": stat.task_id,
+        "strong_id": stat.strong_id,
+        "decoder": stat.decoder,
+        "metadata_json": _canonical_json(dict(stat.metadata)),
+        "shots": int(stat.shots),
+        "errors": int(stat.errors),
+        "discards": int(stat.discards),
+        "seconds": float(stat.seconds),
+        "custom_counts": {
+            str(key): int(value) for key, value in stat.custom_counts.items()
+        },
     }
 
 
-def _ensure_resume_header(path: Path) -> None:
-    if path.exists():
-        return
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", newline="") as f:
-        csv.writer(f).writerow(CSV_HEADER)
-
-
-def _append_native_stats(path: Path, stats: Mapping[str, object]) -> None:
-    with path.open("a", newline="") as f:
-        csv.writer(f).writerow(
-            [
-                int(stats["shots"]),
-                int(stats["errors"]),
-                int(stats["discards"]),
-                f"{float(stats['seconds']):.12g}",
-                stats["decoder"] or "",
-                stats["strong_id"],
-                stats["metadata_json"],
-                _canonical_json(stats.get("custom_counts", {})),
-            ]
-        )
-
-
-def _merge_native_stats(
-    left: Mapping[str, object] | None,
-    right: Mapping[str, object],
-) -> dict[str, object]:
-    if left is None:
-        return dict(right)
-    if left["strong_id"] != right["strong_id"]:
-        raise ValueError("cannot merge collection stats with different strong_id")
-    if left["decoder"] != right["decoder"] or left["metadata_json"] != right["metadata_json"]:
-        raise ValueError("collection stats strong_id collision has different identity")
-    custom_counts = dict(left.get("custom_counts", {}))
-    for key, value in dict(right.get("custom_counts", {})).items():
-        custom_counts[key] = int(custom_counts.get(key, 0)) + int(value)
-    return {
-        "task_id": left.get("task_id") or right.get("task_id"),
-        "strong_id": left["strong_id"],
-        "decoder": left["decoder"],
-        "metadata_json": left["metadata_json"],
-        "shots": int(left["shots"]) + int(right["shots"]),
-        "errors": int(left["errors"]) + int(right["errors"]),
-        "discards": int(left["discards"]) + int(right["discards"]),
-        "seconds": float(left["seconds"]) + float(right["seconds"]),
-        "custom_counts": custom_counts,
-    }
-
-
-def _native_stats_delta(
-    total: Mapping[str, object],
-    existing: Mapping[str, object] | None,
-) -> dict[str, object] | None:
+def _stats_delta(total: TaskStats, existing: TaskStats | None) -> TaskStats | None:
     if existing is None:
-        return dict(total)
+        return total
     custom_counts: dict[str, int] = {}
-    total_counts = dict(total.get("custom_counts", {}))
-    existing_counts = dict(existing.get("custom_counts", {}))
-    for key, value in total_counts.items():
-        delta = int(value) - int(existing_counts.get(key, 0))
+    for key, value in total.custom_counts.items():
+        delta = int(value) - int(existing.custom_counts.get(key, 0))
         if delta:
             custom_counts[key] = delta
-    delta = {
-        "task_id": total["task_id"],
-        "strong_id": total["strong_id"],
-        "decoder": total["decoder"],
-        "metadata_json": total["metadata_json"],
-        "shots": int(total["shots"]) - int(existing["shots"]),
-        "errors": int(total["errors"]) - int(existing["errors"]),
-        "discards": int(total["discards"]) - int(existing["discards"]),
-        "seconds": max(0.0, float(total["seconds"]) - float(existing["seconds"])),
-        "custom_counts": custom_counts,
-    }
+    delta = total.with_edits(
+        shots=total.shots - existing.shots,
+        errors=total.errors - existing.errors,
+        discards=total.discards - existing.discards,
+        seconds=max(0.0, total.seconds - existing.seconds),
+        custom_counts=custom_counts,
+    )
     if (
-        delta["shots"] == 0
-        and delta["errors"] == 0
-        and delta["discards"] == 0
+        delta.shots == 0
+        and delta.errors == 0
+        and delta.discards == 0
         and not custom_counts
     ):
         return None
     return delta
+
+
+def _expand_tasks_for_decoders(
+    tasks: list[CollectionTask],
+    decoders: Iterable[str | object] | str | object | None,
+) -> list[CollectionTask]:
+    if decoders is None:
+        return tasks
+    decoder_list = _normalize_decoders(decoders)
+    if not decoder_list:
+        return tasks
+    out: list[CollectionTask] = []
+    for task_index, task in enumerate(tasks):
+        if task.decoder is not None:
+            out.append(task)
+            continue
+        base_id = task.task_id or f"task-{task_index}"
+        for decoder_index, decoder in enumerate(decoder_list):
+            task_id = base_id
+            if len(decoder_list) > 1:
+                name = _decoder_name(decoder) or f"decoder-{decoder_index}"
+                task_id = f"{base_id}:{name}"
+            out.append(replace(task, decoder=decoder, task_id=task_id))
+    return out
+
+
+def _normalize_decoders(
+    decoders: Iterable[str | object] | str | object,
+) -> list[str | object]:
+    if isinstance(decoders, str):
+        return [decoders]
+    try:
+        return list(decoders)  # type: ignore[arg-type]
+    except TypeError:
+        return [decoders]
+
+
+def _status_message(stat: TaskStats) -> str:
+    return (
+        f"{stat.task_id}: shots={stat.shots} errors={stat.errors} "
+        f"discards={stat.discards}"
+    )

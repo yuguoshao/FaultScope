@@ -4,7 +4,9 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use crate::counting::{sample_dem_logical_error_stats_with_rng, validate_mask_shape, CountOptions};
-use crate::scheduler::{batch_seed, collect_task_set, next_batch_size};
+use crate::scheduler::{
+    batch_seed, collect_task_set, collect_task_set_with_progress, next_batch_size,
+};
 use faultscope_core::{DemHotspotEstimator, NativeBatchDecoder, NpError, NpResult, SmallRng};
 
 pub const DEM_LOGICAL_COLLECTION_CSV_HEADER: &str =
@@ -194,6 +196,19 @@ pub fn collect_dem_logical_error_tasks(
     existing_data: HashMap<String, DemLogicalCollectionStats>,
 ) -> NpResult<Vec<DemLogicalCollectionStats>> {
     collect_task_set(tasks, run_options, existing_data)
+}
+
+pub fn collect_dem_logical_error_tasks_with_progress<F>(
+    tasks: Vec<DemLogicalCollectionTask>,
+    run_options: DemLogicalCollectionRunOptions,
+    existing_data: HashMap<String, DemLogicalCollectionStats>,
+    progress_callback: F,
+) -> NpResult<Vec<DemLogicalCollectionStats>>
+where
+    F: FnMut(&DemLogicalCollectionStats) -> NpResult<()>,
+{
+    let mut progress_callback = progress_callback;
+    collect_task_set_with_progress(tasks, run_options, existing_data, &mut progress_callback)
 }
 
 pub fn write_dem_logical_collection_csv_header<W: Write>(writer: &mut W) -> NpResult<()> {

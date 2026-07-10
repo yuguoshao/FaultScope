@@ -39,6 +39,7 @@ python -m venv .venv
 
 ```bash
 .venv/bin/python -m pip install ".[pymatching,visualization]"
+.venv/bin/python -m pip install ".[collection]"  # plotting/fitting helpers
 .venv/bin/python -m pip install ".[test]"
 ```
 

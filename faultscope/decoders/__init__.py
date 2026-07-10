@@ -39,9 +39,32 @@ def create_native_decoder(
 ):
     """Construct an installed native decoder by backend name."""
 
-    backend = get_native_decoder_class(name)
     if dem is not None and circuit is not None:
         raise ValueError("supply either dem or circuit, not both")
+    if name == "no-correction":
+        if dem is not None:
+            return NativeNoCorrectionDecoder(
+                observable_ids=tuple(observable.id for observable in dem.observables),
+                detector_ids=tuple(detector.id for detector in dem.detectors),
+            )
+        if circuit is not None:
+            return NativeNoCorrectionDecoder(
+                observable_ids=tuple(observable.id for observable in observables or ()),
+                detector_ids=tuple(detector.id for detector in detectors or ()),
+            )
+        raise ValueError("supply dem or circuit")
+    if name == "graphlike-detector-copy":
+        if dem is not None:
+            return NativeGraphlikeDetectorCopyDecoder.from_dem(dem)
+        if circuit is not None:
+            return NativeGraphlikeDetectorCopyDecoder.from_circuit(
+                circuit,
+                detectors=detectors,
+                observables=observables,
+            )
+        raise ValueError("supply dem or circuit")
+
+    backend = get_native_decoder_class(name)
     if dem is not None:
         return backend.from_dem(dem, options=options)
     if circuit is not None:
