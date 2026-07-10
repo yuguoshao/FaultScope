@@ -19,6 +19,7 @@ nav:
   - User Guide: user_guide.md
   - Decoder Development: decoder_development.md
   - API Reference: api_reference.md
+  - Release And Compatibility: release.md
   - Theory: theory.md
   - Implementation Overview: implementation_overview.md
 

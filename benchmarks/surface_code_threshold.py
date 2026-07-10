@@ -108,9 +108,7 @@ def main() -> None:
     )
 
     threshold_stats: list[TaskStats] = []
-    timings_by_path: dict[str, list[TimedLogicalFailureStats]] = {
-        path: [] for path in PATHS
-    }
+    timings_by_path: dict[str, list[TimedLogicalFailureStats]] = {path: [] for path in PATHS}
     for distance in distances:
         rounds = args.rounds if args.rounds is not None else distance
         for rate_index, p in enumerate(rates):
@@ -182,10 +180,7 @@ def main() -> None:
                     )
                     continue
                 stats = timed_stats.stats
-                task_id = (
-                    f"surface-code:{args.basis}:{path}:"
-                    f"d={distance}:p={p:.17g}"
-                )
+                task_id = f"surface-code:{args.basis}:{path}:d={distance}:p={p:.17g}"
                 threshold_stats.append(
                     TaskStats(
                         task_id=task_id,
@@ -421,8 +416,7 @@ def stim_dem_to_faultscope_dem(stim_dem: Any) -> DetectorErrorModel:
     return DetectorErrorModel(
         detectors=tuple(detectors_by_id[key] for key in sorted(detectors_by_id)),
         observables=tuple(
-            LogicalObservable(id=observable_id)
-            for observable_id in sorted(observable_ids)
+            LogicalObservable(id=observable_id) for observable_id in sorted(observable_ids)
         ),
         edges=tuple(edges),
     )
@@ -535,9 +529,7 @@ def _packed_predictions_to_masks(
     out = {observable_id: 0 for observable_id in observable_ids}
     for col, observable_id in enumerate(observable_ids):
         if col // 8 >= predictions.shape[1]:
-            raise ValueError(
-                "PyMatching prediction width does not match observable count"
-            )
+            raise ValueError("PyMatching prediction width does not match observable count")
         bits = (predictions[:, col // 8] >> (col % 8)) & 1
         out[observable_id] = int.from_bytes(
             np.packbits(bits.astype(np.uint8), bitorder="little").tobytes(),
@@ -608,15 +600,9 @@ def _print_threshold_results(results: Iterable[ThresholdAnalysisResult]) -> None
         threshold = _estimate_cells(fit.threshold)
         exponent = _estimate_cells(fit.critical_exponent)
         reduced_chi_squared = (
-            "NA"
-            if fit.reduced_chi_squared is None
-            else f"{fit.reduced_chi_squared:.17g}"
+            "NA" if fit.reduced_chi_squared is None else f"{fit.reduced_chi_squared:.17g}"
         )
-        message = (
-            "NA"
-            if fit.message is None
-            else fit.message.replace("\t", " ").replace("\n", " ")
-        )
+        message = "NA" if fit.message is None else fit.message.replace("\t", " ").replace("\n", " ")
         print(
             f"threshold-scaling\t{basis}\t{path}\t{fit.status}\t"
             f"{threshold[0]}\t{threshold[1]}\t{threshold[2]}\t{threshold[3]}\t"
@@ -671,9 +657,7 @@ def _print_threshold_results_for_paths(
             for lower, upper in expected_pairs
         )
         observed_distances = {point.distance for point in result.points}
-        if normalized_crossings != result.crossings or observed_distances != set(
-            distance_values
-        ):
+        if normalized_crossings != result.crossings or observed_distances != set(distance_values):
             retained_candidates = sorted(
                 {
                     candidate
@@ -683,8 +667,7 @@ def _print_threshold_results_for_paths(
             )
             expected_pair_set = set(expected_pairs)
             all_original_pairs_retained = all(
-                (crossing.lower_distance, crossing.upper_distance)
-                in expected_pair_set
+                (crossing.lower_distance, crossing.upper_distance) in expected_pair_set
                 for crossing in result.crossings
             )
             pairwise_threshold = None
@@ -705,8 +688,7 @@ def _print_threshold_results_for_paths(
                     value = retained_candidates[midpoint]
                 else:
                     value = 0.5 * (
-                        retained_candidates[midpoint - 1]
-                        + retained_candidates[midpoint]
+                        retained_candidates[midpoint - 1] + retained_candidates[midpoint]
                     )
                 confidence_level = (
                     result.pairwise_threshold.confidence_level

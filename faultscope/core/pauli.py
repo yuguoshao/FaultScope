@@ -76,7 +76,7 @@ def multiply_pauli_rows(
     stabilizer generators.
     """
 
-    phase = -1 if left_sign else 1
+    phase: complex = -1 if left_sign else 1
     phase *= -1 if right_sign else 1
     out_x: list[int] = []
     out_z: list[int] = []
@@ -97,7 +97,9 @@ def multiply_pauli_rows(
     raise ValueError("product of stabilizer rows produced a non-Hermitian phase")
 
 
-def pauli_string_to_xz(pauli_string: str, n_qubits: int | None = None) -> tuple[list[int], list[int]]:
+def pauli_string_to_xz(
+    pauli_string: str, n_qubits: int | None = None
+) -> tuple[list[int], list[int]]:
     if n_qubits is None:
         n_qubits = len(pauli_string)
     if len(pauli_string) != n_qubits:

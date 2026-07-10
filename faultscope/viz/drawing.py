@@ -219,9 +219,10 @@ def _ramp(
     else:
         local = (t - 0.5) / 0.5
         start, end = colors[1], colors[2]
-    return tuple(
-        int(start[index] + (end[index] - start[index]) * max(0.0, min(1.0, local)))
-        for index in range(3)
+    return (
+        int(start[0] + (end[0] - start[0]) * max(0.0, min(1.0, local))),
+        int(start[1] + (end[1] - start[1]) * max(0.0, min(1.0, local))),
+        int(start[2] + (end[2] - start[2]) * max(0.0, min(1.0, local))),
     )
 
 

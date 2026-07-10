@@ -28,7 +28,7 @@ pub(crate) fn _collect_dem_logical_error_stats_many(
 ) -> PyResult<Vec<PyObject>> {
     let rust_tasks = py_collection_tasks_to_rust(tasks)?;
     let existing = py_existing_stats_to_rust(existing_stats)?;
-    let run_options = faultscope_collection::api::DemLogicalCollectionRunOptions {
+    let run_options = faultscope_collection::DemLogicalCollectionRunOptions {
         num_workers,
         seed,
         count_observable_error_combos,
@@ -38,7 +38,7 @@ pub(crate) fn _collect_dem_logical_error_stats_many(
 
     let stats = if let Some(progress_callback) = progress_callback {
         py.allow_threads(move || {
-            let progress = move |stats: &faultscope_collection::api::DemLogicalCollectionStats| {
+            let progress = move |stats: &faultscope_collection::DemLogicalCollectionStats| {
                 Python::with_gil(|py| {
                     let py_stats = collection_stats_to_py(py, stats).map_err(|err| {
                         faultscope_core::NpError::new(format!(
@@ -56,7 +56,7 @@ pub(crate) fn _collect_dem_logical_error_stats_many(
                     Ok(())
                 })
             };
-            faultscope_collection::api::collect_dem_logical_error_tasks_with_progress(
+            faultscope_collection::collect_dem_logical_error_tasks_with_progress(
                 rust_tasks,
                 run_options,
                 existing,
@@ -65,7 +65,7 @@ pub(crate) fn _collect_dem_logical_error_stats_many(
         })
     } else {
         py.allow_threads(|| {
-            faultscope_collection::api::collect_dem_logical_error_tasks(
+            faultscope_collection::collect_dem_logical_error_tasks(
                 rust_tasks,
                 run_options,
                 existing,
@@ -91,7 +91,7 @@ fn collection_error_to_py(err: faultscope_core::NpError) -> PyErr {
 
 fn py_collection_tasks_to_rust(
     tasks: &Bound<'_, PyAny>,
-) -> PyResult<Vec<faultscope_collection::api::DemLogicalCollectionTask>> {
+) -> PyResult<Vec<faultscope_collection::DemLogicalCollectionTask>> {
     let iterator = PyIterator::from_object(tasks)?;
     let mut out = Vec::new();
     for item in iterator {
@@ -106,7 +106,7 @@ fn py_collection_tasks_to_rust(
 
 fn py_collection_task_to_rust(
     dict: &Bound<'_, PyDict>,
-) -> PyResult<faultscope_collection::api::DemLogicalCollectionTask> {
+) -> PyResult<faultscope_collection::DemLogicalCollectionTask> {
     let sampler_value = required_item(dict, "sampler")?;
     let sampler = sampler_value.extract::<PyRef<'_, NativeDemSampler>>()?;
     let sampler = Arc::new(sampler.simulator.clone());
@@ -121,14 +121,14 @@ fn py_collection_task_to_rust(
     };
     let decoder_name = optional_string(dict, "decoder_name")?;
 
-    Ok(faultscope_collection::api::DemLogicalCollectionTask {
+    Ok(faultscope_collection::DemLogicalCollectionTask {
         task_id: required_string(dict, "task_id")?,
         strong_id: required_string(dict, "strong_id")?,
         sampler,
         decoder,
         decoder_name,
         metadata_json: required_string(dict, "metadata_json")?,
-        options: faultscope_collection::api::DemLogicalCollectionOptions {
+        options: faultscope_collection::DemLogicalCollectionOptions {
             max_shots: required_item(dict, "max_shots")?.extract::<usize>()?,
             max_errors: optional_usize(dict, "max_errors")?,
             batch_size: required_item(dict, "batch_size")?.extract::<usize>()?,
@@ -144,7 +144,7 @@ fn py_collection_task_to_rust(
 
 fn py_existing_stats_to_rust(
     stats: Option<&Bound<'_, PyAny>>,
-) -> PyResult<HashMap<String, faultscope_collection::api::DemLogicalCollectionStats>> {
+) -> PyResult<HashMap<String, faultscope_collection::DemLogicalCollectionStats>> {
     let Some(stats) = stats else {
         return Ok(HashMap::new());
     };
@@ -152,7 +152,7 @@ fn py_existing_stats_to_rust(
         return Ok(HashMap::new());
     }
     let iterator = PyIterator::from_object(stats)?;
-    let mut out = HashMap::<String, faultscope_collection::api::DemLogicalCollectionStats>::new();
+    let mut out = HashMap::<String, faultscope_collection::DemLogicalCollectionStats>::new();
     for item in iterator {
         let item = item?;
         let dict = item
@@ -172,7 +172,7 @@ fn py_existing_stats_to_rust(
 
 fn py_collection_stats_to_rust(
     dict: &Bound<'_, PyDict>,
-) -> PyResult<faultscope_collection::api::DemLogicalCollectionStats> {
+) -> PyResult<faultscope_collection::DemLogicalCollectionStats> {
     let custom_counts = required_item(dict, "custom_counts")?;
     let custom_counts = custom_counts
         .downcast::<PyDict>()
@@ -181,7 +181,7 @@ fn py_collection_stats_to_rust(
     for (key, value) in custom_counts {
         counts.insert(key.extract::<String>()?, value.extract::<usize>()?);
     }
-    Ok(faultscope_collection::api::DemLogicalCollectionStats {
+    Ok(faultscope_collection::DemLogicalCollectionStats {
         task_id: required_string(dict, "task_id")?,
         strong_id: required_string(dict, "strong_id")?,
         decoder: optional_string(dict, "decoder")?,
@@ -196,7 +196,7 @@ fn py_collection_stats_to_rust(
 
 fn collection_stats_to_py(
     py: Python<'_>,
-    stats: &faultscope_collection::api::DemLogicalCollectionStats,
+    stats: &faultscope_collection::DemLogicalCollectionStats,
 ) -> PyResult<PyObject> {
     let out = PyDict::new(py);
     out.set_item("task_id", &stats.task_id)?;

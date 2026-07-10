@@ -1,6 +1,7 @@
 use faultscope_core::{
-    log_likelihood_ratio, FaultScopeNativeCorrectionMaskBatchMutViewV1, FaultScopeNativeDecoderI64SliceV1,
-    FaultScopeNativeDecoderStatusV1, FaultScopeNativeDecoderStringViewV1, FaultScopeNativeDecoderV1,
+    log_likelihood_ratio, FaultScopeNativeCorrectionMaskBatchMutViewV1,
+    FaultScopeNativeDecoderI64SliceV1, FaultScopeNativeDecoderStatusV1,
+    FaultScopeNativeDecoderStringViewV1, FaultScopeNativeDecoderV1,
     FaultScopeNativeDetectorMaskBatchViewV1, FaultScopeNativePackedDetectorShotBatchViewV1,
     FaultScopeNativePackedObservableShotBatchMutViewV1, NATIVE_DECODER_PLUGIN_ABI_VERSION,
     NATIVE_DECODER_PLUGIN_FLAG_THREAD_SAFE, NATIVE_DECODER_PLUGIN_STATUS_ERROR,
@@ -170,10 +171,12 @@ impl PyNativePyMatchingNativeDecoder {
             .collect::<Vec<_>>();
         let mut output_views = output_buffers
             .iter_mut()
-            .map(|words| faultscope_core::FaultScopeNativeDecoderMaskMutViewV1 {
-                words: words.as_mut_ptr(),
-                word_count: words.len(),
-            })
+            .map(
+                |words| faultscope_core::FaultScopeNativeDecoderMaskMutViewV1 {
+                    words: words.as_mut_ptr(),
+                    word_count: words.len(),
+                },
+            )
             .collect::<Vec<_>>();
         let input = FaultScopeNativeDetectorMaskBatchViewV1 {
             detector_ids: self.detector_ids.as_ptr(),
@@ -358,6 +361,7 @@ impl PymatchingNativeDecoder {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn decode_packed_batch(
         &mut self,
         detector_shots: &[u8],
@@ -1219,7 +1223,10 @@ fn static_error(message: &'static str) -> FaultScopeNativeDecoderStatusV1 {
     }
 }
 
-fn state_error(state: &DecoderState, message: impl Into<String>) -> FaultScopeNativeDecoderStatusV1 {
+fn state_error(
+    state: &DecoderState,
+    message: impl Into<String>,
+) -> FaultScopeNativeDecoderStatusV1 {
     let sanitized = message.into().replace('\0', "\\0");
     let mut last_error = state
         .last_error
@@ -1248,6 +1255,7 @@ fn string_view_to_string(view: FaultScopeNativeDecoderStringViewV1) -> String {
 
 #[pymodule]
 fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
+    module.add("__version__", env!("CARGO_PKG_VERSION"))?;
     module.add_class::<PyNativePyMatchingNativeDecoder>()?;
     Ok(())
 }

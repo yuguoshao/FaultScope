@@ -1,5 +1,7 @@
 """Classical, PyMatching, and native decoder handles."""
 
+from typing import Any, Mapping
+
 from faultscope._native import (
     NativeBatchDecoder,
     NativeGraphlikeDetectorCopyDecoder,
@@ -19,7 +21,7 @@ from faultscope.decoders.pymatching import (
 )
 
 
-def get_native_decoder_class(name):
+def get_native_decoder_class(name: str) -> type[Any]:
     """Return the installed native decoder class for a backend name."""
 
     backend = _get_native_decoder_class(name)
@@ -29,14 +31,14 @@ def get_native_decoder_class(name):
 
 
 def create_native_decoder(
-    name,
+    name: str,
     *,
-    dem=None,
-    circuit=None,
-    detectors=None,
-    observables=None,
-    options=None,
-):
+    dem: Any = None,
+    circuit: Any = None,
+    detectors: Any = None,
+    observables: Any = None,
+    options: Mapping[str, object] | None = None,
+) -> Any:
     """Construct an installed native decoder by backend name."""
 
     if dem is not None and circuit is not None:
@@ -81,7 +83,12 @@ class _NativeDecoderProxy:
     backend_name = ""
 
     @classmethod
-    def from_dem(cls, dem, *, options=None):
+    def from_dem(
+        cls,
+        dem: Any,
+        *,
+        options: Mapping[str, object] | None = None,
+    ) -> Any:
         return create_native_decoder(
             cls.backend_name,
             dem=dem,
@@ -89,7 +96,14 @@ class _NativeDecoderProxy:
         )
 
     @classmethod
-    def from_circuit(cls, circuit, *, detectors=None, observables=None, options=None):
+    def from_circuit(
+        cls,
+        circuit: Any,
+        *,
+        detectors: Any = None,
+        observables: Any = None,
+        options: Mapping[str, object] | None = None,
+    ) -> Any:
         return create_native_decoder(
             cls.backend_name,
             circuit=circuit,
@@ -105,11 +119,21 @@ class NativeFusionBlossomDecoder(_NativeDecoderProxy):
     backend_name = "fusion-blossom"
 
     @staticmethod
-    def from_dem(dem, *, options=None):
+    def from_dem(
+        dem: Any,
+        *,
+        options: Mapping[str, object] | None = None,
+    ) -> Any:
         return create_native_decoder("fusion-blossom", dem=dem, options=options)
 
     @staticmethod
-    def from_circuit(circuit, *, detectors=None, observables=None, options=None):
+    def from_circuit(
+        circuit: Any,
+        *,
+        detectors: Any = None,
+        observables: Any = None,
+        options: Mapping[str, object] | None = None,
+    ) -> Any:
         return create_native_decoder(
             "fusion-blossom",
             circuit=circuit,
@@ -125,11 +149,21 @@ class NativeBpDecoder(_NativeDecoderProxy):
     backend_name = "bpdecoder"
 
     @staticmethod
-    def from_dem(dem, *, options=None):
+    def from_dem(
+        dem: Any,
+        *,
+        options: Mapping[str, object] | None = None,
+    ) -> Any:
         return create_native_decoder("bpdecoder", dem=dem, options=options)
 
     @staticmethod
-    def from_circuit(circuit, *, detectors=None, observables=None, options=None):
+    def from_circuit(
+        circuit: Any,
+        *,
+        detectors: Any = None,
+        observables: Any = None,
+        options: Mapping[str, object] | None = None,
+    ) -> Any:
         return create_native_decoder(
             "bpdecoder",
             circuit=circuit,
@@ -145,11 +179,21 @@ class NativeBposdDecoder(_NativeDecoderProxy):
     backend_name = "bposd"
 
     @staticmethod
-    def from_dem(dem, *, options=None):
+    def from_dem(
+        dem: Any,
+        *,
+        options: Mapping[str, object] | None = None,
+    ) -> Any:
         return create_native_decoder("bposd", dem=dem, options=options)
 
     @staticmethod
-    def from_circuit(circuit, *, detectors=None, observables=None, options=None):
+    def from_circuit(
+        circuit: Any,
+        *,
+        detectors: Any = None,
+        observables: Any = None,
+        options: Mapping[str, object] | None = None,
+    ) -> Any:
         return create_native_decoder(
             "bposd",
             circuit=circuit,
@@ -165,11 +209,21 @@ class NativeMwpmDecoder(_NativeDecoderProxy):
     backend_name = "mwpm"
 
     @staticmethod
-    def from_dem(dem, *, options=None):
+    def from_dem(
+        dem: Any,
+        *,
+        options: Mapping[str, object] | None = None,
+    ) -> Any:
         return create_native_decoder("mwpm", dem=dem, options=options)
 
     @staticmethod
-    def from_circuit(circuit, *, detectors=None, observables=None, options=None):
+    def from_circuit(
+        circuit: Any,
+        *,
+        detectors: Any = None,
+        observables: Any = None,
+        options: Mapping[str, object] | None = None,
+    ) -> Any:
         return create_native_decoder(
             "mwpm",
             circuit=circuit,
@@ -185,11 +239,21 @@ class NativePyMatchingDecoder(_NativeDecoderProxy):
     backend_name = "pymatching"
 
     @staticmethod
-    def from_dem(dem, *, options=None):
+    def from_dem(
+        dem: Any,
+        *,
+        options: Mapping[str, object] | None = None,
+    ) -> Any:
         return create_native_decoder("pymatching", dem=dem, options=options)
 
     @staticmethod
-    def from_circuit(circuit, *, detectors=None, observables=None, options=None):
+    def from_circuit(
+        circuit: Any,
+        *,
+        detectors: Any = None,
+        observables: Any = None,
+        options: Mapping[str, object] | None = None,
+    ) -> Any:
         return create_native_decoder(
             "pymatching",
             circuit=circuit,

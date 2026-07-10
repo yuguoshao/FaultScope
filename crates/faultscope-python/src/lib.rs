@@ -5,7 +5,7 @@ pub(crate) use pyo3::types::{
 };
 pub(crate) use std::collections::{HashMap, HashSet};
 
-pub(crate) const NATIVE_KERNEL_VERSION: &str = "0.1.0";
+pub(crate) const NATIVE_KERNEL_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 mod api;
 mod collection_api;

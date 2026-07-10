@@ -30,7 +30,6 @@ class CollectionOptions:
     max_shots: int | None = None
     max_errors: int | None = None
     batch_size: int = 10_000
-    seed: int | None = None
     start_batch_size: int | None = None
     max_batch_size: int | None = None
     max_batch_seconds: float | None = None
@@ -48,6 +47,22 @@ class CollectionOptions:
             raise ValueError("max_batch_size must be positive")
         if self.max_batch_seconds is not None and self.max_batch_seconds <= 0:
             raise ValueError("max_batch_seconds must be positive")
+
+
+@dataclass(frozen=True)
+class CollectionRunOptions:
+    seed: int | None = None
+    num_workers: int = 1
+    existing_data_filepaths: tuple[str | Path, ...] = ()
+    save_resume_filepath: str | Path | None = None
+    count_observable_error_combos: bool = False
+    count_detection_events: bool = False
+    custom_error_count_key: str | None = None
+    decoders: tuple[str | object, ...] = ()
+
+    def __post_init__(self) -> None:
+        if self.num_workers <= 0:
+            raise ValueError("num_workers must be positive")
 
 
 @dataclass(frozen=True)
@@ -86,7 +101,7 @@ class TaskStats:
     custom_counts: Mapping[str, int] = field(default_factory=dict)
 
     @property
-    def error_rate(self) -> float:
+    def raw_error_rate(self) -> float:
         if self.shots == 0:
             return math.nan
         return self.errors / self.shots
@@ -96,20 +111,28 @@ class TaskStats:
         return self.shots - self.discards
 
     @property
-    def logical_error_rate(self) -> float:
+    def accepted_error_rate(self) -> float:
         if self.accepted_shots == 0:
             return math.nan
         return self.errors / self.accepted_shots
 
     @property
-    def stderr(self) -> float:
+    def logical_error_rate(self) -> float:
+        return self.accepted_error_rate
+
+    @property
+    def accepted_error_rate_stderr(self) -> float:
         if self.accepted_shots == 0:
             return math.nan
-        p = self.logical_error_rate
+        p = self.accepted_error_rate
         return math.sqrt(p * (1.0 - p) / self.accepted_shots)
 
+    @property
+    def logical_error_rate_stderr(self) -> float:
+        return self.accepted_error_rate_stderr
+
     def with_edits(self, **edits: object) -> "TaskStats":
-        return replace(self, **edits)
+        return replace(self, **edits)  # type: ignore[arg-type]
 
     def to_csv_row(self) -> dict[str, str]:
         return {
@@ -147,18 +170,10 @@ class TaskStats:
         return cls(
             task_id=strong_id,
             strong_id=strong_id,
-            shots=_parse_non_negative_int(
-                row.get("shots", "0"), field_name="shots"
-            ),
-            errors=_parse_non_negative_int(
-                row.get("errors", "0"), field_name="errors"
-            ),
-            discards=_parse_non_negative_int(
-                row.get("discards", "0"), field_name="discards"
-            ),
-            seconds=_parse_non_negative_float(
-                row.get("seconds", "0"), field_name="seconds"
-            ),
+            shots=_parse_non_negative_int(row.get("shots", "0"), field_name="shots"),
+            errors=_parse_non_negative_int(row.get("errors", "0"), field_name="errors"),
+            discards=_parse_non_negative_int(row.get("discards", "0"), field_name="discards"),
+            seconds=_parse_non_negative_float(row.get("seconds", "0"), field_name="seconds"),
             decoder=row.get("decoder") or None,
             metadata=dict(metadata),
             custom_counts=_parse_custom_counts(custom_counts),
@@ -169,12 +184,10 @@ class TaskStats:
             return NotImplemented
         if self.strong_id != other.strong_id:
             raise ValueError("cannot merge stats with different strong_id values")
-        if self.decoder != other.decoder or _canonical_json(
-            dict(self.metadata)
-        ) != _canonical_json(dict(other.metadata)):
-            raise ValueError(
-                "stats with the same strong_id have different decoder or metadata"
-            )
+        if self.decoder != other.decoder or _canonical_json(dict(self.metadata)) != _canonical_json(
+            dict(other.metadata)
+        ):
+            raise ValueError("stats with the same strong_id have different decoder or metadata")
         custom_counts = {str(key): int(value) for key, value in self.custom_counts.items()}
         for key, value in other.custom_counts.items():
             custom_counts[str(key)] = int(custom_counts.get(str(key), 0)) + int(value)
@@ -280,9 +293,7 @@ def _parse_custom_counts(custom_counts: Mapping[str, object]) -> dict[str, int]:
         if isinstance(value, bool) or not isinstance(value, int):
             raise ValueError("collection CSV custom_counts values must be integers")
         if value < 0:
-            raise ValueError(
-                "collection CSV custom_counts values must be non-negative"
-            )
+            raise ValueError("collection CSV custom_counts values must be non-negative")
         parsed[str(key)] = value
     return parsed
 

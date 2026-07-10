@@ -12,6 +12,7 @@ batch-granular Rust worker pool.
 from __future__ import annotations
 
 import argparse
+import json
 import statistics
 import sys
 import time
@@ -22,7 +23,12 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from faultscope import DetectorErrorEdge, DetectorErrorModel, LogicalObservable
-from faultscope.collection import CollectionTask, collect
+from faultscope.collection import (
+    CollectionOptions,
+    CollectionRunOptions,
+    CollectionTask,
+    collect,
+)
 
 
 def main() -> None:
@@ -34,9 +40,7 @@ def main() -> None:
     _validate_positive("small-batch-size", args.small_batch_size)
     _validate_positive("adaptive-start-batch-size", args.adaptive_start_batch_size)
     adaptive_max_batch_size = (
-        args.batch_size
-        if args.adaptive_max_batch_size is None
-        else args.adaptive_max_batch_size
+        args.batch_size if args.adaptive_max_batch_size is None else args.adaptive_max_batch_size
     )
     _validate_positive("adaptive-max-batch-size", adaptive_max_batch_size)
     if args.max_batch_seconds <= 0:
@@ -75,6 +79,7 @@ def main() -> None:
             args.max_batch_seconds,
         ),
     )
+    records: list[dict[str, object]] = []
     for (
         mode,
         task_count,
@@ -83,19 +88,24 @@ def main() -> None:
         max_batch_size,
         max_batch_seconds,
     ) in scenarios:
-        _run_worker_sweep(
-            mode=mode,
-            task_count=task_count,
-            workers=args.workers,
-            shots=args.shots,
-            batch_size=batch_size,
-            probability=args.probability,
-            seed=args.seed,
-            repeats=args.repeats,
-            start_batch_size=start_batch_size,
-            max_batch_size=max_batch_size,
-            max_batch_seconds=max_batch_seconds,
+        records.extend(
+            _run_worker_sweep(
+                mode=mode,
+                task_count=task_count,
+                workers=args.workers,
+                shots=args.shots,
+                batch_size=batch_size,
+                probability=args.probability,
+                seed=args.seed,
+                repeats=args.repeats,
+                start_batch_size=start_batch_size,
+                max_batch_size=max_batch_size,
+                max_batch_seconds=max_batch_seconds,
+            )
         )
+    if args.json_out is not None:
+        args.json_out.parent.mkdir(parents=True, exist_ok=True)
+        args.json_out.write_text(json.dumps(records, indent=2, sort_keys=True) + "\n")
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -111,6 +121,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--probability", type=float, default=0.125)
     parser.add_argument("--seed", type=int, default=12345)
     parser.add_argument("--repeats", type=int, default=3)
+    parser.add_argument("--json-out", type=Path)
     return parser
 
 
@@ -127,8 +138,9 @@ def _run_worker_sweep(
     start_batch_size: int | None,
     max_batch_size: int | None,
     max_batch_seconds: float | None,
-) -> None:
+) -> list[dict[str, object]]:
     baseline_seconds: float | None = None
+    records: list[dict[str, object]] = []
     for worker_count in workers:
         seconds, errors, discards = _median_collection_time(
             task_count=task_count,
@@ -157,6 +169,25 @@ def _run_worker_sweep(
             f"{speedup:.3f}\t{errors}\t{discards}\tok",
             flush=True,
         )
+        records.append(
+            {
+                "mode": mode,
+                "tasks": task_count,
+                "workers": worker_count,
+                "shots": total_shots,
+                "batch_size": batch_size,
+                "start_batch_size": start_batch_size,
+                "max_batch_size": max_batch_size,
+                "max_batch_seconds": max_batch_seconds,
+                "seconds": seconds,
+                "shots_per_second": shots_per_second,
+                "speedup": speedup,
+                "errors": errors,
+                "discards": discards,
+                "status": "ok",
+            }
+        )
+    return records
 
 
 def _median_collection_time(
@@ -187,13 +218,17 @@ def _median_collection_time(
         started = time.perf_counter()
         stats = collect(
             tasks,
-            max_shots=shots,
-            batch_size=batch_size,
-            seed=seed + repeat,
-            num_workers=workers,
-            start_batch_size=start_batch_size,
-            max_batch_size=max_batch_size,
-            max_batch_seconds=max_batch_seconds,
+            options=CollectionOptions(
+                max_shots=shots,
+                batch_size=batch_size,
+                start_batch_size=start_batch_size,
+                max_batch_size=max_batch_size,
+                max_batch_seconds=max_batch_seconds,
+            ),
+            run_options=CollectionRunOptions(
+                seed=seed + repeat,
+                num_workers=workers,
+            ),
         )
         timings.append(time.perf_counter() - started)
         last_errors = sum(stat.errors for stat in stats)

@@ -449,11 +449,16 @@ batch scheduling, postselection, and counting. Python owns task construction,
 strong ids, CSV resume files, and `TaskStats` wrappers.
 
 For an existing `DetectorErrorModel`, create a `CollectionTask` with `dem=...`
-and call `collect(...)`:
+and configure a reusable `Collector`:
 
 ```python
 from faultscope import DetectorErrorEdge, DetectorErrorModel, LogicalObservable
-from faultscope.collection import CollectionTask, collect
+from faultscope.collection import (
+    Collector,
+    CollectionOptions,
+    CollectionRunOptions,
+    CollectionTask,
+)
 
 dem = DetectorErrorModel(
     detectors=(),
@@ -469,15 +474,25 @@ dem = DetectorErrorModel(
     ),
 )
 
-stats = collect(
-    [CollectionTask(dem=dem, task_id="p=0.125", metadata={"p": 0.125})],
-    max_shots=10_000,
-    max_errors=200,
-    batch_size=1_000,
-    seed=1,
+collector = Collector(
+    options=CollectionOptions(
+        max_shots=10_000,
+        max_errors=200,
+        batch_size=1_000,
+    ),
+    run_options=CollectionRunOptions(seed=1),
+)
+stats = collector.collect(
+    [CollectionTask(dem=dem, task_id="p=0.125", metadata={"p": 0.125})]
 )[0]
 
-print(stats.shots, stats.errors, stats.logical_error_rate, stats.stderr)
+print(
+    stats.shots,
+    stats.errors,
+    stats.raw_error_rate,
+    stats.logical_error_rate,
+    stats.logical_error_rate_stderr,
+)
 ```
 
 A task may also start from a circuit. In that case FaultScope compiles a
@@ -486,19 +501,18 @@ observable declarations unless explicit `detectors=` or `observables=` are
 provided:
 
 ```python
-from faultscope.collection import CollectionTask, collect
+from faultscope.collection import CollectionOptions, CollectionRunOptions, CollectionTask, collect
 
 stats = collect(
     [CollectionTask(circuit=circuit, task_id="from-circuit")],
-    max_shots=20_000,
-    batch_size=2_000,
-    seed=2,
+    options=CollectionOptions(max_shots=20_000, batch_size=2_000),
+    run_options=CollectionRunOptions(seed=2),
 )
 ```
 
 Each `CollectionTask` must provide exactly one of `dem` or `circuit`.
-`max_shots` is required after combining call-level options with per-task
-`collection_options`. The final batch is capped so collection never exceeds
+`max_shots` is required after combining the Collector's base options with each
+task's `collection_options`. The final batch is capped so collection never exceeds
 `max_shots`. `max_errors` stops after a completed batch reaches the threshold,
 which means the returned `errors` can be greater than `max_errors`.
 
@@ -511,9 +525,8 @@ from faultscope.collection import CollectionTask, collect
 decoder = NativeGraphlikeDetectorCopyDecoder.from_dem(dem)
 stats = collect(
     [CollectionTask(dem=dem, decoder=decoder)],
-    max_shots=10_000,
-    batch_size=1_000,
-    seed=3,
+    options=CollectionOptions(max_shots=10_000, batch_size=1_000),
+    run_options=CollectionRunOptions(seed=3),
 )
 ```
 
@@ -535,10 +548,8 @@ seed.
 ```python
 stats = collect(
     tasks,
-    max_shots=100_000,
-    batch_size=2_000,
-    seed=4,
-    num_workers=4,
+    options=CollectionOptions(max_shots=100_000, batch_size=2_000),
+    run_options=CollectionRunOptions(seed=4, num_workers=4),
 )
 ```
 
@@ -550,11 +561,12 @@ stop decisions without appending to those files.
 ```python
 stats = collect(
     tasks,
-    max_shots=100_000,
-    batch_size=5_000,
-    seed=5,
-    existing_data_filepaths=["previous_threshold.csv"],
-    save_resume_filepath="threshold_resume.csv",
+    options=CollectionOptions(max_shots=100_000, batch_size=5_000),
+    run_options=CollectionRunOptions(
+        seed=5,
+        existing_data_filepaths=("previous_threshold.csv",),
+        save_resume_filepath="threshold_resume.csv",
+    ),
 )
 ```
 
@@ -564,22 +576,24 @@ The CSV header is:
 shots,errors,discards,seconds,decoder,strong_id,json_metadata,custom_counts
 ```
 
-By default, progress is final-only: `iter_collect(...)` yields final
-`TaskStats`, and `progress_callback` receives final `TaskStats`. Set
-`progress_mode="stream"` to receive committed batch deltas. In stream mode,
-`iter_collect(...)` yields `Progress(new_stats=(...), status_message=...)`,
-`progress_callback` receives `Progress`, and resume CSV rows are appended and
-flushed as each delta commits:
+`iter_collect(...)` yields only final `TaskStats`. Use `iter_progress(...)` to
+receive committed batch deltas. Resume CSV rows are appended and flushed before
+each `Progress(new_stats=(...), status_message=...)` value is yielded:
 
 ```python
-from faultscope.collection import Progress, iter_collect
+from faultscope.collection import (
+    CollectionOptions,
+    CollectionRunOptions,
+    Progress,
+    iter_progress,
+)
 
-for progress in iter_collect(
+for progress in iter_progress(
     tasks,
-    max_shots=100_000,
-    batch_size=2_000,
-    save_resume_filepath="threshold_resume.csv",
-    progress_mode="stream",
+    options=CollectionOptions(max_shots=100_000, batch_size=2_000),
+    run_options=CollectionRunOptions(
+        save_resume_filepath="threshold_resume.csv",
+    ),
 ):
     assert isinstance(progress, Progress)
     for delta in progress.new_stats:
@@ -624,10 +638,11 @@ Optional custom counts are accumulated in `TaskStats.custom_counts`:
 ```python
 stats = collect(
     [CollectionTask(dem=dem)],
-    max_shots=10_000,
-    batch_size=1_000,
-    count_observable_error_combos=True,
-    count_detection_events=True,
+    options=CollectionOptions(max_shots=10_000, batch_size=1_000),
+    run_options=CollectionRunOptions(
+        count_observable_error_combos=True,
+        count_detection_events=True,
+    ),
 )[0]
 
 print(stats.custom_counts)
@@ -643,9 +658,10 @@ Decoder fanout expands tasks that do not already specify a decoder:
 ```python
 stats = collect(
     [CollectionTask(dem=dem, task_id="surface-d3")],
-    max_shots=20_000,
-    batch_size=1_000,
-    decoders=["no-correction", "graphlike-detector-copy"],
+    options=CollectionOptions(max_shots=20_000, batch_size=1_000),
+    run_options=CollectionRunOptions(
+        decoders=("no-correction", "graphlike-detector-copy"),
+    ),
 )
 ```
 

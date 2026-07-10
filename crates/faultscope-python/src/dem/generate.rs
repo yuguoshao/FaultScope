@@ -1,6 +1,7 @@
 use crate::*;
 use faultscope_core::DetectorErrorModelGenerator as CoreDetectorErrorModelGenerator;
 
+/// Compiles a circuit into a detector error model.
 #[pyclass(name = "DetectorErrorModelGenerator", module = "faultscope._native")]
 pub(crate) struct PyDetectorErrorModelGenerator {
     py_circuit: Py<PyAny>,

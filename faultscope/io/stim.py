@@ -36,10 +36,14 @@ _MPP_TARGET_RE = re.compile(r"^([XYZ])([0-9]+)$")
 
 
 def load_stim_file(path: str | Path) -> StimImportResult:
+    """Parse a supported Stim circuit from a UTF-8 text file."""
+
     return parse_stim_circuit(Path(path).read_text())
 
 
 def parse_stim_circuit(text: str) -> StimImportResult:
+    """Parse supported Stim syntax into a FaultScope circuit and declarations."""
+
     importer = _StimImporter()
     return importer.parse(text)
 
@@ -189,9 +193,7 @@ class _StimImporter:
     ) -> None:
         rate = _optional_single_arg(args, name, line_no)
         if rate not in {None, 0.0}:
-            raise StimImportError(
-                f"{name} measurement noise is not supported on line {line_no}"
-            )
+            raise StimImportError(f"{name} measurement noise is not supported on line {line_no}")
         basis = {"MR": "Z", "MRX": "X", "MRY": "Y"}[name]
         for qubit in _parse_qubit_targets(targets, line_no):
             key = self._next_measurement_key()
@@ -235,9 +237,7 @@ class _StimImporter:
             for factor in product:
                 match = _MPP_TARGET_RE.match(factor)
                 if not match:
-                    raise StimImportError(
-                        f"unsupported MPP target {factor!r} on line {line_no}"
-                    )
+                    raise StimImportError(f"unsupported MPP target {factor!r} on line {line_no}")
                 paulis.append(match.group(1))
                 qubits.append(int(match.group(2)))
             key = self._next_measurement_key()
@@ -372,9 +372,7 @@ class _StimImporter:
             "ZZ",
         )
         weights = {
-            event: probability
-            for event, probability in zip(events, args)
-            if probability > 0
+            event: probability for event, probability in zip(events, args) if probability > 0
         }
         rate = sum(args)
         qubits = _parse_qubit_targets(targets, line_no)

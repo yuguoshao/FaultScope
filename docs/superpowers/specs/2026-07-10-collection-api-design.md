@@ -89,7 +89,7 @@ def iter_progress(tasks, *, options=None, run_options=None) -> Iterator[Progress
 
 Each wrapper constructs a Collector and delegates to the corresponding method. The existing individual collection kwargs, `progress_mode`, public `progress_callback`, and `print_progress` are removed before the first release.
 
-The CLI consumes `iter_progress` when progress output is needed. Internal native callbacks remain private and continue to flush resume CSV deltas before acknowledging committed batches.
+The CLI uses the same private progress sink as `iter_progress` when progress output is needed, while retaining the final totals returned by the collection run. Internal native callbacks remain private and continue to flush resume CSV deltas before acknowledging committed batches. This avoids a second sampling run and does not expose a public callback API.
 
 ## Task Statistics
 

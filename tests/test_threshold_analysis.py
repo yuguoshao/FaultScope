@@ -157,9 +157,10 @@ def test_public_annotations_match_approved_api() -> None:
     analyze_hints = get_type_hints(threshold.analyze_thresholds)
 
     assert pairwise_hints["status"] == Literal["ok", "no_crossing", "ambiguous"]
-    assert scaling_hints["status"] == Literal[
-        "ok", "insufficient_data", "fit_failed", "bootstrap_unstable"
-    ]
+    assert (
+        scaling_hints["status"]
+        == Literal["ok", "insufficient_data", "fit_failed", "bootstrap_unstable"]
+    )
     assert scaling_hints["threshold"] == threshold.ThresholdEstimate | None
     assert scaling_hints["critical_exponent"] == threshold.ThresholdEstimate | None
     assert scaling_hints["message"] == str | None
@@ -184,9 +185,7 @@ def test_duplicate_points_aggregate_accepted_shots_and_raw_rates() -> None:
     assert point.shots == 135
     assert point.errors == 15
     assert point.rate == pytest.approx(15.0 / 135.0)
-    assert point.stderr == pytest.approx(
-        math.sqrt(point.rate * (1.0 - point.rate) / point.shots)
-    )
+    assert point.stderr == pytest.approx(math.sqrt(point.rate * (1.0 - point.rate) / point.shots))
 
 
 def test_custom_count_key_is_strict_and_uses_accepted_shots_denominator() -> None:
@@ -306,11 +305,7 @@ def test_pairwise_crossings_handle_unique_none_multiple_and_unequal_grids() -> N
     for crossing in result.crossings:
         assert all(0.01 <= candidate <= 0.04 for candidate in crossing.candidates)
     all_candidates = sorted(
-        {
-            candidate
-            for crossing in result.crossings
-            for candidate in crossing.candidates
-        }
+        {candidate for crossing in result.crossings for candidate in crossing.candidates}
     )
     assert result.pairwise_threshold.value == pytest.approx(
         0.5 * (all_candidates[1] + all_candidates[2])
@@ -590,9 +585,7 @@ def test_unique_pairwise_crossings_receive_pair_specific_bootstrap_metadata() ->
         seed=321,
     )
 
-    unique_crossings = [
-        crossing for crossing in result.crossings if crossing.status == "ok"
-    ]
+    unique_crossings = [crossing for crossing in result.crossings if crossing.status == "ok"]
     assert len(unique_crossings) == 2
     assert result.pairwise_threshold.bootstrap_samples == 48
     assert result.pairwise_threshold.bootstrap_successes >= 40
@@ -814,9 +807,7 @@ def test_plot_threshold_analysis_pairwise_marker_uses_crossing_rate() -> None:
 
     _, axes = plot_threshold_analysis(result, log_y=False)
     crossing_marker = next(
-        line
-        for line in axes[0, 0].lines
-        if line.get_marker() == "x" and len(line.get_xdata()) == 1
+        line for line in axes[0, 0].lines if line.get_marker() == "x" and len(line.get_xdata()) == 1
     )
 
     assert crossing_marker.get_xdata()[0] == pytest.approx(0.02)

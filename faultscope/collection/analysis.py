@@ -23,11 +23,7 @@ def error_rate_points(
         metadata = dict(stat.metadata)
         x = metadata[x_key]
         group = metadata[group_key] if group_key is not None else None
-        errors = (
-            int(stat.custom_counts.get(count_key, 0))
-            if count_key is not None
-            else stat.errors
-        )
+        errors = int(stat.custom_counts.get(count_key, 0)) if count_key is not None else stat.errors
         shots = stat.accepted_shots
         rate = errors / shots if shots else math.nan
         points.append(
@@ -71,9 +67,7 @@ def fit_log_error_rate_lines(
             y_mean = sum(ys) / len(ys)
             denom = sum((x - x_mean) ** 2 for x in xs)
             slope = (
-                0.0
-                if denom == 0.0
-                else sum((x - x_mean) * (y - y_mean) for x, y in values) / denom
+                0.0 if denom == 0.0 else sum((x - x_mean) * (y - y_mean) for x, y in values) / denom
             )
             intercept = y_mean - slope * x_mean
         fits[group] = {

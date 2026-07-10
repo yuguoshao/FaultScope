@@ -1,0 +1,105 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Verify tag matches workspace version
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: >-
+          python -c "import os,tomllib,pathlib;
+          version=tomllib.loads(pathlib.Path('Cargo.toml').read_text())['workspace']['package']['version'];
+          assert os.environ['RELEASE_TAG'] == f'v{version}', (os.environ['RELEASE_TAG'], version)"
+
+  wheels:
+    needs: validate
+    uses: ./.github/workflows/wheels.yml
+
+  draft-release:
+    needs: wheels
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: faultscope-*
+          path: dist
+          merge-multiple: true
+      - run: gh release create "${GITHUB_REF_NAME}" dist/* --draft --generate-notes
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+  publish-crates:
+    needs: [validate, wheels]
+    runs-on: ubuntu-latest
+    environment: release
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo publish -p faultscope-core --locked
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+      - name: Wait for faultscope-core to reach the registry index
+        shell: bash
+        run: |
+          version=$(python -c "import pathlib,tomllib; print(tomllib.loads(pathlib.Path('Cargo.toml').read_text())['workspace']['package']['version'])")
+          for attempt in {1..30}; do
+            if cargo search faultscope-core --limit 1 | grep -F "faultscope-core = \"${version}\""; then
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "faultscope-core ${version} did not reach the crates.io index" >&2
+          exit 1
+      - run: cargo publish -p faultscope-collection --locked
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+  publish-main:
+    needs: [publish-crates, wheels]
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: faultscope-main-*
+          path: dist
+          merge-multiple: true
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist
+
+  publish-pymatching:
+    needs: [publish-main, wheels]
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: faultscope-pymatching-*
+          path: dist
+          merge-multiple: true
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist

@@ -73,6 +73,7 @@ def write_rotated_surface_code_spatial_hotspot_map(
 
     origin_x = 130
     origin_y = 170
+
     def px(x_coord: float) -> int:
         return int(origin_x + x_coord * spacing)
 
@@ -228,9 +229,5 @@ def _collect_surface_code_hotspots(
                     "hotspot": float(hotspot),
                 }
             )
-    max_hotspot = max(
-        [0.0]
-        + list(data_nodes.values())
-        + [node["hotspot"] for node in check_nodes]
-    )
+    max_hotspot = max([0.0] + list(data_nodes.values()) + [node["hotspot"] for node in check_nodes])
     return data_nodes, check_nodes, max_hotspot or 1.0

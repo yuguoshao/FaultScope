@@ -1,8 +1,11 @@
 import importlib.util
 import io
+import json
 import runpy
 import subprocess
 import sys
+import tempfile
+import tomllib
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
@@ -16,6 +19,46 @@ def _has_module(name: str) -> bool:
 
 
 class BenchmarkSmokeTests(unittest.TestCase):
+    def test_collection_throughput_writes_machine_readable_json(self) -> None:
+        script = ROOT / "benchmarks" / "collection_throughput.py"
+        with tempfile.TemporaryDirectory() as temp:
+            output = Path(temp) / "collection.json"
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    str(script),
+                    "--shots",
+                    "16",
+                    "--batch-size",
+                    "4",
+                    "--small-batch-size",
+                    "2",
+                    "--adaptive-start-batch-size",
+                    "1",
+                    "--adaptive-max-batch-size",
+                    "4",
+                    "--workers",
+                    "1",
+                    "--tasks",
+                    "1",
+                    "--repeats",
+                    "1",
+                    "--json-out",
+                    str(output),
+                ],
+                cwd=ROOT,
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            records = json.loads(output.read_text())
+            self.assertEqual(len(records), 5)
+            self.assertEqual(records[0]["mode"], "single")
+            self.assertEqual(records[0]["status"], "ok")
+            self.assertGreater(records[0]["shots_per_second"], 0)
+
     def test_collection_throughput_includes_adaptive_scenarios(self) -> None:
         script = ROOT / "benchmarks" / "collection_throughput.py"
         completed = subprocess.run(
@@ -54,9 +97,7 @@ class BenchmarkSmokeTests(unittest.TestCase):
             msg=f"stdout:\n{completed.stdout}\nstderr:\n{completed.stderr}",
         )
         modes = {
-            line.split("\t", 1)[0]
-            for line in completed.stdout.splitlines()[1:]
-            if line.strip()
+            line.split("\t", 1)[0] for line in completed.stdout.splitlines()[1:] if line.strip()
         }
         self.assertEqual(
             modes,
@@ -82,6 +123,7 @@ class BenchmarkSmokeTests(unittest.TestCase):
 
         self.assertNotEqual(completed.returncode, 0)
         self.assertIn("adaptive-max-batch-size must be positive", completed.stderr)
+
     def test_surface_code_threshold_uses_public_threshold_analysis(self) -> None:
         script = ROOT / "benchmarks" / "surface_code_threshold.py"
         source = script.read_text(encoding="utf-8")
@@ -135,9 +177,7 @@ class BenchmarkSmokeTests(unittest.TestCase):
         pairwise_paths = {line.split("\t")[2] for line in pairwise}
         self.assertIn("stim", pairwise_paths)
         self.assertIn("stim-dem", pairwise_paths)
-        self.assertTrue(
-            any(line.split("\t")[3] in {"ok", "insufficient_data"} for line in scaling)
-        )
+        self.assertTrue(any(line.split("\t")[3] in {"ok", "insufficient_data"} for line in scaling))
 
     def test_surface_code_threshold_formats_estimates_and_intervals(self) -> None:
         from faultscope.collection import (
@@ -152,9 +192,7 @@ class BenchmarkSmokeTests(unittest.TestCase):
         result = ThresholdAnalysisResult(
             series={"path": "stim", "basis": "x"},
             points=(),
-            crossings=(
-                PairwiseCrossing(3.0, 5.0, "ok", (0.01,), estimate),
-            ),
+            crossings=(PairwiseCrossing(3.0, 5.0, "ok", (0.01,), estimate),),
             pairwise_threshold=estimate,
             scaling_fit=FiniteSizeScalingFit(
                 status="ok",
@@ -304,11 +342,11 @@ class BenchmarkSmokeTests(unittest.TestCase):
 
         lines = output.getvalue().splitlines()
         summary = next(
-            line.split("\t")
-            for line in lines
-            if line.startswith("threshold-pairwise-summary\t")
+            line.split("\t") for line in lines if line.startswith("threshold-pairwise-summary\t")
         )
-        self.assertEqual(summary[3:], ["0.01", "0.0089999999999999993", "0.010999999999999999", "80"])
+        self.assertEqual(
+            summary[3:], ["0.01", "0.0089999999999999993", "0.010999999999999999", "80"]
+        )
 
     def test_surface_code_threshold_drops_ci_from_discarded_duplicate_candidate(self) -> None:
         from faultscope.collection import (
@@ -462,9 +500,9 @@ class BenchmarkSmokeTests(unittest.TestCase):
         self.assertEqual(summary[3:], ["0.01", "NA", "NA", "0"])
 
     def test_test_extra_installs_pytest_for_threshold_suite(self) -> None:
-        pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
-        test_extra = pyproject.split("test = [", 1)[1].split("]", 1)[0]
-        self.assertIn('"pytest"', test_extra)
+        with (ROOT / "pyproject.toml").open("rb") as f:
+            test_extra = tomllib.load(f)["project"]["optional-dependencies"]["test"]
+        self.assertTrue(any(dependency.startswith("pytest") for dependency in test_extra))
 
     def test_surface_code_decoder_performance_smoke(self) -> None:
         for module_name in ("stim", "pymatching", "numpy"):
@@ -494,11 +532,7 @@ class BenchmarkSmokeTests(unittest.TestCase):
             0,
             msg=f"stdout:\n{completed.stdout}\nstderr:\n{completed.stderr}",
         )
-        rows = [
-            line.split("\t")
-            for line in completed.stdout.splitlines()
-            if line.strip()
-        ]
+        rows = [line.split("\t") for line in completed.stdout.splitlines() if line.strip()]
         self.assertGreaterEqual(len(rows), 2)
         header = rows[0]
         self.assertEqual(header[5], "path")

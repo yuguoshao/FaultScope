@@ -53,9 +53,7 @@ class LargeRotatedSurfaceCodeExampleTests(unittest.TestCase):
                 locations = example.circuit.noise_locations()
                 self.assertEqual(
                     sum(
-                        1
-                        for location in locations.values()
-                        if location.tags.get("role") == "data"
+                        1 for location in locations.values() if location.tags.get("role") == "data"
                     ),
                     2 * example.rounds * expected,
                 )

@@ -21,12 +21,7 @@ from faultscope.runtime import (
     generate_native_dem,
 )
 
-BACKEND_SRC = (
-    Path(__file__).resolve().parents[1]
-    / "backends"
-    / "faultscope-fusion-blossom"
-    / "src"
-)
+BACKEND_SRC = Path(__file__).resolve().parents[1] / "backends" / "faultscope-fusion-blossom" / "src"
 if str(BACKEND_SRC) not in sys.path:
     sys.path.insert(0, str(BACKEND_SRC))
 
@@ -219,9 +214,7 @@ class FusionBlossomBackendPackageTests(unittest.TestCase):
                 Detector(id=20, measurement_keys=()),
             ),
             observables=(LogicalObservable(id=0),),
-            edges=(
-                DetectorErrorEdge(0.2, (10, 20), (0,), "edge0", "X"),
-            ),
+            edges=(DetectorErrorEdge(0.2, (10, 20), (0,), "edge0", "X"),),
         )
         decoder = faultscope_fusion_blossom.NativeFusionBlossomDecoder.from_dem(dem)
 
@@ -428,8 +421,7 @@ class FusionBlossomBackendPackageTests(unittest.TestCase):
             shots=128,
             seed=111,
             decoder=decoder,
-            loss_mask_fn=lambda batch, corrections: batch.observables[0]
-            ^ corrections[0],
+            loss_mask_fn=lambda batch, corrections: batch.observables[0] ^ corrections[0],
         )
 
         self.assertEqual(decoder.python_decode_call_count, 1)
@@ -513,8 +505,7 @@ class FusionBlossomBackendPackageTests(unittest.TestCase):
             detectors=(Detector(id=0, measurement_keys=()),),
             observables=tuple(LogicalObservable(id=index) for index in range(16)),
             edges=tuple(
-                DetectorErrorEdge(0.2, (0,), (index,), f"edge{index}", "X")
-                for index in range(16)
+                DetectorErrorEdge(0.2, (0,), (index,), f"edge{index}", "X") for index in range(16)
             ),
         )
 

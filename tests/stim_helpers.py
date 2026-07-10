@@ -141,9 +141,7 @@ def append_noise(circuit: Any, location: NoiseLocation) -> None:
     model = location.model
     if isinstance(model, BernoulliPauliNoise):
         if len(model.pauli) == 1:
-            gate = {"X": "X_ERROR", "Y": "Y_ERROR", "Z": "Z_ERROR", "I": None}[
-                model.pauli
-            ]
+            gate = {"X": "X_ERROR", "Y": "Y_ERROR", "Z": "Z_ERROR", "I": None}[model.pauli]
             if gate is not None:
                 circuit.append(gate, location.qubits, location.rate)
             return
@@ -202,8 +200,7 @@ def measurement_batch_from_stim_samples(
         x_frame=(),
         z_frame=(),
         measurements={
-            key: stim_column_mask(samples, column)
-            for column, key in enumerate(key_order)
+            key: stim_column_mask(samples, column) for column, key in enumerate(key_order)
         },
         detectors={},
         observables={},
@@ -298,7 +295,9 @@ def dense_predictions_to_masks(
     }
 
 
-def faultscope_dem_error_edges(dem: Any) -> tuple[tuple[float, tuple[int, ...], tuple[int, ...]], ...]:
+def faultscope_dem_error_edges(
+    dem: Any,
+) -> tuple[tuple[float, tuple[int, ...], tuple[int, ...]], ...]:
     return tuple(
         sorted(
             (
@@ -312,7 +311,9 @@ def faultscope_dem_error_edges(dem: Any) -> tuple[tuple[float, tuple[int, ...], 
     )
 
 
-def stim_dem_error_edges(stim_dem: Any) -> tuple[tuple[float, tuple[int, ...], tuple[int, ...]], ...]:
+def stim_dem_error_edges(
+    stim_dem: Any,
+) -> tuple[tuple[float, tuple[int, ...], tuple[int, ...]], ...]:
     edges: list[tuple[float, tuple[int, ...], tuple[int, ...]]] = []
     detector_offset = 0
     for instruction in stim_dem:
@@ -429,9 +430,7 @@ def pauli_targets(qubits: Sequence[int], pauli: str) -> list[Any]:
 def pauli_channel_probabilities(model: PauliChannel, rate: float) -> dict[str, float]:
     total_weight = model.total_weight
     return {
-        event: rate * weight / total_weight
-        for event, weight in model.weights.items()
-        if weight > 0
+        event: rate * weight / total_weight for event, weight in model.weights.items() if weight > 0
     }
 
 
@@ -441,10 +440,7 @@ def rec_targets(
 ) -> list[Any]:
     stim_module = require_stim()
     current_index = len(measurement_index_by_key)
-    return [
-        stim_module.target_rec(measurement_index_by_key[key] - current_index)
-        for key in keys
-    ]
+    return [stim_module.target_rec(measurement_index_by_key[key] - current_index) for key in keys]
 
 
 def _record_measurement_key(

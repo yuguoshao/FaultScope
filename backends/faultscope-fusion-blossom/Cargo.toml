@@ -1,8 +1,13 @@
 [package]
 name = "faultscope-fusion-blossom-python"
-version = "0.1.0"
-edition = "2021"
-license = "MIT"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Experimental fusion-blossom decoder plugin for FaultScope"
+publish = false
 
 [lib]
 name = "faultscope_fusion_blossom_native"
@@ -11,5 +16,5 @@ test = false
 
 [dependencies]
 fusion-blossom = { git = "https://github.com/yuewuo/fusion-blossom.git", rev = "c536a4bdfb13e5e84ea643213510462306c9cb0f", default-features = false, features = ["disable_visualizer", "remove_blossom_v", "u32_index"] }
-faultscope-core = { path = "../../crates/faultscope-core" }
-pyo3 = { version = "0.23", features = ["extension-module"] }
+faultscope-core = { version = "0.1.0", path = "../../crates/faultscope-core" }
+pyo3 = { version = "0.23", features = ["extension-module", "abi3-py310"] }

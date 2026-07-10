@@ -10,9 +10,16 @@ sparse binary structure. User code should import from the public Python modules:
 `faultscope.collection`, `faultscope.decoders`, `faultscope.io`, and
 `faultscope.viz`.
 
-The package is pre-1.0. Python source-level compatibility is the main user
-compatibility target. The Rust core API is public and typed, but may still move
-while the core stabilizes.
+The package is pre-1.0. Within `0.1.x`, names listed in public Python module
+`__all__` values and the documented root APIs of `faultscope-core` and
+`faultscope-collection` are compatibility contracts. Compatible additions may
+land in patch releases. Removal or renaming requires deprecation before a later
+minor release. Private modules and names beginning with `_` are implementation
+details.
+
+`faultscope.__version__` reports the installed distribution version. The Python
+package includes `py.typed` and a generated structural stub for the private
+PyO3 extension so public wrappers remain type-checkable.
 
 ## Import Surface
 
@@ -33,12 +40,15 @@ from faultscope import (
     NativeMwpmDecoder,
     NativePyMatchingDecoder,
     PyMatchingDecoder,
+    Collector,
     CollectionOptions,
+    CollectionRunOptions,
     CollectionTask,
     Progress,
     TaskStats,
     collect,
     iter_collect,
+    iter_progress,
 )
 ```
 
@@ -608,8 +618,9 @@ from faultscope.collection import (
 )
 ```
 
-The top-level `faultscope` collection exports are `CollectionOptions`,
-`CollectionTask`, `Progress`, `TaskStats`, `collect`, and `iter_collect`.
+The top-level `faultscope` collection exports are `Collector`,
+`CollectionOptions`, `CollectionRunOptions`, `CollectionTask`, `Progress`,
+`TaskStats`, `collect`, `iter_collect`, and `iter_progress`.
 Threshold analysis types and helpers are exported from `faultscope.collection`
 only, not from top-level `faultscope`.
 
@@ -620,7 +631,6 @@ CollectionOptions(
     max_shots: int | None = None,
     max_errors: int | None = None,
     batch_size: int = 10_000,
-    seed: int | None = None,
     start_batch_size: int | None = None,
     max_batch_size: int | None = None,
     max_batch_seconds: float | None = None,
@@ -629,8 +639,26 @@ CollectionOptions(
 
 `max_shots`, `batch_size`, `start_batch_size`, `max_batch_size`, and
 `max_batch_seconds` must be positive when set. `max_errors` must be
-non-negative when set. `max_shots` is required after merging call-level options
-with per-task options.
+non-negative when set. `max_shots` is required after merging the Collector's
+base options with per-task options.
+
+`CollectionRunOptions` is a frozen dataclass:
+
+```text
+CollectionRunOptions(
+    seed: int | None = None,
+    num_workers: int = 1,
+    existing_data_filepaths: tuple[str | Path, ...] = (),
+    save_resume_filepath: str | Path | None = None,
+    count_observable_error_combos: bool = False,
+    count_detection_events: bool = False,
+    custom_error_count_key: str | None = None,
+    decoders: tuple[str | object, ...] = (),
+)
+```
+
+`num_workers` must be positive. The run seed is passed once to the Rust
+scheduler, which derives deterministic task-local streams from each strong id.
 
 `CollectionTask` is a frozen dataclass:
 
@@ -675,12 +703,14 @@ TaskStats(
 Properties:
 
 - `accepted_shots = shots - discards`
-- `error_rate = errors / shots`
+- `raw_error_rate = errors / shots`
+- `accepted_error_rate = errors / accepted_shots`
 - `logical_error_rate = errors / accepted_shots`
-- `stderr = sqrt(p * (1 - p) / accepted_shots)` where `p` is
-  `logical_error_rate`
+- `accepted_error_rate_stderr = sqrt(p * (1 - p) / accepted_shots)`
+- `logical_error_rate_stderr = accepted_error_rate_stderr`
 
-If `accepted_shots` is zero, `logical_error_rate` and `stderr` return `nan`.
+If `accepted_shots` is zero, accepted/logical rates and their standard errors
+return `nan`. If `shots` is zero, `raw_error_rate` returns `nan`.
 `TaskStats` also provides `with_edits(...)`, `to_csv_row()`,
 `to_csv_line()`, `from_csv_row(...)`, and `__add__` for validated merging by
 `strong_id`, decoder, and metadata. Normal `TaskStats` equality is the frozen
@@ -702,36 +732,27 @@ correction batch data.
 Collection functions:
 
 ```text
+Collector(*, options=None, run_options=None)
+
+Collector.collect(tasks) -> list[TaskStats]
+Collector.iter_collect(tasks) -> Iterator[TaskStats]
+Collector.iter_progress(tasks) -> Iterator[Progress]
+
 iter_collect(
     tasks,
     *,
     options=None,
-    max_shots=None,
-    max_errors=None,
-    batch_size=None,
-    seed=None,
-    start_batch_size=None,
-    max_batch_size=None,
-    max_batch_seconds=None,
-    num_workers=None,
-    existing_data_filepaths=(),
-    save_resume_filepath=None,
-    progress_callback=None,
-    print_progress=False,
-    count_observable_error_combos=False,
-    count_detection_events=False,
-    custom_error_count_key=None,
-    progress_mode="final",
-    decoders=None,
-) -> Iterator[TaskStats | Progress]
+    run_options=None,
+) -> Iterator[TaskStats]
 
-collect(...) -> list[TaskStats]
+iter_progress(tasks, *, options=None, run_options=None) -> Iterator[Progress]
+collect(tasks, *, options=None, run_options=None) -> list[TaskStats]
 ```
 
-Effective options are defaults, then call-level `options` and keyword
-overrides, then each task's `collection_options`. The final batch is capped to
-the remaining shot budget. `max_errors` and `custom_error_count_key` stopping
-are checked after each completed batch.
+The functions are one-shot wrappers around `Collector`. Sampling options come
+from the Collector and are overlaid by each task's `collection_options`. The
+final batch is capped to the remaining shot budget. `max_errors` and
+`custom_error_count_key` stopping are checked after each completed batch.
 
 `num_workers` defaults to `1`. With fixed batch settings, the Rust scheduler can
 parallelize both multiple tasks and a single large task. Fixed seed plus fixed
@@ -743,18 +764,16 @@ parallel deltas are committed in order and obey the same shot/error limits.
 Because calibration uses elapsed time, adaptive runs do not promise identical
 error counts across worker counts or machine loads.
 
-`progress_mode="final"` is the compatibility default. `iter_collect(...)` yields
-final `TaskStats`, and `progress_callback` receives final `TaskStats`.
-`progress_mode="stream"` makes `iter_collect(...)` yield `Progress`; `collect`
-still returns final `list[TaskStats]`, while `progress_callback` receives
-`Progress`. Stream deltas are emitted only after Rust commits batches in
-task-local ordinal order. Deltas that complete after a stop condition are not
+`iter_collect(...)` yields final `TaskStats` only. `iter_progress(...)` yields
+committed batch-delta `Progress` values only. Stream deltas are emitted after
+Rust commits batches in task-local ordinal order and after configured resume
+CSV output is flushed. Deltas that complete after a stop condition are not
 emitted or counted.
 
-`decoders=` may be a decoder name, native decoder object, or iterable of names
-and native objects. Tasks with `decoder is None` are expanded once per fanout
-decoder; tasks that already specify `decoder=` keep their own decoder. String
-decoders are resolved through `create_native_decoder(...)`.
+`CollectionRunOptions.decoders` is a tuple of decoder names or native decoder
+objects. Tasks with `decoder is None` are expanded once per fanout decoder;
+tasks that already specify `decoder=` keep their own decoder. String decoders
+are resolved through `create_native_decoder(...)`.
 
 `save_resume_filepath` and `existing_data_filepaths` use CSV rows with this
 header:

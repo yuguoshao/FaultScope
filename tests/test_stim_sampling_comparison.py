@@ -264,7 +264,9 @@ class StimSamplingComparisonTests(unittest.TestCase):
             "repetition raw-sample decoded logical error rate",
         )
 
-    def test_surface_code_initialized_memory_logical_error_rates_match_stim_raw_samples(self) -> None:
+    def test_surface_code_initialized_memory_logical_error_rates_match_stim_raw_samples(
+        self,
+    ) -> None:
         shots = 20_000
         for basis in ("x", "z"):
             with self.subTest(basis=basis):
@@ -284,14 +286,8 @@ class StimSamplingComparisonTests(unittest.TestCase):
                     matcher = pymatching.Matching.from_detector_error_model(stim_dem)
                     decoder = _StimMatcherBatchDecoder(
                         matcher=matcher,
-                        detector_ids=tuple(
-                            detector.id
-                            for detector in imported.detectors
-                        ),
-                        observable_ids=tuple(
-                            observable.id
-                            for observable in imported.observables
-                        ),
+                        detector_ids=tuple(detector.id for detector in imported.detectors),
+                        observable_ids=tuple(observable.id for observable in imported.observables),
                     )
                     faultscope_result = compile_native_sampler(
                         imported.circuit,
@@ -404,7 +400,9 @@ class StimSamplingComparisonTests(unittest.TestCase):
 
         for detector in experiment.detectors:
             detector_id = detector.id
-            faultscope_rate = faultscope_batch.detectors[detector_id].bit_count() / faultscope_batch.shots
+            faultscope_rate = (
+                faultscope_batch.detectors[detector_id].bit_count() / faultscope_batch.shots
+            )
             stim_rate = float(stim_detectors[:, detector_id].mean())
             _assert_rates_close(
                 self,
@@ -549,10 +547,7 @@ class _StimMatcherBatchDecoder:
     ) -> None:
         self.matcher = matcher
         self.detector_ids = tuple(int(detector_id) for detector_id in detector_ids)
-        self.observable_ids = tuple(
-            int(observable_id)
-            for observable_id in observable_ids
-        )
+        self.observable_ids = tuple(int(observable_id) for observable_id in observable_ids)
 
     def decode_batch_masks(self, batch: SampleBatch) -> dict[int, int]:
         syndromes = masks_to_dense_array(
@@ -624,8 +619,9 @@ def _dem_decoded_loss_rate(
     return loss_mask.bit_count() / batch.shots
 
 
-def _deterministic_surface_memory_cases(
-) -> tuple[tuple[str, Circuit, tuple[Detector, ...], tuple[LogicalObservable, ...]], ...]:
+def _deterministic_surface_memory_cases() -> tuple[
+    tuple[str, Circuit, tuple[Detector, ...], tuple[LogicalObservable, ...]], ...
+]:
     return (
         _deterministic_surface_memory_case("z_memory"),
         _deterministic_surface_memory_case("x_memory"),
@@ -643,18 +639,12 @@ def _deterministic_surface_memory_case(
         checks = z_checks
         basis = "Z"
         data_error = "X"
-        logical_qubits = tuple(
-            _data_index(distance, row, 0)
-            for row in range(distance)
-        )
+        logical_qubits = tuple(_data_index(distance, row, 0) for row in range(distance))
     elif memory == "x_memory":
         checks = x_checks
         basis = "X"
         data_error = "Z"
-        logical_qubits = tuple(
-            _data_index(distance, 0, col)
-            for col in range(distance)
-        )
+        logical_qubits = tuple(_data_index(distance, 0, col) for col in range(distance))
         for qubit in range(distance * distance):
             operations.append(Operation.h(qubit))
     else:
@@ -724,10 +714,7 @@ def _append_surface_memory_checks(
 ) -> None:
     for check in checks:
         check_id = str(check["id"])
-        qubits = tuple(
-            _data_index(distance, row, col)
-            for row, col in check["data"]
-        )
+        qubits = tuple(_data_index(distance, row, col) for row, col in check["data"])
         location = None
         if noise:
             location = NoiseLocation(
@@ -825,8 +812,7 @@ def _repetition_final_data_loss_mask(
         residual_weight = 0
         for data_idx in range(distance):
             residual_weight += (
-                batch.measurement_bit(f"final_d_{data_idx}", shot)
-                ^ correction[data_idx]
+                batch.measurement_bit(f"final_d_{data_idx}", shot) ^ correction[data_idx]
             )
         if residual_weight > distance // 2:
             loss_mask |= 1 << shot
@@ -852,8 +838,7 @@ def _stim_repetition_final_data_loss_rate(
         residual_weight = 0
         for data_idx in range(distance):
             residual_weight += (
-                int(stim_samples[shot, key_to_col[f"final_d_{data_idx}"]])
-                ^ correction[data_idx]
+                int(stim_samples[shot, key_to_col[f"final_d_{data_idx}"]]) ^ correction[data_idx]
             )
         failures += int(residual_weight > distance // 2)
     return failures / stim_samples.shape[0]

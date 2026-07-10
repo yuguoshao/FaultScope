@@ -172,9 +172,7 @@ def analyze_thresholds(
                 for crossing in boot_crossings:
                     if crossing.status == "ok" and crossing.estimate is not None:
                         key = (crossing.lower_distance, crossing.upper_distance)
-                        pair_bootstrap.setdefault(key, []).append(
-                            crossing.estimate.value
-                        )
+                        pair_bootstrap.setdefault(key, []).append(crossing.estimate.value)
                 if boot_pairwise is not None:
                     pairwise_bootstrap.append(boot_pairwise.value)
                 if boot_scaling.threshold is not None:
@@ -286,6 +284,7 @@ def _aggregate_points(
 def _normalize_threshold_results(
     results: ThresholdAnalysisResult | Iterable[ThresholdAnalysisResult],
 ) -> tuple[ThresholdAnalysisResult, ...]:
+    normalized: tuple[ThresholdAnalysisResult, ...]
     if isinstance(results, ThresholdAnalysisResult):
         normalized = (results,)
     else:
@@ -461,7 +460,7 @@ def _read_metadata(metadata: Mapping[str, object], key: str) -> object:
 
 def _read_finite_float(metadata: Mapping[str, object], key: str, label: str) -> float:
     value = _read_metadata(metadata, key)
-    if isinstance(value, bool):
+    if isinstance(value, bool) or not isinstance(value, (int, float, str)):
         raise ValueError(f"{label} must be finite")
     try:
         numeric = float(value)
@@ -527,12 +526,8 @@ def _pairwise_summary(
         lower_points = tuple(sorted(by_distance[lower], key=lambda point: point.x))
         upper_points = tuple(sorted(by_distance[upper], key=lambda point: point.x))
         candidates = _crossing_candidates(lower_points, upper_points)
-        status = (
-            "no_crossing"
-            if not candidates
-            else "ok"
-            if len(candidates) == 1
-            else "ambiguous"
+        status: Literal["ok", "no_crossing", "ambiguous"] = (
+            "no_crossing" if not candidates else "ok" if len(candidates) == 1 else "ambiguous"
         )
         aggregate_candidates.extend(candidates)
         estimate = None
@@ -591,13 +586,10 @@ def _crossing_candidates(
     if len(knots) < 2:
         return []
     diffs = [
-        _interpolate_logit(lower_points, x) - _interpolate_logit(upper_points, x)
-        for x in knots
+        _interpolate_logit(lower_points, x) - _interpolate_logit(upper_points, x) for x in knots
     ]
     candidates: list[float] = []
-    for left_x, right_x, left_diff, right_diff in zip(
-        knots, knots[1:], diffs, diffs[1:]
-    ):
+    for left_x, right_x, left_diff, right_diff in zip(knots, knots[1:], diffs, diffs[1:]):
         if _is_close_zero(left_diff):
             candidates.append(left_x)
         if _is_close_zero(right_diff):
@@ -719,15 +711,10 @@ def _fit_scaling(
         bootstrap_samples=bootstrap_samples,
         bootstrap_values=nu_bootstrap_values,
     )
-    status = "ok"
-    if (
-        bootstrap_samples
-        and (
-            threshold_estimate.bootstrap_successes
-            < _minimum_bootstrap_successes(bootstrap_samples)
-            or nu_estimate.bootstrap_successes
-            < _minimum_bootstrap_successes(bootstrap_samples)
-        )
+    status: Literal["ok", "bootstrap_unstable"] = "ok"
+    if bootstrap_samples and (
+        threshold_estimate.bootstrap_successes < _minimum_bootstrap_successes(bootstrap_samples)
+        or nu_estimate.bootstrap_successes < _minimum_bootstrap_successes(bootstrap_samples)
     ):
         status = "bootstrap_unstable"
     return FiniteSizeScalingFit(
@@ -757,8 +744,7 @@ def _solve_scaling_fit(
     sigma = np.asarray(
         [
             max(
-                _continuity_corrected_stderr(point)
-                / max(rate * (1.0 - rate), 1e-12),
+                _continuity_corrected_stderr(point) / max(rate * (1.0 - rate), 1e-12),
                 1e-12,
             )
             for point, rate in zip(points, corrected_rates)
@@ -920,15 +906,9 @@ def _json_safe(value: object) -> Any:
     if isinstance(value, float):
         return value if math.isfinite(value) else None
     if hasattr(value, "__dataclass_fields__"):
-        return {
-            field: _json_safe(getattr(value, field))
-            for field in value.__dataclass_fields__
-        }
+        return {field: _json_safe(getattr(value, field)) for field in value.__dataclass_fields__}
     if isinstance(value, Mapping):
-        return {
-            str(key): _json_safe(item)
-            for key, item in value.items()
-        }
+        return {str(key): _json_safe(item) for key, item in value.items()}
     if isinstance(value, (tuple, list)):
         return [_json_safe(item) for item in value]
     return str(value)
@@ -939,8 +919,7 @@ def _import_numpy() -> Any:
         import numpy as np
     except ImportError as exc:
         raise ImportError(
-            "threshold analysis requires optional dependencies; install "
-            "faultscope[collection]"
+            "threshold analysis requires optional dependencies; install faultscope[collection]"
         ) from exc
     return np
 
@@ -950,8 +929,7 @@ def _import_least_squares() -> Any:
         from scipy.optimize import least_squares
     except ImportError as exc:
         raise ImportError(
-            "threshold analysis requires optional dependencies; install "
-            "faultscope[collection]"
+            "threshold analysis requires optional dependencies; install faultscope[collection]"
         ) from exc
     return least_squares
 

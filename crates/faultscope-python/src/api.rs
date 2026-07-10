@@ -5,6 +5,7 @@ use faultscope_core::{
     FaultScopeSimulator as CoreFaultScopeSimulator,
 };
 
+/// Low-level native packed circuit sampler.
 #[pyclass]
 pub(crate) struct NativePackedSampler {
     pub(crate) py_circuit: Py<PyAny>,
@@ -13,16 +14,19 @@ pub(crate) struct NativePackedSampler {
     pub(crate) py_noise_locations: HashMap<String, Py<PyAny>>,
 }
 
+/// Opaque native packed batch used by native callback paths.
 #[pyclass]
 pub(crate) struct NativePackedBatch {
     pub(crate) state: RuntimeState,
 }
 
+/// Bit-packed forward circuit simulator and hotspot estimator.
 #[pyclass(name = "FaultScopeSimulator", module = "faultscope._native")]
 pub(crate) struct PyFaultScopeSimulator {
     sampler: NativePackedSampler,
 }
 
+/// Circuit-backed detector-error-model simulator.
 #[pyclass(name = "DemFaultScopeSimulator", module = "faultscope._native")]
 pub(crate) struct PyDemFaultScopeSimulator {
     py_circuit: Py<PyAny>,
@@ -593,6 +597,7 @@ impl NativePackedBatch {
     }
 }
 
+/// Low-level native detector-error-model sampler.
 #[pyclass]
 pub(crate) struct NativeDemSampler {
     pub(crate) observables: Vec<i64>,
@@ -601,16 +606,19 @@ pub(crate) struct NativeDemSampler {
     pub(crate) py_dem: Option<Py<PyAny>>,
 }
 
+/// Reusable native detector-error-model generator.
 #[pyclass]
 pub(crate) struct NativeDemGenerator {
     generator: CoreDetectorErrorModelGenerator,
 }
 
+/// Opaque native DEM batch used by native decoder paths.
 #[pyclass]
 pub(crate) struct NativeDemBatch {
     pub(crate) batch: DemBatch,
 }
 
+/// Samples a detector error model and estimates edge/location hotspots.
 #[pyclass(name = "DemHotspotEstimator", module = "faultscope._native")]
 pub(crate) struct PyDemHotspotEstimator {
     sampler: NativeDemSampler,

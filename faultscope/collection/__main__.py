@@ -10,8 +10,10 @@ from pathlib import Path
 import sys
 from typing import Any
 
-from faultscope.collection._collect import collect
+from faultscope.collection._collect import Collector
 from faultscope.collection._types import (
+    CollectionOptions,
+    CollectionRunOptions,
     CollectionTask,
     TaskStats,
     read_stats_from_csv_files,
@@ -47,9 +49,7 @@ def _parser() -> argparse.ArgumentParser:
     collect_parser.add_argument("--existing-data-filepath", action="append", default=[])
     collect_parser.add_argument("--save-resume-filepath")
     collect_parser.add_argument("--out")
-    collect_parser.add_argument(
-        "--progress-mode", choices=("final", "stream"), default="final"
-    )
+    collect_parser.add_argument("--progress-mode", choices=("final", "stream"), default="final")
     collect_parser.set_defaults(func=_cmd_collect)
 
     summarize_parser = subcommands.add_parser("summarize")
@@ -99,18 +99,24 @@ def _cmd_collect(args: argparse.Namespace) -> int:
         raise TypeError("tasks factory must return CollectionTask objects, not TaskStats")
     if isinstance(tasks, CollectionTask):
         tasks = [tasks]
-    stats = collect(
-        tasks,
-        max_shots=args.max_shots,
-        max_errors=args.max_errors,
-        batch_size=args.batch_size,
-        seed=args.seed,
-        num_workers=args.num_workers,
-        decoders=args.decoders,
-        existing_data_filepaths=args.existing_data_filepath,
-        save_resume_filepath=args.save_resume_filepath,
-        progress_mode=args.progress_mode,
+    collector = Collector(
+        options=CollectionOptions(
+            max_shots=args.max_shots,
+            max_errors=args.max_errors,
+            batch_size=args.batch_size,
+        ),
+        run_options=CollectionRunOptions(
+            seed=args.seed,
+            num_workers=args.num_workers,
+            decoders=tuple(args.decoders or ()),
+            existing_data_filepaths=tuple(args.existing_data_filepath),
+            save_resume_filepath=args.save_resume_filepath,
+        ),
     )
+    if args.progress_mode == "stream":
+        stats = collector._collect_with_progress(tasks, lambda _progress: None)
+    else:
+        stats = collector.collect(tasks)
     if args.out is not None and args.out != args.save_resume_filepath:
         write_stats_to_csv_file(args.out, stats)
     print(f"collected {len(stats)} task(s)", file=sys.stderr)
@@ -294,9 +300,7 @@ def _print_threshold_text(results: tuple[Any, ...]) -> None:
                     _format_estimate_ci_low(critical_exponent),
                     _format_estimate_ci_high(critical_exponent),
                     str(
-                        critical_exponent.bootstrap_samples
-                        if critical_exponent is not None
-                        else 0
+                        critical_exponent.bootstrap_samples if critical_exponent is not None else 0
                     ),
                     str(
                         critical_exponent.bootstrap_successes

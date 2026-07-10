@@ -106,8 +106,7 @@ impl DetectorErrorModel {
 
     pub fn is_graphlike(&self) -> bool {
         self.edges.iter().all(|edge| {
-            edge.detectors.len() <= 2
-                && !(edge.detectors.is_empty() && !edge.observables.is_empty())
+            (edge.observables.is_empty() || !edge.detectors.is_empty()) && edge.detectors.len() <= 2
         })
     }
 

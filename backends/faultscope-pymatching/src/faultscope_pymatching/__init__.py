@@ -8,6 +8,8 @@ FaultScope through the native decoder PyCapsule ABI.
 
 from __future__ import annotations
 
+from importlib.metadata import PackageNotFoundError, version as _distribution_version
+
 from faultscope._native import NATIVE_DECODER_PLUGIN_ABI
 from faultscope.runtime import generate_native_dem
 
@@ -19,7 +21,18 @@ except ImportError as exc:  # pragma: no cover - exercised before local build.
 else:
     _native_import_error = None
 
-__version__ = "0.1.0"
+
+def _package_version() -> str:
+    try:
+        return _distribution_version("faultscope-pymatching")
+    except PackageNotFoundError:
+        if _native is not None:
+            return _native.__version__
+        return "0+unknown"
+
+
+__version__ = _package_version()
+del _package_version
 BACKEND_NAME = "pymatching"
 
 
@@ -91,8 +104,7 @@ class NativePyMatchingDecoder:
             detector_words,
         )
         return {
-            observable_id: _words_to_int(words)
-            for observable_id, words in correction_words.items()
+            observable_id: _words_to_int(words) for observable_id, words in correction_words.items()
         }
 
     def __repr__(self):

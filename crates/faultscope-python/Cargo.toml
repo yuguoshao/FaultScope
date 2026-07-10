@@ -2,8 +2,12 @@
 name = "faultscope-python"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+authors.workspace = true
+description = "Python extension module for the FaultScope quantum error correction toolkit"
+publish = false
 
 [lib]
 name = "_native"
@@ -16,9 +20,9 @@ decoder-fusion-blossom = ["faultscope-core/decoder-fusion-blossom"]
 decoder-bposd = ["faultscope-core/decoder-bposd"]
 
 [dependencies]
-faultscope-collection = { path = "../faultscope-collection" }
-faultscope-core = { path = "../faultscope-core" }
-pyo3 = { version = "0.23", features = ["extension-module"] }
+faultscope-collection = { version = "0.1.0", path = "../faultscope-collection" }
+faultscope-core = { version = "0.1.0", path = "../faultscope-core" }
+pyo3 = { version = "0.23", features = ["extension-module", "abi3-py310"] }
 
 [package.metadata.maturin]
 module-name = "faultscope._native"

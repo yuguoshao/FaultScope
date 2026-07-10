@@ -1,8 +1,11 @@
 import builtins
+from collections.abc import Iterable, Iterator
 import csv
+from dataclasses import fields
 import gc
 import io
 import importlib.util
+import inspect
 import json
 import math
 import os
@@ -14,8 +17,7 @@ import threading
 import unittest
 import weakref
 from unittest import mock
-from contextlib import redirect_stderr, redirect_stdout
-from typing import Literal, get_args, get_origin, get_type_hints
+from typing import get_type_hints
 
 import faultscope
 import faultscope.collection._collect as collection_collect_module
@@ -34,14 +36,17 @@ from faultscope import (
 from faultscope.collection import (
     COLLECTION_CSV_FIELDS,
     COLLECTION_CSV_HEADER,
+    Collector,
     CollectionData,
     CollectionOptions,
+    CollectionRunOptions,
     CollectionTask,
     Progress,
     TaskStats,
     analyze_thresholds,
-    collect,
-    iter_collect,
+    collect as public_collect,
+    iter_collect as public_iter_collect,
+    iter_progress as public_iter_progress,
     read_stats_from_csv_files,
     write_stats_to_csv_file,
 )
@@ -83,6 +88,57 @@ def _graphlike_dem(probability: float = 1.0) -> DetectorErrorModel:
             ),
         ),
     )
+
+
+def _collect(
+    tasks: Iterable[CollectionTask],
+    *,
+    options: CollectionOptions | None = None,
+    max_shots: int | None = None,
+    max_errors: int | None = None,
+    batch_size: int | None = None,
+    seed: int | None = None,
+    start_batch_size: int | None = None,
+    max_batch_size: int | None = None,
+    max_batch_seconds: float | None = None,
+    num_workers: int | None = None,
+    existing_data_filepaths: Iterable[str | Path] = (),
+    save_resume_filepath: str | Path | None = None,
+    count_observable_error_combos: bool = False,
+    count_detection_events: bool = False,
+    custom_error_count_key: str | None = None,
+    decoders: Iterable[str | object] | str | object | None = None,
+) -> list[TaskStats]:
+    base = options or CollectionOptions()
+    effective_options = CollectionOptions(
+        max_shots=max_shots if max_shots is not None else base.max_shots,
+        max_errors=max_errors if max_errors is not None else base.max_errors,
+        batch_size=batch_size if batch_size is not None else base.batch_size,
+        start_batch_size=(
+            start_batch_size if start_batch_size is not None else base.start_batch_size
+        ),
+        max_batch_size=(max_batch_size if max_batch_size is not None else base.max_batch_size),
+        max_batch_seconds=(
+            max_batch_seconds if max_batch_seconds is not None else base.max_batch_seconds
+        ),
+    )
+    if decoders is None:
+        decoder_tuple: tuple[str | object, ...] = ()
+    elif isinstance(decoders, str) or not isinstance(decoders, Iterable):
+        decoder_tuple = (decoders,)
+    else:
+        decoder_tuple = tuple(decoders)
+    run_options = CollectionRunOptions(
+        seed=seed,
+        num_workers=1 if num_workers is None else num_workers,
+        existing_data_filepaths=tuple(existing_data_filepaths),
+        save_resume_filepath=save_resume_filepath,
+        count_observable_error_combos=count_observable_error_combos,
+        count_detection_events=count_detection_events,
+        custom_error_count_key=custom_error_count_key,
+        decoders=decoder_tuple,
+    )
+    return public_collect(tasks, options=effective_options, run_options=run_options)
 
 
 class CollectionTests(unittest.TestCase):
@@ -132,9 +188,7 @@ class CollectionTests(unittest.TestCase):
         repo_root = Path(__file__).resolve().parents[1]
         env = os.environ.copy()
         pythonpath = env.get("PYTHONPATH")
-        env["PYTHONPATH"] = (
-            f"{repo_root}{os.pathsep}{pythonpath}" if pythonpath else str(repo_root)
-        )
+        env["PYTHONPATH"] = f"{repo_root}{os.pathsep}{pythonpath}" if pythonpath else str(repo_root)
         env["PYTHONNOUSERSITE"] = "1"
         return subprocess.run(
             [sys.executable, "-m", "faultscope.collection", *args],
@@ -285,9 +339,7 @@ class CollectionTests(unittest.TestCase):
         self.assertEqual(valid.scaling_fit.status, "ok")
         self.assertAlmostEqual(valid.scaling_fit.threshold.value, 0.031, delta=0.003)
 
-        incomplete = stats + [
-            self._threshold_stat(x=0.031, distance=13, errors=250)
-        ]
+        incomplete = stats + [self._threshold_stat(x=0.031, distance=13, errors=250)]
         (rejected,) = analyze_thresholds(
             incomplete,
             x_key="p",
@@ -318,7 +370,7 @@ class CollectionTests(unittest.TestCase):
         self.assertEqual(first[0].to_dict(), second[0].to_dict())
 
     def test_options_validate_positive_limits(self) -> None:
-        CollectionOptions(max_shots=1, max_errors=0, batch_size=1, seed=123)
+        CollectionOptions(max_shots=1, max_errors=0, batch_size=1)
         CollectionOptions(start_batch_size=1, max_batch_size=2, max_batch_seconds=0.25)
 
         with self.assertRaisesRegex(ValueError, "max_shots"):
@@ -334,6 +386,16 @@ class CollectionTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "max_batch_seconds"):
             CollectionOptions(max_batch_seconds=0)
 
+    def test_collection_run_options_validate_workers(self) -> None:
+        options = CollectionRunOptions(seed=5, num_workers=2, decoders=("mwpm",))
+
+        self.assertEqual(options.seed, 5)
+        self.assertEqual(options.num_workers, 2)
+        self.assertEqual(options.decoders, ("mwpm",))
+        self.assertNotIn("seed", {field.name for field in fields(CollectionOptions)})
+        with self.assertRaisesRegex(ValueError, "num_workers must be positive"):
+            CollectionRunOptions(num_workers=0)
+
     def test_task_requires_exactly_one_source(self) -> None:
         dem = _logical_edge_dem()
         CollectionTask(dem=dem)
@@ -343,7 +405,7 @@ class CollectionTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "exactly one"):
             CollectionTask(dem=dem, circuit=Circuit(1, (Operation.measure(0, key="m0"),)))
 
-    def test_task_stats_rates_match_binomial_formula(self) -> None:
+    def test_task_stats_rates_have_explicit_denominators(self) -> None:
         stats = TaskStats(
             task_id="case",
             shots=100,
@@ -356,10 +418,20 @@ class CollectionTests(unittest.TestCase):
             custom_counts={},
         )
 
-        self.assertEqual(stats.error_rate, 0.25)
+        self.assertEqual(stats.raw_error_rate, 0.25)
+        self.assertEqual(stats.accepted_error_rate, 0.25)
         self.assertEqual(stats.logical_error_rate, 0.25)
-        self.assertEqual(stats.stderr, math.sqrt(0.25 * 0.75 / 100))
+        self.assertEqual(
+            stats.accepted_error_rate_stderr,
+            math.sqrt(0.25 * 0.75 / 100),
+        )
+        self.assertEqual(
+            stats.logical_error_rate_stderr,
+            stats.accepted_error_rate_stderr,
+        )
         self.assertEqual(stats.accepted_shots, 100)
+        self.assertFalse(hasattr(stats, "error_rate"))
+        self.assertFalse(hasattr(stats, "stderr"))
 
     def test_task_stats_rates_use_accepted_shots_for_logical_rate(self) -> None:
         stats = TaskStats(
@@ -374,9 +446,13 @@ class CollectionTests(unittest.TestCase):
             custom_counts={},
         )
 
-        self.assertEqual(stats.error_rate, 0.1)
+        self.assertEqual(stats.raw_error_rate, 0.1)
+        self.assertEqual(stats.accepted_error_rate, 0.125)
         self.assertEqual(stats.logical_error_rate, 0.125)
-        self.assertEqual(stats.stderr, math.sqrt(0.125 * 0.875 / 80))
+        self.assertEqual(
+            stats.accepted_error_rate_stderr,
+            math.sqrt(0.125 * 0.875 / 80),
+        )
 
     def test_task_stats_csv_utilities_round_trip_and_merge(self) -> None:
         stats = TaskStats(
@@ -559,7 +635,7 @@ class CollectionTests(unittest.TestCase):
         self.assertEqual(data["strong"].shots, 15)
 
     def test_collect_reports_all_logical_edge_failures(self) -> None:
-        stats = collect(
+        stats = _collect(
             [CollectionTask(dem=_logical_edge_dem(), task_id="logical")],
             max_shots=16,
             batch_size=5,
@@ -571,14 +647,14 @@ class CollectionTests(unittest.TestCase):
         self.assertEqual(stats[0].shots, 16)
         self.assertEqual(stats[0].errors, 16)
         self.assertEqual(stats[0].discards, 0)
-        self.assertEqual(stats[0].error_rate, 1.0)
+        self.assertEqual(stats[0].raw_error_rate, 1.0)
         self.assertTrue(stats[0].strong_id)
 
     def test_native_graphlike_decoder_can_remove_all_failures(self) -> None:
         dem = _graphlike_dem()
         decoder = NativeGraphlikeDetectorCopyDecoder.from_dem(dem)
 
-        stats = collect(
+        stats = _collect(
             [CollectionTask(dem=dem, decoder=decoder, task_id="corrected")],
             max_shots=32,
             batch_size=8,
@@ -590,7 +666,7 @@ class CollectionTests(unittest.TestCase):
         self.assertEqual(stats.errors, 0)
 
     def test_max_errors_stops_after_completed_batch(self) -> None:
-        stats = collect(
+        stats = _collect(
             [CollectionTask(dem=_logical_edge_dem())],
             max_shots=10,
             max_errors=1,
@@ -602,7 +678,7 @@ class CollectionTests(unittest.TestCase):
         self.assertEqual(stats.errors, 4)
 
     def test_task_options_do_not_reset_call_batch_size_by_default(self) -> None:
-        stats = collect(
+        stats = _collect(
             [
                 CollectionTask(
                     dem=_logical_edge_dem(),
@@ -624,26 +700,29 @@ class CollectionTests(unittest.TestCase):
             pass
 
         sampler = RustCoreSampler()
-        with mock.patch(
-            "faultscope.collection._collect._compile_task_sampler",
-            return_value=(sampler, dem),
-        ), mock.patch(
-            "faultscope.collection._collect._collect_dem_logical_error_stats_many",
-            return_value=[
-                {
-                    "task_id": "native-core",
-                    "strong_id": "strong",
-                    "shots": 7,
-                    "errors": 3,
-                    "discards": 0,
-                    "seconds": 0.25,
-                    "decoder": None,
-                    "metadata": {},
-                    "custom_counts": {},
-                }
-            ],
-        ) as collect_native:
-            stats = collect(
+        with (
+            mock.patch(
+                "faultscope.collection._collect._compile_task_sampler",
+                return_value=(sampler, dem),
+            ),
+            mock.patch(
+                "faultscope.collection._collect._collect_dem_logical_error_stats_many",
+                return_value=[
+                    {
+                        "task_id": "native-core",
+                        "strong_id": "strong",
+                        "shots": 7,
+                        "errors": 3,
+                        "discards": 0,
+                        "seconds": 0.25,
+                        "decoder": None,
+                        "metadata": {},
+                        "custom_counts": {},
+                    }
+                ],
+            ) as collect_native,
+        ):
+            stats = _collect(
                 [CollectionTask(dem=dem, task_id="native-core")],
                 max_shots=11,
                 max_errors=5,
@@ -658,7 +737,8 @@ class CollectionTests(unittest.TestCase):
         self.assertEqual(native_tasks[0]["max_shots"], 11)
         self.assertEqual(native_tasks[0]["max_errors"], 5)
         self.assertEqual(native_tasks[0]["batch_size"], 4)
-        self.assertEqual(native_tasks[0]["seed"], 9)
+        self.assertIsNone(native_tasks[0]["seed"])
+        self.assertEqual(collect_native.call_args.kwargs["seed"], 9)
         self.assertEqual(stats.task_id, "native-core")
         self.assertEqual(stats.shots, 7)
         self.assertEqual(stats.errors, 3)
@@ -667,8 +747,8 @@ class CollectionTests(unittest.TestCase):
     def test_same_seed_repeats_probabilistic_collection(self) -> None:
         task = CollectionTask(dem=_logical_edge_dem(probability=0.375))
 
-        first = collect([task], max_shots=256, batch_size=64, seed=123)[0]
-        second = collect([task], max_shots=256, batch_size=64, seed=123)[0]
+        first = _collect([task], max_shots=256, batch_size=64, seed=123)[0]
+        second = _collect([task], max_shots=256, batch_size=64, seed=123)[0]
 
         self.assertEqual(first.errors, second.errors)
         self.assertEqual(first.shots, second.shots)
@@ -685,7 +765,7 @@ class CollectionTests(unittest.TestCase):
         decoder = CopyDecoder()
 
         with self.assertRaisesRegex(TypeError, "native decoder"):
-            collect(
+            _collect(
                 [CollectionTask(dem=_graphlike_dem(), decoder=decoder)],
                 max_shots=8,
                 batch_size=8,
@@ -705,7 +785,7 @@ class CollectionTests(unittest.TestCase):
             ),
         )
 
-        stats = collect(
+        stats = _collect(
             [
                 CollectionTask(
                     circuit=circuit,
@@ -730,10 +810,48 @@ class CollectionTests(unittest.TestCase):
             CollectionTask(dem=_logical_edge_dem(), task_id="b"),
         ]
 
-        stats = list(iter_collect(tasks, max_shots=3, batch_size=2, seed=6))
+        stats = list(
+            public_iter_collect(
+                tasks,
+                options=CollectionOptions(max_shots=3, batch_size=2),
+                run_options=CollectionRunOptions(seed=6),
+            )
+        )
 
         self.assertEqual([stat.task_id for stat in stats], ["a", "b"])
         self.assertEqual([stat.errors for stat in stats], [3, 3])
+
+    def test_collector_matches_functional_wrappers(self) -> None:
+        tasks = [CollectionTask(dem=_logical_edge_dem(), task_id="collector")]
+        options = CollectionOptions(max_shots=8, batch_size=2)
+        run_options = CollectionRunOptions(seed=7, num_workers=2)
+
+        direct = Collector(options=options, run_options=run_options).collect(tasks)
+        wrapped = public_collect(tasks, options=options, run_options=run_options)
+        final_items = list(Collector(options=options, run_options=run_options).iter_collect(tasks))
+        progress_items = list(
+            Collector(options=options, run_options=run_options).iter_progress(tasks)
+        )
+
+        self.assertEqual(
+            [item.with_edits(seconds=0.0) for item in direct],
+            [item.with_edits(seconds=0.0) for item in wrapped],
+        )
+        self.assertEqual(
+            [item.with_edits(seconds=0.0) for item in final_items],
+            [item.with_edits(seconds=0.0) for item in direct],
+        )
+        self.assertTrue(progress_items)
+        self.assertTrue(all(isinstance(item, Progress) for item in progress_items))
+
+    def test_collection_functions_have_consolidated_signatures(self) -> None:
+        expected = ("tasks", "options", "run_options")
+
+        self.assertEqual(tuple(inspect.signature(public_collect).parameters), expected)
+        self.assertEqual(tuple(inspect.signature(public_iter_collect).parameters), expected)
+        self.assertEqual(tuple(inspect.signature(public_iter_progress).parameters), expected)
+        with self.assertRaises(TypeError):
+            public_collect([CollectionTask(dem=_logical_edge_dem())], max_shots=1)
 
     def test_num_workers_keeps_result_order(self) -> None:
         tasks = [
@@ -741,7 +859,7 @@ class CollectionTests(unittest.TestCase):
             CollectionTask(dem=_logical_edge_dem(probability=0.5), task_id="b"),
         ]
 
-        stats = collect(tasks, max_shots=128, batch_size=16, seed=8, num_workers=2)
+        stats = _collect(tasks, max_shots=128, batch_size=16, seed=8, num_workers=2)
 
         self.assertEqual([stat.task_id for stat in stats], ["a", "b"])
         self.assertEqual([stat.shots for stat in stats], [128, 128])
@@ -749,8 +867,8 @@ class CollectionTests(unittest.TestCase):
     def test_num_workers_parallelizes_single_task_without_changing_stats(self) -> None:
         task = CollectionTask(dem=_logical_edge_dem(probability=0.375), task_id="single")
 
-        serial = collect([task], max_shots=256, batch_size=16, seed=123, num_workers=1)[0]
-        parallel = collect([task], max_shots=256, batch_size=16, seed=123, num_workers=4)[0]
+        serial = _collect([task], max_shots=256, batch_size=16, seed=123, num_workers=1)[0]
+        parallel = _collect([task], max_shots=256, batch_size=16, seed=123, num_workers=4)[0]
 
         self.assertEqual(parallel.task_id, serial.task_id)
         self.assertEqual(parallel.shots, serial.shots)
@@ -759,7 +877,7 @@ class CollectionTests(unittest.TestCase):
         self.assertEqual(parallel.custom_counts, serial.custom_counts)
 
     def test_adaptive_num_workers_completes_single_task_with_exact_shot_cap(self) -> None:
-        stats = collect(
+        stats = _collect(
             [CollectionTask(dem=_logical_edge_dem(), task_id="adaptive-single")],
             max_shots=64,
             batch_size=8,
@@ -781,8 +899,8 @@ class CollectionTests(unittest.TestCase):
             CollectionTask(dem=_logical_edge_dem(probability=0.5), task_id="c"),
         ]
 
-        serial = collect(tasks, max_shots=256, batch_size=16, seed=124, num_workers=1)
-        parallel = collect(tasks, max_shots=256, batch_size=16, seed=124, num_workers=4)
+        serial = _collect(tasks, max_shots=256, batch_size=16, seed=124, num_workers=1)
+        parallel = _collect(tasks, max_shots=256, batch_size=16, seed=124, num_workers=4)
 
         self.assertEqual(
             [
@@ -796,7 +914,7 @@ class CollectionTests(unittest.TestCase):
         )
 
     def test_postselection_discards_detector_events(self) -> None:
-        stats = collect(
+        stats = _collect(
             [
                 CollectionTask(
                     dem=_graphlike_dem(),
@@ -815,7 +933,7 @@ class CollectionTests(unittest.TestCase):
         self.assertTrue(math.isnan(stats.logical_error_rate))
 
     def test_custom_counts_are_reported(self) -> None:
-        stats = collect(
+        stats = _collect(
             [CollectionTask(dem=_graphlike_dem(), task_id="counts")],
             max_shots=4,
             batch_size=4,
@@ -832,14 +950,14 @@ class CollectionTests(unittest.TestCase):
         task = CollectionTask(dem=_logical_edge_dem(), task_id="resume")
         with tempfile.TemporaryDirectory() as temp_dir:
             path = f"{temp_dir}/stats.csv"
-            first = collect(
+            first = _collect(
                 [task],
                 max_shots=6,
                 batch_size=3,
                 seed=11,
                 save_resume_filepath=path,
             )[0]
-            second = collect(
+            second = _collect(
                 [task],
                 max_shots=6,
                 batch_size=3,
@@ -855,7 +973,7 @@ class CollectionTests(unittest.TestCase):
         task = CollectionTask(dem=_logical_edge_dem(), task_id="resume-header")
         with tempfile.TemporaryDirectory() as temp_dir:
             path = f"{temp_dir}/stats.csv"
-            collect(
+            _collect(
                 [task],
                 max_shots=6,
                 batch_size=3,
@@ -865,7 +983,7 @@ class CollectionTests(unittest.TestCase):
             with open(path, newline="") as f:
                 first_rows = list(csv.reader(f))
 
-            collect(
+            _collect(
                 [task],
                 max_shots=6,
                 batch_size=3,
@@ -895,8 +1013,8 @@ class CollectionTests(unittest.TestCase):
         task = CollectionTask(dem=_logical_edge_dem(), task_id="existing")
         with tempfile.TemporaryDirectory() as temp_dir:
             path = f"{temp_dir}/stats.csv"
-            collect([task], max_shots=5, batch_size=5, seed=12, save_resume_filepath=path)
-            stats = collect(
+            _collect([task], max_shots=5, batch_size=5, seed=12, save_resume_filepath=path)
+            stats = _collect(
                 [task],
                 max_shots=5,
                 batch_size=5,
@@ -911,7 +1029,7 @@ class CollectionTests(unittest.TestCase):
         task = CollectionTask(dem=_logical_edge_dem(), task_id="parallel-resume")
         with tempfile.TemporaryDirectory() as temp_dir:
             path = f"{temp_dir}/stats.csv"
-            first = collect(
+            first = _collect(
                 [task],
                 max_shots=8,
                 batch_size=4,
@@ -919,7 +1037,7 @@ class CollectionTests(unittest.TestCase):
                 num_workers=4,
                 save_resume_filepath=path,
             )[0]
-            second = collect(
+            second = _collect(
                 [task],
                 max_shots=8,
                 batch_size=4,
@@ -934,31 +1052,30 @@ class CollectionTests(unittest.TestCase):
 
     def test_adaptive_stream_interruption_resumes_from_committed_calibration_delta(self) -> None:
         task = CollectionTask(dem=_logical_edge_dem(), task_id="adaptive-stream-resume")
-        seen: list[Progress] = []
-
-        def callback(progress: Progress) -> None:
-            seen.append(progress)
-            if len(seen) == 1:
-                raise RuntimeError("stop adaptive stream")
 
         with tempfile.TemporaryDirectory() as temp_dir:
             path = Path(temp_dir) / "adaptive-resume.csv"
-            with self.assertRaisesRegex(RuntimeError, "stop adaptive stream"):
-                collect(
-                    [task],
-                    max_shots=10,
-                    batch_size=4,
-                    start_batch_size=1,
-                    max_batch_size=4,
-                    max_batch_seconds=1.0,
-                    seed=126,
-                    num_workers=4,
-                    progress_mode="stream",
-                    progress_callback=callback,
-                    save_resume_filepath=path,
-                )
+            options = CollectionOptions(
+                max_shots=10,
+                batch_size=4,
+                start_batch_size=1,
+                max_batch_size=4,
+                max_batch_seconds=1.0,
+            )
+            run_options = CollectionRunOptions(
+                seed=126,
+                num_workers=4,
+                save_resume_filepath=path,
+            )
+            iterator = public_iter_progress(
+                [task],
+                options=options,
+                run_options=run_options,
+            )
+            first = next(iterator)
+            iterator.close()
             partial = read_stats_from_csv_files(path)[0]
-            resumed = collect(
+            resumed = _collect(
                 [task],
                 max_shots=10,
                 batch_size=4,
@@ -970,13 +1087,14 @@ class CollectionTests(unittest.TestCase):
                 save_resume_filepath=path,
             )[0]
 
+        self.assertEqual(first.new_stats[0].shots, 1)
         self.assertEqual(partial.shots, 1)
         self.assertEqual(partial.errors, 1)
         self.assertEqual(resumed.shots, 10)
         self.assertEqual(resumed.errors, 10)
 
     def test_adaptive_parallel_collection_uses_custom_stop_counter(self) -> None:
-        stats = collect(
+        stats = _collect(
             [CollectionTask(dem=_graphlike_dem(), task_id="adaptive-custom-stop")],
             max_shots=20,
             max_errors=6,
@@ -993,48 +1111,38 @@ class CollectionTests(unittest.TestCase):
         self.assertEqual(stats.shots, 9)
         self.assertEqual(stats.custom_counts["detection_events"], 9)
 
-    def test_progress_callback_receives_incremental_stats(self) -> None:
-        seen = []
-
-        stats = collect(
-            [CollectionTask(dem=_logical_edge_dem(), task_id="progress")],
-            max_shots=4,
-            batch_size=4,
-            seed=13,
-            progress_callback=seen.append,
+    def test_iter_progress_receives_incremental_stats(self) -> None:
+        progress = list(
+            public_iter_progress(
+                [CollectionTask(dem=_logical_edge_dem(), task_id="progress")],
+                options=CollectionOptions(max_shots=4, batch_size=4),
+                run_options=CollectionRunOptions(seed=13),
+            )
         )
 
-        self.assertEqual(len(stats), 1)
-        self.assertEqual(len(seen), 1)
-        self.assertEqual(seen[0].task_id, "progress")
+        self.assertEqual(len(progress), 1)
+        self.assertEqual(progress[0].new_stats[0].task_id, "progress")
+        self.assertEqual(progress[0].new_stats[0].shots, 4)
 
-    def test_progress_mode_annotations_are_literal_and_invalid_modes_still_raise(self) -> None:
-        task = CollectionTask(dem=_logical_edge_dem(), task_id="progress-mode")
+    def test_progress_api_annotations_are_disjoint(self) -> None:
         iter_hints = get_type_hints(collection_collect_module.iter_collect)
-        collect_hints = get_type_hints(collection_collect_module.collect)
+        progress_hints = get_type_hints(collection_collect_module.iter_progress)
 
-        self.assertIs(get_origin(iter_hints["progress_mode"]), Literal)
-        self.assertEqual(get_args(iter_hints["progress_mode"]), ("final", "stream"))
-        self.assertIs(get_origin(collect_hints["progress_mode"]), Literal)
-        self.assertEqual(get_args(collect_hints["progress_mode"]), ("final", "stream"))
-
-        with self.assertRaisesRegex(ValueError, 'progress_mode must be "final" or "stream"'):
-            collect([task], max_shots=1, progress_mode="invalid")
-        with self.assertRaisesRegex(ValueError, 'progress_mode must be "final" or "stream"'):
-            list(iter_collect([task], max_shots=1, progress_mode="invalid"))
+        self.assertEqual(iter_hints["return"], Iterator[TaskStats])
+        self.assertEqual(progress_hints["return"], Iterator[Progress])
 
     def test_stream_progress_yields_batch_deltas_and_writes_resume_rows(self) -> None:
         task = CollectionTask(dem=_logical_edge_dem(), task_id="stream")
         with tempfile.TemporaryDirectory() as temp_dir:
             path = Path(temp_dir) / "stream.csv"
             progress = list(
-                iter_collect(
+                public_iter_progress(
                     [task],
-                    max_shots=10,
-                    batch_size=4,
-                    seed=21,
-                    save_resume_filepath=path,
-                    progress_mode="stream",
+                    options=CollectionOptions(max_shots=10, batch_size=4),
+                    run_options=CollectionRunOptions(
+                        seed=21,
+                        save_resume_filepath=path,
+                    ),
                 )
             )
             with path.open(newline="") as f:
@@ -1049,79 +1157,47 @@ class CollectionTests(unittest.TestCase):
         self.assertEqual(rows[0], list(COLLECTION_CSV_FIELDS))
         self.assertEqual(len(rows), 4)
 
-    def test_stream_persists_then_runs_callback_before_yield(self) -> None:
+    def test_stream_persists_before_yield(self) -> None:
         task = CollectionTask(dem=_logical_edge_dem(), task_id="ordered-stream")
-        callback_entered = threading.Event()
-        release_callback = threading.Event()
-        yielded = threading.Event()
-        rows_seen_in_callback: list[list[list[str]]] = []
-        item_holder: dict[str, Progress] = {}
 
         with tempfile.TemporaryDirectory() as temp_dir:
             path = Path(temp_dir) / "ordered.csv"
-
-            def callback(progress: Progress) -> None:
-                with path.open(newline="") as f:
-                    rows_seen_in_callback.append(list(csv.reader(f)))
-                callback_entered.set()
-                self.assertTrue(release_callback.wait(timeout=1.0))
-
-            iterator = iter_collect(
+            iterator = public_iter_progress(
                 [task],
-                max_shots=1,
-                batch_size=1,
-                seed=31,
-                save_resume_filepath=path,
-                progress_mode="stream",
-                progress_callback=callback,
+                options=CollectionOptions(max_shots=1, batch_size=1),
+                run_options=CollectionRunOptions(
+                    seed=31,
+                    save_resume_filepath=path,
+                ),
             )
-
-            def consume_one() -> None:
-                item_holder["progress"] = next(iterator)  # type: ignore[assignment]
-                yielded.set()
-
-            consumer = threading.Thread(target=consume_one, name="test-stream-consumer")
-            consumer.start()
             try:
-                self.assertTrue(callback_entered.wait(timeout=1.0))
-                self.assertFalse(yielded.wait(timeout=0.1))
-                release_callback.set()
-                consumer.join(timeout=1.0)
-                self.assertFalse(consumer.is_alive())
-                self.assertIn("progress", item_holder)
+                progress = next(iterator)
+                with path.open(newline="") as f:
+                    rows = list(csv.reader(f))
             finally:
-                release_callback.set()
-                consumer.join(timeout=1.0)
                 iterator.close()
 
-        self.assertEqual(len(rows_seen_in_callback), 1)
-        self.assertEqual(rows_seen_in_callback[0][0], list(COLLECTION_CSV_FIELDS))
-        self.assertEqual(len(rows_seen_in_callback[0]), 2)
-        self.assertEqual(item_holder["progress"].new_stats[0].shots, 1)
+        self.assertEqual(rows[0], list(COLLECTION_CSV_FIELDS))
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(progress.new_stats[0].shots, 1)
 
-    def test_stream_resume_survives_progress_callback_interruption(self) -> None:
+    def test_stream_resume_survives_iterator_interruption(self) -> None:
         task = CollectionTask(dem=_logical_edge_dem(), task_id="interrupt")
-        seen = []
-
-        def callback(progress: Progress) -> None:
-            seen.append(progress)
-            if len(seen) == 1:
-                raise RuntimeError("stop after first delta")
 
         with tempfile.TemporaryDirectory() as temp_dir:
             path = Path(temp_dir) / "resume.csv"
-            with self.assertRaisesRegex(RuntimeError, "stop after first delta"):
-                collect(
-                    [task],
-                    max_shots=6,
-                    batch_size=3,
+            iterator = public_iter_progress(
+                [task],
+                options=CollectionOptions(max_shots=6, batch_size=3),
+                run_options=CollectionRunOptions(
                     seed=22,
                     save_resume_filepath=path,
-                    progress_mode="stream",
-                    progress_callback=callback,
-                )
+                ),
+            )
+            first = next(iterator)
+            iterator.close()
             partial = read_stats_from_csv_files(path)[0]
-            resumed = collect(
+            resumed = _collect(
                 [task],
                 max_shots=6,
                 batch_size=3,
@@ -1129,13 +1205,13 @@ class CollectionTests(unittest.TestCase):
                 save_resume_filepath=path,
             )[0]
 
+        self.assertEqual(first.new_stats[0].shots, 3)
         self.assertEqual(partial.shots, 3)
         self.assertEqual(resumed.shots, 6)
         self.assertEqual(resumed.errors, 6)
 
-    def test_stream_progress_objects_are_not_retained_after_callback(self) -> None:
+    def test_stream_progress_objects_are_not_retained_after_next_item(self) -> None:
         task = CollectionTask(dem=_logical_edge_dem(), task_id="retention")
-        first_ref: weakref.ReferenceType[Progress] | None = None
 
         def native_item(shots: int) -> dict[str, object]:
             return {
@@ -1158,30 +1234,26 @@ class CollectionTests(unittest.TestCase):
             progress_callback(native_item(1))
             return [native_item(2)]
 
-        def callback(progress: Progress) -> None:
-            nonlocal first_ref
-            if first_ref is None:
-                first_ref = weakref.ref(progress)
-                return
-            gc.collect()
-            self.assertIsNone(first_ref())
-
         with mock.patch.object(
             collection_collect_module,
             "_collect_dem_logical_error_stats_many",
             side_effect=fake_native_collect,
         ):
-            collect(
+            iterator = public_iter_progress(
                 [task],
-                max_shots=2,
-                batch_size=1,
-                progress_mode="stream",
-                progress_callback=callback,
+                options=CollectionOptions(max_shots=2, batch_size=1),
             )
+            first = next(iterator)
+            first_ref = weakref.ref(first)
+            del first
+            second = next(iterator)
+            gc.collect()
+            self.assertIsNone(first_ref())
+            self.assertEqual(second.new_stats[0].shots, 1)
+            iterator.close()
 
     def test_stream_close_while_yielded_cancels_before_future_callbacks(self) -> None:
         task = CollectionTask(dem=_logical_edge_dem(), task_id="close-race")
-        seen_shots: list[int] = []
         producer_returned_from_first = threading.Event()
         real_condition = threading.Condition
 
@@ -1235,36 +1307,28 @@ class CollectionTests(unittest.TestCase):
             progress_callback(items[1])
             return items
 
-        def callback(progress: Progress) -> None:
-            seen_shots.append(progress.new_stats[0].shots)
-
-        with mock.patch.object(
-            collection_collect_module,
-            "_collect_dem_logical_error_stats_many",
-            side_effect=fake_native_collect,
-        ), mock.patch.object(
-            collection_collect_module.threading,
-            "Condition",
-            RaceCondition,
+        with (
+            mock.patch.object(
+                collection_collect_module,
+                "_collect_dem_logical_error_stats_many",
+                side_effect=fake_native_collect,
+            ),
+            mock.patch.object(
+                collection_collect_module.threading,
+                "Condition",
+                RaceCondition,
+            ),
         ):
-            iterator = iter_collect(
+            iterator = public_iter_progress(
                 [task],
-                max_shots=2,
-                batch_size=1,
-                progress_mode="stream",
-                progress_callback=callback,
+                options=CollectionOptions(max_shots=2, batch_size=1),
             )
             first = next(iterator)
             self.assertEqual(first.new_stats[0].shots, 1)
             iterator.close()
 
-        self.assertEqual(seen_shots, [1])
-
-    def test_stream_close_cancels_producer_without_future_callbacks(self) -> None:
+    def test_stream_close_cancels_and_joins_producer(self) -> None:
         task = CollectionTask(dem=_logical_edge_dem(), task_id="close-stream")
-        first_callback_started = threading.Event()
-        future_callback_started = threading.Event()
-        release_future_callback = threading.Event()
         created_threads: list[threading.Thread] = []
         real_thread = threading.Thread
 
@@ -1289,68 +1353,54 @@ class CollectionTests(unittest.TestCase):
                 progress_callback(item)
             return items
 
-        def callback(progress: Progress) -> None:
-            shots = progress.new_stats[0].shots
-            if shots == 1:
-                first_callback_started.set()
-                return
-            future_callback_started.set()
-            self.assertTrue(release_future_callback.wait(timeout=1.0))
-
         def make_thread(*args: object, **kwargs: object) -> threading.Thread:
             thread = real_thread(*args, **kwargs)
             created_threads.append(thread)
             return thread
 
-        with mock.patch.object(
-            collection_collect_module,
-            "_collect_dem_logical_error_stats_many",
-            side_effect=fake_native_collect,
-        ), mock.patch.object(
-            collection_collect_module.threading,
-            "Thread",
-            side_effect=make_thread,
+        with (
+            mock.patch.object(
+                collection_collect_module,
+                "_collect_dem_logical_error_stats_many",
+                side_effect=fake_native_collect,
+            ),
+            mock.patch.object(
+                collection_collect_module.threading,
+                "Thread",
+                side_effect=make_thread,
+            ),
         ):
-            iterator = iter_collect(
+            iterator = public_iter_progress(
                 [task],
-                max_shots=3,
-                batch_size=1,
-                progress_mode="stream",
-                progress_callback=callback,
+                options=CollectionOptions(max_shots=3, batch_size=1),
             )
-            try:
-                first = next(iterator)
-                self.assertEqual(first.new_stats[0].shots, 1)
-                self.assertTrue(first_callback_started.is_set())
-                self.assertFalse(future_callback_started.wait(timeout=0.2))
-                iterator.close()
-                self.assertEqual(len(created_threads), 1)
-                created_threads[0].join(timeout=0.2)
-                self.assertFalse(created_threads[0].is_alive())
-            finally:
-                release_future_callback.set()
-                if created_threads:
-                    created_threads[0].join(timeout=1.0)
+            first = next(iterator)
+            self.assertEqual(first.new_stats[0].shots, 1)
+            iterator.close()
+            self.assertEqual(len(created_threads), 1)
+            created_threads[0].join(timeout=0.2)
+            self.assertFalse(created_threads[0].is_alive())
 
-    def test_print_progress_writes_status_to_stderr(self) -> None:
-        stderr = io.StringIO()
+    def test_private_progress_sink_returns_final_stats(self) -> None:
+        progress: list[Progress] = []
+        collector = Collector(
+            options=CollectionOptions(max_shots=4, batch_size=4),
+            run_options=CollectionRunOptions(seed=14),
+        )
 
-        with redirect_stderr(stderr):
-            collect(
-                [CollectionTask(dem=_logical_edge_dem(), task_id="printed")],
-                max_shots=4,
-                batch_size=4,
-                seed=14,
-                print_progress=True,
-            )
+        stats = collector._collect_with_progress(
+            [CollectionTask(dem=_logical_edge_dem(), task_id="printed")],
+            progress.append,
+        )
 
-        self.assertIn("printed: shots=4 errors=4 discards=0", stderr.getvalue())
+        self.assertEqual(stats[0].shots, 4)
+        self.assertEqual(progress[0].status_message, "printed: shots=4 errors=4 discards=0")
 
     def test_decoder_fanout_expands_tasks_in_order(self) -> None:
         dem = _graphlike_dem()
         no_correction = NativeNoCorrectionDecoder(observable_ids=(0,), detector_ids=(0,))
 
-        stats = collect(
+        stats = _collect(
             [CollectionTask(dem=dem, task_id="fanout")],
             max_shots=8,
             batch_size=4,
@@ -1579,12 +1629,15 @@ class CollectionTests(unittest.TestCase):
         self.assertEqual(args.repeats, 1)
 
     def test_public_exports(self) -> None:
+        self.assertIs(faultscope.Collector, Collector)
         self.assertIs(faultscope.CollectionTask, CollectionTask)
         self.assertIs(faultscope.CollectionOptions, CollectionOptions)
+        self.assertIs(faultscope.CollectionRunOptions, CollectionRunOptions)
         self.assertIs(faultscope.Progress, Progress)
         self.assertIs(faultscope.TaskStats, TaskStats)
-        self.assertIs(faultscope.collect, collect)
-        self.assertIs(faultscope.iter_collect, iter_collect)
+        self.assertIs(faultscope.collect, public_collect)
+        self.assertIs(faultscope.iter_collect, public_iter_collect)
+        self.assertIs(faultscope.iter_progress, public_iter_progress)
 
     def test_collection_exports_threshold_api_without_top_level_faultscope_exports(self) -> None:
         import faultscope.collection as collection
@@ -1632,15 +1685,11 @@ class CollectionTests(unittest.TestCase):
             any("\tpairwise\t3\t5\tok\t0.0203158395151\t" in line for line in lines[1:])
         )
         self.assertTrue(
-            any(
-                "\tpairwise_global\t\t\tok\t0.0203158395151\t" in line
-                for line in lines[1:]
-            )
+            any("\tpairwise_global\t\t\tok\t0.0203158395151\t" in line for line in lines[1:])
         )
         self.assertTrue(
             any(
-                "\tscaling_global\t\t\tinsufficient_data\t\t\t\t0\t0\t\t\t\t0\t0\t"
-                in line
+                "\tscaling_global\t\t\tinsufficient_data\t\t\t\t0\t0\t\t\t\t0\t0\t" in line
                 for line in lines[1:]
             )
         )

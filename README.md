@@ -13,6 +13,7 @@ Python API 暴露；主要能力包括 bit-packed stabilizer batch sampling、de
 
 - [User Guide](docs/user_guide.md)：安装、示例、工作流和排错。
 - [API Reference](docs/api_reference.md)：当前 Python/Rust API surface。
+- [Release And Compatibility](docs/release.md)：支持矩阵、版本策略和发布流程。
 - [Theory](docs/theory.md)：理论原理、公式推导和实现中的计算细节。
 
 ## 项目结构
@@ -26,6 +27,10 @@ Python API 暴露；主要能力包括 bit-packed stabilizer batch sampling、de
 - `tests/`、`benchmarks/`：回归测试、Stim 对照和吞吐基准。
 
 ## 安装与构建
+
+FaultScope `0.1.x` 支持 CPython 3.10–3.14。预构建 wheels 的目标平台是
+manylinux x86_64/aarch64、macOS 11+ x86_64/arm64 和 Windows x86_64；源码构建需要
+Rust 1.85 或更新版本。
 
 从源码 checkout 直接安装：
 
@@ -116,8 +121,9 @@ print(result.hotspot_table(top_k=5))
   \(H\) 的一列及其 logical observable flips。
 - `DemHotspotEstimator` 在 DEM 层采样，每条 DEM edge 按独立 Bernoulli instruction 处理，并把
   sampled edge vector 映射成 detector syndrome 和 logical observable flip record。
-- `faultscope.collection.collect(...)` 提供 threshold-style logical error-rate collection；
-  Rust 负责 native sampler/decoder 调度和计数，Python 负责任务解析、strong id 和 CSV resume。
+- `faultscope.collection.Collector` 提供可复用的 threshold-style logical error-rate
+  collection 配置；`collect(...)` 是一次性薄封装。Rust 负责 native sampler/decoder 调度和
+  计数，Python 负责任务解析、strong id 和 CSV resume。
 - `NativeNoCorrectionDecoder` 和后续 native decoder handle 可通过
   `estimate(..., decoder=decoder)` 自动走 native fast path；传入 Python loss/correction
   callback 时回退到兼容路径。普通 Python decoder 或 subclass 不会自动获得 native hot path；

@@ -34,9 +34,7 @@ def main() -> None:
     circuit = Circuit(
         1,
         (
-            Operation.noise(
-                NoiseLocation("x0", BernoulliPauliNoise("X"), 0.05, (0,))
-            ),
+            Operation.noise(NoiseLocation("x0", BernoulliPauliNoise("X"), 0.05, (0,))),
             Operation.measure(0, key="m0", basis="Z"),
         ),
     )

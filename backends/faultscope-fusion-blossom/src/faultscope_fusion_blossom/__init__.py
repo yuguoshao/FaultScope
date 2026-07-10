@@ -8,6 +8,7 @@ it to FaultScope through the native decoder PyCapsule ABI.
 
 from __future__ import annotations
 
+from importlib.metadata import PackageNotFoundError, version as _distribution_version
 import math
 
 from faultscope._native import NATIVE_DECODER_PLUGIN_ABI
@@ -21,7 +22,18 @@ except ImportError as exc:  # pragma: no cover - exercised before local build.
 else:
     _native_import_error = None
 
-__version__ = "0.1.0"
+
+def _package_version() -> str:
+    try:
+        return _distribution_version("faultscope-fusion-blossom")
+    except PackageNotFoundError:
+        if _native is not None:
+            return _native.__version__
+        return "0+unknown"
+
+
+__version__ = _package_version()
+del _package_version
 BACKEND_NAME = "fusion-blossom"
 DEFAULT_WEIGHT_SCALE = 10_000
 
@@ -118,8 +130,7 @@ class NativeFusionBlossomDecoder:
             detector_words,
         )
         return {
-            observable_id: _words_to_int(words)
-            for observable_id, words in correction_words.items()
+            observable_id: _words_to_int(words) for observable_id, words in correction_words.items()
         }
 
     def __repr__(self):

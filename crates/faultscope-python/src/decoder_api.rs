@@ -35,18 +35,21 @@ pub(crate) fn available_native_decoders(py: Python<'_>) -> PyResult<PyObject> {
     Ok(PyTuple::new(py, names)?.into())
 }
 
+/// Type-erased native batch decoder handle.
 #[pyclass(name = "NativeBatchDecoder", module = "faultscope._native")]
 pub(crate) struct PyNativeBatchDecoder {
     pub(crate) inner: Arc<dyn CoreNativeBatchDecoder>,
     python_decode_calls: Arc<AtomicUsize>,
 }
 
+/// Native decoder that always returns an empty correction.
 #[pyclass(name = "NativeNoCorrectionDecoder", module = "faultscope._native")]
 pub(crate) struct PyNativeNoCorrectionDecoder {
     pub(crate) inner: Arc<dyn CoreNativeBatchDecoder>,
     python_decode_calls: Arc<AtomicUsize>,
 }
 
+/// Native graphlike decoder that copies detector masks to observables.
 #[pyclass(
     name = "NativeGraphlikeDetectorCopyDecoder",
     module = "faultscope._native"
@@ -814,6 +817,7 @@ fn py_detector_masks_to_vec(
         .collect()
 }
 
+/// Indexed detector-error-model edge used by decoder builders.
 #[pyclass(name = "IndexedDemEdge", module = "faultscope._native", frozen)]
 pub(crate) struct PyIndexedDemEdge {
     edge: faultscope_core::IndexedDemEdge,
@@ -857,6 +861,7 @@ impl PyIndexedDemEdge {
     }
 }
 
+/// Decoder-oriented indexed detector error model.
 #[pyclass(name = "IndexedDem", module = "faultscope._native", frozen)]
 pub(crate) struct PyIndexedDem {
     pub(crate) indexed: IndexedDem,
@@ -921,6 +926,7 @@ impl PyIndexedDem {
     }
 }
 
+/// Graphlike decoder edge with fault-observable support.
 #[pyclass(name = "GraphlikeEdge", module = "faultscope._native", frozen)]
 pub(crate) struct PyGraphlikeEdge {
     edge: faultscope_core::GraphlikeEdge,
@@ -964,6 +970,7 @@ impl PyGraphlikeEdge {
     }
 }
 
+/// Graphlike matching problem compiled from a detector error model.
 #[pyclass(
     name = "GraphlikeDecodingProblem",
     module = "faultscope._native",
@@ -1032,6 +1039,7 @@ impl PyGraphlikeDecodingProblem {
     }
 }
 
+/// Sparse binary matrix represented by coordinate entries.
 #[pyclass(name = "SparseBinaryMatrix", module = "faultscope._native", frozen)]
 pub(crate) struct PySparseBinaryMatrix {
     matrix: SparseBinaryMatrix,
@@ -1075,6 +1083,7 @@ impl PySparseBinaryMatrix {
     }
 }
 
+/// Binary-linear decoder problem compiled from a detector error model.
 #[pyclass(
     name = "BinaryLinearDecodingProblem",
     module = "faultscope._native",

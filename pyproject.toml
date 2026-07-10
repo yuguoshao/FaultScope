@@ -4,36 +4,64 @@ build-backend = "maturin"
 
 [project]
 name = "faultscope"
-version = "0.1.0"
+dynamic = ["version"]
 description = "Noise-aware QEC fault attribution toolkit with a Rust core and Python API"
 requires-python = ">=3.10"
 readme = "README.md"
+license = { file = "LICENSE" }
+authors = [{ name = "FaultScope contributors" }]
+keywords = ["quantum error correction", "simulation", "decoder", "threshold"]
+dependencies = [
+    "typing-extensions>=4.4; python_version < '3.11'",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Programming Language :: Rust",
+    "Topic :: Scientific/Engineering :: Physics",
+    "Typing :: Typed",
+]
+
+[project.urls]
+Homepage = "https://github.com/yuguoshao/FaultScope"
+Documentation = "https://yuguoshao.github.io/FaultScope/"
+Issues = "https://github.com/yuguoshao/FaultScope/issues"
+Repository = "https://github.com/yuguoshao/FaultScope"
 
 [project.optional-dependencies]
 pymatching = [
-    "numpy",
-    "scipy",
-    "pymatching",
+    "numpy>=1.24",
+    "scipy>=1.10",
+    "pymatching>=2.2",
 ]
 visualization = [
-    "pillow",
+    "pillow>=10",
 ]
 benchmark = [
-    "numpy",
-    "stim",
+    "numpy>=1.24",
+    "stim>=1.13",
 ]
 collection = [
-    "numpy",
-    "scipy",
-    "matplotlib",
+    "numpy>=1.24",
+    "scipy>=1.10",
+    "matplotlib>=3.7",
 ]
 test = [
-    "numpy",
-    "scipy",
-    "matplotlib",
-    "pymatching",
-    "pytest",
-    "stim",
+    "matplotlib>=3.7",
+    "mypy>=1.15",
+    "numpy>=1.24",
+    "pymatching>=2.2",
+    "pytest>=8",
+    "ruff>=0.11",
+    "scipy>=1.10",
+    "stim>=1.13",
+    "twine>=6",
 ]
 native-build = [
     "maturin>=1.7",
@@ -43,3 +71,31 @@ native-build = [
 manifest-path = "crates/faultscope-python/Cargo.toml"
 module-name = "faultscope._native"
 python-source = "."
+
+[tool.mypy]
+python_version = "3.10"
+files = ["faultscope", "scripts/generate_native_stub.py"]
+check_untyped_defs = true
+disallow_untyped_defs = true
+no_implicit_optional = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+
+[[tool.mypy.overrides]]
+module = ["matplotlib.*", "numpy.*", "pymatching.*", "scipy.*"]
+ignore_missing_imports = true
+
+[tool.ruff]
+target-version = "py310"
+line-length = 100
+extend-exclude = ["faultscope/_native.pyi"]
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F"]
+
+[tool.ruff.lint.per-file-ignores]
+"benchmarks/*.py" = ["E402"]
+"faultscope/core/pauli.py" = ["F401"]
+"faultscope/dem/model.py" = ["F401"]
+"faultscope/dem/sampler.py" = ["F401"]
+"faultscope/runtime/batch.py" = ["F401"]

@@ -97,8 +97,7 @@ def make_repetition_code_experiment(
 
     final_round = rounds - 1
     final_measurement_keys = tuple(
-        f"r{final_round}_c{check_idx}"
-        for check_idx in range(distance - 1)
+        f"r{final_round}_c{check_idx}" for check_idx in range(distance - 1)
     )
     circuit = Circuit(n_qubits=distance + distance - 1, operations=operations)
     decoder = RepetitionCodeDecoder(
@@ -131,10 +130,7 @@ def make_repetition_code_experiment(
     )
 
     def detector_fn(trajectory: Any) -> list[int]:
-        return [
-            trajectory.measurement_by_key[key].bit
-            for key in final_measurement_keys
-        ]
+        return [trajectory.measurement_by_key[key].bit for key in final_measurement_keys]
 
     def loss_fn(trajectory: Any, correction: list[int]) -> float:
         return float(trajectory.frame.x[data[0]] ^ int(correction[0]))

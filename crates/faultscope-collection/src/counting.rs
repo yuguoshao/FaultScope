@@ -16,23 +16,12 @@ pub(crate) struct BatchStats {
     pub(crate) custom_counts: HashMap<String, usize>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub(crate) struct CountOptions<'a> {
     pub(crate) postselection_mask: Option<&'a [u8]>,
     pub(crate) postselected_observables_mask: Option<&'a [u8]>,
     pub(crate) count_observable_error_combos: bool,
     pub(crate) count_detection_events: bool,
-}
-
-impl Default for CountOptions<'_> {
-    fn default() -> Self {
-        Self {
-            postselection_mask: None,
-            postselected_observables_mask: None,
-            count_observable_error_combos: false,
-            count_detection_events: false,
-        }
-    }
 }
 
 pub(crate) fn sample_dem_logical_error_stats_with_rng(

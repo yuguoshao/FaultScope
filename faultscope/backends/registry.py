@@ -75,9 +75,7 @@ OFFICIAL_BACKEND_CATALOG: dict[str, NativeDecoderBackendCatalogEntry] = {
         repo_url="https://github.com/yuewuo/fusion-blossom.git",
         default_rev="main",
         installable=True,
-        description=(
-            "Minimal serial beta fusion-blossom MWPM graphlike decoder backend."
-        ),
+        description=("Minimal serial beta fusion-blossom MWPM graphlike decoder backend."),
     ),
     "pymatching": NativeDecoderBackendCatalogEntry(
         name="pymatching",
@@ -87,9 +85,7 @@ OFFICIAL_BACKEND_CATALOG: dict[str, NativeDecoderBackendCatalogEntry] = {
         repo_url="https://github.com/oscarhiggott/PyMatching.git",
         default_rev="v2.4.0",
         installable=True,
-        description=(
-            "Optional native PyMatching sparse-blossom graphlike decoder backend."
-        ),
+        description=("Optional native PyMatching sparse-blossom graphlike decoder backend."),
     ),
     "mwpm": NativeDecoderBackendCatalogEntry(
         name="mwpm",
@@ -300,11 +296,7 @@ def _load_backends() -> dict[str, _LoadedBackend]:
             )
             continue
         duplicate = next(
-            (
-                decoder_name
-                for decoder_name in backend.decoders
-                if decoder_name in decoder_sources
-            ),
+            (decoder_name for decoder_name in backend.decoders if decoder_name in decoder_sources),
             None,
         )
         if duplicate is not None:
@@ -315,8 +307,7 @@ def _load_backends() -> dict[str, _LoadedBackend]:
                 version=backend.version,
                 source=backend.source,
                 error=(
-                    f"decoder {duplicate!r} is already provided by "
-                    f"{decoder_sources[duplicate]!r}"
+                    f"decoder {duplicate!r} is already provided by {decoder_sources[duplicate]!r}"
                 ),
             )
             continue
@@ -356,7 +347,10 @@ def _normalize_manifest(entry_name: str, manifest: Any) -> _LoadedBackend:
     if isinstance(manifest, Mapping):
         get = manifest.get
     else:
-        get = lambda key, default=None: getattr(manifest, key, default)
+
+        def get(key: str, default: object = None) -> object:
+            return getattr(manifest, key, default)
+
     abi_version = get("abi_version")
     if abi_version != NATIVE_DECODER_PLUGIN_ABI:
         raise RuntimeError(

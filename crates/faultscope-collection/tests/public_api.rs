@@ -4,12 +4,11 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, ThreadId};
 use std::time::{Duration, Instant};
 
-use faultscope_collection::api::{
+use faultscope_collection::{
     collect_dem_logical_error_stats, collect_dem_logical_error_tasks,
-    collect_dem_logical_error_tasks_with_progress, read_dem_logical_collection_csv,
-    sample_dem_logical_error_stats, write_dem_logical_collection_csv_header,
-    write_dem_logical_collection_csv_row, DemLogicalCollectionOptions,
-    DemLogicalCollectionRunOptions, DemLogicalCollectionStats, DemLogicalCollectionTask,
+    collect_dem_logical_error_tasks_with_progress, sample_dem_logical_error_stats,
+    DemLogicalCollectionOptions, DemLogicalCollectionRunOptions, DemLogicalCollectionStats,
+    DemLogicalCollectionTask,
 };
 use faultscope_core::{
     CorrectionMaskBatch, DemEvent, DemHotspotEstimator, Detector, DetectorErrorEdge,
@@ -1676,7 +1675,7 @@ fn postselection_and_custom_counts_are_reported() {
 }
 
 #[test]
-fn csv_round_trips_and_resume_skips_completed_tasks() {
+fn existing_stats_resume_skips_completed_tasks() {
     let simulator = Arc::new(DemHotspotEstimator::new(logical_edge_dem(1.0)).unwrap());
     let task = DemLogicalCollectionTask {
         task_id: "csv".to_string(),
@@ -1710,10 +1709,7 @@ fn csv_round_trips_and_resume_skips_completed_tasks() {
     )
     .unwrap();
 
-    let mut csv = Vec::new();
-    write_dem_logical_collection_csv_header(&mut csv).unwrap();
-    write_dem_logical_collection_csv_row(&mut csv, &stats[0]).unwrap();
-    let loaded = read_dem_logical_collection_csv(csv.as_slice()).unwrap();
+    let loaded = HashMap::from([("csv-strong".to_string(), stats[0].clone())]);
 
     assert_eq!(loaded["csv-strong"].strong_id, stats[0].strong_id);
     assert_eq!(loaded["csv-strong"].metadata_json, stats[0].metadata_json);
