@@ -594,8 +594,15 @@ from faultscope.collection import (
     CollectionTask,
     Progress,
     TaskStats,
+    FiniteSizeScalingFit,
+    PairwiseCrossing,
+    ThresholdAnalysisResult,
+    ThresholdEstimate,
+    ThresholdPoint,
+    analyze_thresholds,
     collect,
     iter_collect,
+    plot_threshold_analysis,
     read_stats_from_csv_files,
     write_stats_to_csv_file,
 )
@@ -603,6 +610,8 @@ from faultscope.collection import (
 
 The top-level `faultscope` collection exports are `CollectionOptions`,
 `CollectionTask`, `Progress`, `TaskStats`, `collect`, and `iter_collect`.
+Threshold analysis types and helpers are exported from `faultscope.collection`
+only, not from top-level `faultscope`.
 
 `CollectionOptions` is a frozen dataclass:
 
@@ -782,6 +791,47 @@ plot_error_rates(stats, *, x_key, group_key=None, output=None, ax=None, count_ke
 
 Plotting lazily imports matplotlib and raises an install hint when the optional
 collection plotting dependencies are unavailable.
+
+Threshold analysis helpers are available from `faultscope.collection` and
+`faultscope.collection.threshold`:
+
+```text
+analyze_thresholds(
+    stats,
+    *,
+    x_key,
+    distance_key,
+    series_keys=(),
+    count_key=None,
+    bootstrap_samples=1000,
+    confidence_level=0.95,
+    seed=0,
+    scaling_order=2,
+) -> tuple[ThresholdAnalysisResult, ...]
+
+plot_threshold_analysis(results, *, output=None, axes=None, log_y=True) -> (figure, axes)
+```
+
+`ThresholdPoint.rate` is the raw logical rate `errors / accepted_shots`, and
+`ThresholdPoint.stderr` is its binomial standard error. Pairwise interpolation,
+finite-size logit fitting, and bootstrap resampling use the private continuity
+correction `(errors + 0.5) / (accepted_shots + 1)` so zero- and one-rate points
+remain finite. Data is grouped by `series_keys`.
+`PairwiseCrossing.status` is `"ok"`, `"no_crossing"`, or `"ambiguous"`.
+`FiniteSizeScalingFit.status` is `"ok"`, `"insufficient_data"`,
+`"fit_failed"`, or `"bootstrap_unstable"`. These statuses are diagnostics, not
+exceptions; invalid inputs and missing optional dependencies still raise.
+
+`plot_threshold_analysis(...)` accepts one result or an iterable of results and
+rejects empty input. With `axes=None`, it creates an `n x 2` grid. Supplied axes
+must have exact shape `(n, 2)`. The left panel plots raw-rate curves by
+distance with pairwise crossings and scaling threshold diagnostics; the right
+panel plots finite-size collapse when a scaling threshold and critical exponent
+exist, otherwise it annotates the scaling status. `output=` saves with
+`bbox_inches="tight"`. With `log_y=True`, a series containing raw zero-rate
+points uses a symmetric-log scale so those observations remain visible;
+strictly positive series use a logarithmic scale. Matplotlib is imported lazily
+and missing dependencies raise an install hint for `faultscope[collection]`.
 
 Postselection masks are bytes-like bit-packed masks over the native detector or
 observable order. Detector postselection discards any shot where a selected

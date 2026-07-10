@@ -60,6 +60,7 @@ Useful checks:
 .venv/bin/python -c "import faultscope; print(faultscope.Circuit)"
 cargo test --workspace
 .venv/bin/python -m unittest discover -s tests -q
+.venv/bin/python -m pytest -q tests/test_threshold_analysis.py
 ```
 
 Optional dependency groups:
@@ -663,13 +664,57 @@ python -m faultscope.collection summarize stats.csv
 python -m faultscope.collection merge merged.csv stats-a.csv stats-b.csv
 python -m faultscope.collection fit stats.csv --x-key p --group-key d
 python -m faultscope.collection plot stats.csv --x-key p --group-key d --out plot.png
+python -m faultscope.collection threshold stats.csv \
+  --x-key p \
+  --distance-key d \
+  --series-key decoder \
+  --bootstrap-samples 50 \
+  --format text \
+  --plot-out threshold.png
 ```
 
 Task factories are called as `factory(**factory_kwargs)` and may return either
 a single `CollectionTask` or an iterable of `CollectionTask` values. Each
 `--factory-arg key=value` value is JSON-decoded when possible, so inputs such
 as numbers, booleans, arrays, and objects arrive at the factory as structured
-Python values. Plotting requires the optional collection extra:
+Python values.
+
+Use `threshold` when a CSV contains a sweep over physical error rate and code
+distance. Text output has a stable tabular header plus pairwise and global
+diagnostic rows. JSON output is an array of `ThresholdAnalysisResult.to_dict()`
+objects. Statistical statuses such as `no_crossing`, `ambiguous`,
+`insufficient_data`, `fit_failed`, and `bootstrap_unstable` are ordinary
+diagnostics and return exit code 0; invalid CSV, invalid arguments, or missing
+optional dependencies return a nonzero subprocess exit.
+
+The same analysis is available in Python:
+
+```python
+from faultscope.collection import (
+    analyze_thresholds,
+    plot_threshold_analysis,
+    read_stats_from_csv_files,
+)
+
+stats = read_stats_from_csv_files("stats.csv")
+results = analyze_thresholds(
+    stats,
+    x_key="p",
+    distance_key="d",
+    series_keys=("decoder",),
+    bootstrap_samples=50,
+)
+plot_threshold_analysis(results, output="threshold.png")
+```
+
+The public threshold points report the raw rate `errors / accepted_shots` and
+its binomial standard error. Crossing interpolation, scaling logits, and
+bootstrap resampling apply a continuity correction internally so records with
+zero or all accepted shots in error remain numerically finite.
+When `plot_threshold_analysis(..., log_y=True)` receives a zero-rate point, the
+rate panel uses a symmetric-log axis so the raw zero remains visible.
+
+Plotting and finite-size scaling require the optional collection extra:
 
 ```bash
 python -m pip install "faultscope[collection]"

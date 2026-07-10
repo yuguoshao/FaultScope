@@ -12,6 +12,15 @@ from faultscope.collection._types import (
     read_stats_from_csv_files,
     write_stats_to_csv_file,
 )
+from faultscope.collection.threshold import (
+    FiniteSizeScalingFit,
+    PairwiseCrossing,
+    ThresholdAnalysisResult,
+    ThresholdEstimate,
+    ThresholdPoint,
+    analyze_thresholds,
+    plot_threshold_analysis,
+)
 
 __all__ = [
     "COLLECTION_CSV_FIELDS",
@@ -25,4 +34,11 @@ __all__ = [
     "iter_collect",
     "read_stats_from_csv_files",
     "write_stats_to_csv_file",
+    "FiniteSizeScalingFit",
+    "PairwiseCrossing",
+    "ThresholdAnalysisResult",
+    "ThresholdEstimate",
+    "ThresholdPoint",
+    "analyze_thresholds",
+    "plot_threshold_analysis",
 ]

@@ -3,6 +3,7 @@ import csv
 import gc
 import io
 import importlib.util
+import json
 import math
 import os
 from pathlib import Path
@@ -38,6 +39,7 @@ from faultscope.collection import (
     CollectionTask,
     Progress,
     TaskStats,
+    analyze_thresholds,
     collect,
     iter_collect,
     read_stats_from_csv_files,
@@ -84,6 +86,44 @@ def _graphlike_dem(probability: float = 1.0) -> DetectorErrorModel:
 
 
 class CollectionTests(unittest.TestCase):
+    def _threshold_stat(
+        self,
+        *,
+        x: float,
+        distance: int,
+        errors: int,
+        shots: int = 1000,
+    ) -> TaskStats:
+        task_id = f"threshold-{distance}-{x}-{errors}"
+        return TaskStats(
+            task_id=task_id,
+            shots=shots,
+            errors=errors,
+            discards=0,
+            seconds=0.0,
+            decoder="mwpm",
+            metadata={"p": x, "d": distance},
+            strong_id=task_id,
+        )
+
+    def _scaling_threshold_stats(self, *, shots: int = 8000) -> list[TaskStats]:
+        stats = []
+        threshold = 0.031
+        nu = 1.4
+        for distance in (5, 7, 9, 11):
+            for x in (0.021, 0.026, 0.031, 0.036, 0.041):
+                z = (x - threshold) * distance ** (1.0 / nu)
+                rate = 1.0 / (1.0 + math.exp(-(-1.1 + 52.0 * z + 4.0 * z * z)))
+                stats.append(
+                    self._threshold_stat(
+                        x=x,
+                        distance=distance,
+                        errors=round(rate * shots),
+                        shots=shots,
+                    )
+                )
+        return stats
+
     def _run_collection_cli(
         self,
         temp: Path,
@@ -104,6 +144,178 @@ class CollectionTests(unittest.TestCase):
             text=True,
             check=False,
         )
+
+    def _write_threshold_cli_stats(self, temp: Path) -> Path:
+        stats_path = temp / "threshold.csv"
+        write_stats_to_csv_file(
+            stats_path,
+            [
+                TaskStats(
+                    "d3-p01",
+                    1000,
+                    100,
+                    0,
+                    0.0,
+                    "mwpm",
+                    {"p": 0.01, "d": 3, "family": "rotated"},
+                    strong_id="d3-p01",
+                ),
+                TaskStats(
+                    "d3-p03",
+                    1000,
+                    300,
+                    0,
+                    0.0,
+                    "mwpm",
+                    {"p": 0.03, "d": 3, "family": "rotated"},
+                    strong_id="d3-p03",
+                ),
+                TaskStats(
+                    "d5-p01",
+                    1000,
+                    300,
+                    0,
+                    0.0,
+                    "mwpm",
+                    {"p": 0.01, "d": 5, "family": "rotated"},
+                    strong_id="d5-p01",
+                ),
+                TaskStats(
+                    "d5-p03",
+                    1000,
+                    100,
+                    0,
+                    0.0,
+                    "mwpm",
+                    {"p": 0.03, "d": 5, "family": "rotated"},
+                    strong_id="d5-p03",
+                ),
+                TaskStats(
+                    "b-d3-p01",
+                    1000,
+                    90,
+                    0,
+                    0.0,
+                    "bposd",
+                    {"p": 0.01, "d": 3, "family": "rotated"},
+                    strong_id="b-d3-p01",
+                ),
+                TaskStats(
+                    "b-d3-p03",
+                    1000,
+                    320,
+                    0,
+                    0.0,
+                    "bposd",
+                    {"p": 0.03, "d": 3, "family": "rotated"},
+                    strong_id="b-d3-p03",
+                ),
+                TaskStats(
+                    "b-d5-p01",
+                    1000,
+                    310,
+                    0,
+                    0.0,
+                    "bposd",
+                    {"p": 0.01, "d": 5, "family": "rotated"},
+                    strong_id="b-d5-p01",
+                ),
+                TaskStats(
+                    "b-d5-p03",
+                    1000,
+                    110,
+                    0,
+                    0.0,
+                    "bposd",
+                    {"p": 0.03, "d": 5, "family": "rotated"},
+                    strong_id="b-d5-p03",
+                ),
+            ],
+        )
+        return stats_path
+
+    def _write_scaling_threshold_cli_stats(self, temp: Path) -> Path:
+        stats_path = temp / "scaling-threshold.csv"
+        stats = [
+            item.with_edits(metadata={**item.metadata, "family": "rotated"})
+            for item in self._scaling_threshold_stats()
+        ]
+        write_stats_to_csv_file(stats_path, stats)
+        return stats_path
+
+    def test_threshold_core_is_covered_by_unittest_discovery(self) -> None:
+        rates_by_distance = {
+            3: (100, 200, 400, 500),
+            5: (50, 200, 500, 600),
+            7: (30, 200, 600, 700),
+            9: (100, 300, 600, 600),
+        }
+        stats = [
+            self._threshold_stat(x=x, distance=distance, errors=errors)
+            for distance, errors_by_x in rates_by_distance.items()
+            for x, errors in zip((0.01, 0.02, 0.04, 0.05), errors_by_x)
+        ]
+
+        (result,) = analyze_thresholds(
+            stats,
+            x_key="p",
+            distance_key="d",
+            bootstrap_samples=0,
+        )
+
+        self.assertAlmostEqual(result.pairwise_threshold.value, 0.03)
+
+        (raw_result,) = analyze_thresholds(
+            [self._threshold_stat(x=0.01, distance=3, errors=0, shots=10)],
+            x_key="p",
+            distance_key="d",
+            bootstrap_samples=0,
+        )
+        self.assertEqual(raw_result.points[0].rate, 0.0)
+        self.assertEqual(raw_result.points[0].stderr, 0.0)
+
+    def test_threshold_scaling_core_is_covered_by_unittest_discovery(self) -> None:
+        stats = self._scaling_threshold_stats()
+        (valid,) = analyze_thresholds(
+            stats,
+            x_key="p",
+            distance_key="d",
+            bootstrap_samples=0,
+        )
+        self.assertEqual(valid.scaling_fit.status, "ok")
+        self.assertAlmostEqual(valid.scaling_fit.threshold.value, 0.031, delta=0.003)
+
+        incomplete = stats + [
+            self._threshold_stat(x=0.031, distance=13, errors=250)
+        ]
+        (rejected,) = analyze_thresholds(
+            incomplete,
+            x_key="p",
+            distance_key="d",
+            bootstrap_samples=0,
+        )
+        self.assertEqual(rejected.scaling_fit.status, "insufficient_data")
+
+    def test_threshold_bootstrap_is_deterministic_under_unittest(self) -> None:
+        stats = [
+            self._threshold_stat(x=0.01, distance=3, errors=100),
+            self._threshold_stat(x=0.02, distance=3, errors=300),
+            self._threshold_stat(x=0.03, distance=3, errors=500),
+            self._threshold_stat(x=0.01, distance=5, errors=500),
+            self._threshold_stat(x=0.02, distance=5, errors=300),
+            self._threshold_stat(x=0.03, distance=5, errors=100),
+        ]
+        kwargs = dict(
+            x_key="p",
+            distance_key="d",
+            bootstrap_samples=40,
+            seed=123,
+        )
+
+        first = analyze_thresholds(stats, **kwargs)
+        second = analyze_thresholds(list(reversed(stats)), **kwargs)
+
+        self.assertEqual(first[0].to_dict(), second[0].to_dict())
 
     def test_options_validate_positive_limits(self) -> None:
         CollectionOptions(max_shots=1, max_errors=0, batch_size=1, seed=123)
@@ -1296,6 +1508,197 @@ class CollectionTests(unittest.TestCase):
         self.assertIs(faultscope.TaskStats, TaskStats)
         self.assertIs(faultscope.collect, collect)
         self.assertIs(faultscope.iter_collect, iter_collect)
+
+    def test_collection_exports_threshold_api_without_top_level_faultscope_exports(self) -> None:
+        import faultscope.collection as collection
+        import faultscope.collection.threshold as threshold
+
+        for name in (
+            "FiniteSizeScalingFit",
+            "PairwiseCrossing",
+            "ThresholdAnalysisResult",
+            "ThresholdEstimate",
+            "ThresholdPoint",
+            "analyze_thresholds",
+            "plot_threshold_analysis",
+        ):
+            self.assertIs(getattr(collection, name), getattr(threshold, name))
+            self.assertFalse(hasattr(faultscope, name))
+
+    def test_threshold_cli_text_outputs_stable_diagnostics(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            stats_path = self._write_threshold_cli_stats(temp)
+
+            result = self._run_collection_cli(
+                temp,
+                "threshold",
+                str(stats_path),
+                "--x-key",
+                "p",
+                "--distance-key",
+                "d",
+                "--bootstrap-samples",
+                "0",
+            )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        lines = result.stdout.strip().splitlines()
+        self.assertEqual(
+            lines[0],
+            "series\tkind\tlower_distance\tupper_distance\tstatus\testimate\tci_low\tci_high\tbootstrap_samples\tbootstrap_successes\tnu\tnu_ci_low\tnu_ci_high\tnu_bootstrap_samples\tnu_bootstrap_successes\tmessage",
+        )
+        pairwise_rows = [line.split("\t") for line in lines[1:] if "\tpairwise\t" in line]
+        self.assertTrue(pairwise_rows)
+        self.assertTrue(all(row[10:15] == ["", "", "", "0", "0"] for row in pairwise_rows))
+        self.assertTrue(
+            any("\tpairwise\t3\t5\tok\t0.0203158395151\t" in line for line in lines[1:])
+        )
+        self.assertTrue(
+            any(
+                "\tpairwise_global\t\t\tok\t0.0203158395151\t" in line
+                for line in lines[1:]
+            )
+        )
+        self.assertTrue(
+            any(
+                "\tscaling_global\t\t\tinsufficient_data\t\t\t\t0\t0\t\t\t\t0\t0\t"
+                in line
+                for line in lines[1:]
+            )
+        )
+
+    def test_threshold_cli_text_scaling_row_includes_critical_exponent(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            stats_path = self._write_scaling_threshold_cli_stats(temp)
+
+            result = self._run_collection_cli(
+                temp,
+                "threshold",
+                str(stats_path),
+                "--x-key",
+                "p",
+                "--distance-key",
+                "d",
+                "--bootstrap-samples",
+                "0",
+            )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        scaling_row = next(
+            row.split("\t")
+            for row in result.stdout.strip().splitlines()[1:]
+            if "\tscaling_global\t" in row
+        )
+        self.assertEqual(scaling_row[4], "ok")
+        self.assertNotEqual(scaling_row[5], "")
+        self.assertNotEqual(scaling_row[10], "")
+        self.assertEqual(scaling_row[11:15], ["", "", "0", "0"])
+
+    def test_threshold_cli_json_outputs_result_dicts(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            stats_path = self._write_threshold_cli_stats(temp)
+
+            result = self._run_collection_cli(
+                temp,
+                "threshold",
+                str(stats_path),
+                "--x-key",
+                "p",
+                "--distance-key",
+                "d",
+                "--bootstrap-samples",
+                "0",
+                "--format",
+                "json",
+            )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        payload = json.loads(result.stdout)
+        self.assertIsInstance(payload, list)
+        self.assertEqual(len(payload), 1)
+        self.assertEqual(payload[0]["crossings"][0]["status"], "ok")
+        self.assertAlmostEqual(payload[0]["pairwise_threshold"]["value"], 0.0203158395151)
+
+    def test_threshold_cli_json_preserves_repeated_series_key_order(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            stats_path = self._write_threshold_cli_stats(temp)
+
+            result = self._run_collection_cli(
+                temp,
+                "threshold",
+                str(stats_path),
+                "--x-key",
+                "p",
+                "--distance-key",
+                "d",
+                "--series-key",
+                "family",
+                "--series-key",
+                "decoder",
+                "--bootstrap-samples",
+                "0",
+                "--format",
+                "json",
+            )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        payload = json.loads(result.stdout)
+        self.assertEqual(list(payload[0]["series"]), ["family", "decoder"])
+
+    def test_threshold_cli_multi_series_preserves_repeated_series_key_order(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            stats_path = self._write_threshold_cli_stats(temp)
+
+            result = self._run_collection_cli(
+                temp,
+                "threshold",
+                str(stats_path),
+                "--x-key",
+                "p",
+                "--distance-key",
+                "d",
+                "--series-key",
+                "family",
+                "--series-key",
+                "decoder",
+                "--bootstrap-samples",
+                "0",
+            )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        rows = result.stdout.strip().splitlines()[1:]
+        series_cells = [row.split("\t", 1)[0] for row in rows]
+        self.assertTrue(all(cell.startswith("family=rotated,decoder=") for cell in series_cells))
+        self.assertTrue(any("decoder=bposd" in cell for cell in series_cells))
+        self.assertTrue(any("decoder=mwpm" in cell for cell in series_cells))
+
+    def test_threshold_cli_writes_plot_artifact(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            stats_path = self._write_threshold_cli_stats(temp)
+            output = temp / "threshold.png"
+
+            result = self._run_collection_cli(
+                temp,
+                "threshold",
+                str(stats_path),
+                "--x-key",
+                "p",
+                "--distance-key",
+                "d",
+                "--bootstrap-samples",
+                "0",
+                "--plot-out",
+                str(output),
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertTrue(output.read_bytes().startswith(b"\x89PNG"))
 
 
 if __name__ == "__main__":
