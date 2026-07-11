@@ -29,15 +29,17 @@ class ReleaseMetadataTests(unittest.TestCase):
         self.assertIn("toolchain: 1.85", ci)
         self.assertIn("cargo clippy --workspace --all-targets --all-features -- -D warnings", ci)
         self.assertIn("python -m mypy.stubtest faultscope._native", ci)
-        self.assertGreaterEqual(ci.count("python -m venv .venv"), 2)
+        self.assertGreaterEqual(ci.count("python -m venv .venv"), 3)
         self.assertGreaterEqual(
             ci.count('.venv/bin/python -m pip install --upgrade pip "maturin>=1.7,<2"'),
-            2,
+            3,
         )
         self.assertGreaterEqual(
             ci.count(".venv/bin/maturin develop --extras test --locked"),
             2,
         )
+        self.assertIn(".venv/bin/maturin develop --locked", ci)
+        self.assertIn(".venv/bin/python benchmarks/collection_throughput.py", ci)
         self.assertIn("workflow_call:", wheels)
         self.assertIn("manylinux", wheels)
         self.assertIn("windows", wheels.lower())
@@ -81,6 +83,18 @@ class ReleaseMetadataTests(unittest.TestCase):
         for path in ("tests/test_benchmarks.py", "tests/test_release_metadata.py"):
             source = (ROOT / path).read_text()
             self.assertIn("import tomli as tomllib", source, path)
+
+    def test_mypy_skips_optional_dependency_stubs(self) -> None:
+        config = _toml("pyproject.toml")["tool"]["mypy"]
+        self.assertIs(config["follow_imports_for_stubs"], True)
+        overrides = config["overrides"]
+        optional_override = next(
+            override for override in overrides if "numpy" in override["module"]
+        )
+        self.assertEqual(optional_override["follow_imports"], "skip")
+        for module in ("matplotlib", "numpy", "pymatching", "scipy"):
+            self.assertIn(module, optional_override["module"])
+            self.assertIn(f"{module}.*", optional_override["module"])
 
     def test_runtime_versions_come_from_package_metadata(self) -> None:
         native_lib = (ROOT / "crates/faultscope-python/src/lib.rs").read_text()
