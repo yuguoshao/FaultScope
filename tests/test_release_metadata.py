@@ -25,12 +25,13 @@ class ReleaseMetadataTests(unittest.TestCase):
         self.assertIn("toolchain: 1.85", ci)
         self.assertIn("cargo clippy --workspace --all-targets --all-features -- -D warnings", ci)
         self.assertIn("python -m mypy.stubtest faultscope._native", ci)
+        self.assertGreaterEqual(ci.count("python -m venv .venv"), 2)
         self.assertGreaterEqual(
-            ci.count('python -m pip install ".[test,native-build]"'),
+            ci.count('.venv/bin/python -m pip install --upgrade pip "maturin>=1.7,<2"'),
             2,
         )
         self.assertGreaterEqual(
-            ci.count("python -m maturin develop --skip-install --locked"),
+            ci.count(".venv/bin/maturin develop --extras test --locked"),
             2,
         )
         self.assertIn("workflow_call:", wheels)
