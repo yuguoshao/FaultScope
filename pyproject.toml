@@ -61,6 +61,7 @@ test = [
     "ruff>=0.11",
     "scipy>=1.10",
     "stim>=1.13",
+    "tomli>=2; python_version < '3.11'",
     "twine>=6",
 ]
 native-build = [

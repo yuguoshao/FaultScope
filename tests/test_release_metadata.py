@@ -1,6 +1,10 @@
 from pathlib import Path
-import tomllib
 import unittest
+
+try:
+    import tomllib
+except ModuleNotFoundError:  # Python 3.10
+    import tomli as tomllib
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -67,6 +71,16 @@ class ReleaseMetadataTests(unittest.TestCase):
         self.assertNotIn("version", project)
         self.assertIn("version", project["dynamic"])
         self.assertEqual(project["requires-python"], ">=3.10")
+
+    def test_test_extra_supports_toml_on_python_3_10(self) -> None:
+        project = _toml("pyproject.toml")["project"]
+        self.assertIn(
+            "tomli>=2; python_version < '3.11'",
+            project["optional-dependencies"]["test"],
+        )
+        for path in ("tests/test_benchmarks.py", "tests/test_release_metadata.py"):
+            source = (ROOT / path).read_text()
+            self.assertIn("import tomli as tomllib", source, path)
 
     def test_runtime_versions_come_from_package_metadata(self) -> None:
         native_lib = (ROOT / "crates/faultscope-python/src/lib.rs").read_text()
