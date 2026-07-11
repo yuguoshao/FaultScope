@@ -1,0 +1,22 @@
+[package]
+name = "faultscope-collection"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Native logical error-rate collection and scheduling for FaultScope"
+documentation = "https://docs.rs/faultscope-collection"
+readme = "README.md"
+keywords = ["quantum-error-correction", "sampling", "threshold"]
+categories = ["science", "simulation"]
+
+[lib]
+name = "faultscope_collection"
+
+[dependencies]
+faultscope-core = { version = "0.1.0", path = "../faultscope-core" }
+
+[package.metadata.docs.rs]
+all-features = true

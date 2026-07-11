@@ -12,7 +12,9 @@ pub(crate) type DemObservableSpec = CoreLogicalObservable;
 pub(crate) type Op = faultscope_core::Operation;
 pub(crate) type DemEdgeSpec = faultscope_core::DemSamplerEdge;
 
-pub(crate) fn parse_core_circuit_object(value: &Bound<'_, PyAny>) -> PyResult<faultscope_core::Circuit> {
+pub(crate) fn parse_core_circuit_object(
+    value: &Bound<'_, PyAny>,
+) -> PyResult<faultscope_core::Circuit> {
     if let Ok(circuit) = value.extract::<PyRef<'_, PyCircuit>>() {
         if let Some(core_circuit) = &circuit.core_circuit {
             return Ok((**core_circuit).clone());

@@ -19,11 +19,9 @@ from faultscope.core.stabilizer import StabilizerState
 class StochasticNoise(Protocol):
     """Noise model interface used by the Python reference simulators."""
 
-    def sample(self, rng: random.Random, rate: float) -> object:
-        ...
+    def sample(self, rng: random.Random, rate: float) -> object: ...
 
-    def score(self, event: object, rate: float) -> float:
-        ...
+    def score(self, event: object, rate: float) -> float: ...
 
     def apply(
         self,
@@ -31,8 +29,7 @@ class StochasticNoise(Protocol):
         state: StabilizerState,
         frame: PauliFrame,
         qubits: Sequence[int],
-    ) -> None:
-        ...
+    ) -> None: ...
 
 
 __all__ = [

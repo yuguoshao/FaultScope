@@ -26,17 +26,11 @@ class RotatedSurfaceCodeMemoryExample:
 
     @property
     def x_logical_qubits(self) -> tuple[int, ...]:
-        return tuple(
-            _data_index(self.distance, row, 0)
-            for row in range(self.distance)
-        )
+        return tuple(_data_index(self.distance, row, 0) for row in range(self.distance))
 
     @property
     def z_logical_qubits(self) -> tuple[int, ...]:
-        return tuple(
-            _data_index(self.distance, 0, col)
-            for col in range(self.distance)
-        )
+        return tuple(_data_index(self.distance, 0, col) for col in range(self.distance))
 
     @property
     def terminal_measurement_pairs(self) -> tuple[tuple[str, str], ...]:
@@ -382,8 +376,7 @@ def _central_check_id(checks: list[dict[str, object]], distance: int) -> str:
     center = (distance - 1) / 2
     check = min(
         checks,
-        key=lambda item: (float(item["x"]) - center) ** 2
-        + (float(item["y"]) - center) ** 2,
+        key=lambda item: (float(item["x"]) - center) ** 2 + (float(item["y"]) - center) ** 2,
     )
     return str(check["id"])
 

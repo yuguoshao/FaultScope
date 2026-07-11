@@ -8,7 +8,7 @@ module ``faultscope._native``.  These wrappers keep the public
 from __future__ import annotations
 
 import importlib
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from faultscope.core import Circuit
 
@@ -17,17 +17,25 @@ class UnsupportedNativeCircuitError(ValueError):
     """Raised when a circuit cannot be compiled by the native sampler."""
 
 
-try:
-    _native_mod = importlib.import_module("faultscope._native")
-    DemFaultScopeSimulator = _native_mod.DemFaultScopeSimulator
-    NativePackedSampler = _native_mod.NativePackedSampler
-    NativeDemSampler = _native_mod.NativeDemSampler
-    NativeDemGenerator = _native_mod.NativeDemGenerator
-except (AttributeError, ImportError):
-    DemFaultScopeSimulator = Any
-    NativePackedSampler = Any
-    NativeDemSampler = Any
-    NativeDemGenerator = Any
+if TYPE_CHECKING:
+    from faultscope._native import (
+        DemFaultScopeSimulator,
+        NativeDemGenerator,
+        NativeDemSampler,
+        NativePackedSampler,
+    )
+else:
+    try:
+        _native_mod = importlib.import_module("faultscope._native")
+        DemFaultScopeSimulator = _native_mod.DemFaultScopeSimulator
+        NativePackedSampler = _native_mod.NativePackedSampler
+        NativeDemSampler = _native_mod.NativeDemSampler
+        NativeDemGenerator = _native_mod.NativeDemGenerator
+    except (AttributeError, ImportError):
+        DemFaultScopeSimulator = Any
+        NativePackedSampler = Any
+        NativeDemSampler = Any
+        NativeDemGenerator = Any
 
 
 def compile_native_sampler(

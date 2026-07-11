@@ -25,9 +25,7 @@ def logical_residual_loss_mask(
                 "default batch loss requires observable-id correction masks; "
                 "supply loss_mask_fn for data-qubit corrections"
             )
-        loss_mask |= int(observables.get(observable_id, 0)) ^ int(
-            corrections.get(observable_id, 0)
-        )
+        loss_mask |= int(observables.get(observable_id, 0)) ^ int(corrections.get(observable_id, 0))
 
     if all_mask is not None:
         loss_mask &= int(all_mask)

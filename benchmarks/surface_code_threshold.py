@@ -30,6 +30,14 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from faultscope.dem import Detector, DetectorErrorEdge, DetectorErrorModel, LogicalObservable
+from faultscope.collection import (
+    FiniteSizeScalingFit,
+    PairwiseCrossing,
+    TaskStats,
+    ThresholdAnalysisResult,
+    ThresholdEstimate,
+    analyze_thresholds,
+)
 from faultscope.runtime import (
     UnsupportedNativeCircuitError,
     compile_native_dem_sampler,
@@ -78,6 +86,7 @@ def main() -> None:
     parser.add_argument("--basis", choices=("x", "z"), default="x")
     parser.add_argument("--rounds", type=int, default=None)
     parser.add_argument("--seed", type=int, default=12_345)
+    parser.add_argument("--bootstrap-samples", type=int, default=1_000)
     args = parser.parse_args()
 
     stim, pymatching, np = _load_required_modules()
@@ -89,6 +98,8 @@ def main() -> None:
         raise SystemExit("at least one physical error rate is required")
     if args.shots <= 0:
         raise SystemExit("shots must be positive")
+    if args.bootstrap_samples < 0:
+        raise SystemExit("bootstrap samples must be non-negative")
 
     print(
         "basis\tdistance\trounds\tp\tshots\tpath\tlogical_failure\t"
@@ -96,13 +107,8 @@ def main() -> None:
         flush=True,
     )
 
-    results: dict[str, dict[int, dict[float, float]]] = {
-        path: {distance: {} for distance in distances}
-        for path in PATHS
-    }
-    timings_by_path: dict[str, list[TimedLogicalFailureStats]] = {
-        path: [] for path in PATHS
-    }
+    threshold_stats: list[TaskStats] = []
+    timings_by_path: dict[str, list[TimedLogicalFailureStats]] = {path: [] for path in PATHS}
     for distance in distances:
         rounds = args.rounds if args.rounds is not None else distance
         for rate_index, p in enumerate(rates):
@@ -174,7 +180,24 @@ def main() -> None:
                     )
                     continue
                 stats = timed_stats.stats
-                results[path][distance][p] = stats.rate
+                task_id = f"surface-code:{args.basis}:{path}:d={distance}:p={p:.17g}"
+                threshold_stats.append(
+                    TaskStats(
+                        task_id=task_id,
+                        strong_id=task_id,
+                        shots=stats.shots,
+                        errors=stats.failures,
+                        discards=0,
+                        seconds=timed_stats.total_s,
+                        decoder=path,
+                        metadata={
+                            "basis": args.basis,
+                            "path": path,
+                            "distance": distance,
+                            "p": p,
+                        },
+                    )
+                )
                 timings_by_path[path].append(timed_stats)
                 print(
                     f"{args.basis}\t{distance}\t{rounds}\t{p:.17g}\t"
@@ -185,20 +208,20 @@ def main() -> None:
                     flush=True,
                 )
 
-    for path in PATHS:
-        for small, large in zip(distances, distances[1:]):
-            p_cross = _crossing_rate(results[path][small], results[path][large], rates)
-            if p_cross is None:
-                p_cell = "NA"
-                status = "no-crossing"
-            else:
-                p_cell = f"{p_cross:.17g}"
-                status = "ok"
-            print(
-                f"threshold\t{args.basis}\t{small}-{large}\t{path}\t"
-                f"{p_cell}\t{status}",
-                flush=True,
-            )
+    threshold_results = analyze_thresholds(
+        threshold_stats,
+        x_key="p",
+        distance_key="distance",
+        series_keys=("path", "basis"),
+        bootstrap_samples=args.bootstrap_samples,
+        seed=args.seed,
+    )
+    _print_threshold_results_for_paths(
+        threshold_results,
+        basis=args.basis,
+        paths=PATHS,
+        distances=distances,
+    )
 
     for path in PATHS:
         timed_values = timings_by_path[path]
@@ -393,8 +416,7 @@ def stim_dem_to_faultscope_dem(stim_dem: Any) -> DetectorErrorModel:
     return DetectorErrorModel(
         detectors=tuple(detectors_by_id[key] for key in sorted(detectors_by_id)),
         observables=tuple(
-            LogicalObservable(id=observable_id)
-            for observable_id in sorted(observable_ids)
+            LogicalObservable(id=observable_id) for observable_id in sorted(observable_ids)
         ),
         edges=tuple(edges),
     )
@@ -507,9 +529,7 @@ def _packed_predictions_to_masks(
     out = {observable_id: 0 for observable_id in observable_ids}
     for col, observable_id in enumerate(observable_ids):
         if col // 8 >= predictions.shape[1]:
-            raise ValueError(
-                "PyMatching prediction width does not match observable count"
-            )
+            raise ValueError("PyMatching prediction width does not match observable count")
         bits = (predictions[:, col // 8] >> (col % 8)) & 1
         out[observable_id] = int.from_bytes(
             np.packbits(bits.astype(np.uint8), bitorder="little").tobytes(),
@@ -553,25 +573,164 @@ def _ensure_2d_bool_array(value: Any, shots: int) -> Any:
     return array
 
 
-def _crossing_rate(
-    small_distance_rates: Mapping[float, float],
-    large_distance_rates: Mapping[float, float],
-    rates: Iterable[float],
-) -> float | None:
-    previous_rate: float | None = None
-    previous_delta: float | None = None
-    for rate in rates:
-        if rate not in small_distance_rates or rate not in large_distance_rates:
-            continue
-        delta = small_distance_rates[rate] - large_distance_rates[rate]
-        if previous_rate is not None and previous_delta is not None:
-            # Below threshold, larger distance should have lower logical failure.
-            if previous_delta > 0.0 >= delta:
-                fraction = -previous_delta / (delta - previous_delta)
-                return previous_rate + fraction * (rate - previous_rate)
-        previous_rate = rate
-        previous_delta = delta
-    return None
+def _print_threshold_results(results: Iterable[ThresholdAnalysisResult]) -> None:
+    for result in results:
+        basis = str(result.series["basis"])
+        path = str(result.series["path"])
+        for crossing in result.crossings:
+            estimate = _estimate_cells(crossing.estimate)
+            candidates = ",".join(f"{value:.17g}" for value in crossing.candidates)
+            print(
+                f"threshold-pairwise\t{basis}\t{path}\t"
+                f"{crossing.lower_distance:g}-{crossing.upper_distance:g}\t"
+                f"{crossing.status}\t{candidates or 'NA'}\t"
+                f"{estimate[0]}\t{estimate[1]}\t{estimate[2]}\t"
+                f"{estimate[3]}",
+                flush=True,
+            )
+
+        pairwise = _estimate_cells(result.pairwise_threshold)
+        print(
+            f"threshold-pairwise-summary\t{basis}\t{path}\t"
+            f"{pairwise[0]}\t{pairwise[1]}\t{pairwise[2]}\t{pairwise[3]}",
+            flush=True,
+        )
+
+        fit = result.scaling_fit
+        threshold = _estimate_cells(fit.threshold)
+        exponent = _estimate_cells(fit.critical_exponent)
+        reduced_chi_squared = (
+            "NA" if fit.reduced_chi_squared is None else f"{fit.reduced_chi_squared:.17g}"
+        )
+        message = "NA" if fit.message is None else fit.message.replace("\t", " ").replace("\n", " ")
+        print(
+            f"threshold-scaling\t{basis}\t{path}\t{fit.status}\t"
+            f"{threshold[0]}\t{threshold[1]}\t{threshold[2]}\t{threshold[3]}\t"
+            f"{exponent[0]}\t{exponent[1]}\t{exponent[2]}\t{exponent[3]}\t"
+            f"{reduced_chi_squared}\t{message}",
+            flush=True,
+        )
+
+
+def _print_threshold_results_for_paths(
+    results: Iterable[ThresholdAnalysisResult],
+    *,
+    basis: str,
+    paths: Iterable[str],
+    distances: Iterable[int],
+) -> None:
+    results_by_path = {str(result.series["path"]): result for result in results}
+    distance_values = tuple(sorted(set(float(distance) for distance in distances)))
+    for path in paths:
+        result = results_by_path.get(path)
+        if result is None:
+            result = ThresholdAnalysisResult(
+                series={"basis": basis, "path": path},
+                points=(),
+                crossings=(),
+                pairwise_threshold=None,
+                scaling_fit=FiniteSizeScalingFit(
+                    status="insufficient_data",
+                    threshold=None,
+                    critical_exponent=None,
+                    coefficients=(),
+                    reduced_chi_squared=None,
+                    message="no sampled data for path",
+                ),
+            )
+        crossings_by_pair = {
+            (crossing.lower_distance, crossing.upper_distance): crossing
+            for crossing in result.crossings
+        }
+        expected_pairs = tuple(zip(distance_values, distance_values[1:]))
+        normalized_crossings = tuple(
+            crossings_by_pair.get(
+                (lower, upper),
+                PairwiseCrossing(
+                    lower_distance=lower,
+                    upper_distance=upper,
+                    status="no_crossing",
+                    candidates=(),
+                    estimate=None,
+                ),
+            )
+            for lower, upper in expected_pairs
+        )
+        observed_distances = {point.distance for point in result.points}
+        if normalized_crossings != result.crossings or observed_distances != set(distance_values):
+            retained_candidates = sorted(
+                {
+                    candidate
+                    for crossing in normalized_crossings
+                    for candidate in crossing.candidates
+                }
+            )
+            expected_pair_set = set(expected_pairs)
+            all_original_pairs_retained = all(
+                (crossing.lower_distance, crossing.upper_distance) in expected_pair_set
+                for crossing in result.crossings
+            )
+            pairwise_threshold = None
+            if all_original_pairs_retained:
+                pairwise_threshold = result.pairwise_threshold
+            retained_candidate_crossings = tuple(
+                crossing for crossing in normalized_crossings if crossing.candidates
+            )
+            if (
+                pairwise_threshold is None
+                and len(retained_candidate_crossings) == 1
+                and retained_candidate_crossings[0].estimate is not None
+            ):
+                pairwise_threshold = retained_candidate_crossings[0].estimate
+            if retained_candidates and pairwise_threshold is None:
+                midpoint = len(retained_candidates) // 2
+                if len(retained_candidates) % 2:
+                    value = retained_candidates[midpoint]
+                else:
+                    value = 0.5 * (
+                        retained_candidates[midpoint - 1] + retained_candidates[midpoint]
+                    )
+                confidence_level = (
+                    result.pairwise_threshold.confidence_level
+                    if result.pairwise_threshold is not None
+                    else 0.95
+                )
+                bootstrap_samples = (
+                    result.pairwise_threshold.bootstrap_samples
+                    if result.pairwise_threshold is not None
+                    else 0
+                )
+                pairwise_threshold = ThresholdEstimate(
+                    value=value,
+                    ci_low=None,
+                    ci_high=None,
+                    confidence_level=confidence_level,
+                    bootstrap_samples=bootstrap_samples,
+                    bootstrap_successes=0,
+                )
+            result = ThresholdAnalysisResult(
+                series=result.series,
+                points=result.points,
+                crossings=normalized_crossings,
+                pairwise_threshold=pairwise_threshold,
+                scaling_fit=result.scaling_fit,
+            )
+        _print_threshold_results((result,))
+
+
+def _estimate_cells(
+    estimate: ThresholdEstimate | None,
+) -> tuple[str, str, str, str]:
+    if estimate is None:
+        return "NA", "NA", "NA", "0"
+    ci_low = "NA" if estimate.ci_low is None else f"{estimate.ci_low:.17g}"
+    ci_high = "NA" if estimate.ci_high is None else f"{estimate.ci_high:.17g}"
+    return (
+        f"{estimate.value:.17g}",
+        ci_low,
+        ci_high,
+        str(estimate.bootstrap_successes),
+    )
 
 
 def _load_required_modules() -> tuple[Any, Any, Any]:

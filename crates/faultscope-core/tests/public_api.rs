@@ -1,8 +1,15 @@
 use std::collections::HashMap;
+use std::mem::{align_of, offset_of, size_of};
 
 use faultscope_core::{
-    FaultScopeSimulator, Circuit, DemHotspotEstimator, Detector,
-    DetectorErrorModelGenerator, LogicalObservable, NoiseLocation, NoiseModel, Operation,
+    Circuit, DemHotspotEstimator, Detector, DetectorErrorModelGenerator,
+    FaultScopeNativeCorrectionMaskBatchMutViewV1, FaultScopeNativeDecoderStatusV1,
+    FaultScopeNativeDecoderStringViewV1, FaultScopeNativeDecoderV1,
+    FaultScopeNativeDetectorEventShotBatchViewV1, FaultScopeNativeDetectorMaskBatchViewV1,
+    FaultScopeNativePackedDetectorShotBatchViewV1, FaultScopeSimulator, LogicalObservable,
+    NoiseLocation, NoiseModel, Operation, NATIVE_DECODER_PLUGIN_ABI_NAME,
+    NATIVE_DECODER_PLUGIN_ABI_VERSION, NATIVE_DECODER_PLUGIN_CAPSULE_NAME,
+    NATIVE_DECODER_PLUGIN_ENTRY_POINT_GROUP,
 };
 
 fn x_noise(id: &str, rate: f64) -> NoiseLocation {
@@ -115,4 +122,54 @@ fn rust_dem_hotspot_api_estimates_default_loss() {
     assert_eq!(estimate.mean_loss, 1.0);
     assert_eq!(estimate.top_edges, vec![0]);
     assert_eq!(estimate.top_locations, vec!["x0"]);
+}
+
+#[test]
+fn native_decoder_v1_abi_layout_is_frozen_on_64_bit_targets() {
+    assert_eq!(NATIVE_DECODER_PLUGIN_ABI_VERSION, 1);
+    assert_eq!(
+        NATIVE_DECODER_PLUGIN_ABI_NAME,
+        "faultscope.native_decoder_plugin.v1"
+    );
+    assert_eq!(
+        NATIVE_DECODER_PLUGIN_CAPSULE_NAME,
+        NATIVE_DECODER_PLUGIN_ABI_NAME
+    );
+    assert_eq!(
+        NATIVE_DECODER_PLUGIN_ENTRY_POINT_GROUP,
+        "faultscope.native_decoders"
+    );
+
+    if cfg!(target_pointer_width = "64") {
+        assert_eq!(size_of::<FaultScopeNativeDecoderStringViewV1>(), 16);
+        assert_eq!(size_of::<FaultScopeNativeDetectorMaskBatchViewV1>(), 40);
+        assert_eq!(
+            size_of::<FaultScopeNativeCorrectionMaskBatchMutViewV1>(),
+            40
+        );
+        assert_eq!(
+            size_of::<FaultScopeNativePackedDetectorShotBatchViewV1>(),
+            40
+        );
+        assert_eq!(
+            size_of::<FaultScopeNativeDetectorEventShotBatchViewV1>(),
+            56
+        );
+        assert_eq!(size_of::<FaultScopeNativeDecoderStatusV1>(), 24);
+        assert_eq!(size_of::<FaultScopeNativeDecoderV1>(), 88);
+        assert_eq!(align_of::<FaultScopeNativeDecoderV1>(), 8);
+        assert_eq!(offset_of!(FaultScopeNativeDecoderV1, abi_version), 0);
+        assert_eq!(offset_of!(FaultScopeNativeDecoderV1, struct_size), 8);
+        assert_eq!(offset_of!(FaultScopeNativeDecoderV1, flags), 16);
+        assert_eq!(offset_of!(FaultScopeNativeDecoderV1, state), 24);
+        assert_eq!(offset_of!(FaultScopeNativeDecoderV1, decode_batch), 64);
+        assert_eq!(
+            offset_of!(FaultScopeNativeDecoderV1, decode_packed_batch),
+            72
+        );
+        assert_eq!(
+            offset_of!(FaultScopeNativeDecoderV1, decode_detector_event_batch),
+            80
+        );
+    }
 }

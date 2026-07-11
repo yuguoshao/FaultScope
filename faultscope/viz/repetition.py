@@ -6,7 +6,6 @@ from pathlib import Path
 from typing import Any
 
 from faultscope.viz.drawing import (
-    _contrast_color,
     _draw_centered_text,
     _draw_heatmap,
     _draw_score_scale,
@@ -114,9 +113,7 @@ def write_repetition_gate_structure_hotspot_map(
     Image, ImageDraw, ImageFont = _load_pillow()
     fonts = _fonts(ImageFont)
     data_hot, measurement_hot, cx_hot = _collect_gate_hotspots(result)
-    max_hotspot = max(
-        [0.0, *data_hot.values(), *measurement_hot.values(), *cx_hot.values()]
-    )
+    max_hotspot = max([0.0, *data_hot.values(), *measurement_hot.values(), *cx_hot.values()])
     max_hotspot = max_hotspot or 1.0
 
     output = Path(output_path)
@@ -157,15 +154,9 @@ def write_repetition_gate_structure_hotspot_map(
         lanes.append(("data", index, f"D{index}"))
         if index < distance - 1:
             lanes.append(("ancilla", index, f"A{index}"))
-    y_by_lane = {
-        lane: top + lane_index * lane_gap
-        for lane_index, lane in enumerate(lanes)
-    }
+    y_by_lane = {lane: top + lane_index * lane_gap for lane_index, lane in enumerate(lanes)}
     y_data = {index: y_by_lane[("data", index, f"D{index}")] for index in range(distance)}
-    y_ancilla = {
-        index: y_by_lane[("ancilla", index, f"A{index}")]
-        for index in range(distance - 1)
-    }
+    y_ancilla = {index: y_by_lane[("ancilla", index, f"A{index}")] for index in range(distance - 1)}
     right_edge = left + rounds * block_width
 
     for lane in lanes:
@@ -385,7 +376,5 @@ def _collect_gate_hotspots(
         elif operation == "measurement_noise":
             measurement_hot[(int(tags["round"]), int(tags["check"]))] = float(hotspot)
         elif operation == "cx_noise":
-            cx_hot[(int(tags["round"]), int(tags["check"]), str(tags["side"]))] = (
-                float(hotspot)
-            )
+            cx_hot[(int(tags["round"]), int(tags["check"]), str(tags["side"]))] = float(hotspot)
     return data_hot, measurement_hot, cx_hot

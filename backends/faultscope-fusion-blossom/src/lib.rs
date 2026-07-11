@@ -1,3 +1,11 @@
+use faultscope_core::{
+    log_likelihood_ratio, FaultScopeNativeCorrectionMaskBatchMutViewV1,
+    FaultScopeNativeDecoderI64SliceV1, FaultScopeNativeDecoderStatusV1,
+    FaultScopeNativeDecoderStringViewV1, FaultScopeNativeDecoderV1,
+    FaultScopeNativeDetectorMaskBatchViewV1, FaultScopeNativePackedDetectorShotBatchViewV1,
+    FaultScopeNativePackedObservableShotBatchMutViewV1, NATIVE_DECODER_PLUGIN_ABI_VERSION,
+    NATIVE_DECODER_PLUGIN_FLAG_THREAD_SAFE, NATIVE_DECODER_PLUGIN_STATUS_ERROR,
+};
 use fusion_blossom::complete_graph::CompleteGraph;
 use fusion_blossom::dual_module::{DualNodeClass, DualNodePtr};
 use fusion_blossom::mwpm_solver::{PrimalDualSolver, SolverSerial};
@@ -5,13 +13,6 @@ use fusion_blossom::pointers::RwLockPtr;
 use fusion_blossom::primal_module::PerfectMatching;
 use fusion_blossom::util::{
     EdgeIndex, SolverInitializer, SyndromePattern, VertexIndex, VertexNum, Weight,
-};
-use faultscope_core::{
-    log_likelihood_ratio, FaultScopeNativeCorrectionMaskBatchMutViewV1, FaultScopeNativeDecoderI64SliceV1,
-    FaultScopeNativeDecoderStatusV1, FaultScopeNativeDecoderStringViewV1, FaultScopeNativeDecoderV1,
-    FaultScopeNativeDetectorMaskBatchViewV1, FaultScopeNativePackedDetectorShotBatchViewV1,
-    FaultScopeNativePackedObservableShotBatchMutViewV1, NATIVE_DECODER_PLUGIN_ABI_VERSION,
-    NATIVE_DECODER_PLUGIN_FLAG_THREAD_SAFE, NATIVE_DECODER_PLUGIN_STATUS_ERROR,
 };
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
@@ -187,10 +188,12 @@ impl PyNativeFusionBlossomNativeDecoder {
             .collect::<Vec<_>>();
         let mut output_views = output_buffers
             .iter_mut()
-            .map(|words| faultscope_core::FaultScopeNativeDecoderMaskMutViewV1 {
-                words: words.as_mut_ptr(),
-                word_count: words.len(),
-            })
+            .map(
+                |words| faultscope_core::FaultScopeNativeDecoderMaskMutViewV1 {
+                    words: words.as_mut_ptr(),
+                    word_count: words.len(),
+                },
+            )
             .collect::<Vec<_>>();
         let input = FaultScopeNativeDetectorMaskBatchViewV1 {
             detector_ids: self.detector_ids.as_ptr(),
@@ -1262,6 +1265,7 @@ unsafe extern "C" fn decoder_decode_batch(
     FaultScopeNativeDecoderStatusV1::ok()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn decode_detector_major_with_solver(
     solver: &mut SolverBackend,
     path_resolver: &mut PathEffectResolver,
@@ -1741,6 +1745,7 @@ fn fusion_blossom_block_rows(shots: usize, worker_count: usize) -> usize {
     shots.div_ceil(target_blocks).clamp(128, 4096)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn decode_packed_rows_with_solver(
     solver: &mut SolverBackend,
     path_resolver: &mut PathEffectResolver,
@@ -1827,6 +1832,7 @@ fn decode_packed_rows_with_solver(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn decode_packed_rows_with_solver_profiled(
     solver: &mut SolverBackend,
     path_resolver: &mut PathEffectResolver,
@@ -2045,7 +2051,10 @@ fn static_error(message: &'static str) -> FaultScopeNativeDecoderStatusV1 {
     }
 }
 
-fn state_error(state: &DecoderState, message: impl Into<String>) -> FaultScopeNativeDecoderStatusV1 {
+fn state_error(
+    state: &DecoderState,
+    message: impl Into<String>,
+) -> FaultScopeNativeDecoderStatusV1 {
     let sanitized = message.into().replace('\0', "\\0");
     let mut last_error = state
         .last_error
@@ -2115,6 +2124,7 @@ mod tests {
 
 #[pymodule]
 fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
+    module.add("__version__", env!("CARGO_PKG_VERSION"))?;
     module.add_class::<PyNativeFusionBlossomNativeDecoder>()?;
     module.add_class::<PyInvalidNativeDecoderCapsule>()?;
     Ok(())

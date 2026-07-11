@@ -1,5 +1,6 @@
 use crate::*;
 
+/// Named stochastic noise source attached to circuit operations.
 #[pyclass(name = "NoiseLocation", module = "faultscope._native", frozen)]
 pub(crate) struct PyNoiseLocation {
     pub(crate) id: String,
@@ -79,6 +80,7 @@ impl PyNoiseLocation {
     }
 }
 
+/// Stabilizer-compatible circuit operation.
 #[pyclass(name = "Operation", module = "faultscope._native", frozen)]
 pub(crate) struct PyOperation {
     pub(crate) kind: String,
@@ -544,6 +546,7 @@ impl PyOperation {
     }
 }
 
+/// Ordered stabilizer circuit consumed by FaultScope runtimes.
 #[pyclass(name = "Circuit", module = "faultscope._native", frozen)]
 pub(crate) struct PyCircuit {
     pub(crate) n_qubits: usize,
@@ -627,6 +630,7 @@ impl PyCircuit {
     }
 }
 
+/// Detector parity declaration over measurement keys.
 #[pyclass(name = "Detector", module = "faultscope._native", frozen)]
 pub(crate) struct PyDetector {
     id: i64,
@@ -678,6 +682,7 @@ impl PyDetector {
     }
 }
 
+/// Logical observable declaration from measurements or a Pauli projection.
 #[pyclass(name = "LogicalObservable", module = "faultscope._native", frozen)]
 pub(crate) struct PyLogicalObservable {
     id: i64,
@@ -753,6 +758,7 @@ impl PyLogicalObservable {
     }
 }
 
+/// One probabilistic detector-error-model instruction.
 #[pyclass(name = "DetectorErrorEdge", module = "faultscope._native", frozen)]
 pub(crate) struct PyDetectorErrorEdge {
     probability: f64,
@@ -882,6 +888,7 @@ impl PyDetectorErrorEdge {
     }
 }
 
+/// Typed detector error model with detector and observable declarations.
 #[pyclass(name = "DetectorErrorModel", module = "faultscope._native", frozen)]
 pub(crate) struct PyDetectorErrorModel {
     core_dem: Option<faultscope_core::DetectorErrorModel>,
@@ -1290,16 +1297,19 @@ impl PyDetectorErrorModel {
         }
     }
 
-    pub(crate) fn to_core_dem(&self, py: Python<'_>) -> PyResult<faultscope_core::DetectorErrorModel> {
+    pub(crate) fn to_core_dem(
+        &self,
+        py: Python<'_>,
+    ) -> PyResult<faultscope_core::DetectorErrorModel> {
         if let Some(dem) = &self.core_dem {
             return Ok(dem.clone());
         }
         if let Some(dem) = &self.core_lazy_dem {
             return Ok(dem.materialize());
         }
-        let detectors = parse_dem_detector_sequence(&self.detectors(py)?.bind(py))?;
-        let observables = parse_dem_observable_sequence(&self.observables(py)?.bind(py))?;
-        let edges = parse_dem_edge_sequence(&self.edges(py)?.bind(py))?;
+        let detectors = parse_dem_detector_sequence(self.detectors(py)?.bind(py))?;
+        let observables = parse_dem_observable_sequence(self.observables(py)?.bind(py))?;
+        let edges = parse_dem_edge_sequence(self.edges(py)?.bind(py))?;
         Ok(faultscope_core::DetectorErrorModel {
             detectors,
             observables,
@@ -1319,7 +1329,7 @@ impl PyDetectorErrorModel {
 
     fn edge_views(&self, py: Python<'_>) -> PyResult<Vec<PyDemEdgeView>> {
         if let Some(dem) = &self.core_dem {
-            return Ok(dem
+            return dem
                 .edges
                 .iter()
                 .map(|edge| {
@@ -1331,11 +1341,11 @@ impl PyDetectorErrorModel {
                         observables: edge.observables.clone(),
                     })
                 })
-                .collect::<PyResult<Vec<_>>>()?);
+                .collect::<PyResult<Vec<_>>>();
         }
         if let Some(dem) = &self.core_lazy_dem {
             let dem = dem.materialize();
-            return Ok(dem
+            return dem
                 .edges
                 .iter()
                 .map(|edge| {
@@ -1347,7 +1357,7 @@ impl PyDetectorErrorModel {
                         observables: edge.observables.clone(),
                     })
                 })
-                .collect::<PyResult<Vec<_>>>()?);
+                .collect::<PyResult<Vec<_>>>();
         }
         let mut out = Vec::with_capacity(self.edges.len());
         for edge in &self.edges {
@@ -1377,7 +1387,10 @@ fn detector_dem_line(py: Python<'_>, detector_id: i64, coords: &[f64]) -> PyResu
     }
 }
 
-fn core_edge_dem_line(py: Python<'_>, edge: &faultscope_core::DetectorErrorEdge) -> PyResult<String> {
+fn core_edge_dem_line(
+    py: Python<'_>,
+    edge: &faultscope_core::DetectorErrorEdge,
+) -> PyResult<String> {
     let mut targets: Vec<String> = edge
         .detectors
         .iter()

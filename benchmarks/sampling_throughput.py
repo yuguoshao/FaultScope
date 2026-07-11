@@ -337,10 +337,7 @@ def _noise_to_stim_line(location: Any) -> str:
         total = model.total_weight
         for pauli, weight in model.weights.items():
             probs[pauli] = location.rate * weight / total
-        return (
-            "PAULI_CHANNEL_1"
-            f"({probs['X']:.17g},{probs['Y']:.17g},{probs['Z']:.17g}) {targets}"
-        )
+        return f"PAULI_CHANNEL_1({probs['X']:.17g},{probs['Y']:.17g},{probs['Z']:.17g}) {targets}"
     raise ValueError(f"unsupported benchmark noise model {type(model).__name__}")
 
 
@@ -362,9 +359,7 @@ def _mpp_to_stim_line(operation: Operation) -> str:
         if not isinstance(operation.noise_location.model, MeasurementBitFlip):
             raise ValueError("benchmark conversion supports only measurement bit-flip noise")
         prefix += f"({operation.noise_location.rate:.17g})"
-    targets = "*".join(
-        f"{pauli}{qubit}" for qubit, pauli in zip(operation.qubits, operation.pauli)
-    )
+    targets = "*".join(f"{pauli}{qubit}" for qubit, pauli in zip(operation.qubits, operation.pauli))
     return f"{prefix} {targets}"
 
 

@@ -37,9 +37,7 @@ class RepetitionCodeDecoder:
         del measurements, trajectory
         syndrome = self._coerce_syndrome(detector_record)
         if len(syndrome) != self.distance - 1:
-            raise ValueError(
-                f"expected {self.distance - 1} syndrome bits, got {len(syndrome)}"
-            )
+            raise ValueError(f"expected {self.distance - 1} syndrome bits, got {len(syndrome)}")
 
         candidate = [0] * self.distance
         for idx, bit in enumerate(syndrome):
@@ -58,15 +56,10 @@ class RepetitionCodeDecoder:
 
     def decode_batch_masks(self, batch: Any) -> dict[int, int]:
         if len(self.measurement_keys) != self.distance - 1:
-            raise ValueError(
-                "repetition batch decoder requires distance-1 measurement keys"
-            )
+            raise ValueError("repetition batch decoder requires distance-1 measurement keys")
         correction_mask = 0
         for shot in range(int(batch.shots)):
-            syndrome = [
-                (int(batch.measurements[key]) >> shot) & 1
-                for key in self.measurement_keys
-            ]
+            syndrome = [(int(batch.measurements[key]) >> shot) & 1 for key in self.measurement_keys]
             correction = self.decode(syndrome, {}, batch)
             if correction[0]:
                 correction_mask |= 1 << shot

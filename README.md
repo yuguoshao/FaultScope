@@ -13,18 +13,24 @@ Python API 暴露；主要能力包括 bit-packed stabilizer batch sampling、de
 
 - [User Guide](docs/user_guide.md)：安装、示例、工作流和排错。
 - [API Reference](docs/api_reference.md)：当前 Python/Rust API surface。
+- [Release And Compatibility](docs/release.md)：支持矩阵、版本策略和发布流程。
 - [Theory](docs/theory.md)：理论原理、公式推导和实现中的计算细节。
 
 ## 项目结构
 
 - `crates/faultscope-core`：Python 无关的 Rust core，包含 circuit/DEM 数据模型、detector
   syndrome sampling 和 hotspot 聚合。
+- `crates/faultscope-collection`：logical error-rate / threshold collection 的 Rust 调度和计数层。
 - `crates/faultscope-python`：PyO3 binding crate，构建 `faultscope._native`。
 - `faultscope/`：公共 Python import surface、decoder/Stim/visualization adapters 和示例构建器。
 - `docs/`：MkDocs 文档站点。
 - `tests/`、`benchmarks/`：回归测试、Stim 对照和吞吐基准。
 
 ## 安装与构建
+
+FaultScope `0.1.x` 支持 CPython 3.10–3.14。预构建 wheels 的目标平台是
+manylinux x86_64/aarch64、macOS 11+ x86_64/arm64 和 Windows x86_64；源码构建需要
+Rust 1.85 或更新版本。
 
 从源码 checkout 直接安装：
 
@@ -38,6 +44,7 @@ python -m venv .venv
 
 ```bash
 .venv/bin/python -m pip install ".[pymatching,visualization]"
+.venv/bin/python -m pip install ".[collection]"  # plotting/fitting helpers
 .venv/bin/python -m pip install ".[test]"
 ```
 
@@ -114,6 +121,9 @@ print(result.hotspot_table(top_k=5))
   \(H\) 的一列及其 logical observable flips。
 - `DemHotspotEstimator` 在 DEM 层采样，每条 DEM edge 按独立 Bernoulli instruction 处理，并把
   sampled edge vector 映射成 detector syndrome 和 logical observable flip record。
+- `faultscope.collection.Collector` 提供可复用的 threshold-style logical error-rate
+  collection 配置；`collect(...)` 是一次性薄封装。Rust 负责 native sampler/decoder 调度和
+  计数，Python 负责任务解析、strong id 和 CSV resume。
 - `NativeNoCorrectionDecoder` 和后续 native decoder handle 可通过
   `estimate(..., decoder=decoder)` 自动走 native fast path；传入 Python loss/correction
   callback 时回退到兼容路径。普通 Python decoder 或 subclass 不会自动获得 native hot path；
@@ -183,6 +193,7 @@ FaultScope 当前产品路径是 packed batch engine，不暴露通用的 per-sh
 .venv/bin/python benchmarks/sampling_throughput.py --family random-clifford --qubits 128 256 512 --depth 20
 .venv/bin/python benchmarks/dem_throughput.py --distances 9 13 21 --rounds 3
 .venv/bin/python benchmarks/hotspot_throughput.py --distances 9 13 21 --rounds 3 --shots 100000
+.venv/bin/python benchmarks/collection_throughput.py --shots 10000 --batch-size 1000 --adaptive-start-batch-size 100 --adaptive-max-batch-size 1000 --max-batch-seconds 0.25 --workers 1 2 4
 .venv/bin/python benchmarks/native_decoder_fast_path.py
 .venv/bin/python benchmarks/surface_code_decoder_performance.py --distances 3 5 7 --shots 10000
 .venv/bin/python benchmarks/surface_code_threshold.py --distances 3 5 7 --shots 10000

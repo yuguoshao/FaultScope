@@ -1,5 +1,6 @@
 use crate::*;
 
+/// Bit-packed forward-simulation batch.
 #[pyclass(name = "SampleBatch", module = "faultscope._native", frozen)]
 pub(crate) struct PySampleBatch {
     shots: usize,
@@ -141,6 +142,7 @@ impl PySampleBatch {
     }
 }
 
+/// Bit-packed detector-error-model sample batch.
 #[pyclass(name = "DemSampleBatch", module = "faultscope._native", frozen)]
 pub(crate) struct PyDemSampleBatch {
     shots: usize,
@@ -286,6 +288,7 @@ fn mapping_to_dict_object(py: Python<'_>, value: &Bound<'_, PyAny>) -> PyResult<
     Ok(dict.into())
 }
 
+/// Aggregated sensitivity and hotspot score for one noise location.
 #[pyclass(name = "FaultHotspot", module = "faultscope._native", frozen)]
 pub(crate) struct PyFaultHotspot {
     location_id: String,
@@ -342,6 +345,7 @@ impl PyFaultHotspot {
     }
 }
 
+/// Logical-failure estimate and forward-circuit hotspot aggregates.
 #[pyclass(name = "FailureEstimate", module = "faultscope._native", frozen)]
 pub(crate) struct PyFailureEstimate {
     shots: usize,
@@ -552,6 +556,7 @@ impl PyFailureEstimate {
     }
 }
 
+/// Metadata associated with one detector-error-model location.
 #[pyclass(name = "DemLocationMetadata", module = "faultscope._native", frozen)]
 pub(crate) struct PyDemLocationMetadata {
     id: String,
@@ -592,6 +597,7 @@ impl PyDemLocationMetadata {
     }
 }
 
+/// Aggregated DEM hotspot for one location.
 #[pyclass(name = "DemLocationHotspot", module = "faultscope._native", frozen)]
 pub(crate) struct PyDemLocationHotspot {
     location_id: String,
@@ -648,6 +654,7 @@ impl PyDemLocationHotspot {
     }
 }
 
+/// Sensitivity and hotspot score for one DEM edge.
 #[pyclass(name = "DemEdgeHotspot", module = "faultscope._native", frozen)]
 pub(crate) struct PyDemEdgeHotspot {
     edge_index: usize,
@@ -738,6 +745,7 @@ impl PyDemEdgeHotspot {
     }
 }
 
+/// Detector-graph projection of one DEM edge hotspot.
 #[pyclass(
     name = "DetectorGraphEdgeHotspot",
     module = "faultscope._native",
@@ -841,6 +849,7 @@ impl PyDetectorGraphEdgeHotspot {
     }
 }
 
+/// Detector-graph hotspot aggregates.
 #[pyclass(name = "DetectorGraphHotspots", module = "faultscope._native", frozen)]
 pub(crate) struct PyDetectorGraphHotspots {
     edge_hotspots: Py<PyAny>,
@@ -1045,6 +1054,7 @@ pub(crate) fn detector_graph_hotspots_object(
     .into_any())
 }
 
+/// Logical-failure estimate and detector-error-model hotspot aggregates.
 #[pyclass(name = "DemHotspotEstimate", module = "faultscope._native", frozen)]
 pub(crate) struct PyDemHotspotEstimate {
     dem: Py<PyAny>,

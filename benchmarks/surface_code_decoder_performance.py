@@ -210,16 +210,18 @@ def main() -> None:
                     metadata,
                     seed,
                 ),
-                "faultscope-dem-pymatching-native": lambda seed: run_faultscope_dem_pymatching_native(
-                    faultscope_dem,
-                    args.basis,
-                    distance,
-                    rounds,
-                    p,
-                    args.shots,
-                    metadata,
-                    seed,
-                    args.split_native_baseline,
+                "faultscope-dem-pymatching-native": lambda seed: (
+                    run_faultscope_dem_pymatching_native(
+                        faultscope_dem,
+                        args.basis,
+                        distance,
+                        rounds,
+                        p,
+                        args.shots,
+                        metadata,
+                        seed,
+                        args.split_native_baseline,
+                    )
                 ),
                 "faultscope-dem-mwpm": lambda seed: run_faultscope_dem_mwpm(
                     faultscope_dem,
@@ -247,10 +249,7 @@ def main() -> None:
             for repeat in range(args.repeats):
                 for path_index, path in enumerate(paths):
                     seed = (
-                        args.seed
-                        + 100_000_000 * repeat
-                        + 1_000_000 * distance
-                        + 1_000 * rate_index
+                        args.seed + 100_000_000 * repeat + 1_000_000 * distance + 1_000 * rate_index
                     )
                     if not args.same_seed_across_paths:
                         seed += path_index
@@ -548,9 +547,7 @@ def run_native_decoder(
         aggregate_hotspots=False,
     )
     estimate_s = time.perf_counter() - started
-    decoder_delta_s = (
-        max(0.0, estimate_s - baseline_s) if baseline_s is not None else estimate_s
-    )
+    decoder_delta_s = max(0.0, estimate_s - baseline_s) if baseline_s is not None else estimate_s
 
     python_decode_calls = int(getattr(decoder, "python_decode_call_count", -1))
     status = "ok" if python_decode_calls == 0 else "python-callback-used"
@@ -641,9 +638,7 @@ def stim_dem_to_graphlike_faultscope_dem(stim_dem: Any) -> DetectorErrorModel:
             raw_coords = [float(coord) for coord in instruction.args_copy()]
             if len(raw_coords) > len(coord_offsets):
                 coord_offsets.extend([0.0] * (len(raw_coords) - len(coord_offsets)))
-            coords = tuple(
-                coord + coord_offsets[index] for index, coord in enumerate(raw_coords)
-            )
+            coords = tuple(coord + coord_offsets[index] for index, coord in enumerate(raw_coords))
             for target in instruction.targets_copy():
                 if not target.is_relative_detector_id():
                     raise ValueError(f"unsupported detector target {target!r}")
@@ -682,8 +677,7 @@ def stim_dem_to_graphlike_faultscope_dem(stim_dem: Any) -> DetectorErrorModel:
     return DetectorErrorModel(
         detectors=tuple(detectors_by_id[key] for key in sorted(detectors_by_id)),
         observables=tuple(
-            LogicalObservable(id=observable_id)
-            for observable_id in sorted(observable_ids)
+            LogicalObservable(id=observable_id) for observable_id in sorted(observable_ids)
         ),
         edges=tuple(edges),
     )
@@ -777,10 +771,7 @@ def parse_paths(raw_paths: list[str]) -> tuple[str, ...]:
     unknown = sorted(set(paths) - set(PATHS))
     if unknown:
         raise SystemExit(
-            "unknown path(s): "
-            + ", ".join(unknown)
-            + "; expected one of "
-            + ", ".join(PATHS)
+            "unknown path(s): " + ", ".join(unknown) + "; expected one of " + ", ".join(PATHS)
         )
     return tuple(dict.fromkeys(paths))
 

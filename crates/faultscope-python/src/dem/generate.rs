@@ -1,6 +1,7 @@
 use crate::*;
 use faultscope_core::DetectorErrorModelGenerator as CoreDetectorErrorModelGenerator;
 
+/// Compiles a circuit into a detector error model.
 #[pyclass(name = "DetectorErrorModelGenerator", module = "faultscope._native")]
 pub(crate) struct PyDetectorErrorModelGenerator {
     py_circuit: Py<PyAny>,
@@ -85,7 +86,10 @@ pub(crate) fn detector_error_model_lazy_to_py(
     Ok(PyDetectorErrorModel::from_core_lazy_dem(dem))
 }
 
-pub(crate) fn dem_event_to_py(py: Python<'_>, event: &faultscope_core::DemEvent) -> PyResult<Py<PyAny>> {
+pub(crate) fn dem_event_to_py(
+    py: Python<'_>,
+    event: &faultscope_core::DemEvent,
+) -> PyResult<Py<PyAny>> {
     match event {
         faultscope_core::DemEvent::Pauli(pauli) => Ok(PyString::new(py, pauli).into_any().unbind()),
         faultscope_core::DemEvent::Bool(value) => {

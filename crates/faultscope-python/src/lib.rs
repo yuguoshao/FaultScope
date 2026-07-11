@@ -5,9 +5,10 @@ pub(crate) use pyo3::types::{
 };
 pub(crate) use std::collections::{HashMap, HashSet};
 
-pub(crate) const NATIVE_KERNEL_VERSION: &str = "0.1.0";
+pub(crate) const NATIVE_KERNEL_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 mod api;
+mod collection_api;
 mod core_api;
 mod decoder_api;
 mod dem {
@@ -25,6 +26,7 @@ mod runtime {
 mod spec;
 
 pub(crate) use api::*;
+pub(crate) use collection_api::*;
 pub(crate) use core_api::*;
 pub(crate) use decoder_api::*;
 pub(crate) use dem::generate::*;

@@ -1,8 +1,13 @@
 [package]
 name = "faultscope-pymatching-python"
-version = "0.1.0"
-edition = "2021"
-license = "MIT"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Native PyMatching decoder plugin for FaultScope"
+publish = false
 
 [lib]
 name = "faultscope_pymatching_native"
@@ -10,8 +15,8 @@ crate-type = ["cdylib"]
 test = false
 
 [dependencies]
-faultscope-core = { path = "../../crates/faultscope-core" }
-pyo3 = { version = "0.23", features = ["extension-module"] }
+faultscope-core = { version = "0.1.0", path = "../../crates/faultscope-core" }
+pyo3 = { version = "0.23", features = ["extension-module", "abi3-py310"] }
 
 [build-dependencies]
 cc = "1"

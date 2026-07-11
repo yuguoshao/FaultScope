@@ -96,8 +96,7 @@ def _validate_distances(distances: list[int]) -> None:
     if invalid:
         values = ", ".join(str(distance) for distance in invalid)
         raise SystemExit(
-            "surface-code DEM benchmark distances must be odd integers >= 3; "
-            f"got {values}"
+            f"surface-code DEM benchmark distances must be odd integers >= 3; got {values}"
         )
 
 
@@ -350,10 +349,7 @@ def _append_surface_memory_checks(
 ) -> None:
     for check in checks:
         check_id = str(check["id"])
-        qubits = tuple(
-            _data_index(distance, row, col)
-            for row, col in check["data"]
-        )
+        qubits = tuple(_data_index(distance, row, col) for row, col in check["data"])
         location = None
         if noise:
             location = NoiseLocation(

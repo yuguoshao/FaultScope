@@ -4,11 +4,14 @@ build-backend = "maturin"
 
 [project]
 name = "faultscope-fusion-blossom"
-version = "0.1.0"
+dynamic = ["version"]
 description = "Official FaultScope fusion-blossom native decoder backend"
 requires-python = ">=3.10"
+readme = "README.md"
+license = { file = "../../LICENSE" }
+authors = [{ name = "FaultScope contributors" }]
 dependencies = [
-    "faultscope",
+    "faultscope>=0.1,<0.2",
 ]
 
 [tool.maturin]

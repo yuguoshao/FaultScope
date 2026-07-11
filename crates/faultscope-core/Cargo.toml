@@ -2,8 +2,15 @@
 name = "faultscope-core"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+authors.workspace = true
+description = "Python-independent circuit, DEM, sampling, and decoder primitives for FaultScope"
+documentation = "https://docs.rs/faultscope-core"
+readme = "README.md"
+keywords = ["quantum-error-correction", "simulation", "decoder"]
+categories = ["science", "simulation"]
 
 [lib]
 name = "faultscope_core"
@@ -15,3 +22,6 @@ decoder-bposd = []
 
 [dependencies]
 rand = { version = "0.9.2", features = ["small_rng"] }
+
+[package.metadata.docs.rs]
+all-features = true

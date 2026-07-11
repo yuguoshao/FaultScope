@@ -844,6 +844,7 @@ class NoiseAwareSimulatorTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             PauliChannel({"X": 1.0, "ZZ": 1.0})
 
+
 class BatchNoiseAwareSimulatorTests(unittest.TestCase):
     def test_batch_score_function_estimates_single_x_noise_gradient(self) -> None:
         location = NoiseLocation(
@@ -1799,9 +1800,7 @@ class NativeDetectorErrorModelTests(unittest.TestCase):
         dem = DetectorErrorModel(
             detectors=(Detector(id=0, measurement_keys=()),),
             observables=(LogicalObservable(id=0),),
-            edges=(
-                DetectorErrorEdge(0.2, (0,), (0,), "edge0", "X"),
-            ),
+            edges=(DetectorErrorEdge(0.2, (0,), (0,), "edge0", "X"),),
         )
         decoder = NativeNoCorrectionDecoder(observable_ids=(0,), detector_ids=(0,))
 
@@ -1820,9 +1819,7 @@ class NativeDetectorErrorModelTests(unittest.TestCase):
         dem = DetectorErrorModel(
             detectors=(Detector(id=0, measurement_keys=()),),
             observables=(LogicalObservable(id=0),),
-            edges=(
-                DetectorErrorEdge(0.2, (0,), (0,), "edge0", "X"),
-            ),
+            edges=(DetectorErrorEdge(0.2, (0,), (0,), "edge0", "X"),),
         )
         decoder = NativeGraphlikeDetectorCopyDecoder.from_dem(dem)
 
@@ -1863,9 +1860,7 @@ class NativeDetectorErrorModelTests(unittest.TestCase):
         dem = DetectorErrorModel(
             detectors=(Detector(id=0, measurement_keys=()),),
             observables=(LogicalObservable(id=0),),
-            edges=(
-                DetectorErrorEdge(0.2, (0,), (0,), "edge0", "X"),
-            ),
+            edges=(DetectorErrorEdge(0.2, (0,), (0,), "edge0", "X"),),
         )
         decoder = NativeGraphlikeDetectorCopyDecoder.from_dem(dem)
 
@@ -2732,16 +2727,12 @@ class HotspotVisualizationTests(unittest.TestCase):
         hot_data = (1, 1)
         hot_measurement = (2, 0)
         data_rates = {
-            (round_idx, data_idx): (
-                0.18 if (round_idx, data_idx) == hot_data else 0.04
-            )
+            (round_idx, data_idx): (0.18 if (round_idx, data_idx) == hot_data else 0.04)
             for round_idx in range(rounds)
             for data_idx in range(distance)
         }
         measurement_rates = {
-            (round_idx, check_idx): (
-                0.16 if (round_idx, check_idx) == hot_measurement else 0.03
-            )
+            (round_idx, check_idx): (0.16 if (round_idx, check_idx) == hot_measurement else 0.03)
             for round_idx in range(rounds)
             for check_idx in range(distance - 1)
         }
@@ -2942,9 +2933,7 @@ class HotspotVisualizationTests(unittest.TestCase):
                 location_id = str(check["id"])
                 x_coord = float(check["x"])
                 y_coord = float(check["y"])
-                hotspot = 0.015 + 0.012 * (
-                    (len(location_id) + int(10 * x_coord)) % 4
-                )
+                hotspot = 0.015 + 0.012 * ((len(location_id) + int(10 * x_coord)) % 4)
                 if location_id == "z_check_2_2":
                     hotspot = 0.36
                 locations[location_id] = NoiseLocation(
@@ -3016,10 +3005,7 @@ class HotspotVisualizationTests(unittest.TestCase):
             for check in z_checks:
                 check_id = str(check["id"])
                 data = tuple(check["data"])
-                qubits = tuple(
-                    _surface_data_index(distance, row, col)
-                    for row, col in data
-                )
+                qubits = tuple(_surface_data_index(distance, row, col) for row, col in data)
                 location = NoiseLocation(
                     id=f"meas_r{round_idx}_{check_id}",
                     model=MeasurementBitFlip(),
@@ -3084,18 +3070,12 @@ class HotspotVisualizationTests(unittest.TestCase):
         z_checks: list[dict[str, object]],
         matching,
     ):
-        logical_path = tuple(
-            _surface_data_index(distance, row, 0)
-            for row in range(distance)
-        )
+        logical_path = tuple(_surface_data_index(distance, row, 0) for row in range(distance))
 
         def loss_mask_fn(batch):
             final_round = rounds - 1
             syndromes = [
-                [
-                    batch.measurement_bit(f"r{final_round}_{check['id']}", shot)
-                    for check in z_checks
-                ]
+                [batch.measurement_bit(f"r{final_round}_{check['id']}", shot) for check in z_checks]
                 for shot in range(batch.shots)
             ]
             predictions = matching.decode_batch(syndromes)

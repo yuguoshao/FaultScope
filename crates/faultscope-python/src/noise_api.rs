@@ -5,6 +5,7 @@ const TWO_QUBIT_EVENTS: [&str; 15] = [
     "IX", "IY", "IZ", "XI", "XX", "XY", "XZ", "YI", "YX", "YY", "YZ", "ZI", "ZX", "ZY", "ZZ",
 ];
 
+/// Bernoulli Pauli error model with one named Pauli event.
 #[pyclass(name = "BernoulliPauliNoise", module = "faultscope._native", frozen)]
 pub(crate) struct PyBernoulliPauliNoise {
     pub(crate) pauli: String,
@@ -58,6 +59,7 @@ impl PyBernoulliPauliNoise {
     }
 }
 
+/// Weighted Pauli channel used by circuit noise locations.
 #[pyclass(name = "PauliChannel", module = "faultscope._native", frozen)]
 pub(crate) struct PyPauliChannel {
     pub(crate) weights: Vec<(String, f64)>,
@@ -145,6 +147,7 @@ impl PyPauliChannel {
     }
 }
 
+/// Uniform single-qubit depolarizing noise model.
 #[pyclass(
     name = "SingleQubitDepolarizing",
     module = "faultscope._native",
@@ -200,6 +203,7 @@ impl PySingleQubitDepolarizing {
     }
 }
 
+/// Uniform two-qubit depolarizing noise model.
 #[pyclass(name = "TwoQubitDepolarizing", module = "faultscope._native", frozen)]
 pub(crate) struct PyTwoQubitDepolarizing {
     events: Vec<String>,
@@ -269,6 +273,7 @@ impl PyTwoQubitDepolarizing {
     }
 }
 
+/// Classical measurement-bit flip noise model.
 #[pyclass(name = "MeasurementBitFlip", module = "faultscope._native", frozen)]
 pub(crate) struct PyMeasurementBitFlip;
 

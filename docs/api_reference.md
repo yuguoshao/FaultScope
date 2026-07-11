@@ -6,12 +6,20 @@ FaultScope is a Rust Cargo workspace with a Python API. The product runtime live
 declarations represent detector matrix rows, generated DEM edges are columns of
 the detector error matrix \(H=D\Omega\), and decoder-ready views expose that
 sparse binary structure. User code should import from the public Python modules:
-`faultscope`, `faultscope.core`, `faultscope.runtime`, `faultscope.dem`, `faultscope.decoders`,
-`faultscope.io`, and `faultscope.viz`.
+`faultscope`, `faultscope.core`, `faultscope.runtime`, `faultscope.dem`,
+`faultscope.collection`, `faultscope.decoders`, `faultscope.io`, and
+`faultscope.viz`.
 
-The package is pre-1.0. Python source-level compatibility is the main user
-compatibility target. The Rust core API is public and typed, but may still move
-while the core stabilizes.
+The package is pre-1.0. Within `0.1.x`, names listed in public Python module
+`__all__` values and the documented root APIs of `faultscope-core` and
+`faultscope-collection` are compatibility contracts. Compatible additions may
+land in patch releases. Removal or renaming requires deprecation before a later
+minor release. Private modules and names beginning with `_` are implementation
+details.
+
+`faultscope.__version__` reports the installed distribution version. The Python
+package includes `py.typed` and a generated structural stub for the private
+PyO3 extension so public wrappers remain type-checkable.
 
 ## Import Surface
 
@@ -32,6 +40,15 @@ from faultscope import (
     NativeMwpmDecoder,
     NativePyMatchingDecoder,
     PyMatchingDecoder,
+    Collector,
+    CollectionOptions,
+    CollectionRunOptions,
+    CollectionTask,
+    Progress,
+    TaskStats,
+    collect,
+    iter_collect,
+    iter_progress,
 )
 ```
 
@@ -572,6 +589,288 @@ result = dem_sim.estimate(shots=128, seed=4, top_k=1)
 print(batch.detector_bit(0, 0))
 print(result.top_edges(1)[0].edge_index)
 ```
+
+## Collection API
+
+`faultscope.collection` provides native-first logical error-rate collection for
+threshold sweeps. The public Python API is:
+
+```python
+from faultscope.collection import (
+    COLLECTION_CSV_FIELDS,
+    COLLECTION_CSV_HEADER,
+    CollectionData,
+    CollectionOptions,
+    CollectionTask,
+    Progress,
+    TaskStats,
+    FiniteSizeScalingFit,
+    PairwiseCrossing,
+    ThresholdAnalysisResult,
+    ThresholdEstimate,
+    ThresholdPoint,
+    analyze_thresholds,
+    collect,
+    iter_collect,
+    plot_threshold_analysis,
+    read_stats_from_csv_files,
+    write_stats_to_csv_file,
+)
+```
+
+The top-level `faultscope` collection exports are `Collector`,
+`CollectionOptions`, `CollectionRunOptions`, `CollectionTask`, `Progress`,
+`TaskStats`, `collect`, `iter_collect`, and `iter_progress`.
+Threshold analysis types and helpers are exported from `faultscope.collection`
+only, not from top-level `faultscope`.
+
+`CollectionOptions` is a frozen dataclass:
+
+```text
+CollectionOptions(
+    max_shots: int | None = None,
+    max_errors: int | None = None,
+    batch_size: int = 10_000,
+    start_batch_size: int | None = None,
+    max_batch_size: int | None = None,
+    max_batch_seconds: float | None = None,
+)
+```
+
+`max_shots`, `batch_size`, `start_batch_size`, `max_batch_size`, and
+`max_batch_seconds` must be positive when set. `max_errors` must be
+non-negative when set. `max_shots` is required after merging the Collector's
+base options with per-task options.
+
+`CollectionRunOptions` is a frozen dataclass:
+
+```text
+CollectionRunOptions(
+    seed: int | None = None,
+    num_workers: int = 1,
+    existing_data_filepaths: tuple[str | Path, ...] = (),
+    save_resume_filepath: str | Path | None = None,
+    count_observable_error_combos: bool = False,
+    count_detection_events: bool = False,
+    custom_error_count_key: str | None = None,
+    decoders: tuple[str | object, ...] = (),
+)
+```
+
+`num_workers` must be positive. The run seed is passed once to the Rust
+scheduler, which derives deterministic task-local streams from each strong id.
+
+`CollectionTask` is a frozen dataclass:
+
+```text
+CollectionTask(
+    circuit: Circuit | None = None,
+    dem: DetectorErrorModel | None = None,
+    detectors: tuple[Detector, ...] | None = None,
+    observables: tuple[LogicalObservable, ...] | None = None,
+    decoder: object | str | None = None,
+    decoder_options: Mapping[str, object] | None = None,
+    metadata: Mapping[str, object] | None = None,
+    collection_options: CollectionOptions | None = None,
+    task_id: str | None = None,
+    postselection_mask: bytes | bytearray | memoryview | None = None,
+    postselected_observables_mask: bytes | bytearray | memoryview | None = None,
+)
+```
+
+Exactly one of `circuit` or `dem` is required. Circuit tasks compile a
+materialized native DEM sampler, using embedded declarations unless explicit
+`detectors` or `observables` are supplied. String decoders are resolved with
+`create_native_decoder(name, dem=dem, options=decoder_options)`. Object decoders
+must be native decoder handles; Python decoders are rejected by collection.
+
+`TaskStats` is a frozen dataclass:
+
+```text
+TaskStats(
+    task_id: str,
+    shots: int,
+    errors: int,
+    discards: int,
+    seconds: float,
+    decoder: str | None,
+    metadata: Mapping[str, object],
+    strong_id: str = "",
+    custom_counts: Mapping[str, int] = {},
+)
+```
+
+Properties:
+
+- `accepted_shots = shots - discards`
+- `raw_error_rate = errors / shots`
+- `accepted_error_rate = errors / accepted_shots`
+- `logical_error_rate = errors / accepted_shots`
+- `accepted_error_rate_stderr = sqrt(p * (1 - p) / accepted_shots)`
+- `logical_error_rate_stderr = accepted_error_rate_stderr`
+
+If `accepted_shots` is zero, accepted/logical rates and their standard errors
+return `nan`. If `shots` is zero, `raw_error_rate` returns `nan`.
+`TaskStats` also provides `with_edits(...)`, `to_csv_row()`,
+`to_csv_line()`, `from_csv_row(...)`, and `__add__` for validated merging by
+`strong_id`, decoder, and metadata. Normal `TaskStats` equality is the frozen
+dataclass field equality. `__add__` treats `task_id` as display-only: stats may
+merge with different display ids when `strong_id`, decoder, and metadata match.
+
+`Progress` is a frozen dataclass used by streaming collection:
+
+```text
+Progress(
+    new_stats: tuple[TaskStats, ...],
+    status_message: str,
+)
+```
+
+`new_stats` contains committed batch-delta `TaskStats` objects, not detector or
+correction batch data.
+
+Collection functions:
+
+```text
+Collector(*, options=None, run_options=None)
+
+Collector.collect(tasks) -> list[TaskStats]
+Collector.iter_collect(tasks) -> Iterator[TaskStats]
+Collector.iter_progress(tasks) -> Iterator[Progress]
+
+iter_collect(
+    tasks,
+    *,
+    options=None,
+    run_options=None,
+) -> Iterator[TaskStats]
+
+iter_progress(tasks, *, options=None, run_options=None) -> Iterator[Progress]
+collect(tasks, *, options=None, run_options=None) -> list[TaskStats]
+```
+
+The functions are one-shot wrappers around `Collector`. Sampling options come
+from the Collector and are overlaid by each task's `collection_options`. The
+final batch is capped to the remaining shot budget. `max_errors` and
+`custom_error_count_key` stopping are checked after each completed batch.
+
+`num_workers` defaults to `1`. With fixed batch settings, the Rust scheduler can
+parallelize both multiple tasks and a single large task. Fixed seed plus fixed
+batch settings gives deterministic stats independent of worker count.
+Adaptive tasks using `max_batch_seconds` execute two or three serial calibration
+batches, freeze the median-throughput batch estimate, and parallelize the
+remaining fixed-size batches through the same worker pool. Calibration and
+parallel deltas are committed in order and obey the same shot/error limits.
+Because calibration uses elapsed time, adaptive runs do not promise identical
+error counts across worker counts or machine loads.
+
+`iter_collect(...)` yields final `TaskStats` only. `iter_progress(...)` yields
+committed batch-delta `Progress` values only. Stream deltas are emitted after
+Rust commits batches in task-local ordinal order and after configured resume
+CSV output is flushed. Deltas that complete after a stop condition are not
+emitted or counted.
+
+`CollectionRunOptions.decoders` is a tuple of decoder names or native decoder
+objects. Tasks with `decoder is None` are expanded once per fanout decoder;
+tasks that already specify `decoder=` keep their own decoder. String decoders
+are resolved through `create_native_decoder(...)`.
+
+`save_resume_filepath` and `existing_data_filepaths` use CSV rows with this
+header:
+
+```text
+shots,errors,discards,seconds,decoder,strong_id,json_metadata,custom_counts
+```
+
+CSV/resume orchestration is Python-owned and outside the native sampling hot
+path. Existing rows are merged by `strong_id`; mismatched decoder or metadata
+for the same `strong_id` raises `ValueError`. A completed resume task is not
+sampled again, and only newly collected deltas are appended. CSV rows do not
+persist a display `task_id`, so `TaskStats.from_csv_row(...)` reconstructs
+`task_id` from `strong_id`.
+
+Public CSV utilities:
+
+```text
+COLLECTION_CSV_FIELDS
+COLLECTION_CSV_HEADER
+CollectionData(stats=())
+read_stats_from_csv_files(*filepaths) -> list[TaskStats]
+write_stats_to_csv_file(filepath, stats, *, append=False) -> None
+```
+
+`CollectionData` merges samples by `strong_id` using the same validation as
+`TaskStats.__add__`. `read_stats_from_csv_files(...)` rejects malformed headers,
+negative `shots`/`errors`/`discards`/`seconds`, negative custom counts,
+non-object `custom_counts`, and non-integer custom count values.
+
+Analysis helpers are available from `faultscope.collection.analysis`:
+
+```text
+error_rate_points(stats, *, x_key, group_key=None, count_key=None)
+fit_log_error_rate_lines(points, *, x_key, group_key)
+predict_error_rate(fit, x)
+plot_error_rates(stats, *, x_key, group_key=None, output=None, ax=None, count_key=None)
+```
+
+Plotting lazily imports matplotlib and raises an install hint when the optional
+collection plotting dependencies are unavailable.
+
+Threshold analysis helpers are available from `faultscope.collection` and
+`faultscope.collection.threshold`:
+
+```text
+analyze_thresholds(
+    stats,
+    *,
+    x_key,
+    distance_key,
+    series_keys=(),
+    count_key=None,
+    bootstrap_samples=1000,
+    confidence_level=0.95,
+    seed=0,
+    scaling_order=2,
+) -> tuple[ThresholdAnalysisResult, ...]
+
+plot_threshold_analysis(results, *, output=None, axes=None, log_y=True) -> (figure, axes)
+```
+
+`ThresholdPoint.rate` is the raw logical rate `errors / accepted_shots`, and
+`ThresholdPoint.stderr` is its binomial standard error. Pairwise interpolation,
+finite-size logit fitting, and bootstrap resampling use the private continuity
+correction `(errors + 0.5) / (accepted_shots + 1)` so zero- and one-rate points
+remain finite. Data is grouped by `series_keys`.
+`PairwiseCrossing.status` is `"ok"`, `"no_crossing"`, or `"ambiguous"`.
+`FiniteSizeScalingFit.status` is `"ok"`, `"insufficient_data"`,
+`"fit_failed"`, or `"bootstrap_unstable"`. These statuses are diagnostics, not
+exceptions; invalid inputs and missing optional dependencies still raise.
+
+`plot_threshold_analysis(...)` accepts one result or an iterable of results and
+rejects empty input. With `axes=None`, it creates an `n x 2` grid. Supplied axes
+must have exact shape `(n, 2)`. The left panel plots raw-rate curves by
+distance with pairwise crossings and scaling threshold diagnostics; the right
+panel plots finite-size collapse when a scaling threshold and critical exponent
+exist, otherwise it annotates the scaling status. `output=` saves with
+`bbox_inches="tight"`. With `log_y=True`, a series containing raw zero-rate
+points uses a symmetric-log scale so those observations remain visible;
+strictly positive series use a logarithmic scale. Matplotlib is imported lazily
+and missing dependencies raise an install hint for `faultscope[collection]`.
+
+Postselection masks are bytes-like bit-packed masks over the native detector or
+observable order. Detector postselection discards any shot where a selected
+detector fired. Observable postselection discards any shot where the decoder
+residual is nonzero on a selected observable. Logical errors are counted only on
+accepted shots and only on non-postselected residual observables.
+
+Custom counts:
+
+- `count_observable_error_combos=True` records accepted residual observable
+  combinations under keys such as `obs_mistake_mask=E_E__`.
+- `count_detection_events=True` records `detection_events` and
+  `detectors_checked`.
+- `custom_error_count_key="..."` makes `max_errors` use that custom count
+  instead of `errors`.
 
 ## Callback Contracts
 
