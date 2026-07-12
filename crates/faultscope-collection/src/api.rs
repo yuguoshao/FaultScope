@@ -11,6 +11,7 @@ use faultscope_core::{DemHotspotEstimator, NativeBatchDecoder, NpError, NpResult
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct DemLogicalCollectionOptions {
     pub max_shots: usize,
+    pub min_shots: usize,
     pub max_errors: Option<usize>,
     pub batch_size: usize,
     pub seed: Option<u64>,
@@ -119,7 +120,10 @@ pub fn collect_dem_logical_error_stats(
     let mut batch_ordinal = 0usize;
     let mut last_batch: Option<(usize, f64)> = None;
 
-    while shots_done < options.max_shots {
+    while shots_done < options.max_shots
+        && !(shots_done >= options.min_shots
+            && options.max_errors.is_some_and(|limit| errors >= limit))
+    {
         let batch_shots = next_batch_size(options, shots_done, last_batch);
         let mut batch_rng = SmallRng::new(batch_seed(options.seed, 0, batch_ordinal));
         let batch_started = Instant::now();
@@ -136,7 +140,9 @@ pub fn collect_dem_logical_error_stats(
         errors += batch_stats.errors;
         last_batch = Some((batch_shots, elapsed));
         batch_ordinal += 1;
-        if options.max_errors.is_some_and(|limit| errors >= limit) {
+        if shots_done >= options.min_shots
+            && options.max_errors.is_some_and(|limit| errors >= limit)
+        {
             break;
         }
     }
@@ -228,6 +234,9 @@ pub(crate) fn validate_task(task: &DemLogicalCollectionTask) -> NpResult<()> {
 fn validate_collection_options(options: DemLogicalCollectionOptions) -> NpResult<()> {
     if options.max_shots == 0 {
         return Err(NpError::new("max_shots must be positive"));
+    }
+    if options.min_shots > options.max_shots {
+        return Err(NpError::new("min_shots must not exceed max_shots"));
     }
     if options.batch_size == 0 {
         return Err(NpError::new("batch_size must be positive"));

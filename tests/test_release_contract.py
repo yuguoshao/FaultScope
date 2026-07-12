@@ -27,6 +27,7 @@ from faultscope.collection import (
     CollectionRunOptions,
     CollectionTask,
     FiniteSizeScalingFit,
+    HotspotCollectionResult,
     PairwiseCrossing,
     Progress,
     TaskStats,
@@ -35,6 +36,7 @@ from faultscope.collection import (
     ThresholdPoint,
     analyze_thresholds,
     collect,
+    collect_hotspots,
     iter_collect,
     iter_progress,
     plot_threshold_analysis,
@@ -87,6 +89,7 @@ class ReleaseContractTests(unittest.TestCase):
     def test_public_python_function_signatures_are_frozen_for_v0_1(self) -> None:
         expected_parameters = {
             collect: ("tasks", "options", "run_options"),
+            collect_hotspots: ("tasks", "options", "run_options"),
             iter_collect: ("tasks", "options", "run_options"),
             iter_progress: ("tasks", "options", "run_options"),
             analyze_thresholds: (
@@ -129,6 +132,7 @@ class ReleaseContractTests(unittest.TestCase):
                 "start_batch_size",
                 "max_batch_size",
                 "max_batch_seconds",
+                "min_shots",
             ),
             CollectionRunOptions: (
                 "seed",
@@ -164,6 +168,11 @@ class ReleaseContractTests(unittest.TestCase):
                 "metadata",
                 "strong_id",
                 "custom_counts",
+            ),
+            HotspotCollectionResult: (
+                "stats",
+                "batch_stats",
+                "edge_sensitivities",
             ),
             Progress: ("new_stats", "status_message"),
             ThresholdPoint: ("x", "distance", "shots", "errors", "rate", "stderr"),
@@ -224,7 +233,7 @@ class ReleaseContractTests(unittest.TestCase):
         )
         self.assertEqual(
             sorted(name for name in Collector.__dict__ if not name.startswith("_")),
-            ["collect", "iter_collect", "iter_progress"],
+            ["collect", "collect_hotspots", "iter_collect", "iter_progress"],
         )
         self.assertEqual(
             sorted(name for name in ThresholdAnalysisResult.__dict__ if not name.startswith("_")),

@@ -2,6 +2,7 @@
 
 mod api;
 mod counting;
+mod hotspot;
 mod scheduler;
 
 pub use api::{
@@ -10,3 +11,4 @@ pub use api::{
     DemLogicalCollectionOptions, DemLogicalCollectionRunOptions, DemLogicalCollectionStats,
     DemLogicalCollectionTask,
 };
+pub use hotspot::{collect_dem_hotspot_tasks, DemHotspotCollectionResult};

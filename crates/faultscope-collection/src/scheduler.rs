@@ -84,6 +84,7 @@ struct TaskState {
     task: Arc<DemLogicalCollectionTask>,
     stats: DemLogicalCollectionStats,
     target_shots: usize,
+    min_shots: usize,
     stop_error_limit: Option<usize>,
     specs: Vec<usize>,
     next_scheduled: usize,
@@ -301,6 +302,7 @@ fn make_task_state(
     run_options: &DemLogicalCollectionRunOptions,
 ) -> NpResult<TaskState> {
     let target_shots = task.options.max_shots;
+    let min_shots = task.options.min_shots;
     let stop_error_limit = task.options.max_errors;
     let resume_shots = stats.shots;
     let remaining_shots = target_shots.saturating_sub(stats.shots);
@@ -310,6 +312,7 @@ fn make_task_state(
             task: Arc::new(task),
             stats,
             target_shots,
+            min_shots,
             stop_error_limit,
             specs: Vec::new(),
             next_scheduled: 0,
@@ -344,6 +347,7 @@ fn make_task_state(
         task: Arc::new(adjusted),
         stats,
         target_shots,
+        min_shots,
         stop_error_limit,
         specs,
         next_scheduled: 0,
@@ -365,6 +369,7 @@ fn adjusted_task_for_remaining(
 ) -> NpResult<DemLogicalCollectionTask> {
     let remaining_shots = task.options.max_shots.saturating_sub(stats.shots);
     task.options.max_shots = remaining_shots;
+    task.options.min_shots = task.options.min_shots.saturating_sub(stats.shots);
     if let Some(max_errors) = task.options.max_errors {
         let current = stop_error_count(stats, &run_options.custom_error_count_key);
         if current >= max_errors {
@@ -555,9 +560,10 @@ fn commit_ready_batches(
 
 fn reached_task_limit(state: &TaskState, run_options: &DemLogicalCollectionRunOptions) -> bool {
     state.stats.shots >= state.target_shots
-        || state.stop_error_limit.is_some_and(|limit| {
-            stop_error_count(&state.stats, &run_options.custom_error_count_key) >= limit
-        })
+        || (state.stats.shots >= state.min_shots
+            && state.stop_error_limit.is_some_and(|limit| {
+                stop_error_count(&state.stats, &run_options.custom_error_count_key) >= limit
+            }))
 }
 
 fn mark_state_complete(
@@ -677,9 +683,11 @@ fn calibrate_adaptive_task(
         observations.push((batch_shots, elapsed));
         batch_ordinal += 1;
 
-        if task.options.max_errors.is_some_and(|limit| {
-            stop_error_count(&stats, &run_options.custom_error_count_key) >= limit
-        }) {
+        if shots_done >= task.options.min_shots
+            && task.options.max_errors.is_some_and(|limit| {
+                stop_error_count(&stats, &run_options.custom_error_count_key) >= limit
+            })
+        {
             break;
         }
         if shots_done >= task.options.max_shots {
@@ -858,9 +866,10 @@ fn task_is_complete(
     custom_error_count_key: &Option<String>,
 ) -> bool {
     stats.shots >= options.max_shots
-        || options
-            .max_errors
-            .is_some_and(|limit| stop_error_count(stats, custom_error_count_key) >= limit)
+        || (stats.shots >= options.min_shots
+            && options
+                .max_errors
+                .is_some_and(|limit| stop_error_count(stats, custom_error_count_key) >= limit))
 }
 
 fn collect_results(
@@ -909,6 +918,7 @@ mod tests {
     fn options() -> DemLogicalCollectionOptions {
         DemLogicalCollectionOptions {
             max_shots: 1_000,
+            min_shots: 0,
             max_errors: None,
             batch_size: 40,
             seed: Some(1),

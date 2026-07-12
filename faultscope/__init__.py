@@ -51,6 +51,7 @@ from faultscope.runtime import (
 )
 from faultscope.decoders import (
     NativeBatchDecoder,
+    NativeCompositeDecoder,
     NativeBpDecoder,
     NativeBposdDecoder,
     NativeDecoderBackendUnavailable,
@@ -79,9 +80,11 @@ from faultscope.collection import (
     CollectionOptions,
     CollectionRunOptions,
     CollectionTask,
+    HotspotCollectionResult,
     Progress,
     TaskStats,
     collect,
+    collect_hotspots,
     iter_collect,
     iter_progress,
 )
@@ -105,6 +108,7 @@ __all__ = [
     "CollectionOptions",
     "CollectionRunOptions",
     "CollectionTask",
+    "HotspotCollectionResult",
     "Collector",
     "FaultScopeSimulator",
     "SampleBatch",
@@ -129,6 +133,7 @@ __all__ = [
     "LogicalObservable",
     "MeasurementBitFlip",
     "NativeBatchDecoder",
+    "NativeCompositeDecoder",
     "NativeBpDecoder",
     "NativeBposdDecoder",
     "NativeDecoderBackendUnavailable",
@@ -164,6 +169,7 @@ __all__ = [
     "compile_native_dem_sampler_from_circuit",
     "compile_native_sampler",
     "collect",
+    "collect_hotspots",
     "create_native_decoder",
     "generate_native_dem",
     "get_native_decoder_class",

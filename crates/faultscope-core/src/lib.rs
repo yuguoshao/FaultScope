@@ -31,7 +31,7 @@ pub use decoder::{
     FaultScopeNativeDecoderStringViewV1, FaultScopeNativeDecoderV1,
     FaultScopeNativeDetectorEventShotBatchViewV1, FaultScopeNativeDetectorMaskBatchViewV1,
     FaultScopeNativePackedDetectorShotBatchViewV1,
-    FaultScopeNativePackedObservableShotBatchMutViewV1, NativeBatchDecoder,
+    FaultScopeNativePackedObservableShotBatchMutViewV1, NativeBatchDecoder, NativeCompositeDecoder,
     NativeGraphlikeDetectorCopyDecoder, NativeNoCorrectionDecoder, PackedDetectorShotBatchView,
     PackedObservableShotBatch, NATIVE_DECODER_PLUGIN_ABI_NAME, NATIVE_DECODER_PLUGIN_ABI_VERSION,
     NATIVE_DECODER_PLUGIN_CAPSULE_METHOD, NATIVE_DECODER_PLUGIN_CAPSULE_NAME,

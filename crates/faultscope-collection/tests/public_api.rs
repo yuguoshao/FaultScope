@@ -280,6 +280,7 @@ fn collection_api_collects_logical_error_stats() {
         &simulator,
         DemLogicalCollectionOptions {
             max_shots: 10,
+            min_shots: 0,
             max_errors: Some(1),
             batch_size: 4,
             seed: Some(7),
@@ -298,6 +299,24 @@ fn collection_api_collects_logical_error_stats() {
     let sample = sample_dem_logical_error_stats(&simulator, 3, Some(9), None).unwrap();
     assert_eq!(sample.shots, 3);
     assert_eq!(sample.errors, 3);
+
+    let zero = collect_dem_logical_error_stats(
+        &simulator,
+        DemLogicalCollectionOptions {
+            max_shots: 10,
+            min_shots: 0,
+            max_errors: Some(0),
+            batch_size: 4,
+            seed: Some(7),
+            start_batch_size: None,
+            max_batch_size: None,
+            max_batch_seconds: None,
+        },
+        None,
+    )
+    .unwrap();
+    assert_eq!(zero.shots, 0);
+    assert_eq!(zero.errors, 0);
 }
 
 #[test]
@@ -313,6 +332,7 @@ fn native_decoder_removes_graphlike_failures() {
         &simulator,
         DemLogicalCollectionOptions {
             max_shots: 16,
+            min_shots: 0,
             max_errors: None,
             batch_size: 5,
             seed: Some(11),
@@ -333,6 +353,7 @@ fn validates_options_and_repeats_seeded_runs() {
     let simulator = DemHotspotEstimator::new(logical_edge_dem(0.375)).unwrap();
     let options = DemLogicalCollectionOptions {
         max_shots: 128,
+        min_shots: 0,
         max_errors: None,
         batch_size: 17,
         seed: Some(123),
@@ -350,6 +371,7 @@ fn validates_options_and_repeats_seeded_runs() {
         &simulator,
         DemLogicalCollectionOptions {
             max_shots: 0,
+            min_shots: 0,
             max_errors: None,
             batch_size: 1,
             seed: None,
@@ -366,6 +388,7 @@ fn validates_options_and_repeats_seeded_runs() {
         &simulator,
         DemLogicalCollectionOptions {
             max_shots: 1,
+            min_shots: 0,
             max_errors: None,
             batch_size: 0,
             seed: None,
@@ -391,6 +414,7 @@ fn parallel_task_collection_is_seed_order_stable() {
         metadata_json: "{\"d\":3}".to_string(),
         options: DemLogicalCollectionOptions {
             max_shots: 200,
+            min_shots: 0,
             max_errors: None,
             batch_size: 25,
             seed: Some(19),
@@ -410,6 +434,7 @@ fn parallel_task_collection_is_seed_order_stable() {
         metadata_json: "{\"d\":5}".to_string(),
         options: DemLogicalCollectionOptions {
             max_shots: 200,
+            min_shots: 0,
             max_errors: None,
             batch_size: 20,
             seed: Some(23),
@@ -487,6 +512,7 @@ fn single_fixed_batch_task_uses_multiple_workers() {
         metadata_json: "{}".to_string(),
         options: DemLogicalCollectionOptions {
             max_shots: 64,
+            min_shots: 0,
             max_errors: None,
             batch_size: 8,
             seed: Some(29),
@@ -530,6 +556,7 @@ fn multiple_fixed_batch_tasks_share_global_worker_pool() {
         metadata_json: format!("{{\"index\":{index}}}"),
         options: DemLogicalCollectionOptions {
             max_shots: 64,
+            min_shots: 0,
             max_errors: None,
             batch_size: 8,
             seed: Some(53 + index as u64),
@@ -578,6 +605,7 @@ fn single_fixed_batch_task_matches_serial_stats() {
         metadata_json: "{}".to_string(),
         options: DemLogicalCollectionOptions {
             max_shots: 256,
+            min_shots: 0,
             max_errors: None,
             batch_size: 16,
             seed: Some(41),
@@ -631,6 +659,7 @@ fn fixed_batch_scheduler_preserves_committed_order_with_custom_counts() {
         metadata_json: format!("{{\"name\":\"{name}\"}}"),
         options: DemLogicalCollectionOptions {
             max_shots: 70,
+            min_shots: 0,
             max_errors: None,
             batch_size: 9,
             seed: Some(seed),
@@ -692,6 +721,7 @@ fn single_parallel_task_stops_after_completed_max_error_batch() {
         metadata_json: "{}".to_string(),
         options: DemLogicalCollectionOptions {
             max_shots: 64,
+            min_shots: 0,
             max_errors: Some(1),
             batch_size: 8,
             seed: Some(43),
@@ -731,6 +761,7 @@ fn progress_callback_receives_committed_fixed_batch_deltas_in_order() {
         metadata_json: "{}".to_string(),
         options: DemLogicalCollectionOptions {
             max_shots: 10,
+            min_shots: 0,
             max_errors: None,
             batch_size: 4,
             seed: Some(151),
@@ -790,6 +821,7 @@ fn fixed_batch_seconds_track_wall_time_and_preserve_resume_seconds() {
         metadata_json: "{}".to_string(),
         options: DemLogicalCollectionOptions {
             max_shots: 8,
+            min_shots: 0,
             max_errors: None,
             batch_size: 1,
             seed: Some(173),
@@ -869,6 +901,7 @@ fn progress_callback_stops_at_first_max_error_batch() {
         metadata_json: "{}".to_string(),
         options: DemLogicalCollectionOptions {
             max_shots: 64,
+            min_shots: 0,
             max_errors: Some(1),
             batch_size: 8,
             seed: Some(157),
@@ -914,6 +947,7 @@ fn progress_callback_receives_adaptive_task_deltas() {
         metadata_json: "{}".to_string(),
         options: DemLogicalCollectionOptions {
             max_shots: 9,
+            min_shots: 0,
             max_errors: None,
             batch_size: 3,
             seed: Some(163),
@@ -960,6 +994,7 @@ fn adaptive_progress_error_stops_before_next_batch() {
         metadata_json: "{}".to_string(),
         options: DemLogicalCollectionOptions {
             max_shots: 4,
+            min_shots: 0,
             max_errors: None,
             batch_size: 1,
             seed: Some(181),
@@ -1009,6 +1044,7 @@ fn progress_callback_error_propagates_after_joining_workers() {
         metadata_json: "{}".to_string(),
         options: DemLogicalCollectionOptions {
             max_shots: 32,
+            min_shots: 0,
             max_errors: None,
             batch_size: 4,
             seed: Some(167),
@@ -1058,6 +1094,7 @@ fn adaptive_batch_task_uses_multiple_workers_after_calibration() {
         metadata_json: "{}".to_string(),
         options: DemLogicalCollectionOptions {
             max_shots: 64,
+            min_shots: 0,
             max_errors: None,
             batch_size: 4,
             seed: Some(47),
@@ -1101,6 +1138,7 @@ fn adaptive_parallel_phase_stops_at_first_committed_error_batch() {
         metadata_json: "{}".to_string(),
         options: DemLogicalCollectionOptions {
             max_shots: 20,
+            min_shots: 0,
             max_errors: Some(1),
             batch_size: 4,
             seed: Some(191),
@@ -1153,6 +1191,7 @@ fn adaptive_calibration_stops_immediately_at_error_limit() {
         metadata_json: "{}".to_string(),
         options: DemLogicalCollectionOptions {
             max_shots: 20,
+            min_shots: 0,
             max_errors: Some(1),
             batch_size: 4,
             seed: Some(193),
@@ -1199,6 +1238,7 @@ fn adaptive_task_resumes_partial_existing_stats_to_target() {
         metadata_json: "{}".to_string(),
         options: DemLogicalCollectionOptions {
             max_shots: 20,
+            min_shots: 0,
             max_errors: None,
             batch_size: 4,
             seed: Some(197),
@@ -1255,6 +1295,7 @@ fn adaptive_seconds_and_progress_deltas_track_calibration_plus_parallel_wall_tim
         metadata_json: "{}".to_string(),
         options: DemLogicalCollectionOptions {
             max_shots: 10,
+            min_shots: 0,
             max_errors: None,
             batch_size: 1,
             seed: Some(211),
@@ -1314,6 +1355,7 @@ fn adaptive_parallel_phase_honors_custom_error_stop_counter() {
         metadata_json: "{}".to_string(),
         options: DemLogicalCollectionOptions {
             max_shots: 20,
+            min_shots: 0,
             max_errors: Some(6),
             batch_size: 4,
             seed: Some(223),
@@ -1357,6 +1399,7 @@ fn adaptive_calibration_propagates_decoder_errors() {
         metadata_json: "{}".to_string(),
         options: DemLogicalCollectionOptions {
             max_shots: 20,
+            min_shots: 0,
             max_errors: None,
             batch_size: 4,
             seed: Some(199),
@@ -1395,6 +1438,7 @@ fn global_scheduler_resumes_partial_existing_stats() {
         metadata_json: "{\"p\":1}".to_string(),
         options: DemLogicalCollectionOptions {
             max_shots: 16,
+            min_shots: 0,
             max_errors: None,
             batch_size: 4,
             seed: Some(59),
@@ -1446,6 +1490,7 @@ fn seeded_resume_does_not_replay_the_original_detector_batch() {
         metadata_json: "{}".to_string(),
         options: DemLogicalCollectionOptions {
             max_shots,
+            min_shots: 0,
             max_errors: None,
             batch_size: 128,
             seed: Some(229),
@@ -1501,6 +1546,7 @@ fn global_scheduler_mixes_fixed_and_adaptive_tasks() {
         metadata_json: "{}".to_string(),
         options: DemLogicalCollectionOptions {
             max_shots: 64,
+            min_shots: 0,
             max_errors: None,
             batch_size: 8,
             seed: Some(61),
@@ -1520,6 +1566,7 @@ fn global_scheduler_mixes_fixed_and_adaptive_tasks() {
         metadata_json: "{}".to_string(),
         options: DemLogicalCollectionOptions {
             max_shots: 64,
+            min_shots: 0,
             max_errors: None,
             batch_size: 8,
             seed: Some(67),
@@ -1583,6 +1630,7 @@ fn global_scheduler_returns_worker_errors() {
         metadata_json: "{}".to_string(),
         options: DemLogicalCollectionOptions {
             max_shots: 16,
+            min_shots: 0,
             max_errors: None,
             batch_size: 4,
             seed: Some(71),
@@ -1618,6 +1666,7 @@ fn postselection_and_custom_counts_are_reported() {
         &simulator,
         DemLogicalCollectionOptions {
             max_shots: 8,
+            min_shots: 0,
             max_errors: None,
             batch_size: 8,
             seed: Some(5),
@@ -1645,6 +1694,7 @@ fn postselection_and_custom_counts_are_reported() {
             metadata_json: "{}".to_string(),
             options: DemLogicalCollectionOptions {
                 max_shots: 8,
+                min_shots: 0,
                 max_errors: None,
                 batch_size: 8,
                 seed: Some(5),
@@ -1686,6 +1736,7 @@ fn existing_stats_resume_skips_completed_tasks() {
         metadata_json: "{\"p\":1}".to_string(),
         options: DemLogicalCollectionOptions {
             max_shots: 4,
+            min_shots: 0,
             max_errors: None,
             batch_size: 4,
             seed: Some(7),
@@ -1744,6 +1795,7 @@ fn custom_error_count_key_controls_stop_condition() {
         metadata_json: "{}".to_string(),
         options: DemLogicalCollectionOptions {
             max_shots: 10,
+            min_shots: 0,
             max_errors: Some(4),
             batch_size: 3,
             seed: Some(31),

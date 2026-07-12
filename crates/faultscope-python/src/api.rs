@@ -1766,6 +1766,7 @@ pub(crate) fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<PySparseBinaryMatrix>()?;
     module.add_class::<PyBinaryLinearDecodingProblem>()?;
     module.add_class::<PyNativeBatchDecoder>()?;
+    module.add_class::<PyNativeCompositeDecoder>()?;
     module.add_class::<PyNativeNoCorrectionDecoder>()?;
     module.add_class::<PyNativeGraphlikeDetectorCopyDecoder>()?;
     #[cfg(feature = "decoder-fusion-blossom")]
@@ -1799,5 +1800,6 @@ pub(crate) fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
         _collect_dem_logical_error_stats_many,
         module
     )?)?;
+    module.add_function(wrap_pyfunction!(_collect_dem_hotspots_many, module)?)?;
     Ok(())
 }

@@ -477,6 +477,7 @@ dem = DetectorErrorModel(
 collector = Collector(
     options=CollectionOptions(
         max_shots=10_000,
+        min_shots=2_000,
         max_errors=200,
         batch_size=1_000,
     ),
@@ -513,8 +514,14 @@ stats = collect(
 Each `CollectionTask` must provide exactly one of `dem` or `circuit`.
 `max_shots` is required after combining the Collector's base options with each
 task's `collection_options`. The final batch is capped so collection never exceeds
-`max_shots`. `max_errors` stops after a completed batch reaches the threshold,
-which means the returned `errors` can be greater than `max_errors`.
+`max_shots`. `max_errors` stops only after both it and `min_shots` are reached;
+the returned error count can exceed the threshold by one committed batch.
+
+Use `collect_hotspots(...)` (or `Collector.collect_hotspots(...)`) when the same
+run must also return ordered per-batch `TaskStats` and shot-weighted DEM edge
+sensitivities. This path keeps edge-event masks, decoding, residual counting,
+and sensitivity calculation inside Rust. CSV partial resume is intentionally
+unsupported for hotspot collection.
 
 Native decoders can be passed directly or resolved by name:
 

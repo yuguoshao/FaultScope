@@ -11,6 +11,7 @@ use faultscope_core::{
     FaultScopeNativePackedDetectorShotBatchViewV1,
     FaultScopeNativePackedObservableShotBatchMutViewV1, GraphlikeDecodingProblem, IndexedDem,
     NativeBatchDecoder as CoreNativeBatchDecoder,
+    NativeCompositeDecoder as CoreNativeCompositeDecoder,
     NativeGraphlikeDetectorCopyDecoder as CoreNativeGraphlikeDetectorCopyDecoder,
     NativeNoCorrectionDecoder as CoreNativeNoCorrectionDecoder, PackedDetectorShotBatchView,
     PackedObservableShotBatch, SparseBinaryMatrix, NATIVE_DECODER_PLUGIN_ABI_VERSION,
@@ -38,6 +39,13 @@ pub(crate) fn available_native_decoders(py: Python<'_>) -> PyResult<PyObject> {
 /// Type-erased native batch decoder handle.
 #[pyclass(name = "NativeBatchDecoder", module = "faultscope._native")]
 pub(crate) struct PyNativeBatchDecoder {
+    pub(crate) inner: Arc<dyn CoreNativeBatchDecoder>,
+    python_decode_calls: Arc<AtomicUsize>,
+}
+
+/// Native decoder that composes independent child decoders.
+#[pyclass(name = "NativeCompositeDecoder", module = "faultscope._native")]
+pub(crate) struct PyNativeCompositeDecoder {
     pub(crate) inner: Arc<dyn CoreNativeBatchDecoder>,
     python_decode_calls: Arc<AtomicUsize>,
 }
@@ -116,6 +124,66 @@ impl PyNativeBatchDecoder {
         format!(
             "NativeBatchDecoder(name={:?}, detector_ids={:?}, observable_ids={:?})",
             self.inner.name(),
+            self.inner.detector_ids(),
+            self.inner.observable_ids(),
+        )
+    }
+}
+
+#[pymethods]
+impl PyNativeCompositeDecoder {
+    #[new]
+    pub(crate) fn new(decoders: &Bound<'_, PyAny>) -> PyResult<Self> {
+        let mut children = Vec::new();
+        for (index, decoder) in PyIterator::from_object(decoders)?.enumerate() {
+            let decoder = decoder?;
+            let child = native_decoder_from_py(&decoder)?.ok_or_else(|| {
+                PyTypeError::new_err(format!(
+                    "NativeCompositeDecoder child {index} is not a native decoder"
+                ))
+            })?;
+            children.push(child);
+        }
+        let inner = CoreNativeCompositeDecoder::new(children)
+            .map_err(|err| PyValueError::new_err(err.to_string()))?;
+        Ok(Self {
+            inner: Arc::new(inner),
+            python_decode_calls: Arc::new(AtomicUsize::new(0)),
+        })
+    }
+
+    #[getter]
+    pub(crate) fn name(&self) -> String {
+        self.inner.name().to_string()
+    }
+
+    #[getter]
+    pub(crate) fn detector_ids(&self, py: Python<'_>) -> PyResult<PyObject> {
+        tuple_i64(py, self.inner.detector_ids())
+    }
+
+    #[getter]
+    pub(crate) fn observable_ids(&self, py: Python<'_>) -> PyResult<PyObject> {
+        tuple_i64(py, self.inner.observable_ids())
+    }
+
+    pub(crate) fn decode_batch_masks(
+        &self,
+        py: Python<'_>,
+        batch: &Bound<'_, PyAny>,
+    ) -> PyResult<PyObject> {
+        self.python_decode_calls.fetch_add(1, Ordering::Relaxed);
+        decode_batch_masks_with_native_decoder(py, self.inner.clone(), batch)
+    }
+
+    #[getter]
+    pub(crate) fn python_decode_call_count(&self) -> usize {
+        self.python_decode_calls.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn __repr__(&self) -> String {
+        format!(
+            "NativeCompositeDecoder(detector_ids={:?}, observable_ids={:?})",
             self.inner.detector_ids(),
             self.inner.observable_ids(),
         )
@@ -622,6 +690,9 @@ pub(crate) fn native_decoder_from_py(
     decoder: &Bound<'_, PyAny>,
 ) -> PyResult<Option<Arc<dyn CoreNativeBatchDecoder>>> {
     if let Ok(decoder) = decoder.extract::<PyRef<'_, PyNativeBatchDecoder>>() {
+        return Ok(Some(decoder.inner.clone()));
+    }
+    if let Ok(decoder) = decoder.extract::<PyRef<'_, PyNativeCompositeDecoder>>() {
         return Ok(Some(decoder.inner.clone()));
     }
     if let Ok(decoder) = decoder.extract::<PyRef<'_, PyNativeNoCorrectionDecoder>>() {
