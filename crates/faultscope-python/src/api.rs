@@ -154,18 +154,19 @@ impl NativePackedSampler {
             }
             if let Some(decoder) = decoder {
                 if let Some(native_decoder) = native_decoder_from_py(decoder)? {
-                    let detector_masks = detector_mask_view_from_map(
-                        &state.detectors,
-                        native_decoder.detector_ids(),
-                        state.shots,
-                    )?;
+                    let detector_ids = native_decoder.detector_ids().to_vec();
+                    let mut worker = native_decoder
+                        .create_worker()
+                        .map_err(|err| PyValueError::new_err(err.to_string()))?;
+                    let detector_masks =
+                        detector_mask_view_from_map(&state.detectors, &detector_ids, state.shots)?;
                     let view = faultscope_core::DetectorMaskBatchView::new(
-                        native_decoder.detector_ids(),
+                        &detector_ids,
                         &detector_masks,
                         state.shots,
                     )
                     .map_err(|err| PyValueError::new_err(err.to_string()))?;
-                    let corrections = native_decoder
+                    let corrections = worker
                         .decode_batch_checked(view)
                         .map_err(|err| PyValueError::new_err(err.to_string()))?;
                     validate_declared_observables(&state.observables, &self.simulator.observables)?;
@@ -734,26 +735,30 @@ impl NativeDemSampler {
         if correction_mask_fn.is_none() && loss_mask_fn.is_none() {
             if let Some(decoder) = decoder {
                 if let Some(native_decoder) = native_decoder_from_py(decoder)? {
+                    let detector_ids = native_decoder.detector_ids().to_vec();
+                    let mut worker = native_decoder
+                        .create_worker()
+                        .map_err(|err| PyValueError::new_err(err.to_string()))?;
                     let estimate = py.allow_threads(|| {
                         let mut rng = SmallRng::new(seed.unwrap_or(0x95f2_04dc_4291_a715));
-                        if !aggregate_hotspots && native_decoder.supports_detector_event_batch() {
+                        if !aggregate_hotspots && worker.supports_detector_event_batch() {
                             let event_batch = self
                                 .simulator
                                 .run_detector_event_shot_batch_with_rng(
                                     shots,
                                     &mut rng,
-                                    native_decoder.detector_ids(),
+                                    &detector_ids,
                                     &self.observables,
                                 )
                                 .map_err(|err| PyValueError::new_err(err.to_string()))?;
                             let detector_view = faultscope_core::DetectorEventShotBatchView::new(
-                                native_decoder.detector_ids(),
+                                &detector_ids,
                                 &event_batch.offsets,
                                 &event_batch.events,
                                 event_batch.shots,
                             )
                             .map_err(|err| PyValueError::new_err(err.to_string()))?;
-                            let corrections = native_decoder
+                            let corrections = worker
                                 .decode_detector_event_batch_checked(detector_view)
                                 .map_err(|err| PyValueError::new_err(err.to_string()))?;
                             let mean_loss = packed_residual_mean_loss_from_rows(
@@ -769,23 +774,23 @@ impl NativeDemSampler {
                                 baseline,
                             ));
                         }
-                        if !aggregate_hotspots && native_decoder.supports_packed_batch() {
+                        if !aggregate_hotspots && worker.supports_packed_batch() {
                             let packed_batch = self
                                 .simulator
                                 .run_packed_shot_batch_with_rng(
                                     shots,
                                     &mut rng,
-                                    native_decoder.detector_ids(),
+                                    &detector_ids,
                                     &self.observables,
                                 )
                                 .map_err(|err| PyValueError::new_err(err.to_string()))?;
                             let detector_view = faultscope_core::PackedDetectorShotBatchView::new(
-                                native_decoder.detector_ids(),
+                                &detector_ids,
                                 &packed_batch.detector_data,
                                 packed_batch.shots,
                             )
                             .map_err(|err| PyValueError::new_err(err.to_string()))?;
-                            let corrections = native_decoder
+                            let corrections = worker
                                 .decode_packed_batch_checked(detector_view)
                                 .map_err(|err| PyValueError::new_err(err.to_string()))?;
                             let mean_loss = packed_residual_mean_loss_from_rows(
@@ -804,16 +809,16 @@ impl NativeDemSampler {
                         let batch = run_dem_batch(self, shots, &mut rng, aggregate_hotspots);
                         let detector_masks = detector_mask_view_from_map(
                             &batch.detectors,
-                            native_decoder.detector_ids(),
+                            &detector_ids,
                             batch.shots,
                         )?;
                         let view = faultscope_core::DetectorMaskBatchView::new(
-                            native_decoder.detector_ids(),
+                            &detector_ids,
                             &detector_masks,
                             batch.shots,
                         )
                         .map_err(|err| PyValueError::new_err(err.to_string()))?;
-                        let corrections = native_decoder
+                        let corrections = worker
                             .decode_batch_checked(view)
                             .map_err(|err| PyValueError::new_err(err.to_string()))?;
                         let loss_mask = faultscope_core::logical_residual_loss_mask_native(
