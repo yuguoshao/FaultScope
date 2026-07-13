@@ -28,6 +28,7 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 const BACKEND_NAME: &str = "fusion-blossom";
+static WORKER_FACTORY_FAILURE_MESSAGE: &str = "fusion-blossom worker-state factory failed";
 const CAPSULE_NAME: &[u8] = b"faultscope.native_decoder_plugin.v1\0";
 const DEFAULT_WEIGHT_SCALE: f64 = 10_000.0;
 
@@ -1099,11 +1100,12 @@ unsafe extern "C" fn create_worker_state(
             *out_state = Box::into_raw(Box::new(worker)).cast::<c_void>();
             FaultScopeNativeDecoderStatusV1::ok()
         }
-        Err(message) => state_error(
-            factory,
-            format!("fusion-blossom worker-state factory failed: {message}"),
-        ),
+        Err(_) => worker_factory_failure_status(),
     }
+}
+
+fn worker_factory_failure_status() -> FaultScopeNativeDecoderStatusV1 {
+    static_error(WORKER_FACTORY_FAILURE_MESSAGE)
 }
 
 unsafe extern "C" fn decoder_name(
@@ -1987,6 +1989,8 @@ fn string_view_to_string(view: FaultScopeNativeDecoderStringViewV1) -> String {
 mod tests {
     use super::*;
     use std::ptr;
+    use std::sync::{Arc, Barrier};
+    use std::thread;
 
     fn worker_test_state() -> Box<DecoderState> {
         let initializer = SolverInitializer::new(2, vec![(0, 1, 2 as Weight)], vec![1]);
@@ -2070,6 +2074,35 @@ mod tests {
             drop_state(first);
             drop_state(second);
             drop_state(factory);
+        }
+    }
+
+    #[test]
+    fn worker_factory_failure_messages_remain_valid_across_concurrent_calls() {
+        let expected = WORKER_FACTORY_FAILURE_MESSAGE;
+        let barrier = Arc::new(Barrier::new(3));
+        let handles = (0..2)
+            .map(|_| {
+                let barrier = Arc::clone(&barrier);
+                thread::spawn(move || {
+                    barrier.wait();
+                    let status = worker_factory_failure_status();
+                    (status.message.ptr as usize, status.message.len)
+                })
+            })
+            .collect::<Vec<_>>();
+
+        barrier.wait();
+        let statuses = handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .collect::<Vec<_>>();
+
+        for (pointer, len) in statuses {
+            assert_eq!(pointer, expected.as_ptr() as usize);
+            assert_eq!(len, expected.len());
+            let message = unsafe { slice::from_raw_parts(pointer as *const u8, len) };
+            assert_eq!(message, expected.as_bytes());
         }
     }
 

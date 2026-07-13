@@ -56,11 +56,12 @@ overhead.
 
 ### General Hot-Path Work
 
-- Per-worker solver state and scratch buffers are reused across batches.
+- Per-descriptor solver state and scratch buffers are reused across batches;
+  collection workers receive independent descriptors.
 - `SyndromePattern` and defect buffers are reused instead of rebuilt from
   scratch for every shot.
-- Panic handling is done once per worker instead of around every small decode
-  block.
+- Panic handling is done once per descriptor batch decode instead of around
+  every small decode block.
 - Profile environment lookup is hoisted out of inner loops.
 - Profiling splits the backend work into:
   - `collect_s`
@@ -72,11 +73,13 @@ overhead.
 
 ### Useful Diagnostics
 
-The following environment variables are still useful for controlled experiments:
+The public backend retains one controlled diagnostic environment variable:
 
-- `NPSIM_FUSION_BLOSSOM_THREADS`
-- `NPSIM_FUSION_BLOSSOM_BLOCK_ROWS`
 - `NPSIM_FUSION_BLOSSOM_PROFILE`
+
+Earlier thread-count and packed-row block-size environment experiments belonged
+to the removed descriptor-owned scheduler. They are historical notes only and
+are not active controls.
 
 Earlier experiments also used `NPSIM_FUSION_BLOSSOM_BOUNDARY_VIRTUALS`,
 `NPSIM_FUSION_BLOSSOM_PREDICTION`, and diagnostic benchmark paths such as
@@ -113,16 +116,16 @@ at `d=5/9/12`. It remains useful only as a diagnostic comparison.
 
 ### Fixed Thread Counts
 
-Manual `t1`, `t4`, and `t8` caps were tried. `t1` and `t4` were slower in the
-target benchmark, while `t8` was noisy and not consistently better. The default
-continues to use available host parallelism, with an environment override for
-experiments.
+Manual `t1`, `t4`, and `t8` caps were tried with the former descriptor-owned
+scheduler. `t1` and `t4` were slower in the target benchmark, while `t8` was
+noisy and not consistently better. That scheduler and its thread-count control
+were removed; collection parallelism now uses independent decoder descriptors.
 
 ### Fixed Block Sizes
 
 Different distances preferred different block sizes, and timing variance was
-high. Keep `NPSIM_FUSION_BLOSSOM_BLOCK_ROWS` as an experiment knob instead of a
-hardcoded tuning rule.
+high. The packed-row scheduler and its block-size control were removed instead
+of retaining a public tuning rule.
 
 ### `max_tree_size`
 

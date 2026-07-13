@@ -559,17 +559,15 @@ build uses fusion-blossom's compact vertex/edge index mode and rejects graphs
 that exceed that backend index range. The default integer conversion uses
 `weight_scale=10_000`; after scaling, solver weights are normalized by their
 common even-preserving divisor, preserving the integer MWPM objective while
-reducing solver weight magnitudes when possible. Packed batch decoding reuses
-per-worker solver state and path caches across calls.
+reducing solver weight magnitudes when possible. Each native descriptor owns one
+mutex-protected solver state and path cache that it reuses across calls.
+Collection parallelism comes from fresh independent decoder descriptors; the
+backend does not maintain a worker-state pool or packed-row scheduler.
 
-For host-specific scheduling diagnostics, `NPSIM_FUSION_BLOSSOM_THREADS=<n>`
-caps the packed batch worker count; the default is to use the available native
-parallelism. `NPSIM_FUSION_BLOSSOM_PROFILE=1` prints a native per-batch timing
+`NPSIM_FUSION_BLOSSOM_PROFILE=1` prints a native per-batch timing
 split for defect collection, solver clear, solver growth, matching extraction,
-and correction application. `NPSIM_FUSION_BLOSSOM_BLOCK_ROWS=<n>` overrides the
-packed-row scheduler block size for load-balancing experiments. These diagnostics
-are intentionally environment-variable gated and do not change the public
-decoder API.
+and correction application. This diagnostic is environment-variable gated and
+does not change the public decoder API.
 
 Current profiling on surface-code DEMs shows the fusion backend time is
 dominated by upstream `solver.solve(...)`; defect collection, packed mask
@@ -642,7 +640,7 @@ The implemented minimal beta adapter is:
    can be converted back into observable correction masks.
 8. Convert each hot-path `DetectorMaskBatchView` shot into the solver syndrome
    representation, run serial MWPM, and recover matched-pair paths through a
-   per-worker cache without touching Python.
+   per-descriptor cache without touching Python.
 9. Return a checked `CorrectionMaskBatch`.
 
 The construction summary is intentionally lightweight and safe to inspect from
@@ -657,9 +655,9 @@ summary["edges"][0]["dem_edge_indices"]
 summary["edges"][0]["fault_observables"]
 ```
 
-The remaining productionization items are solver reuse, parallel/streaming
-execution, erasure/dynamic weights, compression for ambiguous parallel logical
-effects, and large-scale performance tuning.
+The remaining productionization items are partitioned/streaming solver execution,
+erasure/dynamic weights, compression for ambiguous parallel logical effects, and
+large-scale performance tuning.
 
 The primary beta evaluation entry point is the surface-code decoder performance
 benchmark:

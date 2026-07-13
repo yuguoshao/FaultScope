@@ -1565,6 +1565,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     const TEST_NAME: &str = "test-external";
+    const TEST_FACTORY_ERROR: &str = "test factory failure";
     const TEST_METADATA_ERROR: &str = "test metadata failure";
     const TEST_DETECTOR_IDS: [i64; 1] = [7];
     const TEST_OBSERVABLE_IDS: [i64; 1] = [11];
@@ -1694,6 +1695,28 @@ mod tests {
         });
         *out_state = Box::into_raw(worker).cast::<c_void>();
         FaultScopeNativeDecoderStatusV1::ok()
+    }
+
+    unsafe extern "C" fn test_create_error_with_worker_state(
+        factory_state: *const c_void,
+        out_state: *mut *mut c_void,
+    ) -> FaultScopeNativeDecoderStatusV1 {
+        let factory = &*factory_state.cast::<TestState>();
+        let worker = Box::new(TestState {
+            next_worker: AtomicU64::new(0),
+            value: AtomicU64::new(0),
+            drops: Arc::clone(&factory.drops),
+            worker_pointers: Arc::clone(&factory.worker_pointers),
+            metadata_error: false,
+        });
+        *out_state = Box::into_raw(worker).cast::<c_void>();
+        FaultScopeNativeDecoderStatusV1 {
+            code: faultscope_core::NATIVE_DECODER_PLUGIN_STATUS_ERROR,
+            message: FaultScopeNativeDecoderStringViewV1 {
+                ptr: TEST_FACTORY_ERROR.as_ptr().cast(),
+                len: TEST_FACTORY_ERROR.len(),
+            },
+        }
     }
 
     fn test_descriptor(
@@ -1875,6 +1898,34 @@ mod tests {
         };
 
         assert!(error.to_string().contains(TEST_METADATA_ERROR));
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+        drop(decoder);
+        unsafe { drop_test_descriptor(descriptor) };
+        assert_eq!(drops.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn external_worker_instance_drops_non_null_state_when_factory_returns_error() {
+        let drops = Arc::new(AtomicUsize::new(0));
+        let worker_pointers = Arc::new(Mutex::new(Vec::new()));
+        let state = Box::into_raw(Box::new(TestState::prototype(
+            Arc::clone(&drops),
+            worker_pointers,
+        )))
+        .cast::<c_void>();
+        let descriptor = Box::into_raw(Box::new(test_descriptor(
+            state,
+            mem::size_of::<FaultScopeNativeDecoderV1>(),
+            Some(test_create_error_with_worker_state),
+        )));
+        let decoder = unsafe { external_from_test_descriptor(descriptor) };
+
+        let error = match decoder.create_worker_instance() {
+            Ok(_) => panic!("failing worker factory unexpectedly created a worker"),
+            Err(error) => error,
+        };
+
+        assert!(error.to_string().contains(TEST_FACTORY_ERROR));
         assert_eq!(drops.load(Ordering::SeqCst), 1);
         drop(decoder);
         unsafe { drop_test_descriptor(descriptor) };

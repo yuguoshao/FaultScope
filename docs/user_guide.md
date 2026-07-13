@@ -968,11 +968,11 @@ safely compresses identical boundary and two-detector parallel edges. It uses
 normalizes scaled integer weights by a common even-preserving divisor without
 changing that integer MWPM objective. It still rejects ambiguous parallel
 logical effects and has not implemented production partitioning, streaming
-execution, or production performance tuning. For local diagnostics,
-`NPSIM_FUSION_BLOSSOM_THREADS=<n>` caps the packed batch worker count; by
-default the backend uses available native parallelism. Set
-`NPSIM_FUSION_BLOSSOM_PROFILE=1` to print the native timing split used for
-backend performance diagnosis, including solver clear/growth/extraction costs.
+execution, or production performance tuning. Each collection worker receives an
+independent native decoder descriptor with one mutex-protected solver state; the
+backend does not own a separate packed-row scheduler or worker pool. Set
+`NPSIM_FUSION_BLOSSOM_PROFILE=1` for local diagnostics that print the native
+timing split, including solver clear/growth/extraction costs.
 
 The local `faultscope-pymatching` package links pinned PyMatching sparse-blossom C++
 source and exposes `NativePyMatchingDecoder`. It is graphlike-only and keeps

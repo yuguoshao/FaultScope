@@ -1,4 +1,3 @@
-import os
 import sys
 import unittest
 from pathlib import Path
@@ -207,7 +206,7 @@ class FusionBlossomBackendPackageTests(unittest.TestCase):
         self.assertEqual(result.mean_loss, 0.0)
 
     @requires_native_backend
-    def test_backend_large_packed_fast_path_uses_native_scheduler(self) -> None:
+    def test_backend_large_packed_fast_path_stays_native(self) -> None:
         dem = DetectorErrorModel(
             detectors=(
                 Detector(id=10, measurement_keys=()),
@@ -218,13 +217,12 @@ class FusionBlossomBackendPackageTests(unittest.TestCase):
         )
         decoder = faultscope_fusion_blossom.NativeFusionBlossomDecoder.from_dem(dem)
 
-        with mock.patch.dict(os.environ, {"NPSIM_FUSION_BLOSSOM_BLOCK_ROWS": "128"}):
-            result = compile_native_dem_sampler(dem).estimate(
-                shots=4096,
-                seed=1202,
-                decoder=decoder,
-                aggregate_hotspots=False,
-            )
+        result = compile_native_dem_sampler(dem).estimate(
+            shots=4096,
+            seed=1202,
+            decoder=decoder,
+            aggregate_hotspots=False,
+        )
 
         self.assertEqual(decoder.python_decode_call_count, 0)
         self.assertEqual(result.mean_loss, 0.0)
