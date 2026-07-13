@@ -145,7 +145,8 @@ def _filled_worker() -> WorkerV2:
     return worker
 
 
-def assert_v2_worker_contract(test, decoder) -> None:
+def assert_v2_worker_contract(test, decoder):
+    test_stats = decoder._inner._test_stats_for_test()
     capsule = decoder.__faultscope_native_decoder_capsule__()
     test.assertEqual(_py_capsule_get_name(capsule), CAPSULE_NAME)
     pointer = _py_capsule_get_pointer(capsule, CAPSULE_NAME)
@@ -205,11 +206,29 @@ def assert_v2_worker_contract(test, decoder) -> None:
             test.assertEqual(_decode_mask(worker, decoder), 1)
             test.assertEqual(_decode_packed(worker, decoder), 1)
             test.assertEqual(_decode_events(worker, decoder), 1)
+
+            first_error = DECODE_MASK(worker.decode_batch)(worker.worker_state, None, None)
+            test.assertNotEqual(first_error.code, 0)
+            test.assertTrue(first_error.message.ptr)
+            retained_message = ctypes.string_at(
+                first_error.message.ptr,
+                first_error.message.len,
+            )
+            second_error = DECODE_MASK(worker.decode_batch)(worker.worker_state, None, None)
+            test.assertNotEqual(second_error.code, 0)
+            test.assertEqual(
+                ctypes.string_at(first_error.message.ptr, first_error.message.len),
+                retained_message,
+            )
     finally:
         for worker in (first, second):
             if worker.worker_state and worker.drop_worker_state:
                 DROP_WORKER(worker.drop_worker_state)(worker.worker_state)
                 worker.worker_state = None
+    test.assertEqual(test_stats.worker_creates, 2)
+    test.assertEqual(test_stats.worker_drops, 2)
+    test.assertEqual(len(set(test_stats.worker_addresses)), 2)
+    return test_stats
 
 
 def assert_factory_failure_lifetimes(test, invalid_decoder_type) -> None:

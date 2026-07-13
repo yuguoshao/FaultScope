@@ -25,7 +25,7 @@ use std::mem;
 use std::os::raw::c_char;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::slice;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -36,6 +36,7 @@ const DEFAULT_WEIGHT_SCALE: f64 = 10_000.0;
 #[pyclass(name = "NativeFusionBlossomNativeDecoder")]
 struct PyNativeFusionBlossomNativeDecoder {
     capsule: Py<PyAny>,
+    test_stats: Arc<NativeDecoderTestStats>,
     detector_ids: Vec<i64>,
     detector_coords: Vec<Vec<f64>>,
     observable_ids: Vec<i64>,
@@ -62,17 +63,17 @@ impl PyNativeFusionBlossomNativeDecoder {
         let observable_ids = builder.observable_ids.clone();
         let built = builder.build()?;
         let build_summary = built.summary;
-        let state = Box::new(
-            FactoryState::new(
-                detector_ids.clone(),
-                observable_ids.clone(),
-                built.detector_to_solver_vertices,
-                built.is_virtual_vertex,
-                built.initializer,
-                built.edge_effects,
-            )
-            .map_err(PyValueError::new_err)?,
-        );
+        let state = FactoryState::new(
+            detector_ids.clone(),
+            observable_ids.clone(),
+            built.detector_to_solver_vertices,
+            built.is_virtual_vertex,
+            built.initializer,
+            built.edge_effects,
+        )
+        .map_err(PyValueError::new_err)?;
+        let test_stats = Arc::clone(&state.test_stats);
+        let state = Box::new(state);
         let descriptor = Box::new(FaultScopeNativeDecoderFactoryV2 {
             abi_version: NATIVE_DECODER_PLUGIN_ABI_VERSION,
             struct_size: mem::size_of::<FaultScopeNativeDecoderFactoryV2>(),
@@ -88,6 +89,7 @@ impl PyNativeFusionBlossomNativeDecoder {
 
         Ok(Self {
             capsule,
+            test_stats,
             detector_ids,
             detector_coords,
             observable_ids,
@@ -234,6 +236,18 @@ impl PyNativeFusionBlossomNativeDecoder {
         self.capsule.clone_ref(py)
     }
 
+    fn _test_stats_for_test(&self, py: Python<'_>) -> PyResult<Py<PyNativeDecoderTestStats>> {
+        self.test_stats
+            .collect_enabled
+            .store(true, Ordering::SeqCst);
+        Py::new(
+            py,
+            PyNativeDecoderTestStats {
+                stats: Arc::clone(&self.test_stats),
+            },
+        )
+    }
+
     fn __repr__(&self) -> String {
         format!(
             "NativeFusionBlossomNativeDecoder(name={:?}, detector_ids={:?}, observable_ids={:?}, solver_vertex_count={}, solver_edge_count={})",
@@ -285,6 +299,9 @@ impl PyInvalidNativeDecoderCapsule {
             "not-thread-safe" => descriptor.flags = 0,
             "decode-error" => descriptor.create_worker = Some(create_forced_error_worker),
             "create-error" => state.worker_create_mode = WorkerCreateMode::Error,
+            "create-error-after-allocation" => {
+                state.worker_create_mode = WorkerCreateMode::ErrorAfterAllocation
+            }
             "create-panic" => state.worker_create_mode = WorkerCreateMode::Panic,
             "missing-worker-decode" => state.worker_create_mode = WorkerCreateMode::MissingDecode,
             "invalid-worker-size" => state.worker_create_mode = WorkerCreateMode::InvalidSize,
@@ -313,6 +330,13 @@ impl PyInvalidNativeDecoderCapsule {
     fn __faultscope_native_decoder_capsule__(&self, py: Python<'_>) -> Py<PyAny> {
         self.capsule.clone_ref(py)
     }
+
+    fn _try_create_temporary_worker_for_test(&self) -> PyResult<()> {
+        let worker =
+            unsafe { create_temporary_worker(&self.capsule) }.map_err(PyValueError::new_err)?;
+        drop(worker);
+        Ok(())
+    }
 }
 
 struct FactoryState {
@@ -325,12 +349,14 @@ struct FactoryState {
     error_messages: Mutex<Vec<CString>>,
     worker_create_mode: WorkerCreateMode,
     worker_drop_counter: Option<Arc<AtomicUsize>>,
+    test_stats: Arc<NativeDecoderTestStats>,
 }
 
 #[derive(Clone, Copy)]
 enum WorkerCreateMode {
     Normal,
     Error,
+    ErrorAfterAllocation,
     Panic,
     MissingDecode,
     InvalidSize,
@@ -356,6 +382,7 @@ impl FactoryState {
             error_messages: Mutex::new(Vec::new()),
             worker_create_mode: WorkerCreateMode::Normal,
             worker_drop_counter: None,
+            test_stats: Arc::new(NativeDecoderTestStats::default()),
         })
     }
 
@@ -374,9 +401,18 @@ impl FactoryState {
             self.is_virtual_vertex.clone(),
             self.initializer.clone(),
             self.edge_effects.clone(),
+            Arc::clone(&self.test_stats),
         )?;
         worker.drop_counter = self.worker_drop_counter.clone();
         Ok(worker)
+    }
+}
+
+impl Drop for FactoryState {
+    fn drop(&mut self) {
+        if self.test_stats.collect_enabled.load(Ordering::SeqCst) {
+            self.test_stats.factory_drops.fetch_add(1, Ordering::SeqCst);
+        }
     }
 }
 
@@ -389,6 +425,7 @@ struct WorkerState {
     decode: WorkerDecodeState,
     error_messages: Vec<CString>,
     drop_counter: Option<Arc<AtomicUsize>>,
+    test_stats: Arc<NativeDecoderTestStats>,
 }
 
 impl WorkerState {
@@ -399,6 +436,7 @@ impl WorkerState {
         is_virtual_vertex: Vec<bool>,
         initializer: SolverInitializer,
         edge_effects: Vec<SolverEdgeEffect>,
+        test_stats: Arc<NativeDecoderTestStats>,
     ) -> Result<Self, String> {
         let decode = WorkerDecodeState::new(&initializer)?;
         Ok(Self {
@@ -410,15 +448,113 @@ impl WorkerState {
             decode,
             error_messages: Vec::new(),
             drop_counter: None,
+            test_stats,
         })
     }
 }
 
 impl Drop for WorkerState {
     fn drop(&mut self) {
+        if self.test_stats.collect_enabled.load(Ordering::SeqCst) {
+            self.test_stats.worker_drops.fetch_add(1, Ordering::SeqCst);
+        }
         if let Some(counter) = &self.drop_counter {
             counter.fetch_add(1, Ordering::SeqCst);
         }
+    }
+}
+
+#[derive(Default)]
+struct NativeDecoderTestStats {
+    collect_enabled: AtomicBool,
+    overlap_enabled: AtomicBool,
+    factory_drops: AtomicUsize,
+    worker_creates: AtomicUsize,
+    worker_drops: AtomicUsize,
+    active_decodes: AtomicUsize,
+    max_active_decodes: AtomicUsize,
+    worker_addresses: Mutex<Vec<usize>>,
+}
+
+impl NativeDecoderTestStats {
+    fn record_worker_create(&self, address: usize) {
+        if !self.collect_enabled.load(Ordering::SeqCst) {
+            return;
+        }
+        self.worker_creates.fetch_add(1, Ordering::SeqCst);
+        self.worker_addresses
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push(address);
+    }
+
+    fn enter_decode(self: &Arc<Self>) -> Option<DecodeActivityGuard> {
+        if !self.overlap_enabled.load(Ordering::SeqCst) {
+            return None;
+        }
+        let active = self.active_decodes.fetch_add(1, Ordering::SeqCst) + 1;
+        self.max_active_decodes.fetch_max(active, Ordering::SeqCst);
+        std::thread::sleep(Duration::from_millis(5));
+        Some(DecodeActivityGuard {
+            stats: Arc::clone(self),
+        })
+    }
+}
+
+struct DecodeActivityGuard {
+    stats: Arc<NativeDecoderTestStats>,
+}
+
+impl Drop for DecodeActivityGuard {
+    fn drop(&mut self) {
+        self.stats.active_decodes.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+#[pyclass(name = "_NativeDecoderTestStats")]
+struct PyNativeDecoderTestStats {
+    stats: Arc<NativeDecoderTestStats>,
+}
+
+#[pymethods]
+impl PyNativeDecoderTestStats {
+    #[getter]
+    fn factory_drops(&self) -> usize {
+        self.stats.factory_drops.load(Ordering::SeqCst)
+    }
+
+    #[getter]
+    fn worker_creates(&self) -> usize {
+        self.stats.worker_creates.load(Ordering::SeqCst)
+    }
+
+    #[getter]
+    fn worker_drops(&self) -> usize {
+        self.stats.worker_drops.load(Ordering::SeqCst)
+    }
+
+    #[getter]
+    fn active_decodes(&self) -> usize {
+        self.stats.active_decodes.load(Ordering::SeqCst)
+    }
+
+    #[getter]
+    fn max_active_decodes(&self) -> usize {
+        self.stats.max_active_decodes.load(Ordering::SeqCst)
+    }
+
+    #[getter]
+    fn worker_addresses(&self) -> Vec<usize> {
+        self.stats
+            .worker_addresses
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
+    fn enable_decode_overlap(&self) {
+        self.stats.collect_enabled.store(true, Ordering::SeqCst);
+        self.stats.overlap_enabled.store(true, Ordering::SeqCst);
     }
 }
 
@@ -461,19 +597,23 @@ unsafe fn create_temporary_worker(capsule: &Py<PyAny>) -> Result<TemporaryWorker
         &mut descriptor,
         mem::size_of::<FaultScopeNativeDecoderWorkerV2>(),
     );
+    let worker = TemporaryWorker { descriptor };
     if status.code != faultscope_core::NATIVE_DECODER_PLUGIN_STATUS_OK {
         return Err(format!(
             "native decoder plugin error: {}",
             string_view_to_string(status.message)
         ));
     }
-    if descriptor.worker_state.is_null()
-        || descriptor.drop_worker_state.is_none()
-        || descriptor.decode_batch.is_none()
+    if worker.descriptor.struct_size
+        < mem::offset_of!(FaultScopeNativeDecoderWorkerV2, decode_packed_batch)
+        || worker.descriptor.struct_size > mem::size_of::<FaultScopeNativeDecoderWorkerV2>()
+        || worker.descriptor.worker_state.is_null()
+        || worker.descriptor.drop_worker_state.is_none()
+        || worker.descriptor.decode_batch.is_none()
     {
         return Err("fusion-blossom factory returned an invalid worker descriptor".to_string());
     }
-    Ok(TemporaryWorker { descriptor })
+    Ok(worker)
 }
 
 struct WorkerDecodeState {
@@ -1227,9 +1367,14 @@ unsafe extern "C" fn create_worker(
     let factory = &*factory_state.cast::<FactoryState>();
     match catch_unwind(AssertUnwindSafe(|| factory.create_worker())) {
         Ok(Ok(worker)) => {
+            let worker = Box::new(worker);
+            let worker_state = Box::into_raw(worker).cast::<c_void>();
+            factory
+                .test_stats
+                .record_worker_create(worker_state as usize);
             let mut descriptor = FaultScopeNativeDecoderWorkerV2 {
                 struct_size: mem::size_of::<FaultScopeNativeDecoderWorkerV2>(),
-                worker_state: Box::into_raw(Box::new(worker)).cast::<c_void>(),
+                worker_state,
                 drop_worker_state: Some(drop_worker_state),
                 decode_batch: Some(decoder_decode_batch),
                 decode_packed_batch: Some(decoder_decode_packed_batch),
@@ -1241,7 +1386,17 @@ unsafe extern "C" fn create_worker(
                 _ => {}
             }
             std::ptr::write(out, descriptor);
-            FaultScopeNativeDecoderStatusV1::ok()
+            if matches!(
+                factory.worker_create_mode,
+                WorkerCreateMode::ErrorAfterAllocation
+            ) {
+                factory_error(
+                    factory,
+                    "fusion-blossom worker creation failed after allocation",
+                )
+            } else {
+                FaultScopeNativeDecoderStatusV1::ok()
+            }
         }
         Ok(Err(message)) => factory_error(
             factory,
@@ -1323,6 +1478,7 @@ unsafe extern "C" fn decoder_decode_batch(
         return static_error("fusion-blossom decode callback received null state pointer");
     }
     let state = &mut *state.cast::<WorkerState>();
+    let _activity = state.test_stats.enter_decode();
     if input.is_null() {
         return state_error(
             state,
@@ -1635,6 +1791,7 @@ unsafe extern "C" fn decoder_decode_packed_batch(
         return static_error("fusion-blossom packed decode callback received null state pointer");
     }
     let state = &mut *state.cast::<WorkerState>();
+    let _activity = state.test_stats.enter_decode();
     if input.is_null() {
         return state_error(
             state,
@@ -2305,5 +2462,6 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add("__version__", env!("CARGO_PKG_VERSION"))?;
     module.add_class::<PyNativeFusionBlossomNativeDecoder>()?;
     module.add_class::<PyInvalidNativeDecoderCapsule>()?;
+    module.add_class::<PyNativeDecoderTestStats>()?;
     Ok(())
 }
