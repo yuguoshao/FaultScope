@@ -52,10 +52,11 @@ descriptor and invokes `drop_state` once for the prototype state.
 
 ## Dynamic error-view lifetime
 
-A dynamic `FaultScopeNativeErrorView` returned by a decoder callback remains
-valid until the associated decoder state is dropped. This includes views from
-overlapping callbacks on the same state: producing a later error must not
-invalidate a view that another caller may still be consuming.
+A dynamic `FaultScopeNativeDecoderStringViewV1` stored in
+`FaultScopeNativeDecoderStatusV1::message` remains valid until the associated
+decoder state is dropped. This includes views from overlapping callbacks on the
+same state: producing a later error must not invalidate a view that another
+caller may still be consuming.
 
 Bundled backends satisfy this lifetime by retaining each dynamic error message
 in state-owned append-only storage. Consequently, repeated errors retain their
