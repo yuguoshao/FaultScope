@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{mpsc, Arc, Barrier, Condvar, Mutex};
+use std::sync::{mpsc, Arc, Condvar, Mutex};
 use std::thread::{self, ThreadId};
 use std::time::{Duration, Instant};
 
@@ -15,6 +15,127 @@ use faultscope_core::{
     DetectorErrorModel, DetectorMaskBatchView, LogicalObservable, NativeBatchDecoder,
     NativeGraphlikeDetectorCopyDecoder,
 };
+
+const TEST_COORDINATION_TIMEOUT: Duration = Duration::from_secs(2);
+
+#[derive(Debug)]
+struct BoundedTestLatch {
+    target: usize,
+    timeout: Duration,
+    label: &'static str,
+    state: Mutex<BoundedTestLatchState>,
+    changed: Condvar,
+}
+
+#[derive(Debug, Default)]
+struct BoundedTestLatchState {
+    arrivals: usize,
+    released: bool,
+    aborted: Option<String>,
+}
+
+impl BoundedTestLatch {
+    fn new(target: usize, timeout: Duration, label: &'static str) -> Self {
+        Self {
+            target,
+            timeout,
+            label,
+            state: Mutex::new(BoundedTestLatchState::default()),
+            changed: Condvar::new(),
+        }
+    }
+
+    fn arrive_and_wait(&self) -> faultscope_core::NpResult<()> {
+        let mut state = self.state.lock().unwrap();
+        if let Some(message) = &state.aborted {
+            return Err(faultscope_core::NpError::new(message.clone()));
+        }
+        if state.released {
+            return Ok(());
+        }
+        state.arrivals += 1;
+        if state.arrivals >= self.target {
+            state.released = true;
+            self.changed.notify_all();
+            return Ok(());
+        }
+        self.wait_for_release(state)
+    }
+
+    fn signal(&self) -> faultscope_core::NpResult<()> {
+        let mut state = self.state.lock().unwrap();
+        if let Some(message) = &state.aborted {
+            return Err(faultscope_core::NpError::new(message.clone()));
+        }
+        if !state.released {
+            state.arrivals += 1;
+            if state.arrivals >= self.target {
+                state.released = true;
+                self.changed.notify_all();
+            }
+        }
+        Ok(())
+    }
+
+    fn wait(&self) -> faultscope_core::NpResult<()> {
+        let state = self.state.lock().unwrap();
+        self.wait_for_release(state)
+    }
+
+    fn wait_for_release(
+        &self,
+        state: std::sync::MutexGuard<'_, BoundedTestLatchState>,
+    ) -> faultscope_core::NpResult<()> {
+        if let Some(message) = &state.aborted {
+            return Err(faultscope_core::NpError::new(message.clone()));
+        }
+        if state.released {
+            return Ok(());
+        }
+        let (mut state, timeout) = self
+            .changed
+            .wait_timeout_while(state, self.timeout, |state| {
+                !state.released && state.aborted.is_none()
+            })
+            .unwrap();
+        if timeout.timed_out() && !state.released && state.aborted.is_none() {
+            state.aborted = Some(format!(
+                "{} timed out after {:?} with {}/{} arrivals",
+                self.label, self.timeout, state.arrivals, self.target
+            ));
+            self.changed.notify_all();
+        }
+        if let Some(message) = &state.aborted {
+            Err(faultscope_core::NpError::new(message.clone()))
+        } else {
+            Ok(())
+        }
+    }
+}
+
+#[test]
+fn bounded_test_latch_timeout_aborts_all_waiters() {
+    let latch = Arc::new(BoundedTestLatch::new(
+        3,
+        Duration::from_millis(20),
+        "bounded latch self-test",
+    ));
+    let handles = (0..2)
+        .map(|_| {
+            let latch = latch.clone();
+            thread::spawn(move || latch.arrive_and_wait())
+        })
+        .collect::<Vec<_>>();
+
+    for handle in handles {
+        let err = handle.join().unwrap().unwrap_err();
+        assert!(err.message().contains("bounded latch self-test timed out"));
+    }
+    let late_err = latch.arrive_and_wait().unwrap_err();
+    assert!(late_err
+        .message()
+        .contains("bounded latch self-test timed out"));
+}
 
 #[derive(Debug, Default)]
 struct InstanceTracker {
@@ -31,26 +152,28 @@ struct WorkerOwnedDecoder {
     detector_ids: Vec<i64>,
     observable_ids: Vec<i64>,
     is_prototype: bool,
-    decode_barrier: Option<Arc<Barrier>>,
+    decode_latch: Option<Arc<BoundedTestLatch>>,
+    rendezvoused: AtomicBool,
     active: AtomicBool,
     owner: Mutex<Option<ThreadId>>,
 }
 
 impl WorkerOwnedDecoder {
     fn prototype(tracker: Arc<InstanceTracker>) -> Self {
-        Self::prototype_with_barrier(tracker, None)
+        Self::prototype_with_latch(tracker, None)
     }
 
-    fn prototype_with_barrier(
+    fn prototype_with_latch(
         tracker: Arc<InstanceTracker>,
-        decode_barrier: Option<Arc<Barrier>>,
+        decode_latch: Option<Arc<BoundedTestLatch>>,
     ) -> Self {
         Self {
             tracker,
             detector_ids: vec![0],
             observable_ids: vec![0],
             is_prototype: true,
-            decode_barrier,
+            decode_latch,
+            rendezvoused: AtomicBool::new(false),
             active: AtomicBool::new(false),
             owner: Mutex::new(None),
         }
@@ -62,7 +185,8 @@ impl WorkerOwnedDecoder {
             detector_ids: self.detector_ids.clone(),
             observable_ids: self.observable_ids.clone(),
             is_prototype: false,
-            decode_barrier: self.decode_barrier.clone(),
+            decode_latch: self.decode_latch.clone(),
+            rendezvoused: AtomicBool::new(false),
             active: AtomicBool::new(false),
             owner: Mutex::new(None),
         }
@@ -97,13 +221,15 @@ impl NativeBatchDecoder for WorkerOwnedDecoder {
                 .prototype_decode_calls
                 .fetch_add(1, Ordering::SeqCst);
         }
+        if !self.rendezvoused.swap(true, Ordering::SeqCst) {
+            if let Some(latch) = &self.decode_latch {
+                latch.arrive_and_wait()?;
+            }
+        }
         if self.active.swap(true, Ordering::SeqCst) {
             self.tracker
                 .concurrent_reentries
                 .fetch_add(1, Ordering::SeqCst);
-        }
-        if let Some(barrier) = &self.decode_barrier {
-            barrier.wait();
         }
         let current = thread::current().id();
         let mut owner = self.owner.lock().unwrap();
@@ -146,16 +272,33 @@ struct HotspotFactoryFailureTracker {
     dropped: AtomicUsize,
 }
 
-#[derive(Debug, Default)]
-struct HotspotFactoryFailureState {
-    first_decode_started: bool,
-    release_decode: bool,
+#[derive(Debug)]
+struct HotspotFactoryFailureCoordination {
+    first_decode_started: BoundedTestLatch,
+    release_decode: BoundedTestLatch,
+}
+
+impl HotspotFactoryFailureCoordination {
+    fn new() -> Self {
+        Self {
+            first_decode_started: BoundedTestLatch::new(
+                1,
+                TEST_COORDINATION_TIMEOUT,
+                "hotspot first worker decode rendezvous",
+            ),
+            release_decode: BoundedTestLatch::new(
+                1,
+                TEST_COORDINATION_TIMEOUT,
+                "hotspot failed-factory decode release",
+            ),
+        }
+    }
 }
 
 #[derive(Debug)]
 struct SecondInstanceFailingDecoder {
     tracker: Arc<HotspotFactoryFailureTracker>,
-    coordination: Arc<(Mutex<HotspotFactoryFailureState>, Condvar)>,
+    coordination: Arc<HotspotFactoryFailureCoordination>,
     detector_ids: Vec<i64>,
     observable_ids: Vec<i64>,
     is_worker: bool,
@@ -185,13 +328,8 @@ impl NativeBatchDecoder for SecondInstanceFailingDecoder {
     fn create_worker_instance(&self) -> faultscope_core::NpResult<Arc<dyn NativeBatchDecoder>> {
         let call = self.tracker.factory_calls.fetch_add(1, Ordering::SeqCst) + 1;
         if call == 2 {
-            let (lock, changed) = self.coordination.as_ref();
-            let mut state = lock.lock().unwrap();
-            while !state.first_decode_started {
-                state = changed.wait(state).unwrap();
-            }
-            state.release_decode = true;
-            changed.notify_all();
+            self.coordination.first_decode_started.wait()?;
+            self.coordination.release_decode.signal()?;
             return Err(faultscope_core::NpError::new(
                 "intentional hotspot second worker factory failure",
             ));
@@ -213,13 +351,8 @@ impl NativeBatchDecoder for SecondInstanceFailingDecoder {
         if !self.is_worker {
             return Ok(CorrectionMaskBatch::empty(detectors.shots));
         }
-        let (lock, changed) = self.coordination.as_ref();
-        let mut state = lock.lock().unwrap();
-        state.first_decode_started = true;
-        changed.notify_all();
-        while !state.release_decode {
-            state = changed.wait(state).unwrap();
-        }
+        self.coordination.first_decode_started.signal()?;
+        self.coordination.release_decode.wait()?;
         Ok(CorrectionMaskBatch::empty(detectors.shots))
     }
 }
@@ -716,9 +849,13 @@ fn collection_run_options(num_workers: usize) -> DemLogicalCollectionRunOptions 
 fn collection_uses_worker_local_decoder() {
     let tracker = Arc::new(InstanceTracker::default());
     let prototype: Arc<dyn NativeBatchDecoder> =
-        Arc::new(WorkerOwnedDecoder::prototype_with_barrier(
+        Arc::new(WorkerOwnedDecoder::prototype_with_latch(
             tracker.clone(),
-            Some(Arc::new(Barrier::new(4))),
+            Some(Arc::new(BoundedTestLatch::new(
+                4,
+                TEST_COORDINATION_TIMEOUT,
+                "fixed collection worker decode rendezvous",
+            ))),
         ));
     let task = decoder_collection_task("worker-owned-fixed", prototype, 4_000, false);
 
@@ -739,42 +876,90 @@ fn hotspot_uses_worker_local_decoder() {
     let serial_decoder: Arc<dyn NativeBatchDecoder> =
         Arc::new(WorkerOwnedDecoder::prototype(serial_tracker));
     let mut serial_task =
-        decoder_collection_task("hotspot-worker-owned", serial_decoder, 4_000, false);
+        decoder_collection_task("hotspot-worker-owned", serial_decoder, 8_000, false);
     serial_task.sampler = Arc::new(DemHotspotEstimator::new(graphlike_dem(0.37)).unwrap());
     let serial = collect_dem_hotspot_tasks(vec![serial_task], collection_run_options(1)).unwrap();
 
     let tracker = Arc::new(InstanceTracker::default());
     let prototype: Arc<dyn NativeBatchDecoder> =
-        Arc::new(WorkerOwnedDecoder::prototype_with_barrier(
+        Arc::new(WorkerOwnedDecoder::prototype_with_latch(
             tracker.clone(),
-            Some(Arc::new(Barrier::new(4))),
+            Some(Arc::new(BoundedTestLatch::new(
+                4,
+                TEST_COORDINATION_TIMEOUT,
+                "hotspot worker decode rendezvous",
+            ))),
         ));
     let mut parallel_task =
-        decoder_collection_task("hotspot-worker-owned", prototype, 4_000, false);
+        decoder_collection_task("hotspot-worker-owned", prototype, 8_000, false);
     parallel_task.sampler = Arc::new(DemHotspotEstimator::new(graphlike_dem(0.37)).unwrap());
 
     let parallel =
         collect_dem_hotspot_tasks(vec![parallel_task], collection_run_options(4)).unwrap();
 
-    assert_eq!(parallel[0].stats.shots, 4_000);
-    assert!(tracker.created.load(Ordering::SeqCst) >= 2);
+    assert_eq!(parallel[0].stats.shots, 8_000);
+    assert_eq!(tracker.created.load(Ordering::SeqCst), 4);
+    assert_eq!(tracker.decode_calls.load(Ordering::SeqCst), 8);
     assert_eq!(tracker.concurrent_reentries.load(Ordering::SeqCst), 0);
     assert_eq!(tracker.cross_thread_uses.load(Ordering::SeqCst), 0);
     assert_eq!(tracker.prototype_decode_calls.load(Ordering::SeqCst), 0);
-    assert_eq!(parallel[0].batch_stats.len(), 4);
+    assert_eq!(parallel[0].batch_stats.len(), 8);
     assert_eq!(
         parallel[0]
             .batch_stats
             .iter()
-            .map(|batch| (batch.shots, batch.errors, batch.discards))
+            .map(|batch| {
+                (
+                    batch.shots,
+                    batch.errors,
+                    batch.discards,
+                    batch.custom_counts.clone(),
+                )
+            })
             .collect::<Vec<_>>(),
         serial[0]
             .batch_stats
             .iter()
-            .map(|batch| (batch.shots, batch.errors, batch.discards))
+            .map(|batch| {
+                (
+                    batch.shots,
+                    batch.errors,
+                    batch.discards,
+                    batch.custom_counts.clone(),
+                )
+            })
             .collect::<Vec<_>>()
     );
+    assert_eq!(parallel[0].stats.errors, serial[0].stats.errors);
+    assert_eq!(parallel[0].stats.discards, serial[0].stats.discards);
+    assert_eq!(
+        parallel[0].stats.custom_counts,
+        serial[0].stats.custom_counts
+    );
     assert_eq!(parallel[0].edge_sensitivities, serial[0].edge_sensitivities);
+}
+
+#[test]
+fn hotspot_decoder_cache_isolated_by_task_index() {
+    let first_tracker = Arc::new(InstanceTracker::default());
+    let second_tracker = Arc::new(InstanceTracker::default());
+    let first_decoder: Arc<dyn NativeBatchDecoder> =
+        Arc::new(WorkerOwnedDecoder::prototype(first_tracker.clone()));
+    let second_decoder: Arc<dyn NativeBatchDecoder> =
+        Arc::new(WorkerOwnedDecoder::prototype(second_tracker.clone()));
+    let first_task = decoder_collection_task("hotspot-cache-first", first_decoder, 2_000, false);
+    let second_task = decoder_collection_task("hotspot-cache-second", second_decoder, 2_000, false);
+
+    let results =
+        collect_dem_hotspot_tasks(vec![first_task, second_task], collection_run_options(1))
+            .unwrap();
+
+    assert_eq!(results.len(), 2);
+    for tracker in [&first_tracker, &second_tracker] {
+        assert_eq!(tracker.created.load(Ordering::SeqCst), 1);
+        assert_eq!(tracker.decode_calls.load(Ordering::SeqCst), 2);
+        assert_eq!(tracker.prototype_decode_calls.load(Ordering::SeqCst), 0);
+    }
 }
 
 #[test]
@@ -782,10 +967,7 @@ fn hotspot_worker_factory_failure() {
     let tracker = Arc::new(HotspotFactoryFailureTracker::default());
     let decoder: Arc<dyn NativeBatchDecoder> = Arc::new(SecondInstanceFailingDecoder {
         tracker: tracker.clone(),
-        coordination: Arc::new((
-            Mutex::new(HotspotFactoryFailureState::default()),
-            Condvar::new(),
-        )),
+        coordination: Arc::new(HotspotFactoryFailureCoordination::new()),
         detector_ids: vec![0],
         observable_ids: vec![0],
         is_worker: false,
