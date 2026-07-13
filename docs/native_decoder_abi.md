@@ -128,12 +128,11 @@ the boundary. Report failures through `FaultScopeNativeDecoderStatusV1`.
 
 ## Backend availability
 
-`pymatching` and `fusion-blossom` are ABI v2 packages. `bpdecoder` remains an
-installable catalog entry and becomes loadable after its separate ABI v2
-migration. `mwpm` is discoverable but unavailable: its package is ABI v1 and
+`pymatching`, `fusion-blossom`, and `bpdecoder` are ABI v2 packages. `mwpm` is
+discoverable but unavailable: its package is ABI v1 and
 not yet migrated to FaultScope native decoder ABI v2, so FaultScope offers no
-install action. `bposd` remains a distinct reserved, unimplemented catalog
-entry.
+install action. `bposd` is a reserved, unimplemented name shown by status; it
+is not installable and has no install action.
 
 Public Python decoder class names do not change. The public Python decoder classes are factory handles; workers are private implementation objects and
 are never returned through the Python API.

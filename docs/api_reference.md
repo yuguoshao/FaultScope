@@ -409,9 +409,10 @@ uniform API. Friendly proxies such as `NativePyMatchingDecoder`,
 `NativeFusionBlossomDecoder`, `NativeMwpmDecoder`, and `NativeBposdDecoder` remain importable;
 construction raises a precise availability error until a compatible backend
 package is installed. `mwpm` is discoverable but unavailable pending its ABI v2
-migration; `bposd` is reserved and unimplemented. A post-install backend enters the native fast path only when the
-constructed decoder exposes the FaultScope native decoder PyCapsule ABI; otherwise it
-remains a normal Python decoder.
+migration. `bposd` is a reserved, unimplemented, non-installable status entry
+with no install action. A post-install backend enters the native fast path only
+when the constructed decoder exposes the FaultScope native decoder PyCapsule
+ABI; otherwise it remains a normal Python decoder.
 
 ## Detector Error Models
 

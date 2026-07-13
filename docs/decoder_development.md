@@ -382,7 +382,8 @@ problem view, source repository, default revision, installability, and a short
 description. `pymatching`, `fusion-blossom`, and `bpdecoder` are installable.
 `mwpm` remains discoverable but unavailable because its package is ABI v1 and
 not yet migrated to FaultScope native decoder ABI v2; no install action is
-offered. `bposd` is the distinct reserved, unimplemented binary-linear entry.
+offered. `bposd` is visible only as reserved, unimplemented, non-installable
+status metadata and has no install action.
 
 Python can inspect compiled native backend names:
 
@@ -473,13 +474,12 @@ Installable catalog entries expose explicit installation helpers:
 python -m faultscope.backends install fusion-blossom --dry-run
 python -m faultscope.backends install pymatching --dry-run
 python -m faultscope.backends install bpdecoder --dry-run
-python -m faultscope.backends install bposd --dry-run
 ```
 
-The command reserves the install workflow and prints the clone/build/install
-steps. `mwpm` is shown by `status` as unavailable pending ABI v2 migration and
-has no install action. `bposd` is a separate catalog reservation only; its dry
-run prints the reserved-backend explanation and does not imply an implementation.
+These commands print clone/build/install steps for the three installable
+entries. `mwpm` is shown by `status` as unavailable pending ABI v2 migration
+and has no install action. `bposd` is shown only as a reserved, unimplemented,
+non-installable status entry and likewise has no install action.
 
 When the backend package is missing, the public proxy remains importable but
 construction raises an install hint:

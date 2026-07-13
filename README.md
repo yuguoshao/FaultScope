@@ -136,7 +136,8 @@ print(result.hotspot_table(top_k=5))
   `python -m faultscope.backends install pymatching --dry-run` 查看安装步骤；FaultScope 不会在
   `import` 或 `estimate(...)` 时隐式联网、clone 或编译。
 - `mwpm` 仍可在 catalog/status 中发现，但外部 `faultscope-mwpm` 包还是 ABI v1，尚未迁移到
-  FaultScope native decoder ABI v2，因此目前不可安装；`bposd` 是另一条独立的预留项。
+  FaultScope native decoder ABI v2，因此目前不可安装；`bposd` 只在 status 中作为不可安装、
+  未实现的预留名称出现，没有 install 操作。
 - 开发中的 PyMatching 和 fusion-blossom backend 可在激活 venv 后通过
   `.venv/bin/python -m pip install -e backends/faultscope-pymatching --no-build-isolation` 和
   `.venv/bin/python -m pip install -e backends/faultscope-fusion-blossom` 本地安装；当前是最小
