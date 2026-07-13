@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{mpsc, Arc, Barrier, Condvar, Mutex};
 use std::thread::{self, ThreadId};
 use std::time::{Duration, Instant};
 
@@ -19,6 +19,7 @@ use faultscope_core::{
 #[derive(Debug, Default)]
 struct InstanceTracker {
     created: AtomicUsize,
+    decode_calls: AtomicUsize,
     concurrent_reentries: AtomicUsize,
     cross_thread_uses: AtomicUsize,
     prototype_decode_calls: AtomicUsize,
@@ -30,17 +31,26 @@ struct WorkerOwnedDecoder {
     detector_ids: Vec<i64>,
     observable_ids: Vec<i64>,
     is_prototype: bool,
+    decode_barrier: Option<Arc<Barrier>>,
     active: AtomicBool,
     owner: Mutex<Option<ThreadId>>,
 }
 
 impl WorkerOwnedDecoder {
     fn prototype(tracker: Arc<InstanceTracker>) -> Self {
+        Self::prototype_with_barrier(tracker, None)
+    }
+
+    fn prototype_with_barrier(
+        tracker: Arc<InstanceTracker>,
+        decode_barrier: Option<Arc<Barrier>>,
+    ) -> Self {
         Self {
             tracker,
             detector_ids: vec![0],
             observable_ids: vec![0],
             is_prototype: true,
+            decode_barrier,
             active: AtomicBool::new(false),
             owner: Mutex::new(None),
         }
@@ -52,6 +62,7 @@ impl WorkerOwnedDecoder {
             detector_ids: self.detector_ids.clone(),
             observable_ids: self.observable_ids.clone(),
             is_prototype: false,
+            decode_barrier: self.decode_barrier.clone(),
             active: AtomicBool::new(false),
             owner: Mutex::new(None),
         }
@@ -80,6 +91,7 @@ impl NativeBatchDecoder for WorkerOwnedDecoder {
         &self,
         detectors: DetectorMaskBatchView<'_>,
     ) -> faultscope_core::NpResult<CorrectionMaskBatch> {
+        self.tracker.decode_calls.fetch_add(1, Ordering::SeqCst);
         if self.is_prototype {
             self.tracker
                 .prototype_decode_calls
@@ -89,6 +101,9 @@ impl NativeBatchDecoder for WorkerOwnedDecoder {
             self.tracker
                 .concurrent_reentries
                 .fetch_add(1, Ordering::SeqCst);
+        }
+        if let Some(barrier) = &self.decode_barrier {
+            barrier.wait();
         }
         let current = thread::current().id();
         let mut owner = self.owner.lock().unwrap();
@@ -104,6 +119,145 @@ impl NativeBatchDecoder for WorkerOwnedDecoder {
         drop(owner);
         thread::sleep(Duration::from_millis(5));
         self.active.store(false, Ordering::SeqCst);
+        Ok(CorrectionMaskBatch::empty(detectors.shots))
+    }
+}
+
+#[derive(Debug, Default)]
+struct GatedAdaptiveTracker {
+    created: AtomicUsize,
+    dropped: AtomicUsize,
+}
+
+#[derive(Debug)]
+struct GatedAdaptiveDecoder {
+    tracker: Arc<GatedAdaptiveTracker>,
+    gate: Arc<(Mutex<bool>, Condvar)>,
+    started_tx: Arc<Mutex<Option<mpsc::SyncSender<()>>>>,
+    detector_ids: Vec<i64>,
+    observable_ids: Vec<i64>,
+    is_worker: bool,
+}
+
+impl Drop for GatedAdaptiveDecoder {
+    fn drop(&mut self) {
+        if self.is_worker {
+            self.tracker.dropped.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+}
+
+impl NativeBatchDecoder for GatedAdaptiveDecoder {
+    fn name(&self) -> &str {
+        "gated_adaptive"
+    }
+
+    fn detector_ids(&self) -> &[i64] {
+        &self.detector_ids
+    }
+
+    fn observable_ids(&self) -> &[i64] {
+        &self.observable_ids
+    }
+
+    fn create_worker_instance(&self) -> faultscope_core::NpResult<Arc<dyn NativeBatchDecoder>> {
+        self.tracker.created.fetch_add(1, Ordering::SeqCst);
+        Ok(Arc::new(Self {
+            tracker: self.tracker.clone(),
+            gate: self.gate.clone(),
+            started_tx: self.started_tx.clone(),
+            detector_ids: self.detector_ids.clone(),
+            observable_ids: self.observable_ids.clone(),
+            is_worker: true,
+        }))
+    }
+
+    fn decode_batch(
+        &self,
+        detectors: DetectorMaskBatchView<'_>,
+    ) -> faultscope_core::NpResult<CorrectionMaskBatch> {
+        if let Some(started_tx) = self.started_tx.lock().unwrap().take() {
+            let _ = started_tx.send(());
+        }
+        let (lock, ready) = self.gate.as_ref();
+        let mut released = lock.lock().unwrap();
+        while !*released {
+            released = ready.wait(released).unwrap();
+        }
+        Ok(CorrectionMaskBatch::empty(detectors.shots))
+    }
+}
+
+#[derive(Debug)]
+struct SignalingUnsupportedDecoder {
+    factory_called: Arc<(Mutex<bool>, Condvar)>,
+    decode_calls: AtomicUsize,
+    detector_ids: Vec<i64>,
+    observable_ids: Vec<i64>,
+}
+
+impl NativeBatchDecoder for SignalingUnsupportedDecoder {
+    fn name(&self) -> &str {
+        "signaling_legacy"
+    }
+
+    fn detector_ids(&self) -> &[i64] {
+        &self.detector_ids
+    }
+
+    fn observable_ids(&self) -> &[i64] {
+        &self.observable_ids
+    }
+
+    fn create_worker_instance(&self) -> faultscope_core::NpResult<Arc<dyn NativeBatchDecoder>> {
+        let (lock, called) = self.factory_called.as_ref();
+        *lock.lock().unwrap() = true;
+        called.notify_all();
+        Err(faultscope_core::NpError::new(
+            "signaling_legacy does not support collection worker instances",
+        ))
+    }
+
+    fn decode_batch(
+        &self,
+        detectors: DetectorMaskBatchView<'_>,
+    ) -> faultscope_core::NpResult<CorrectionMaskBatch> {
+        self.decode_calls.fetch_add(1, Ordering::SeqCst);
+        Ok(CorrectionMaskBatch::empty(detectors.shots))
+    }
+}
+
+#[derive(Debug)]
+struct NearMatchFactoryErrorDecoder {
+    decode_calls: AtomicUsize,
+    detector_ids: Vec<i64>,
+    observable_ids: Vec<i64>,
+}
+
+impl NativeBatchDecoder for NearMatchFactoryErrorDecoder {
+    fn name(&self) -> &str {
+        "near_match"
+    }
+
+    fn detector_ids(&self) -> &[i64] {
+        &self.detector_ids
+    }
+
+    fn observable_ids(&self) -> &[i64] {
+        &self.observable_ids
+    }
+
+    fn create_worker_instance(&self) -> faultscope_core::NpResult<Arc<dyn NativeBatchDecoder>> {
+        Err(faultscope_core::NpError::new(
+            "near_match does not support collection worker instances (temporary)",
+        ))
+    }
+
+    fn decode_batch(
+        &self,
+        detectors: DetectorMaskBatchView<'_>,
+    ) -> faultscope_core::NpResult<CorrectionMaskBatch> {
+        self.decode_calls.fetch_add(1, Ordering::SeqCst);
         Ok(CorrectionMaskBatch::empty(detectors.shots))
     }
 }
@@ -477,7 +631,10 @@ fn collection_run_options(num_workers: usize) -> DemLogicalCollectionRunOptions 
 fn collection_uses_worker_local_decoder() {
     let tracker = Arc::new(InstanceTracker::default());
     let prototype: Arc<dyn NativeBatchDecoder> =
-        Arc::new(WorkerOwnedDecoder::prototype(tracker.clone()));
+        Arc::new(WorkerOwnedDecoder::prototype_with_barrier(
+            tracker.clone(),
+            Some(Arc::new(Barrier::new(4))),
+        ));
     let task = decoder_collection_task("worker-owned-fixed", prototype, 4_000, false);
 
     let stats =
@@ -535,6 +692,136 @@ fn legacy_decoder_fails_with_multiple_workers_before_decoding() {
         .message()
         .contains("does not support collection worker instances"));
     assert_eq!(decoder.calls.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn worker_error_drain_cancels_late_adaptive_delta_and_joins_workers() {
+    let factory_called = Arc::new((Mutex::new(false), Condvar::new()));
+    let unsupported = Arc::new(SignalingUnsupportedDecoder {
+        factory_called: factory_called.clone(),
+        decode_calls: AtomicUsize::new(0),
+        detector_ids: vec![0],
+        observable_ids: vec![0],
+    });
+    let (started_tx, started_rx) = mpsc::sync_channel(0);
+    let adaptive_tracker = Arc::new(GatedAdaptiveTracker::default());
+    let gate = Arc::new((Mutex::new(false), Condvar::new()));
+    let adaptive: Arc<dyn NativeBatchDecoder> = Arc::new(GatedAdaptiveDecoder {
+        tracker: adaptive_tracker.clone(),
+        gate: gate.clone(),
+        started_tx: Arc::new(Mutex::new(Some(started_tx))),
+        detector_ids: vec![0],
+        observable_ids: vec![0],
+        is_worker: false,
+    });
+    let tasks = vec![
+        decoder_collection_task("drain-error", unsupported.clone(), 1_000, false),
+        decoder_collection_task("drain-adaptive", adaptive, 1_000, true),
+    ];
+    let (done_tx, done_rx) = mpsc::sync_channel(0);
+    let progress_calls = Arc::new(AtomicUsize::new(0));
+    let worker_progress_calls = progress_calls.clone();
+    let collect_handle = thread::spawn(move || {
+        let result = collect_dem_logical_error_tasks_with_progress(
+            tasks,
+            collection_run_options(2),
+            HashMap::new(),
+            |_delta| {
+                worker_progress_calls.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            },
+        );
+        let _ = done_tx.send(result);
+    });
+
+    started_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("adaptive calibration work did not reach decode");
+    {
+        let (lock, called) = factory_called.as_ref();
+        let (called, timeout) = called
+            .wait_timeout_while(lock.lock().unwrap(), Duration::from_secs(1), |called| {
+                !*called
+            })
+            .unwrap();
+        assert!(*called, "unsupported factory work did not start");
+        assert!(!timeout.timed_out(), "unsupported factory signal timed out");
+    }
+    thread::sleep(Duration::from_millis(100));
+    {
+        let (lock, ready) = gate.as_ref();
+        *lock.lock().unwrap() = true;
+        ready.notify_all();
+    }
+
+    let result = done_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("collection did not drain and join workers after the first error");
+    collect_handle.join().unwrap();
+    let err = result.unwrap_err();
+    assert_eq!(
+        err.message(),
+        "signaling_legacy does not support collection worker instances"
+    );
+    assert_eq!(unsupported.decode_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        progress_calls.load(Ordering::SeqCst),
+        0,
+        "the gated adaptive delta must arrive after the original worker error"
+    );
+    assert!(adaptive_tracker.created.load(Ordering::SeqCst) > 0);
+    assert_eq!(
+        adaptive_tracker.created.load(Ordering::SeqCst),
+        adaptive_tracker.dropped.load(Ordering::SeqCst),
+        "collection must return only after every worker-local decoder is dropped"
+    );
+}
+
+#[test]
+fn mixed_fixed_and_adaptive_tasks_keep_decoder_caches_isolated_by_task_key() {
+    let fixed_tracker = Arc::new(InstanceTracker::default());
+    let adaptive_tracker = Arc::new(InstanceTracker::default());
+    let fixed: Arc<dyn NativeBatchDecoder> =
+        Arc::new(WorkerOwnedDecoder::prototype(fixed_tracker.clone()));
+    let adaptive: Arc<dyn NativeBatchDecoder> =
+        Arc::new(WorkerOwnedDecoder::prototype(adaptive_tracker.clone()));
+    let tasks = vec![
+        decoder_collection_task("isolated-fixed", fixed, 4_000, false),
+        decoder_collection_task("isolated-adaptive", adaptive, 6_000, true),
+    ];
+
+    let stats =
+        collect_dem_logical_error_tasks(tasks, collection_run_options(4), HashMap::new()).unwrap();
+
+    assert_eq!(stats[0].shots, 4_000);
+    assert_eq!(stats[1].shots, 6_000);
+    for tracker in [&fixed_tracker, &adaptive_tracker] {
+        assert!(tracker.created.load(Ordering::SeqCst) > 0);
+        assert!(tracker.decode_calls.load(Ordering::SeqCst) > 0);
+        assert_eq!(tracker.concurrent_reentries.load(Ordering::SeqCst), 0);
+        assert_eq!(tracker.cross_thread_uses.load(Ordering::SeqCst), 0);
+        assert_eq!(tracker.prototype_decode_calls.load(Ordering::SeqCst), 0);
+    }
+}
+
+#[test]
+fn single_worker_does_not_treat_near_match_factory_error_as_legacy_unsupported() {
+    let decoder = Arc::new(NearMatchFactoryErrorDecoder {
+        decode_calls: AtomicUsize::new(0),
+        detector_ids: vec![0],
+        observable_ids: vec![0],
+    });
+    let task = decoder_collection_task("near-match", decoder.clone(), 1_000, false);
+
+    let err =
+        collect_dem_logical_error_tasks(vec![task], collection_run_options(1), HashMap::new())
+            .unwrap_err();
+
+    assert_eq!(
+        err.message(),
+        "near_match does not support collection worker instances (temporary)"
+    );
+    assert_eq!(decoder.decode_calls.load(Ordering::SeqCst), 0);
 }
 
 #[test]

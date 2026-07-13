@@ -256,6 +256,11 @@ fn collect_task_set_inner(
             in_flight -= 1;
         }
         if first_error.is_some() {
+            if let Ok(WorkResult::AdaptiveDelta { ack, .. }) = result {
+                let _ = ack.send(Err(NpError::new(
+                    "adaptive collection cancelled after an earlier worker error",
+                )));
+            }
             continue;
         }
         match result {
