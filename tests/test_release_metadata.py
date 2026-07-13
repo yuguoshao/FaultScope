@@ -249,6 +249,34 @@ class ReleaseMetadataTests(unittest.TestCase):
         ):
             self.assertNotIn(obsolete, docs, obsolete)
 
+    def test_native_decoder_development_uses_factory_worker_contract(self) -> None:
+        development = (ROOT / "docs/decoder_development.md").read_text()
+
+        for required in (
+            "`NativeBatchDecoder` remains the public Python factory-handle class name",
+            "NativeDecoderFactory: Send + Sync",
+            "NativeDecoderWorker: Send",
+            "fn create_worker(&self) -> NpResult<Box<dyn NativeDecoderWorker>>",
+            "fn decode_batch(\n        &mut self,",
+            "fn decode_packed_batch(\n        &mut self,",
+            "fn decode_detector_event_batch(\n        &mut self,",
+            "Arc<dyn NativeDecoderFactory>",
+            "temporary worker",
+            "per-thread/task worker",
+            "recursive composite workers",
+            "no backend decoder pool or worker mutex",
+        ):
+            self.assertIn(required, development, required)
+
+        for obsolete in (
+            "faultscope_core::NativeBatchDecoder",
+            "impl NativeBatchDecoder for",
+            "Arc<dyn NativeBatchDecoder",
+            "fn decode_batch(\n        &self,",
+            "fn decode_packed_batch(\n    &self,",
+        ):
+            self.assertNotIn(obsolete, development, obsolete)
+
 
 if __name__ == "__main__":
     unittest.main()

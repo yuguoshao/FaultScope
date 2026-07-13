@@ -213,12 +213,18 @@ a DEM first, then delegate to the same Rust construction path as
 `from_dem(...)`.
 
 The PyO3 implementation should convert Python input into Rust core structures
-once:
+once. `NativeBatchDecoder` remains the public Python factory-handle class name;
+it is not the name of a Rust trait. A backend-specific Python class is also a
+factory handle and stores the immutable Rust factory:
 
 ```rust
+use std::sync::Arc;
+
+use faultscope_core::NativeDecoderFactory;
+
 #[pyclass(name = "MyNativeDecoder", module = "faultscope._native")]
 pub struct PyMyNativeDecoder {
-    inner: Arc<dyn faultscope_core::NativeBatchDecoder>,
+    inner: Arc<dyn NativeDecoderFactory>,
 }
 
 #[pymethods]
@@ -235,14 +241,14 @@ impl PyMyNativeDecoder {
             .compile_graphlike_problem()
             .map_err(|err| PyValueError::new_err(err.to_string()))?;
 
-        let backend = MyNativeDecoder::from_graphlike_problem(
+        let factory = MyNativeDecoderFactory::from_graphlike_problem(
             problem,
             option_a,
         )
         .map_err(|err| PyValueError::new_err(err.to_string()))?;
 
         Ok(Self {
-            inner: Arc::new(backend),
+            inner: Arc::new(factory),
         })
     }
 }
@@ -253,41 +259,177 @@ For BP+OSD/LDPC-style decoders, use
 more DEM metadata, use `compile_indexed()` or extend the construction-time DEM
 view. Do not add per-batch circuit or DEM reads to `decode_batch(...)`.
 
-The Rust backend stores all construction-time information:
+The Rust factory stores immutable construction-time information. Mutable
+solver state belongs only to a worker created from that information:
 
 ```rust
-pub struct MyNativeDecoder {
+pub struct MyNativeDecoderFactory {
     detector_ids: Vec<i64>,
     observable_ids: Vec<i64>,
-    // Compiled graph / H matrix / F matrix / weights / LLR / backend state.
+    // Share immutable compiled graph / H / F / weights / LLR data with workers.
+    compiled: Arc<MyCompiledProblem>,
+}
+
+pub struct MyNativeDecoderWorker {
+    detector_ids: Vec<i64>,
+    observable_ids: Vec<i64>,
+    // This worker's exclusive, mutable backend solver and scratch state.
+    solver: MySolver,
 }
 ```
 
 The Python object only owns the handle. It does not own batch detector syndrome
 masks or correction masks during `estimate(...)`.
 
-The core Rust contract is `NativeBatchDecoder`:
+The core Rust contracts are the distinct factory and worker traits below. These
+signatures are normative: `NativeDecoderFactory: Send + Sync` is immutable and
+creates fresh workers, while `NativeDecoderWorker: Send` owns mutable state and
+decodes through `&mut self`:
 
 ```rust
+pub trait NativeDecoderFactory: Send + Sync {
+    fn name(&self) -> &str;
+    fn detector_ids(&self) -> &[i64];
+    fn observable_ids(&self) -> &[i64];
+    fn create_worker(&self) -> NpResult<Box<dyn NativeDecoderWorker>>;
+}
+
+pub trait NativeDecoderWorker: Send {
+    fn name(&self) -> &str;
+    fn detector_ids(&self) -> &[i64];
+    fn observable_ids(&self) -> &[i64];
+    fn decode_batch(
+        &mut self,
+        detectors: DetectorMaskBatchView<'_>,
+    ) -> NpResult<CorrectionMaskBatch>;
+
+    fn supports_packed_batch(&self) -> bool {
+        false
+    }
+
+    fn decode_packed_batch(
+        &mut self,
+        _detectors: PackedDetectorShotBatchView<'_>,
+    ) -> NpResult<PackedObservableShotBatch> {
+        Err(NpError::new(format!(
+            "{} does not support packed-row batch decode",
+            self.name()
+        )))
+    }
+
+    fn supports_detector_event_batch(&self) -> bool {
+        false
+    }
+
+    fn decode_detector_event_batch(
+        &mut self,
+        _detectors: DetectorEventShotBatchView<'_>,
+    ) -> NpResult<PackedObservableShotBatch> {
+        Err(NpError::new(format!(
+            "{} does not support detector-event batch decode",
+            self.name()
+        )))
+    }
+
+    fn decode_batch_checked(
+        &mut self,
+        detectors: DetectorMaskBatchView<'_>,
+    ) -> NpResult<CorrectionMaskBatch> {
+        let shots = detectors.shots;
+        let corrections = self.decode_batch(detectors)?;
+        corrections.validate_against(self.observable_ids(), shots)?;
+        Ok(corrections)
+    }
+
+    fn decode_packed_batch_checked(
+        &mut self,
+        detectors: PackedDetectorShotBatchView<'_>,
+    ) -> NpResult<PackedObservableShotBatch> {
+        let shots = detectors.shots;
+        let corrections = self.decode_packed_batch(detectors)?;
+        corrections.validate_against(self.observable_ids(), shots)?;
+        Ok(corrections)
+    }
+
+    fn decode_detector_event_batch_checked(
+        &mut self,
+        detectors: DetectorEventShotBatchView<'_>,
+    ) -> NpResult<PackedObservableShotBatch> {
+        let shots = detectors.shots;
+        let corrections = self.decode_detector_event_batch(detectors)?;
+        corrections.validate_against(self.observable_ids(), shots)?;
+        Ok(corrections)
+    }
+}
+```
+
+FaultScope calls the checked wrappers to validate shot counts and observable
+ids. A minimal implementation with both optional fast paths has this ownership
+shape:
+
+```rust
+use std::sync::Arc;
+
 use faultscope_core::{
     CorrectionMaskBatch,
+    DetectorEventShotBatchView,
     DetectorMaskBatchView,
     Mask,
-    NativeBatchDecoder,
+    NativeDecoderFactory,
+    NativeDecoderWorker,
     NpResult,
     PackedDetectorShotBatchView,
     PackedObservableShotBatch,
 };
 
-pub struct MyNativeDecoder {
-    detector_ids: Vec<i64>,
-    observable_ids: Vec<i64>,
-    // Store the compiled graph, matrix, weights, or backend object here.
+const DECODER_NAME: &str = "my-decoder";
+
+struct MyCompiledProblem;
+struct MySolver;
+
+impl MySolver {
+    fn from_compiled(_compiled: &MyCompiledProblem) -> NpResult<Self> {
+        Ok(Self)
+    }
 }
 
-impl NativeBatchDecoder for MyNativeDecoder {
+struct MyNativeDecoderFactory {
+    detector_ids: Vec<i64>,
+    observable_ids: Vec<i64>,
+    compiled: Arc<MyCompiledProblem>,
+}
+
+impl NativeDecoderFactory for MyNativeDecoderFactory {
     fn name(&self) -> &str {
-        "my-decoder"
+        DECODER_NAME
+    }
+
+    fn detector_ids(&self) -> &[i64] {
+        &self.detector_ids
+    }
+
+    fn observable_ids(&self) -> &[i64] {
+        &self.observable_ids
+    }
+
+    fn create_worker(&self) -> NpResult<Box<dyn NativeDecoderWorker>> {
+        Ok(Box::new(MyNativeDecoderWorker {
+            detector_ids: self.detector_ids.clone(),
+            observable_ids: self.observable_ids.clone(),
+            solver: MySolver::from_compiled(&self.compiled)?,
+        }))
+    }
+}
+
+struct MyNativeDecoderWorker {
+    detector_ids: Vec<i64>,
+    observable_ids: Vec<i64>,
+    solver: MySolver,
+}
+
+impl NativeDecoderWorker for MyNativeDecoderWorker {
+    fn name(&self) -> &str {
+        DECODER_NAME
     }
 
     fn detector_ids(&self) -> &[i64] {
@@ -299,47 +441,59 @@ impl NativeBatchDecoder for MyNativeDecoder {
     }
 
     fn decode_batch(
-        &self,
+        &mut self,
         detectors: DetectorMaskBatchView<'_>,
     ) -> NpResult<CorrectionMaskBatch> {
-        let words = faultscope_core::word_count(detectors.shots);
-
-        // detectors.masks are ordered exactly like self.detector_ids().
-        // Run the backend and fill one Mask per corrected observable id.
-        let correction_for_observable_0 = Mask::zero(words);
-
+        let _solver = &mut self.solver; // Decode detector-major masks here.
         CorrectionMaskBatch::new(
-            vec![self.observable_ids[0]],
-            vec![correction_for_observable_0],
+            self.observable_ids.clone(),
+            vec![
+                Mask::zero(faultscope_core::word_count(detectors.shots));
+                self.observable_ids.len()
+            ],
             detectors.shots,
         )
+    }
+
+    fn supports_packed_batch(&self) -> bool {
+        true
+    }
+
+    fn decode_packed_batch(
+        &mut self,
+        detectors: PackedDetectorShotBatchView<'_>,
+    ) -> NpResult<PackedObservableShotBatch> {
+        let _solver = &mut self.solver; // Decode row-major packed shots here.
+        Ok(PackedObservableShotBatch::zero(
+            self.observable_ids.clone(),
+            detectors.shots,
+        ))
+    }
+
+    fn supports_detector_event_batch(&self) -> bool {
+        true
+    }
+
+    fn decode_detector_event_batch(
+        &mut self,
+        detectors: DetectorEventShotBatchView<'_>,
+    ) -> NpResult<PackedObservableShotBatch> {
+        let _solver = &mut self.solver; // Decode sparse detector events here.
+        Ok(PackedObservableShotBatch::zero(
+            self.observable_ids.clone(),
+            detectors.shots,
+        ))
     }
 }
 ```
 
-`decode_batch(...)` is the required compatibility-native callback. Backends
-that can consume Stim/PyMatching-style row-major packed shots may additionally
-override:
-
-```rust
-fn supports_packed_batch(&self) -> bool {
-    true
-}
-
-fn decode_packed_batch(
-    &self,
-    detectors: PackedDetectorShotBatchView<'_>,
-) -> NpResult<PackedObservableShotBatch> {
-    // detectors.data layout is shots x ceil(detectors / 8), little-endian
-    // bit order within each byte. Return the same layout for observables.
-    PackedObservableShotBatch::zero(self.observable_ids.clone(), detectors.shots)
-}
-```
-
-The DEM sampler uses this optional path only for native decoders when
-`aggregate_hotspots=False` and no Python callbacks are supplied. Hotspot
-aggregation still uses the detector-major mask path because it needs DEM edge
-event masks.
+Every worker must report the same `name`, `detector_ids`, and `observable_ids`
+as its factory for its entire lifetime. `decode_batch(...)` is the required
+detector-major mask path. A worker may additionally advertise the packed-row
+path for `shots x ceil(detectors / 8)` bytes and the sparse detector-event path
+for per-shot event offsets and detector indices. The optional methods still
+mutate only that exclusive worker; they do not move solver state into the
+factory.
 
 The PyO3 layer should expose a Python handle with constructors such as:
 
@@ -354,8 +508,12 @@ decoder = MyNativeDecoder.from_circuit(
 ```
 
 Internally, those constructors should compile the DEM/problem once and store an
-`Arc<dyn NativeBatchDecoder + Send + Sync>`. The runtime recognizes native
-handles explicitly; a Python subclass that only implements
+`Arc<dyn NativeDecoderFactory>`. FaultScope owns the workers: it uses a
+temporary worker for debug and estimate paths, a per-thread/task worker cache
+for collection (including a one-worker collection), and
+recursive composite workers whose children are fresh workers from the child
+factories. Backend code therefore needs
+no backend decoder pool or worker mutex. A Python subclass that only implements
 `decode_batch_masks(batch)` remains a Python decoder and does not enter the
 native fast path.
 
