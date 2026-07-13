@@ -2,7 +2,10 @@
 
 mod api;
 mod counting;
+mod hotspot;
 mod scheduler;
+mod worker_decoder;
+mod worker_executor;
 
 pub use api::{
     collect_dem_logical_error_stats, collect_dem_logical_error_tasks,
@@ -10,3 +13,4 @@ pub use api::{
     DemLogicalCollectionOptions, DemLogicalCollectionRunOptions, DemLogicalCollectionStats,
     DemLogicalCollectionTask,
 };
+pub use hotspot::{collect_dem_hotspot_tasks, DemHotspotCollectionResult};

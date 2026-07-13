@@ -10,7 +10,7 @@ from pathlib import Path
 import threading
 from typing import Any
 
-from faultscope._native import _collect_dem_logical_error_stats_many
+from faultscope._native import _collect_dem_hotspots_many, _collect_dem_logical_error_stats_many
 from faultscope.decoders import create_native_decoder
 from faultscope.runtime import (
     compile_native_dem_sampler,
@@ -22,6 +22,7 @@ from faultscope.collection._types import (
     CollectionOptions,
     CollectionRunOptions,
     CollectionTask,
+    HotspotCollectionResult,
     Progress,
     TaskStats,
     read_stats_from_csv_files,
@@ -58,6 +59,11 @@ class Collector:
         """Yield final task totals in expanded task order."""
 
         yield from self.collect(tasks)
+
+    def collect_hotspots(self, tasks: Iterable[CollectionTask]) -> list[HotspotCollectionResult]:
+        """Collect logical statistics and shot-weighted edge sensitivities."""
+
+        return _run_collect_hotspots(tasks, self.options, self.run_options)
 
     def iter_progress(self, tasks: Iterable[CollectionTask]) -> Iterator[Progress]:
         """Yield committed native batch deltas as progress events."""
@@ -97,6 +103,17 @@ def collect(
     """Collect native logical-error statistics and return one total per task."""
 
     return Collector(options=options, run_options=run_options).collect(tasks)
+
+
+def collect_hotspots(
+    tasks: Iterable[CollectionTask],
+    *,
+    options: CollectionOptions | None = None,
+    run_options: CollectionRunOptions | None = None,
+) -> list[HotspotCollectionResult]:
+    """Collect logical statistics and shot-weighted edge sensitivities."""
+
+    return Collector(options=options, run_options=run_options).collect_hotspots(tasks)
 
 
 def iter_progress(
@@ -165,6 +182,38 @@ def _run_collect(
                     write_stats_to_csv_file(resume_path, [delta], append=True)
 
     return final_stats
+
+
+def _run_collect_hotspots(
+    tasks: Iterable[CollectionTask],
+    options: CollectionOptions,
+    run_options: CollectionRunOptions,
+) -> list[HotspotCollectionResult]:
+    if run_options.existing_data_filepaths or run_options.save_resume_filepath is not None:
+        raise ValueError("hotspot collection does not support CSV partial resume")
+    task_list = _expand_tasks_for_decoders(list(tasks), run_options.decoders)
+    native_tasks = []
+    for index, task in enumerate(task_list):
+        effective = _merge_options(options, task.collection_options)
+        if effective.max_shots is None:
+            raise ValueError("max_shots is required")
+        native_tasks.append(_native_task(task, index, effective))
+    native_results = _collect_dem_hotspots_many(
+        native_tasks,
+        num_workers=run_options.num_workers,
+        seed=run_options.seed,
+        count_observable_error_combos=run_options.count_observable_error_combos,
+        count_detection_events=run_options.count_detection_events,
+        custom_error_count_key=run_options.custom_error_count_key,
+    )
+    return [
+        HotspotCollectionResult(
+            stats=_task_stats_from_native(item["stats"]),
+            batch_stats=tuple(_task_stats_from_native(stat) for stat in item["batch_stats"]),
+            edge_sensitivities=tuple(float(value) for value in item["edge_sensitivities"]),
+        )
+        for item in native_results
+    ]
 
 
 class _CollectStreamCancelled(Exception):
@@ -264,6 +313,7 @@ def _merge_options(
 ) -> CollectionOptions:
     default_batch_size = CollectionOptions().batch_size
     max_shots = base.max_shots
+    min_shots = base.min_shots
     max_errors = base.max_errors
     batch_size = base.batch_size
     start_batch_size = base.start_batch_size
@@ -274,6 +324,8 @@ def _merge_options(
             continue
         if overlay.max_shots is not None:
             max_shots = overlay.max_shots
+        if getattr(overlay, "_min_shots_explicit", False):
+            min_shots = overlay.min_shots
         if overlay.max_errors is not None:
             max_errors = overlay.max_errors
         if overlay.batch_size != default_batch_size:
@@ -286,6 +338,7 @@ def _merge_options(
             max_batch_seconds = overlay.max_batch_seconds
     return CollectionOptions(
         max_shots=max_shots,
+        min_shots=min_shots,
         max_errors=max_errors,
         batch_size=batch_size,
         start_batch_size=start_batch_size,
@@ -326,6 +379,7 @@ def _native_task(
         "decoder_name": decoder_name,
         "metadata_json": metadata_json,
         "max_shots": int(options.max_shots),
+        "min_shots": options.min_shots,
         "max_errors": options.max_errors,
         "batch_size": options.batch_size,
         "seed": None,

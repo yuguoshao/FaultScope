@@ -94,8 +94,11 @@ OFFICIAL_BACKEND_CATALOG: dict[str, NativeDecoderBackendCatalogEntry] = {
         problem_kind="graphlike",
         repo_url="https://github.com/Quon-team/mwpm.rs.git",
         default_rev="main",
-        installable=True,
-        description="Optional mwpm.rs graphlike MWPM decoder backend.",
+        installable=False,
+        description=(
+            "The faultscope-mwpm package is still ABI v1 and is not yet migrated to "
+            "FaultScope native decoder ABI v2."
+        ),
     ),
     "bpdecoder": NativeDecoderBackendCatalogEntry(
         name="bpdecoder",
@@ -212,6 +215,12 @@ def backend_unavailable_message(name: str) -> str:
         return f"Native decoder backend {name!r} is not installed{details}."
     install_hint = f"python -m faultscope.backends install {entry.name}"
     if not entry.installable:
+        if entry.name == "mwpm":
+            return (
+                f"{entry.decoder_class_name} is unavailable: `{entry.package_name}` is "
+                "still ABI v1 and is not yet migrated to FaultScope native decoder ABI v2"
+                f"{details}."
+            )
         return (
             f"{entry.decoder_class_name} requires the optional `{entry.package_name}` "
             f"native backend, but `{entry.name}` is reserved and not installable yet. "

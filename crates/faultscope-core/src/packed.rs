@@ -106,7 +106,7 @@ impl RuntimeState {
         }
         Self {
             shots,
-            all_mask: all_mask.clone(),
+            all_mask,
             x_frame: vec![Mask::zero(words); n_qubits],
             z_frame: vec![Mask::zero(words); n_qubits],
             measurements: HashMap::new(),
@@ -161,25 +161,20 @@ fn apply_operation(
 ) -> NpResult<()> {
     match op {
         RunOperation::H(q) => {
-            let old_x = state.x_frame[*q].clone();
-            state.x_frame[*q] = state.z_frame[*q].clone();
-            state.z_frame[*q] = old_x;
+            std::mem::swap(&mut state.x_frame[*q], &mut state.z_frame[*q]);
         }
         RunOperation::S(q) | RunOperation::SDag(q) => {
-            let x = state.x_frame[*q].clone();
-            state.z_frame[*q].xor_assign(&x);
+            state.z_frame[*q].xor_assign(&state.x_frame[*q]);
         }
         RunOperation::Cx(control, target) => {
-            let x_control = state.x_frame[*control].clone();
-            state.x_frame[*target].xor_assign(&x_control);
-            let z_target = state.z_frame[*target].clone();
-            state.z_frame[*control].xor_assign(&z_target);
+            xor_mask_between(&mut state.x_frame, *control, *target);
+            xor_mask_between(&mut state.z_frame, *target, *control);
         }
         RunOperation::Cz(left, right) => {
-            let x_right = state.x_frame[*right].clone();
-            let x_left = state.x_frame[*left].clone();
-            state.z_frame[*left].xor_assign(&x_right);
-            state.z_frame[*right].xor_assign(&x_left);
+            if left != right {
+                state.z_frame[*left].xor_assign(&state.x_frame[*right]);
+                state.z_frame[*right].xor_assign(&state.x_frame[*left]);
+            }
         }
         RunOperation::Swap(left, right) => {
             state.x_frame.swap(*left, *right);
@@ -196,11 +191,9 @@ fn apply_operation(
             noise,
         } => {
             let mut bit = ideal.eval(random_masks, state.all_mask.words.len(), &state.all_mask);
-            let flip = frame_measurement_flip(state, qubits, pauli)?;
-            bit.xor_assign(&flip);
+            xor_frame_measurement_flip_into(&mut bit, state, qubits, pauli)?;
             if let Some(location) = noise {
-                let flip = sample_measurement_noise(location, state, rng)?;
-                bit.xor_assign(&flip);
+                sample_measurement_noise_into(location, state, rng, &mut bit)?;
             }
             let key = key
                 .clone()
@@ -213,15 +206,13 @@ fn apply_operation(
             basis,
             ideal,
         } => {
-            let outcome = ideal.eval(random_masks, state.all_mask.words.len(), &state.all_mask);
+            let mut outcome = ideal.eval(random_masks, state.all_mask.words.len(), &state.all_mask);
             if let Some(key) = key {
-                let mut bit = outcome.clone();
-                let flip = frame_measurement_flip(state, &[*qubit], basis)?;
-                bit.xor_assign(&flip);
-                record_measurement(&mut state.measurements, key, bit)?;
+                xor_frame_measurement_flip_into(&mut outcome, state, &[*qubit], basis)?;
+                record_measurement(&mut state.measurements, key, outcome)?;
             }
-            state.x_frame[*qubit] = Mask::zero(state.all_mask.words.len());
-            state.z_frame[*qubit] = Mask::zero(state.all_mask.words.len());
+            state.x_frame[*qubit].words.fill(0);
+            state.z_frame[*qubit].words.fill(0);
         }
         RunOperation::Detector {
             detector_id,
@@ -250,6 +241,18 @@ fn apply_operation(
     Ok(())
 }
 
+fn xor_mask_between(masks: &mut [Mask], source: usize, target: usize) {
+    if source == target {
+        masks[target].words.fill(0);
+    } else if source < target {
+        let (left, right) = masks.split_at_mut(target);
+        right[0].xor_assign(&left[source]);
+    } else {
+        let (left, right) = masks.split_at_mut(source);
+        left[target].xor_assign(&right[0]);
+    }
+}
+
 fn sample_noise(
     location: &NoiseLocation,
     state: &mut RuntimeState,
@@ -272,23 +275,30 @@ fn sample_noise(
     }
 }
 
-fn sample_measurement_noise(
+fn sample_measurement_noise_into(
     location: &NoiseLocation,
     state: &mut RuntimeState,
     rng: &mut SmallRng,
-) -> NpResult<Mask> {
+    target: &mut Mask,
+) -> NpResult<()> {
     if !matches!(location.model, NoiseModel::MeasurementBitFlip) {
         return Err(NpError::new(
             "native measurement noise supports MeasurementBitFlip only",
         ));
     }
-    let flip = bernoulli_mask(rng, state.shots, location.rate);
-    if state.record_events {
-        if let Some(mask) = state.event_masks.get_mut(&location.id) {
-            mask.xor_assign(&flip);
+    let mut event_mask = state
+        .record_events
+        .then(|| state.event_masks.get_mut(&location.id))
+        .flatten();
+    for_each_bernoulli_event(rng, state.shots, location.rate, |shot, _| {
+        let word = shot / 64;
+        let bit = 1u64 << (shot % 64);
+        target.words[word] ^= bit;
+        if let Some(mask) = event_mask.as_deref_mut() {
+            mask.words[word] ^= bit;
         }
-    }
-    Ok(flip)
+    });
+    Ok(())
 }
 
 fn sample_fixed_pauli_noise(
@@ -435,21 +445,25 @@ fn apply_masked_pauli_to_frame(
     Ok(())
 }
 
-fn frame_measurement_flip(state: &RuntimeState, qubits: &[usize], pauli: &str) -> NpResult<Mask> {
+fn xor_frame_measurement_flip_into(
+    target: &mut Mask,
+    state: &RuntimeState,
+    qubits: &[usize],
+    pauli: &str,
+) -> NpResult<()> {
     if qubits.len() != pauli.len() {
         return Err(NpError::new("qubits and pauli must have the same length"));
     }
-    let mut flip = Mask::zero(state.all_mask.words.len());
     for (qubit, local) in qubits.iter().zip(pauli.chars()) {
         let (x, z) = pauli_to_xz(local)?;
         if z != 0 {
-            flip.xor_assign(&state.x_frame[*qubit]);
+            target.xor_assign(&state.x_frame[*qubit]);
         }
         if x != 0 {
-            flip.xor_assign(&state.z_frame[*qubit]);
+            target.xor_assign(&state.z_frame[*qubit]);
         }
     }
-    Ok(flip)
+    Ok(())
 }
 
 fn record_measurement(
@@ -487,8 +501,12 @@ fn evaluate_observables(
     for observable in observables {
         let mut value = measurement_parity(&state.measurements, &observable.measurement_keys)?;
         if !observable.pauli.is_empty() {
-            let flip = frame_measurement_flip(state, &observable.pauli_qubits, &observable.pauli)?;
-            value.xor_assign(&flip);
+            xor_frame_measurement_flip_into(
+                &mut value,
+                state,
+                &observable.pauli_qubits,
+                &observable.pauli,
+            )?;
         }
         state.observables.insert(observable.id, value);
     }
@@ -515,6 +533,145 @@ fn two_qubits(qubits: &[usize], kind: &str) -> NpResult<(usize, usize)> {
 mod tests {
     use super::*;
     use crate::{Expr, Operation};
+
+    fn patterned_mask(shots: usize, offset: usize) -> Mask {
+        let mut mask = Mask::zero(word_count(shots));
+        for shot in 0..shots {
+            if (shot + offset).is_multiple_of(3) {
+                set_shot_bit(&mut mask, shot);
+            }
+        }
+        mask
+    }
+
+    #[test]
+    fn clifford_frame_updates_preserve_boundary_semantics() {
+        for shots in [1, 63, 64, 65, 129] {
+            let a = patterned_mask(shots, 0);
+            let b = patterned_mask(shots, 1);
+            let c = patterned_mask(shots, 2);
+            let d = patterned_mask(shots, 3);
+            let random_masks = Vec::new();
+            let mut rng = SmallRng::new(7);
+
+            let mut state = RuntimeState::new(2, shots, &[], false);
+            state.x_frame[0] = a.clone();
+            state.z_frame[0] = b.clone();
+            apply_operation(&RunOperation::H(0), &mut state, &random_masks, &mut rng).unwrap();
+            assert_eq!(state.x_frame[0], b);
+            assert_eq!(state.z_frame[0], a);
+
+            let mut state = RuntimeState::new(2, shots, &[], false);
+            state.x_frame[0] = a.clone();
+            state.z_frame[0] = b.clone();
+            let mut expected = b.clone();
+            expected.xor_assign(&a);
+            apply_operation(&RunOperation::S(0), &mut state, &random_masks, &mut rng).unwrap();
+            assert_eq!(state.z_frame[0], expected);
+            state.z_frame[0] = b.clone();
+            apply_operation(&RunOperation::SDag(0), &mut state, &random_masks, &mut rng).unwrap();
+            assert_eq!(state.z_frame[0], expected);
+
+            let mut state = RuntimeState::new(2, shots, &[], false);
+            state.x_frame = vec![a.clone(), b.clone()];
+            state.z_frame = vec![c.clone(), d.clone()];
+            let mut expected_x_target = b.clone();
+            expected_x_target.xor_assign(&a);
+            let mut expected_z_control = c.clone();
+            expected_z_control.xor_assign(&d);
+            apply_operation(&RunOperation::Cx(0, 1), &mut state, &random_masks, &mut rng).unwrap();
+            assert_eq!(state.x_frame, vec![a.clone(), expected_x_target]);
+            assert_eq!(state.z_frame, vec![expected_z_control, d.clone()]);
+
+            let mut state = RuntimeState::new(2, shots, &[], false);
+            state.x_frame = vec![a.clone(), b.clone()];
+            state.z_frame = vec![c.clone(), d.clone()];
+            let mut expected_z_left = c.clone();
+            expected_z_left.xor_assign(&b);
+            let mut expected_z_right = d.clone();
+            expected_z_right.xor_assign(&a);
+            apply_operation(&RunOperation::Cz(0, 1), &mut state, &random_masks, &mut rng).unwrap();
+            assert_eq!(state.z_frame, vec![expected_z_left, expected_z_right]);
+
+            let mut state = RuntimeState::new(2, shots, &[], false);
+            state.x_frame = vec![a.clone(), b.clone()];
+            state.z_frame = vec![c.clone(), d.clone()];
+            apply_operation(
+                &RunOperation::Swap(0, 1),
+                &mut state,
+                &random_masks,
+                &mut rng,
+            )
+            .unwrap();
+            assert_eq!(state.x_frame, vec![b.clone(), a.clone()]);
+            assert_eq!(state.z_frame, vec![d.clone(), c.clone()]);
+
+            let mut state = RuntimeState::new(1, shots, &[], false);
+            state.x_frame[0] = a.clone();
+            state.z_frame[0] = b.clone();
+            apply_operation(&RunOperation::Cx(0, 0), &mut state, &random_masks, &mut rng).unwrap();
+            assert_eq!(state.x_frame[0], Mask::zero(word_count(shots)));
+            assert_eq!(state.z_frame[0], Mask::zero(word_count(shots)));
+
+            let mut state = RuntimeState::new(1, shots, &[], false);
+            state.x_frame[0] = a.clone();
+            state.z_frame[0] = b.clone();
+            apply_operation(&RunOperation::Cz(0, 0), &mut state, &random_masks, &mut rng).unwrap();
+            assert_eq!(state.x_frame[0], a.clone());
+            assert_eq!(state.z_frame[0], b.clone());
+
+            let mut state = RuntimeState::new(1, shots, &[], false);
+            state.x_frame[0] = a.clone();
+            state.z_frame[0] = b;
+            apply_operation(
+                &RunOperation::Reset {
+                    qubit: 0,
+                    key: Some("reset".to_string()),
+                    basis: "Z".to_string(),
+                    ideal: Expr::constant(false),
+                },
+                &mut state,
+                &random_masks,
+                &mut rng,
+            )
+            .unwrap();
+            assert_eq!(state.measurements["reset"], a);
+            assert_eq!(state.x_frame[0], Mask::zero(word_count(shots)));
+            assert_eq!(state.z_frame[0], Mask::zero(word_count(shots)));
+        }
+    }
+
+    #[test]
+    fn in_place_measurement_noise_matches_mask_sampler() {
+        for shots in [1, 63, 64, 65, 129] {
+            let location = NoiseLocation {
+                id: "measurement".to_string(),
+                model: NoiseModel::MeasurementBitFlip,
+                rate: 0.17,
+                qubits: vec![0],
+                tags: HashMap::new(),
+            };
+            let mut expected_rng = SmallRng::new(1234);
+            let expected = bernoulli_mask(&mut expected_rng, shots, location.rate);
+            let mut rng = SmallRng::new(1234);
+            let mut state = RuntimeState::new(1, shots, std::slice::from_ref(&location.id), true);
+            apply_operation(
+                &RunOperation::Measure {
+                    qubits: vec![0],
+                    key: Some("m".to_string()),
+                    pauli: "Z".to_string(),
+                    ideal: Expr::constant(false),
+                    noise: Some(location),
+                },
+                &mut state,
+                &[],
+                &mut rng,
+            )
+            .unwrap();
+            assert_eq!(state.measurements["m"], expected);
+            assert_eq!(state.event_masks["measurement"], expected);
+        }
+    }
 
     #[test]
     fn packed_sample_records_measurement_and_detector() {

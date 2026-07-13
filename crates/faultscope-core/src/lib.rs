@@ -26,16 +26,17 @@ pub use decoder::NativeFusionBlossomDecoder;
 pub use decoder::{
     logical_residual_loss_mask_native, CorrectionMaskBatch, DetectorEventShotBatchView,
     DetectorMaskBatchView, FaultScopeNativeCorrectionMaskBatchMutViewV1,
-    FaultScopeNativeDecoderI64SliceV1, FaultScopeNativeDecoderMaskMutViewV1,
-    FaultScopeNativeDecoderMaskViewV1, FaultScopeNativeDecoderStatusV1,
-    FaultScopeNativeDecoderStringViewV1, FaultScopeNativeDecoderV1,
-    FaultScopeNativeDetectorEventShotBatchViewV1, FaultScopeNativeDetectorMaskBatchViewV1,
-    FaultScopeNativePackedDetectorShotBatchViewV1,
-    FaultScopeNativePackedObservableShotBatchMutViewV1, NativeBatchDecoder,
-    NativeGraphlikeDetectorCopyDecoder, NativeNoCorrectionDecoder, PackedDetectorShotBatchView,
-    PackedObservableShotBatch, NATIVE_DECODER_PLUGIN_ABI_NAME, NATIVE_DECODER_PLUGIN_ABI_VERSION,
-    NATIVE_DECODER_PLUGIN_CAPSULE_METHOD, NATIVE_DECODER_PLUGIN_CAPSULE_NAME,
-    NATIVE_DECODER_PLUGIN_ENTRY_POINT_GROUP, NATIVE_DECODER_PLUGIN_FLAG_THREAD_SAFE,
+    FaultScopeNativeDecoderFactoryV2, FaultScopeNativeDecoderI64SliceV1,
+    FaultScopeNativeDecoderMaskMutViewV1, FaultScopeNativeDecoderMaskViewV1,
+    FaultScopeNativeDecoderStatusV1, FaultScopeNativeDecoderStringViewV1,
+    FaultScopeNativeDecoderWorkerV2, FaultScopeNativeDetectorEventShotBatchViewV1,
+    FaultScopeNativeDetectorMaskBatchViewV1, FaultScopeNativePackedDetectorShotBatchViewV1,
+    FaultScopeNativePackedObservableShotBatchMutViewV1, NativeCompositeDecoder,
+    NativeDecoderFactory, NativeDecoderWorker, NativeGraphlikeDetectorCopyDecoder,
+    NativeNoCorrectionDecoder, PackedDetectorShotBatchView, PackedObservableShotBatch,
+    NATIVE_DECODER_FACTORY_FLAG_THREAD_SAFE, NATIVE_DECODER_PLUGIN_ABI_NAME,
+    NATIVE_DECODER_PLUGIN_ABI_VERSION, NATIVE_DECODER_PLUGIN_CAPSULE_METHOD,
+    NATIVE_DECODER_PLUGIN_CAPSULE_NAME, NATIVE_DECODER_PLUGIN_ENTRY_POINT_GROUP,
     NATIVE_DECODER_PLUGIN_STATUS_ERROR, NATIVE_DECODER_PLUGIN_STATUS_OK,
 };
 pub use dem::{
@@ -49,7 +50,8 @@ pub use dem_problem::{
 };
 pub use dem_sampling::{
     build_dem_location_groups, run_dem_batch, run_dem_detector_event_shot_batch,
-    run_dem_packed_shot_batch, DemHotspotEstimator, DetectorEventDemShotBatch, PackedDemShotBatch,
+    run_dem_packed_shot_batch, CompiledDemLogicalCountPlan, CompiledDemSamplingPlan,
+    DemHotspotEstimator, DetectorEventDemShotBatch, PackedDemShotBatch,
 };
 pub use expr::Expr;
 pub use hotspot::{compute_dem_estimate, compute_packed_estimate};

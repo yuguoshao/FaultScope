@@ -1,8 +1,10 @@
+import gc
 import sys
 import unittest
 from pathlib import Path
 from unittest import mock
 
+from faultscope import _native as faultscope_native
 from faultscope._native import NATIVE_DECODER_PLUGIN_ABI
 from faultscope.backends import clear_native_decoder_plugin_cache
 from faultscope.decoders import (
@@ -14,6 +16,10 @@ from faultscope.decoders import (
 )
 from faultscope.dem import Detector, DetectorErrorEdge, DetectorErrorModel, LogicalObservable
 from faultscope.runtime import compile_native_dem_sampler
+from tests.native_backend_v2_helpers import (
+    assert_factory_failure_lifetimes,
+    assert_v2_worker_contract,
+)
 
 BACKEND_SRC = Path(__file__).resolve().parents[1] / "backends" / "faultscope-pymatching" / "src"
 if str(BACKEND_SRC) not in sys.path:
@@ -88,6 +94,82 @@ class PyMatchingBackendPackageTests(unittest.TestCase):
         self.assertEqual(decoder.build_summary["solver_edge_count"], 1)
         self.assertEqual(decoder.python_decode_call_count, 0)
         self.assertIsNotNone(decoder.__faultscope_native_decoder_capsule__())
+
+    @requires_native_backend
+    def test_exact_v2_factory_creates_distinct_workers_and_fast_paths(self) -> None:
+        decoder = faultscope_pymatching.NativePyMatchingDecoder.from_dem(single_boundary_dem())
+
+        test_stats = assert_v2_worker_contract(self, decoder)
+        self.assertEqual(test_stats.factory_drops, 0)
+        del decoder
+        gc.collect()
+        self.assertEqual(test_stats.factory_drops, 1)
+        gc.collect()
+        self.assertEqual(test_stats.factory_drops, 1)
+
+    @requires_native_backend
+    def test_concurrent_collection_uses_one_factory_handle(self) -> None:
+        dem = single_boundary_dem()
+        decoder = faultscope_pymatching.NativePyMatchingDecoder.from_dem(dem)
+        test_stats = decoder._inner._test_stats_for_test()
+        test_stats.enable_decode_overlap()
+        tasks = (
+            {
+                "task_id": "pymatching-v2-workers",
+                "strong_id": "pymatching-v2-workers-strong",
+                "sampler": compile_native_dem_sampler(dem),
+                "decoder": decoder,
+                "metadata_json": "{}",
+                "max_shots": 128,
+                "min_shots": 128,
+                "batch_size": 8,
+            },
+        )
+
+        (stats,) = faultscope_native._collect_dem_logical_error_stats_many(
+            tasks,
+            num_workers=4,
+            seed=1234,
+        )
+
+        self.assertEqual(stats["shots"], 128)
+        self.assertEqual(stats["errors"], 0)
+        self.assertEqual(decoder.python_decode_call_count, 0)
+        self.assertGreater(len(set(test_stats.worker_addresses)), 1)
+        self.assertEqual(test_stats.worker_creates, test_stats.worker_drops)
+        self.assertEqual(test_stats.active_decodes, 0)
+        self.assertGreater(test_stats.max_active_decodes, 1)
+
+    @requires_native_backend
+    def test_factory_failures_retain_messages_across_concurrent_calls(self) -> None:
+        assert_factory_failure_lifetimes(self, pymatching_native.InvalidNativeDecoderCapsule)
+
+    @requires_native_backend
+    def test_invalid_worker_outputs_are_dropped_once(self) -> None:
+        sampler = compile_native_dem_sampler(single_boundary_dem())
+        for kind in (
+            "create-error-after-allocation",
+            "missing-worker-decode",
+            "invalid-worker-size",
+        ):
+            with self.subTest(kind=kind):
+                decoder = pymatching_native.InvalidNativeDecoderCapsule(kind)
+                with self.assertRaisesRegex(ValueError, "worker"):
+                    sampler.estimate(shots=1, seed=19, decoder=decoder)
+                self.assertEqual(decoder.worker_drops, 1)
+
+    @requires_native_backend
+    def test_temporary_worker_helper_drops_invalid_worker_once(self) -> None:
+        for kind in (
+            "create-error-after-allocation",
+            "missing-worker-decode",
+            "invalid-worker-size",
+        ):
+            with self.subTest(kind=kind):
+                decoder = pymatching_native.InvalidNativeDecoderCapsule(kind)
+                with self.assertRaisesRegex(ValueError, "worker"):
+                    decoder._try_create_temporary_worker_for_test()
+                self.assertEqual(decoder.worker_drops, 1)
 
     @requires_native_backend
     def test_backend_entry_point_integrates_with_registry_and_fast_path(self) -> None:

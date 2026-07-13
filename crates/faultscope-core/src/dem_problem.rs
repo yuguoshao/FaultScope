@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::{DetectorErrorModel, NpError, NpResult};
 
@@ -191,9 +191,10 @@ fn stable_detector_ids(dem: &DetectorErrorModel) -> Vec<i64> {
         .iter()
         .map(|detector| detector.id)
         .collect::<Vec<_>>();
+    let mut seen = ids.iter().copied().collect::<HashSet<_>>();
     for edge in &dem.edges {
         for detector_id in &edge.detectors {
-            if !ids.contains(detector_id) {
+            if seen.insert(*detector_id) {
                 ids.push(*detector_id);
             }
         }
@@ -219,9 +220,10 @@ fn stable_observable_ids(dem: &DetectorErrorModel) -> Vec<i64> {
         .iter()
         .map(|observable| observable.id)
         .collect::<Vec<_>>();
+    let mut seen = ids.iter().copied().collect::<HashSet<_>>();
     for edge in &dem.edges {
         for observable_id in &edge.observables {
-            if !ids.contains(observable_id) {
+            if seen.insert(*observable_id) {
                 ids.push(*observable_id);
             }
         }
