@@ -19,7 +19,10 @@ use crate::api::{
     stop_error_count, validate_task, DemLogicalCollectionOptions, DemLogicalCollectionRunOptions,
     DemLogicalCollectionStats, DemLogicalCollectionTask,
 };
-use crate::counting::{sample_dem_logical_error_stats_with_rng, BatchStats, CountOptions};
+use crate::counting::{
+    prepare_dem_count_plan, sample_dem_logical_error_stats_with_rng, BatchStats, CountOptions,
+    PreparedDemCountPlan,
+};
 use crate::worker_decoder::WorkerDecoderCache;
 use faultscope_core::{NativeDecoderWorker, NpError, NpResult, SmallRng};
 
@@ -32,6 +35,7 @@ struct BatchWork {
     seed_stream: usize,
     task: Arc<DemLogicalCollectionTask>,
     run_options: Arc<DemLogicalCollectionRunOptions>,
+    prepared_plan: Arc<PreparedDemCountPlan>,
 }
 
 #[derive(Clone)]
@@ -40,6 +44,7 @@ struct AdaptiveCalibrationWork {
     task: Arc<DemLogicalCollectionTask>,
     run_options: Arc<DemLogicalCollectionRunOptions>,
     seed_stream: usize,
+    prepared_plan: Arc<PreparedDemCountPlan>,
 }
 
 struct AdaptiveCalibrationResult {
@@ -84,6 +89,7 @@ enum TaskPhase {
 struct TaskState {
     output_index: usize,
     task: Arc<DemLogicalCollectionTask>,
+    prepared_plan: Arc<PreparedDemCountPlan>,
     stats: DemLogicalCollectionStats,
     target_shots: usize,
     min_shots: usize,
@@ -180,6 +186,21 @@ fn collect_task_set_inner(
     }
 
     if states.is_empty() {
+        return collect_results(results);
+    }
+
+    if run_options.num_workers == 1
+        && states
+            .iter()
+            .all(|state| matches!(state.phase, TaskPhase::Parallel { .. }))
+    {
+        let run_options = Arc::new(run_options);
+        run_fixed_tasks_inline(
+            &mut states,
+            &run_options,
+            &mut results,
+            &mut progress_callback,
+        )?;
         return collect_results(results);
     }
 
@@ -379,6 +400,7 @@ fn make_task_state(
         return Ok(TaskState {
             output_index,
             task: Arc::new(task),
+            prepared_plan: Arc::new(PreparedDemCountPlan::Generic),
             stats,
             target_shots,
             min_shots,
@@ -411,9 +433,24 @@ fn make_task_state(
         }
     };
     let seed = task_run_seed(&adjusted, run_options);
+    let count_options = CountOptions {
+        postselection_mask: adjusted.postselection_mask.as_deref(),
+        postselected_observables_mask: adjusted.postselected_observables_mask.as_deref(),
+        count_observable_error_combos: run_options.count_observable_error_combos,
+        count_detection_events: run_options.count_detection_events,
+    };
+    let prepared_plan = Arc::new(prepare_dem_count_plan(
+        &adjusted.sampler,
+        adjusted
+            .decoder
+            .as_deref()
+            .map(|factory| factory.detector_ids()),
+        &count_options,
+    )?);
     Ok(TaskState {
         output_index,
         task: Arc::new(adjusted),
+        prepared_plan,
         stats,
         target_shots,
         min_shots,
@@ -449,6 +486,45 @@ fn adjusted_task_for_remaining(
     }
     validate_task(&task)?;
     Ok(task)
+}
+
+fn run_fixed_tasks_inline(
+    states: &mut [TaskState],
+    run_options: &Arc<DemLogicalCollectionRunOptions>,
+    results: &mut [Option<DemLogicalCollectionStats>],
+    progress_callback: &mut Option<&mut ProgressCallback<'_>>,
+) -> NpResult<()> {
+    let mut next_state_to_schedule = 0usize;
+    let mut decoder_cache = WorkerDecoderCache::new();
+    while states.iter().any(TaskState::can_schedule) {
+        let state_index = next_schedulable_state(states, &mut next_state_to_schedule)
+            .ok_or_else(|| NpError::new("missing schedulable fixed task"))?;
+        let work = next_work_for_state(state_index, &mut states[state_index], run_options)?;
+        states[state_index].in_flight += 1;
+        let context = worker_panic_context(&work);
+        let error_context = worker_error_context(&work);
+        let Work::Batch(work) = work else {
+            return Err(NpError::new("inline scheduler received non-fixed work"));
+        };
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            decoder_cache
+                .resolve(work.state_index, work.task.decoder.as_ref())
+                .and_then(|decoder| run_batch_work(work, decoder))
+        }))
+        .map_or_else(
+            |payload| {
+                Err(NpError::new(format!(
+                    "{context}: {}",
+                    panic_payload_message(payload.as_ref())
+                )))
+            },
+            |result| {
+                result.map_err(|err| NpError::new(format!("{error_context}: {}", err.message())))
+            },
+        )?;
+        handle_work_result(result, states, run_options, results, progress_callback)?;
+    }
+    Ok(())
 }
 
 fn schedule_available_work(
@@ -502,6 +578,7 @@ fn next_work_for_state(
             task: state.task.clone(),
             run_options: run_options.clone(),
             seed_stream: task_seed_stream(state.resume_shots, 0),
+            prepared_plan: state.prepared_plan.clone(),
         }));
     }
 
@@ -530,6 +607,7 @@ fn next_work_for_state(
         seed_stream,
         task: state.task.clone(),
         run_options: run_options.clone(),
+        prepared_plan: state.prepared_plan.clone(),
     }))
 }
 
@@ -667,6 +745,7 @@ fn run_batch_work(
         decoder,
         None,
         &count_options,
+        &work.prepared_plan,
     )?;
     Ok(WorkResult::Batch {
         state_index: work.state_index,
@@ -685,6 +764,7 @@ fn run_adaptive_calibration_work(
         decoder,
         &work.run_options,
         work.seed_stream,
+        &work.prepared_plan,
         Some(work.state_index),
         Some(result_tx),
     )?;
@@ -699,6 +779,7 @@ fn calibrate_adaptive_task(
     mut decoder: Option<&mut dyn NativeDecoderWorker>,
     run_options: &DemLogicalCollectionRunOptions,
     seed_stream: usize,
+    prepared_plan: &PreparedDemCountPlan,
     state_index: Option<usize>,
     delta_tx: Option<&mpsc::Sender<NpResult<WorkResult>>>,
 ) -> NpResult<AdaptiveCalibrationResult> {
@@ -739,6 +820,7 @@ fn calibrate_adaptive_task(
                 Some(&mut **decoder),
                 Some(batch_started),
                 &count_options,
+                prepared_plan,
             )?,
             None => sample_dem_logical_error_stats_with_rng(
                 &task.sampler,
@@ -747,6 +829,7 @@ fn calibrate_adaptive_task(
                 None,
                 Some(batch_started),
                 &count_options,
+                prepared_plan,
             )?,
         };
         let elapsed = batch_stats.seconds;

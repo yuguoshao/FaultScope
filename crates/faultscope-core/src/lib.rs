@@ -50,7 +50,8 @@ pub use dem_problem::{
 };
 pub use dem_sampling::{
     build_dem_location_groups, run_dem_batch, run_dem_detector_event_shot_batch,
-    run_dem_packed_shot_batch, DemHotspotEstimator, DetectorEventDemShotBatch, PackedDemShotBatch,
+    run_dem_packed_shot_batch, CompiledDemLogicalCountPlan, CompiledDemSamplingPlan,
+    DemHotspotEstimator, DetectorEventDemShotBatch, PackedDemShotBatch,
 };
 pub use expr::Expr;
 pub use hotspot::{compute_dem_estimate, compute_packed_estimate};

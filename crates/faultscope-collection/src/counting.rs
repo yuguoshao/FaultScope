@@ -2,10 +2,10 @@ use std::collections::HashMap;
 use std::time::Instant;
 
 use faultscope_core::{
-    logical_residual_loss_mask_native, word_count, CorrectionMaskBatch, DemBatch,
-    DemHotspotEstimator, DetectorEventShotBatchView, DetectorMaskBatchView, Mask,
-    NativeDecoderWorker, NpError, NpResult, PackedDetectorShotBatchView, PackedObservableShotBatch,
-    SmallRng,
+    logical_residual_loss_mask_native, word_count, CompiledDemLogicalCountPlan,
+    CompiledDemSamplingPlan, CorrectionMaskBatch, DemBatch, DemHotspotEstimator,
+    DetectorEventShotBatchView, DetectorMaskBatchView, Mask, NativeDecoderWorker, NpError,
+    NpResult, PackedDetectorShotBatchView, PackedObservableShotBatch, SmallRng,
 };
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -30,6 +30,41 @@ pub(crate) struct CountOptions<'a> {
     pub(crate) count_detection_events: bool,
 }
 
+impl CountOptions<'_> {
+    fn uses_detailed_path(&self) -> bool {
+        self.postselection_mask.is_some()
+            || self.postselected_observables_mask.is_some()
+            || self.count_observable_error_combos
+            || self.count_detection_events
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum PreparedDemCountPlan {
+    Generic,
+    Logical(CompiledDemLogicalCountPlan),
+    Decoder(CompiledDemSamplingPlan),
+}
+
+pub(crate) fn prepare_dem_count_plan(
+    sampler: &DemHotspotEstimator,
+    detector_ids: Option<&[i64]>,
+    count_options: &CountOptions<'_>,
+) -> NpResult<PreparedDemCountPlan> {
+    if count_options.uses_detailed_path() {
+        return Ok(PreparedDemCountPlan::Generic);
+    }
+    match detector_ids {
+        Some(detector_ids) => Ok(sampler
+            .compile_sampling_plan(detector_ids, &sampler.observable_ids)
+            .map(PreparedDemCountPlan::Decoder)
+            .unwrap_or(PreparedDemCountPlan::Generic)),
+        None => Ok(PreparedDemCountPlan::Logical(
+            sampler.compile_logical_count_plan(),
+        )),
+    }
+}
+
 pub(crate) fn sample_dem_logical_error_stats_with_rng(
     sampler: &DemHotspotEstimator,
     shots: usize,
@@ -37,23 +72,27 @@ pub(crate) fn sample_dem_logical_error_stats_with_rng(
     decoder: Option<&mut dyn NativeDecoderWorker>,
     started: Option<Instant>,
     count_options: &CountOptions<'_>,
+    prepared_plan: &PreparedDemCountPlan,
 ) -> NpResult<BatchStats> {
-    let use_detailed_path = count_options.postselection_mask.is_some()
-        || count_options.postselected_observables_mask.is_some()
-        || count_options.count_observable_error_combos
-        || count_options.count_detection_events;
-
-    let mut out = if use_detailed_path {
+    let mut out = if count_options.uses_detailed_path() {
         sample_detailed_batch(sampler, shots, rng, decoder, count_options)?
     } else {
         let errors = match decoder {
-            Some(decoder) => {
-                sample_dem_logical_error_count_with_decoder(sampler, shots, rng, decoder)?
-            }
-            None => {
-                let batch = sampler.run_batch_with_rng(shots, rng, false);
-                batch.loss_mask.bit_count()
-            }
+            Some(decoder) => sample_dem_logical_error_count_with_decoder(
+                sampler,
+                shots,
+                rng,
+                decoder,
+                prepared_plan,
+            )?,
+            None => match prepared_plan {
+                PreparedDemCountPlan::Logical(plan) => {
+                    plan.sample_logical_error_count_with_rng(shots, rng)
+                }
+                PreparedDemCountPlan::Generic | PreparedDemCountPlan::Decoder(_) => sampler
+                    .compile_logical_count_plan()
+                    .sample_logical_error_count_with_rng(shots, rng),
+            },
         };
         BatchStats {
             shots,
@@ -200,15 +239,26 @@ fn sample_dem_logical_error_count_with_decoder(
     shots: usize,
     rng: &mut SmallRng,
     decoder: &mut dyn NativeDecoderWorker,
+    prepared_plan: &PreparedDemCountPlan,
 ) -> NpResult<usize> {
     if decoder.supports_detector_event_batch() {
         let detector_ids = decoder.detector_ids().to_vec();
-        let event_batch = sampler.run_detector_event_shot_batch_with_rng(
-            shots,
-            rng,
-            &detector_ids,
-            &sampler.observable_ids,
-        )?;
+        let fallback;
+        let plan = match prepared_plan {
+            PreparedDemCountPlan::Decoder(plan)
+                if plan.detector_ids() == detector_ids.as_slice()
+                    && plan.observable_ids() == sampler.observable_ids.as_slice() =>
+            {
+                plan
+            }
+            PreparedDemCountPlan::Generic
+            | PreparedDemCountPlan::Logical(_)
+            | PreparedDemCountPlan::Decoder(_) => {
+                fallback = sampler.compile_sampling_plan(&detector_ids, &sampler.observable_ids)?;
+                &fallback
+            }
+        };
+        let event_batch = plan.run_detector_event_shot_batch_with_rng(shots, rng);
         let detector_view = DetectorEventShotBatchView::new(
             &detector_ids,
             &event_batch.offsets,
@@ -227,12 +277,22 @@ fn sample_dem_logical_error_count_with_decoder(
 
     if decoder.supports_packed_batch() {
         let detector_ids = decoder.detector_ids().to_vec();
-        let packed_batch = sampler.run_packed_shot_batch_with_rng(
-            shots,
-            rng,
-            &detector_ids,
-            &sampler.observable_ids,
-        )?;
+        let fallback;
+        let plan = match prepared_plan {
+            PreparedDemCountPlan::Decoder(plan)
+                if plan.detector_ids() == detector_ids.as_slice()
+                    && plan.observable_ids() == sampler.observable_ids.as_slice() =>
+            {
+                plan
+            }
+            PreparedDemCountPlan::Generic
+            | PreparedDemCountPlan::Logical(_)
+            | PreparedDemCountPlan::Decoder(_) => {
+                fallback = sampler.compile_sampling_plan(&detector_ids, &sampler.observable_ids)?;
+                &fallback
+            }
+        };
+        let packed_batch = plan.run_packed_shot_batch_with_rng(shots, rng);
         let detector_view = PackedDetectorShotBatchView::new(
             &detector_ids,
             &packed_batch.detector_data,

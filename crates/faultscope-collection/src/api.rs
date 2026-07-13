@@ -2,7 +2,10 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 
-use crate::counting::{sample_dem_logical_error_stats_with_rng, validate_mask_shape, CountOptions};
+use crate::counting::{
+    prepare_dem_count_plan, sample_dem_logical_error_stats_with_rng, validate_mask_shape,
+    CountOptions,
+};
 use crate::scheduler::{
     batch_seed, collect_task_set, collect_task_set_with_progress, next_batch_size,
 };
@@ -122,6 +125,12 @@ pub fn collect_dem_logical_error_stats(
     let mut errors = 0usize;
     let mut batch_ordinal = 0usize;
     let mut last_batch: Option<(usize, f64)> = None;
+    let count_options = CountOptions::default();
+    let prepared_plan = prepare_dem_count_plan(
+        sampler,
+        decoder.as_deref().map(NativeDecoderWorker::detector_ids),
+        &count_options,
+    )?;
 
     while shots_done < options.max_shots
         && !(shots_done >= options.min_shots
@@ -137,7 +146,8 @@ pub fn collect_dem_logical_error_stats(
                 &mut batch_rng,
                 Some(&mut **decoder),
                 None,
-                &CountOptions::default(),
+                &count_options,
+                &prepared_plan,
             )?,
             None => sample_dem_logical_error_stats_with_rng(
                 sampler,
@@ -145,7 +155,8 @@ pub fn collect_dem_logical_error_stats(
                 &mut batch_rng,
                 None,
                 None,
-                &CountOptions::default(),
+                &count_options,
+                &prepared_plan,
             )?,
         };
         let elapsed = batch_started.elapsed().as_secs_f64();
@@ -185,13 +196,20 @@ pub fn sample_dem_logical_error_stats(
     let started = Instant::now();
     let mut rng = SmallRng::new(seed.unwrap_or(0x95f2_04dc_4291_a715));
     let decoder_name = decoder.as_ref().map(|decoder| decoder.name().to_string());
+    let count_options = CountOptions::default();
+    let prepared_plan = prepare_dem_count_plan(
+        sampler,
+        decoder.as_deref().map(NativeDecoderWorker::detector_ids),
+        &count_options,
+    )?;
     let batch = sample_dem_logical_error_stats_with_rng(
         sampler,
         shots,
         &mut rng,
         decoder,
         Some(started),
-        &CountOptions::default(),
+        &count_options,
+        &prepared_plan,
     )?;
     Ok(DemLogicalCollectionStats {
         task_id: String::new(),
