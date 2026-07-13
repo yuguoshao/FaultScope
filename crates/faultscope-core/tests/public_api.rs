@@ -1,16 +1,87 @@
 use std::collections::HashMap;
 use std::mem::{align_of, offset_of, size_of};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 
 use faultscope_core::{
-    Circuit, DemHotspotEstimator, Detector, DetectorErrorModelGenerator,
-    FaultScopeNativeCorrectionMaskBatchMutViewV1, FaultScopeNativeDecoderStatusV1,
-    FaultScopeNativeDecoderStringViewV1, FaultScopeNativeDecoderV1,
-    FaultScopeNativeDetectorEventShotBatchViewV1, FaultScopeNativeDetectorMaskBatchViewV1,
-    FaultScopeNativePackedDetectorShotBatchViewV1, FaultScopeSimulator, LogicalObservable,
-    NoiseLocation, NoiseModel, Operation, NATIVE_DECODER_PLUGIN_ABI_NAME,
+    Circuit, CorrectionMaskBatch, DemHotspotEstimator, Detector, DetectorErrorModelGenerator,
+    DetectorMaskBatchView, FaultScopeNativeCorrectionMaskBatchMutViewV1,
+    FaultScopeNativeDecoderStatusV1, FaultScopeNativeDecoderStringViewV1,
+    FaultScopeNativeDecoderV1, FaultScopeNativeDetectorEventShotBatchViewV1,
+    FaultScopeNativeDetectorMaskBatchViewV1, FaultScopeNativePackedDetectorShotBatchViewV1,
+    FaultScopeSimulator, LogicalObservable, Mask, NativeBatchDecoder, NativeCompositeDecoder,
+    NoiseLocation, NoiseModel, NpError, NpResult, Operation, NATIVE_DECODER_PLUGIN_ABI_NAME,
     NATIVE_DECODER_PLUGIN_ABI_VERSION, NATIVE_DECODER_PLUGIN_CAPSULE_NAME,
     NATIVE_DECODER_PLUGIN_ENTRY_POINT_GROUP,
 };
+
+struct FactoryDecoder {
+    created: Arc<AtomicUsize>,
+    detector_ids: Vec<i64>,
+    observable_ids: Vec<i64>,
+}
+
+impl NativeBatchDecoder for FactoryDecoder {
+    fn detector_ids(&self) -> &[i64] {
+        &self.detector_ids
+    }
+
+    fn observable_ids(&self) -> &[i64] {
+        &self.observable_ids
+    }
+
+    fn create_worker_instance(&self) -> NpResult<Arc<dyn NativeBatchDecoder>> {
+        let id = self.created.fetch_add(1, Ordering::SeqCst);
+        Ok(Arc::new(FactoryWorkerDecoder::new(
+            id,
+            self.detector_ids.clone(),
+            self.observable_ids.clone(),
+        )))
+    }
+
+    fn decode_batch(&self, _: DetectorMaskBatchView<'_>) -> NpResult<CorrectionMaskBatch> {
+        Err(NpError::new("prototype must not decode"))
+    }
+}
+
+struct FactoryWorkerDecoder {
+    id: usize,
+    detector_ids: Vec<i64>,
+    observable_ids: Vec<i64>,
+}
+
+impl FactoryWorkerDecoder {
+    fn new(id: usize, detector_ids: Vec<i64>, observable_ids: Vec<i64>) -> Self {
+        Self {
+            id,
+            detector_ids,
+            observable_ids,
+        }
+    }
+}
+
+impl NativeBatchDecoder for FactoryWorkerDecoder {
+    fn detector_ids(&self) -> &[i64] {
+        &self.detector_ids
+    }
+
+    fn observable_ids(&self) -> &[i64] {
+        &self.observable_ids
+    }
+
+    fn decode_batch(&self, detectors: DetectorMaskBatchView<'_>) -> NpResult<CorrectionMaskBatch> {
+        CorrectionMaskBatch::new(
+            self.observable_ids.clone(),
+            vec![
+                Mask {
+                    words: vec![self.id as u64 + 1],
+                };
+                self.observable_ids.len()
+            ],
+            detectors.shots,
+        )
+    }
+}
 
 fn x_noise(id: &str, rate: f64) -> NoiseLocation {
     NoiseLocation {
@@ -125,6 +196,85 @@ fn rust_dem_hotspot_api_estimates_default_loss() {
 }
 
 #[test]
+fn native_decoder_worker_instances_are_fresh_and_preserve_ids() {
+    let prototype = FactoryDecoder {
+        created: Arc::new(AtomicUsize::new(0)),
+        detector_ids: vec![10, 20],
+        observable_ids: vec![2],
+    };
+
+    let first = prototype.create_worker_instance().unwrap();
+    let second = prototype.create_worker_instance().unwrap();
+
+    assert!(!Arc::ptr_eq(&first, &second));
+    assert_eq!(first.detector_ids(), prototype.detector_ids());
+    assert_eq!(second.detector_ids(), prototype.detector_ids());
+    assert_eq!(first.observable_ids(), prototype.observable_ids());
+    assert_eq!(second.observable_ids(), prototype.observable_ids());
+    let detector_masks = vec![Mask::zero(1); 2];
+    let first_view = DetectorMaskBatchView::new(first.detector_ids(), &detector_masks, 4).unwrap();
+    let second_view =
+        DetectorMaskBatchView::new(second.detector_ids(), &detector_masks, 4).unwrap();
+    assert_eq!(first.decode_batch(first_view).unwrap().masks[0].words, [1]);
+    assert_eq!(
+        second.decode_batch(second_view).unwrap().masks[0].words,
+        [2]
+    );
+}
+
+#[test]
+fn composite_worker_instance_recursively_creates_fresh_children() {
+    let created = Arc::new(AtomicUsize::new(0));
+    let prototype = NativeCompositeDecoder::new(vec![
+        Arc::new(FactoryDecoder {
+            created: Arc::clone(&created),
+            detector_ids: vec![10],
+            observable_ids: vec![2],
+        }),
+        Arc::new(FactoryDecoder {
+            created: Arc::clone(&created),
+            detector_ids: vec![20],
+            observable_ids: vec![5],
+        }),
+    ])
+    .unwrap();
+
+    let first = prototype.create_worker_instance().unwrap();
+    let second = prototype.create_worker_instance().unwrap();
+
+    assert!(!Arc::ptr_eq(&first, &second));
+    assert_eq!(created.load(Ordering::SeqCst), 4);
+    assert_eq!(first.detector_ids(), &[10, 20]);
+    assert_eq!(second.detector_ids(), &[10, 20]);
+    assert_eq!(first.observable_ids(), &[2, 5]);
+    assert_eq!(second.observable_ids(), &[2, 5]);
+    let detector_masks = vec![Mask::zero(1); 2];
+    let first_view = DetectorMaskBatchView::new(first.detector_ids(), &detector_masks, 4).unwrap();
+    let second_view =
+        DetectorMaskBatchView::new(second.detector_ids(), &detector_masks, 4).unwrap();
+    assert_eq!(
+        first
+            .decode_batch(first_view)
+            .unwrap()
+            .masks
+            .into_iter()
+            .map(|mask| mask.words[0])
+            .collect::<Vec<_>>(),
+        vec![1, 2]
+    );
+    assert_eq!(
+        second
+            .decode_batch(second_view)
+            .unwrap()
+            .masks
+            .into_iter()
+            .map(|mask| mask.words[0])
+            .collect::<Vec<_>>(),
+        vec![3, 4]
+    );
+}
+
+#[test]
 fn native_decoder_v1_abi_layout_is_frozen_on_64_bit_targets() {
     assert_eq!(NATIVE_DECODER_PLUGIN_ABI_VERSION, 1);
     assert_eq!(
@@ -156,7 +306,7 @@ fn native_decoder_v1_abi_layout_is_frozen_on_64_bit_targets() {
             56
         );
         assert_eq!(size_of::<FaultScopeNativeDecoderStatusV1>(), 24);
-        assert_eq!(size_of::<FaultScopeNativeDecoderV1>(), 88);
+        assert_eq!(size_of::<FaultScopeNativeDecoderV1>(), 96);
         assert_eq!(align_of::<FaultScopeNativeDecoderV1>(), 8);
         assert_eq!(offset_of!(FaultScopeNativeDecoderV1, abi_version), 0);
         assert_eq!(offset_of!(FaultScopeNativeDecoderV1, struct_size), 8);
@@ -170,6 +320,10 @@ fn native_decoder_v1_abi_layout_is_frozen_on_64_bit_targets() {
         assert_eq!(
             offset_of!(FaultScopeNativeDecoderV1, decode_detector_event_batch),
             80
+        );
+        assert_eq!(
+            offset_of!(FaultScopeNativeDecoderV1, create_worker_state),
+            88
         );
     }
 }

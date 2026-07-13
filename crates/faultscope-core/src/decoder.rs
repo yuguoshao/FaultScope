@@ -175,6 +175,9 @@ pub struct FaultScopeNativeDecoderV1 {
             *mut FaultScopeNativePackedObservableShotBatchMutViewV1,
         ) -> FaultScopeNativeDecoderStatusV1,
     >,
+    pub create_worker_state: Option<
+        unsafe extern "C" fn(*const c_void, *mut *mut c_void) -> FaultScopeNativeDecoderStatusV1,
+    >,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -461,6 +464,13 @@ pub trait NativeBatchDecoder: Send + Sync {
     /// Observable ids define the allowed correction-mask output ids.
     fn observable_ids(&self) -> &[i64];
 
+    fn create_worker_instance(&self) -> NpResult<Arc<dyn NativeBatchDecoder>> {
+        Err(NpError::new(format!(
+            "{} does not support collection worker instances",
+            self.name()
+        )))
+    }
+
     fn decode_batch(&self, detectors: DetectorMaskBatchView<'_>) -> NpResult<CorrectionMaskBatch>;
 
     fn supports_packed_batch(&self) -> bool {
@@ -635,6 +645,15 @@ impl NativeBatchDecoder for NativeCompositeDecoder {
         &self.observable_ids
     }
 
+    fn create_worker_instance(&self) -> NpResult<Arc<dyn NativeBatchDecoder>> {
+        let children = self
+            .children
+            .iter()
+            .map(|child| child.create_worker_instance())
+            .collect::<NpResult<Vec<_>>>()?;
+        Ok(Arc::new(NativeCompositeDecoder::new(children)?))
+    }
+
     fn decode_batch(&self, detectors: DetectorMaskBatchView<'_>) -> NpResult<CorrectionMaskBatch> {
         self.validate_detector_order(detectors.detector_ids)?;
         let observable_indices = self
@@ -797,6 +816,10 @@ impl NativeBatchDecoder for NativeNoCorrectionDecoder {
         &self.observable_ids
     }
 
+    fn create_worker_instance(&self) -> NpResult<Arc<dyn NativeBatchDecoder>> {
+        Ok(Arc::new(self.clone()))
+    }
+
     fn decode_batch(&self, detectors: DetectorMaskBatchView<'_>) -> NpResult<CorrectionMaskBatch> {
         let words = crate::word_count(detectors.shots);
         CorrectionMaskBatch::new(
@@ -889,6 +912,10 @@ impl NativeBatchDecoder for NativeGraphlikeDetectorCopyDecoder {
         &self.observable_ids
     }
 
+    fn create_worker_instance(&self) -> NpResult<Arc<dyn NativeBatchDecoder>> {
+        Ok(Arc::new(self.clone()))
+    }
+
     fn decode_batch(&self, detectors: DetectorMaskBatchView<'_>) -> NpResult<CorrectionMaskBatch> {
         if detectors.detector_ids != self.detector_ids.as_slice() {
             return Err(NpError::new(
@@ -957,6 +984,10 @@ impl NativeBatchDecoder for NativeFusionBlossomDecoder {
 
     fn observable_ids(&self) -> &[i64] {
         &self.observable_ids
+    }
+
+    fn create_worker_instance(&self) -> NpResult<Arc<dyn NativeBatchDecoder>> {
+        Ok(Arc::new(self.clone()))
     }
 
     fn decode_batch(&self, _detectors: DetectorMaskBatchView<'_>) -> NpResult<CorrectionMaskBatch> {
@@ -1045,6 +1076,14 @@ mod tests {
             &self.observable_ids
         }
 
+        fn create_worker_instance(&self) -> NpResult<Arc<dyn NativeBatchDecoder>> {
+            Ok(Arc::new(FixedCorrectionDecoder {
+                detector_ids: self.detector_ids.clone(),
+                observable_ids: self.observable_ids.clone(),
+                correction: self.correction.clone(),
+            }))
+        }
+
         fn decode_batch(
             &self,
             detectors: DetectorMaskBatchView<'_>,
@@ -1064,6 +1103,13 @@ mod tests {
 
         fn observable_ids(&self) -> &[i64] {
             &self.observable_ids
+        }
+
+        fn create_worker_instance(&self) -> NpResult<Arc<dyn NativeBatchDecoder>> {
+            Ok(Arc::new(FastCopyDecoder {
+                detector_ids: self.detector_ids.clone(),
+                observable_ids: self.observable_ids.clone(),
+            }))
         }
 
         fn decode_batch(
