@@ -64,9 +64,8 @@ pub use model::{
 };
 pub use packed::{run_packed_sample, FaultScopeSimulator, RuntimeState};
 pub use pauli::{
-    coeff_bit, highest_bit, multiply_concrete_rows, multiply_symbolic_rows, pauli_product,
-    pauli_to_xz, solve_row_span, sparse_pauli_to_xz, support_to_words, symplectic_product,
-    xor_words, xz_to_pauli,
+    coeff_bit, highest_bit, multiply_concrete_rows, pauli_product, pauli_to_xz, solve_row_span,
+    sparse_pauli_to_xz, support_to_words, symplectic_product, xor_words, xz_to_pauli,
 };
 pub use rng::SmallRng;
 pub use sampling::{
@@ -76,5 +75,5 @@ pub use sampling::{
 };
 pub use stabilizer::{
     frame_apply_cx, frame_apply_cz, frame_apply_h, frame_apply_pauli_string, frame_apply_s,
-    frame_apply_swap, frame_measurement_flip_bits, ConcreteStabilizer, SymbolicStabilizer,
+    frame_apply_swap, frame_measurement_flip_bits, ConcreteStabilizer,
 };

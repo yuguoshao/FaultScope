@@ -10,8 +10,7 @@ use super::measurement_plan::{
 };
 use super::{GeneratedDemEdge, GeneratedDemEdgeRef};
 use crate::{
-    sparse_pauli_to_xz, word_count, ConcreteStabilizer, DemEvent, DemSamplerEdge, Mask, NpError,
-    NpResult, Operation,
+    word_count, ConcreteStabilizer, DemEvent, DemSamplerEdge, Mask, NpError, NpResult, Operation,
 };
 
 struct DemFaultPropagationState {
@@ -211,8 +210,7 @@ fn apply_fault_propagation_operation(
             state.z_frame.swap(*left, *right);
         }
         Operation::Pauli { qubits, pauli } => {
-            let (x, z) = sparse_pauli_to_xz(state.reference.n_qubits(), qubits, pauli)?;
-            state.reference.apply_pauli_string(&x, &z);
+            state.reference.apply_sparse_pauli_string(qubits, pauli)?;
         }
         Operation::Noise(_) => {
             apply_fault_events(fault_events, fault_events_by_op, op_index, state)?;

@@ -31,22 +31,28 @@ impl Expr {
 
     pub fn xor_assign(&mut self, other: &Expr) {
         self.constant ^= other.constant;
-        self.terms.extend_from_slice(&other.terms);
-        self.terms.sort_unstable();
-        let mut out = Vec::with_capacity(self.terms.len());
-        let mut idx = 0;
-        while idx < self.terms.len() {
-            let value = self.terms[idx];
-            let mut count = 1;
-            idx += 1;
-            while idx < self.terms.len() && self.terms[idx] == value {
-                count += 1;
-                idx += 1;
-            }
-            if count & 1 == 1 {
-                out.push(value);
+        let left = std::mem::take(&mut self.terms);
+        let mut out = Vec::with_capacity(left.len() + other.terms.len());
+        let mut left_idx = 0;
+        let mut right_idx = 0;
+        while left_idx < left.len() && right_idx < other.terms.len() {
+            match left[left_idx].cmp(&other.terms[right_idx]) {
+                std::cmp::Ordering::Less => {
+                    out.push(left[left_idx]);
+                    left_idx += 1;
+                }
+                std::cmp::Ordering::Greater => {
+                    out.push(other.terms[right_idx]);
+                    right_idx += 1;
+                }
+                std::cmp::Ordering::Equal => {
+                    left_idx += 1;
+                    right_idx += 1;
+                }
             }
         }
+        out.extend_from_slice(&left[left_idx..]);
+        out.extend_from_slice(&other.terms[right_idx..]);
         self.terms = out;
     }
 
@@ -78,6 +84,62 @@ mod tests {
 
         assert_eq!(expr.terms(), &[1]);
         assert!(!expr.constant_value());
+    }
+
+    #[test]
+    fn xor_assign_merges_sorted_terms_by_symmetric_difference() {
+        let mut left = Expr {
+            terms: vec![1, 3, 5, 8],
+            constant: true,
+        };
+        let right = Expr {
+            terms: vec![0, 3, 4, 8, 9],
+            constant: true,
+        };
+
+        left.xor_assign(&right);
+
+        assert_eq!(left.terms(), &[0, 1, 4, 5, 9]);
+        assert!(!left.constant_value());
+    }
+
+    #[test]
+    fn xor_assign_matches_randomized_symmetric_differences() {
+        let mut state = 0x9e37_79b9_7f4a_7c15u64;
+        for _ in 0..128 {
+            let mut left_terms = Vec::new();
+            let mut right_terms = Vec::new();
+            let mut expected = Vec::new();
+            for term in 0..96 {
+                state = state
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1);
+                let in_left = state >> 63 != 0;
+                state = state
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1);
+                let in_right = state >> 63 != 0;
+                if in_left {
+                    left_terms.push(term);
+                }
+                if in_right {
+                    right_terms.push(term);
+                }
+                if in_left ^ in_right {
+                    expected.push(term);
+                }
+            }
+            let mut left = Expr {
+                terms: left_terms,
+                constant: false,
+            };
+            left.xor_assign(&Expr {
+                terms: right_terms,
+                constant: true,
+            });
+            assert_eq!(left.terms(), expected);
+            assert!(left.constant_value());
+        }
     }
 
     #[test]

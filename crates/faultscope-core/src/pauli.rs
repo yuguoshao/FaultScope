@@ -1,4 +1,6 @@
-use crate::{Expr, NpError, NpResult};
+#[cfg(test)]
+use crate::Expr;
+use crate::{NpError, NpResult};
 
 pub fn sparse_pauli_to_xz(
     n_qubits: usize,
@@ -46,6 +48,23 @@ pub fn symplectic_product(x1: &[u8], z1: &[u8], x2: &[u8], z2: &[u8]) -> u8 {
     acc & 1
 }
 
+pub(crate) fn sparse_symplectic_product(
+    row_x: &[u8],
+    row_z: &[u8],
+    qubits: &[usize],
+    pauli: &str,
+) -> NpResult<u8> {
+    if qubits.len() != pauli.len() {
+        return Err(NpError::new("qubits and paulis must have the same length"));
+    }
+    let mut acc = 0;
+    for (qubit, local) in qubits.iter().zip(pauli.chars()) {
+        let (target_x, target_z) = pauli_to_xz(local)?;
+        acc ^= (row_x[*qubit] & target_z) ^ (row_z[*qubit] & target_x);
+    }
+    Ok(acc & 1)
+}
+
 pub fn multiply_concrete_rows(
     left_x: &[u8],
     left_z: &[u8],
@@ -77,7 +96,8 @@ pub fn multiply_concrete_rows(
     Ok((out_x, out_z, sign))
 }
 
-pub fn multiply_symbolic_rows(
+#[cfg(test)]
+pub(crate) fn multiply_symbolic_rows(
     left_x: &[u8],
     left_z: &[u8],
     left_sign: &Expr,
@@ -212,5 +232,19 @@ mod tests {
 
         assert!(coeff_bit(&coeff, 0));
         assert!(coeff_bit(&coeff, 1));
+    }
+
+    #[test]
+    fn sparse_symplectic_product_matches_dense_product() {
+        let row_x = vec![1, 0, 1, 1];
+        let row_z = vec![0, 1, 1, 0];
+        let qubits = vec![0, 2, 3];
+        let pauli = "XYZ";
+        let (target_x, target_z) = sparse_pauli_to_xz(4, &qubits, pauli).unwrap();
+
+        assert_eq!(
+            sparse_symplectic_product(&row_x, &row_z, &qubits, pauli).unwrap(),
+            symplectic_product(&row_x, &row_z, &target_x, &target_z),
+        );
     }
 }

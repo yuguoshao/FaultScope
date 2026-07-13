@@ -96,9 +96,25 @@ impl RuntimeState {
         noise_location_ids: &[String],
         record_events: bool,
     ) -> Self {
+        Self::new_with_capacities(n_qubits, shots, noise_location_ids, record_events, 0, 0, 0)
+    }
+
+    fn new_with_capacities(
+        n_qubits: usize,
+        shots: usize,
+        noise_location_ids: &[String],
+        record_events: bool,
+        measurement_capacity: usize,
+        detector_capacity: usize,
+        observable_capacity: usize,
+    ) -> Self {
         let words = word_count(shots);
         let all_mask = Mask::all(shots);
-        let mut event_masks = HashMap::new();
+        let mut event_masks = HashMap::with_capacity(if record_events {
+            noise_location_ids.len()
+        } else {
+            0
+        });
         if record_events {
             for location_id in noise_location_ids {
                 event_masks.insert(location_id.clone(), Mask::zero(words));
@@ -109,9 +125,9 @@ impl RuntimeState {
             all_mask,
             x_frame: vec![Mask::zero(words); n_qubits],
             z_frame: vec![Mask::zero(words); n_qubits],
-            measurements: HashMap::new(),
-            detectors: HashMap::new(),
-            observables: HashMap::new(),
+            measurements: HashMap::with_capacity(measurement_capacity),
+            detectors: HashMap::with_capacity(detector_capacity),
+            observables: HashMap::with_capacity(observable_capacity),
             event_masks,
             record_events,
         }
@@ -128,8 +144,17 @@ pub fn run_packed_sample(
     record_events: bool,
 ) -> NpResult<RuntimeState> {
     let mut rng = SmallRng::new(seed.unwrap_or(0x4d59_5df4_d0f3_3173));
-    let mut state = RuntimeState::new(n_qubits, shots, noise_location_ids, record_events);
-    let random_masks = (0..random_source_count(runtime_operations))
+    let capacities = runtime_capacities(runtime_operations);
+    let mut state = RuntimeState::new_with_capacities(
+        n_qubits,
+        shots,
+        noise_location_ids,
+        record_events,
+        capacities.measurements,
+        capacities.detectors,
+        capacities.observables.max(observables.len()),
+    );
+    let random_masks = (0..capacities.random_sources)
         .map(|_| random_bit_mask(&mut rng, state.all_mask.words.len(), state.shots))
         .collect::<Vec<_>>();
     for operation in runtime_operations {
@@ -139,18 +164,36 @@ pub fn run_packed_sample(
     Ok(state)
 }
 
-fn random_source_count(runtime_operations: &[RunOperation]) -> usize {
-    runtime_operations
-        .iter()
-        .flat_map(|operation| match operation {
-            RunOperation::Measure { ideal, .. } | RunOperation::Reset { ideal, .. } => {
-                ideal.terms().iter().copied()
+#[derive(Default)]
+struct RuntimeCapacities {
+    random_sources: usize,
+    measurements: usize,
+    detectors: usize,
+    observables: usize,
+}
+
+fn runtime_capacities(runtime_operations: &[RunOperation]) -> RuntimeCapacities {
+    let mut capacities = RuntimeCapacities::default();
+    for operation in runtime_operations {
+        match operation {
+            RunOperation::Measure { ideal, .. } => {
+                capacities.measurements += 1;
+                if let Some(source) = ideal.terms().last() {
+                    capacities.random_sources = capacities.random_sources.max(source + 1);
+                }
             }
-            _ => [].iter().copied(),
-        })
-        .max()
-        .map(|source| source + 1)
-        .unwrap_or(0)
+            RunOperation::Reset { key, ideal, .. } => {
+                capacities.measurements += usize::from(key.is_some());
+                if let Some(source) = ideal.terms().last() {
+                    capacities.random_sources = capacities.random_sources.max(source + 1);
+                }
+            }
+            RunOperation::Detector { .. } => capacities.detectors += 1,
+            RunOperation::ObservableInclude { .. } => capacities.observables += 1,
+            _ => {}
+        }
+    }
+    capacities
 }
 
 fn apply_operation(
@@ -206,8 +249,9 @@ fn apply_operation(
             basis,
             ideal,
         } => {
-            let mut outcome = ideal.eval(random_masks, state.all_mask.words.len(), &state.all_mask);
             if let Some(key) = key {
+                let mut outcome =
+                    ideal.eval(random_masks, state.all_mask.words.len(), &state.all_mask);
                 xor_frame_measurement_flip_into(&mut outcome, state, &[*qubit], basis)?;
                 record_measurement(&mut state.measurements, key, outcome)?;
             }
@@ -471,11 +515,15 @@ fn record_measurement(
     key: &str,
     bit: Mask,
 ) -> NpResult<()> {
-    if measurements.contains_key(key) {
-        return Err(NpError::new(format!("duplicate measurement key {key:?}")));
+    match measurements.entry(key.to_string()) {
+        std::collections::hash_map::Entry::Vacant(entry) => {
+            entry.insert(bit);
+            Ok(())
+        }
+        std::collections::hash_map::Entry::Occupied(_) => {
+            Err(NpError::new(format!("duplicate measurement key {key:?}")))
+        }
     }
-    measurements.insert(key.to_string(), bit);
-    Ok(())
 }
 
 fn measurement_parity(measurements: &HashMap<String, Mask>, keys: &[String]) -> NpResult<Mask> {
@@ -537,7 +585,7 @@ mod tests {
     fn patterned_mask(shots: usize, offset: usize) -> Mask {
         let mut mask = Mask::zero(word_count(shots));
         for shot in 0..shots {
-            if (shot + offset).is_multiple_of(3) {
+            if (shot + offset) % 3 == 0 {
                 set_shot_bit(&mut mask, shot);
             }
         }

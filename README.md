@@ -190,6 +190,7 @@ FaultScope 当前产品路径是 packed batch engine，不暴露通用的 per-sh
 然后从仓库根目录运行：
 
 ```bash
+.venv/bin/python benchmarks/compiler_throughput.py --distances 5 10 15 20 --representation m-plus-r --json-out compiler-throughput.json
 .venv/bin/python benchmarks/sampling_throughput.py --distances 15 21 31 --rounds 3
 .venv/bin/python benchmarks/sampling_throughput.py --family random-clifford --qubits 128 256 512 --depth 20
 .venv/bin/python benchmarks/dem_throughput.py --distances 9 13 21 --rounds 3
