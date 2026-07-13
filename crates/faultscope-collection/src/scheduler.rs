@@ -9,10 +9,8 @@
 //! seed stream, and ordinal, not from the worker that executes the work.
 
 use std::collections::HashMap;
-use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::mpsc;
-use std::sync::{Arc, Mutex};
-use std::thread;
+use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::api::{
@@ -24,6 +22,7 @@ use crate::counting::{
     PreparedDemCountPlan,
 };
 use crate::worker_decoder::WorkerDecoderCache;
+use crate::worker_executor::{execute_with_context, WorkerExecutor};
 use faultscope_core::{NativeDecoderWorker, NpError, NpResult, SmallRng};
 
 #[derive(Clone)]
@@ -55,7 +54,6 @@ struct AdaptiveCalibrationResult {
 enum Work {
     Batch(BatchWork),
     AdaptiveCalibration(AdaptiveCalibrationWork),
-    Shutdown,
 }
 
 enum WorkResult {
@@ -209,59 +207,20 @@ fn collect_task_set_inner(
     });
     let worker_count = run_options.num_workers.min(runnable_capacity).max(1);
     let run_options = Arc::new(run_options);
-    let (work_tx, work_rx) = mpsc::channel::<Work>();
-    let work_rx = Arc::new(Mutex::new(work_rx));
-    let (result_tx, result_rx) = mpsc::channel::<NpResult<WorkResult>>();
-    let mut handles = Vec::with_capacity(worker_count);
-    for _ in 0..worker_count {
-        let work_rx = work_rx.clone();
-        let result_tx = result_tx.clone();
-        handles.push(thread::spawn(move || {
-            let mut decoder_cache = WorkerDecoderCache::new();
-            loop {
-                let work = {
-                    let rx = work_rx.lock().unwrap();
-                    rx.recv()
-                };
-                let Ok(work) = work else {
-                    break;
-                };
-                if matches!(work, Work::Shutdown) {
-                    break;
-                }
-                let context = worker_panic_context(&work);
-                let error_context = worker_error_context(&work);
-                let result = catch_unwind(AssertUnwindSafe(|| match work {
-                    Work::Batch(work) => decoder_cache
-                        .resolve(work.state_index, work.task.decoder.as_ref())
-                        .and_then(|decoder| run_batch_work(work, decoder)),
-                    Work::AdaptiveCalibration(work) => decoder_cache
-                        .resolve(work.state_index, work.task.decoder.as_ref())
-                        .and_then(|decoder| {
-                            run_adaptive_calibration_work(work, decoder, &result_tx)
-                        }),
-                    Work::Shutdown => unreachable!("shutdown work was handled before execution"),
-                }))
-                .map_or_else(
-                    |payload| {
-                        Err(NpError::new(format!(
-                            "{context}: {}",
-                            panic_payload_message(payload.as_ref())
-                        )))
-                    },
-                    |result| {
-                        result.map_err(|err| {
-                            NpError::new(format!("{error_context}: {}", err.message()))
-                        })
-                    },
-                );
-                if result_tx.send(result).is_err() {
-                    break;
-                }
-            }
-        }));
-    }
-    drop(result_tx);
+    let executor = WorkerExecutor::new(
+        worker_count,
+        WorkerDecoderCache::new,
+        |work, decoder_cache, result_tx| match work {
+            Work::Batch(work) => decoder_cache
+                .resolve(work.state_index, work.task.decoder.as_ref())
+                .and_then(|decoder| run_batch_work(work, decoder)),
+            Work::AdaptiveCalibration(work) => decoder_cache
+                .resolve(work.state_index, work.task.decoder.as_ref())
+                .and_then(|decoder| run_adaptive_calibration_work(work, decoder, result_tx)),
+        },
+        worker_panic_context,
+        worker_error_context,
+    );
 
     let mut in_flight = 0usize;
     let mut next_state_to_schedule = 0usize;
@@ -270,73 +229,42 @@ fn collect_task_set_inner(
         &mut states,
         &mut next_state_to_schedule,
         worker_count,
-        &work_tx,
+        executor.sender(),
         &run_options,
         &mut in_flight,
     )?;
 
-    while in_flight > 0 {
-        let result = result_rx
-            .recv()
-            .map_err(|_| NpError::new("collection worker result channel closed"))?;
-        let completes_work = match &result {
-            Ok(result) => result.completes_work(),
-            Err(_) => true,
-        };
-        if completes_work {
-            in_flight -= 1;
-        }
-        if first_error.is_some() {
-            if let Ok(WorkResult::AdaptiveDelta { ack, .. }) = result {
+    executor.drain(
+        &mut in_flight,
+        &mut first_error,
+        "collection worker result channel closed",
+        WorkResult::completes_work,
+        |result, work_tx, in_flight| {
+            handle_work_result(
+                result,
+                &mut states,
+                &run_options,
+                &mut results,
+                &mut progress_callback,
+            )?;
+            schedule_available_work(
+                &mut states,
+                &mut next_state_to_schedule,
+                worker_count,
+                work_tx,
+                &run_options,
+                in_flight,
+            )
+        },
+        |result| {
+            if let WorkResult::AdaptiveDelta { ack, .. } = result {
                 let _ = ack.send(Err(NpError::new(
                     "adaptive collection cancelled after an earlier worker error",
                 )));
             }
-            continue;
-        }
-        match result {
-            Ok(result) => {
-                if let Err(err) = handle_work_result(
-                    result,
-                    &mut states,
-                    &run_options,
-                    &mut results,
-                    &mut progress_callback,
-                ) {
-                    first_error = Some(err);
-                    continue;
-                }
-                if let Err(err) = schedule_available_work(
-                    &mut states,
-                    &mut next_state_to_schedule,
-                    worker_count,
-                    &work_tx,
-                    &run_options,
-                    &mut in_flight,
-                ) {
-                    first_error = Some(err);
-                }
-            }
-            Err(err) => {
-                if first_error.is_none() {
-                    first_error = Some(err);
-                }
-            }
-        }
-    }
-
-    for _ in 0..worker_count {
-        let _ = work_tx.send(Work::Shutdown);
-    }
-    drop(work_tx);
-    for handle in handles {
-        if handle.join().is_err() && first_error.is_none() {
-            first_error = Some(NpError::new("collection worker thread panicked"));
-        }
-    }
-    if let Some(err) = first_error {
-        return Err(err);
-    }
+        },
+    );
+    executor.finish(first_error, "collection worker thread panicked")?;
 
     collect_results(results)
 }
@@ -345,7 +273,6 @@ fn worker_panic_context(work: &Work) -> String {
     let (task_key, task) = match work {
         Work::Batch(work) => (work.state_index, work.task.as_ref()),
         Work::AdaptiveCalibration(work) => (work.state_index, work.task.as_ref()),
-        Work::Shutdown => return "collection worker panicked while shutting down".to_string(),
     };
     let backend = task
         .decoder
@@ -362,7 +289,6 @@ fn worker_error_context(work: &Work) -> String {
     let (task_key, task) = match work {
         Work::Batch(work) => (work.state_index, work.task.as_ref()),
         Work::AdaptiveCalibration(work) => (work.state_index, work.task.as_ref()),
-        Work::Shutdown => return "collection worker failed while shutting down".to_string(),
     };
     let backend = task
         .decoder
@@ -373,16 +299,6 @@ fn worker_error_context(work: &Work) -> String {
         "collection worker failed while processing task key {task_key} (`{}`) with backend `{backend}`",
         task.task_id
     )
-}
-
-fn panic_payload_message(payload: &(dyn std::any::Any + Send)) -> &str {
-    if let Some(message) = payload.downcast_ref::<&str>() {
-        message
-    } else if let Some(message) = payload.downcast_ref::<String>() {
-        message.as_str()
-    } else {
-        "non-string panic payload"
-    }
 }
 
 fn make_task_state(
@@ -506,22 +422,11 @@ fn run_fixed_tasks_inline(
         let Work::Batch(work) = work else {
             return Err(NpError::new("inline scheduler received non-fixed work"));
         };
-        let result = catch_unwind(AssertUnwindSafe(|| {
+        let result = execute_with_context(context, error_context, || {
             decoder_cache
                 .resolve(work.state_index, work.task.decoder.as_ref())
                 .and_then(|decoder| run_batch_work(work, decoder))
-        }))
-        .map_or_else(
-            |payload| {
-                Err(NpError::new(format!(
-                    "{context}: {}",
-                    panic_payload_message(payload.as_ref())
-                )))
-            },
-            |result| {
-                result.map_err(|err| NpError::new(format!("{error_context}: {}", err.message())))
-            },
-        )?;
+        })?;
         handle_work_result(result, states, run_options, results, progress_callback)?;
     }
     Ok(())

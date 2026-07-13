@@ -1,8 +1,6 @@
 use std::collections::HashMap;
-use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::mpsc;
-use std::sync::{Arc, Mutex};
-use std::thread;
+use std::sync::Arc;
 use std::time::Instant;
 
 use faultscope_core::{compute_dem_estimate, NativeDecoderWorker, NpError, NpResult, SmallRng};
@@ -14,6 +12,7 @@ use crate::api::{
 use crate::counting::{count_detailed_batch, CountOptions};
 use crate::scheduler::{batch_seed, next_batch_size, task_run_seed};
 use crate::worker_decoder::WorkerDecoderCache;
+use crate::worker_executor::WorkerExecutor;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct DemHotspotCollectionResult {
@@ -120,47 +119,17 @@ pub fn collect_dem_hotspot_tasks(
     }
 
     let worker_count = run_options.num_workers.min(work_items.len()).max(1);
-    let (work_tx, work_rx) = mpsc::channel::<HotspotWork>();
-    let work_rx = Arc::new(Mutex::new(work_rx));
-    let (result_tx, result_rx) = mpsc::channel::<NpResult<HotspotBatchResult>>();
-    let mut handles = Vec::with_capacity(worker_count);
-    for _ in 0..worker_count {
-        let work_rx = work_rx.clone();
-        let result_tx = result_tx.clone();
-        handles.push(thread::spawn(move || {
-            let mut decoder_cache = WorkerDecoderCache::new();
-            loop {
-                let work = {
-                    let receiver = work_rx.lock().unwrap();
-                    receiver.recv()
-                };
-                let Ok(work) = work else {
-                    break;
-                };
-                let context = hotspot_worker_context(&work);
-                let result = catch_unwind(AssertUnwindSafe(|| {
-                    decoder_cache
-                        .resolve(work.task_index, work.task.decoder.as_ref())
-                        .and_then(|decoder| run_hotspot_batch(work, decoder))
-                }))
-                .map_or_else(
-                    |payload| {
-                        Err(NpError::new(format!(
-                            "{context}: {}",
-                            panic_payload_message(payload.as_ref())
-                        )))
-                    },
-                    |result| {
-                        result.map_err(|err| NpError::new(format!("{context}: {}", err.message())))
-                    },
-                );
-                if result_tx.send(result).is_err() {
-                    break;
-                }
-            }
-        }));
-    }
-    drop(result_tx);
+    let executor = WorkerExecutor::new(
+        worker_count,
+        WorkerDecoderCache::new,
+        |work, decoder_cache, _| {
+            decoder_cache
+                .resolve(work.task_index, work.task.decoder.as_ref())
+                .and_then(|decoder| run_hotspot_batch(work, decoder))
+        },
+        hotspot_worker_context,
+        hotspot_worker_context,
+    );
     let mut next_work = 0usize;
     let mut in_flight = 0usize;
     schedule_hotspot_work(
@@ -168,54 +137,29 @@ pub fn collect_dem_hotspot_tasks(
         &mut next_work,
         &mut states,
         worker_count,
-        &work_tx,
+        executor.sender(),
         &mut in_flight,
     )?;
     let mut first_error = None;
-    while in_flight > 0 {
-        match result_rx.recv() {
-            Ok(Ok(result)) => {
-                in_flight -= 1;
-                if first_error.is_none() {
-                    if let Err(err) = commit_hotspot_result(result, &mut states, &run_options) {
-                        first_error = Some(err);
-                    } else if let Err(err) = schedule_hotspot_work(
-                        &work_items,
-                        &mut next_work,
-                        &mut states,
-                        worker_count,
-                        &work_tx,
-                        &mut in_flight,
-                    ) {
-                        first_error = Some(err);
-                    }
-                }
-            }
-            Ok(Err(err)) => {
-                in_flight -= 1;
-                if first_error.is_none() {
-                    first_error = Some(err);
-                }
-            }
-            Err(_) => {
-                if first_error.is_none() {
-                    first_error = Some(NpError::new(
-                        "hotspot collection worker result channel closed",
-                    ));
-                }
-                break;
-            }
-        }
-    }
-    drop(work_tx);
-    for handle in handles {
-        if handle.join().is_err() && first_error.is_none() {
-            first_error = Some(NpError::new("hotspot collection worker thread panicked"));
-        }
-    }
-    if let Some(err) = first_error {
-        return Err(err);
-    }
+    executor.drain(
+        &mut in_flight,
+        &mut first_error,
+        "hotspot collection worker result channel closed",
+        |_| true,
+        |result, work_tx, in_flight| {
+            commit_hotspot_result(result, &mut states, &run_options)?;
+            schedule_hotspot_work(
+                &work_items,
+                &mut next_work,
+                &mut states,
+                worker_count,
+                work_tx,
+                in_flight,
+            )
+        },
+        |_| {},
+    );
+    executor.finish(first_error, "hotspot collection worker thread panicked")?;
 
     states.into_iter().map(finish_hotspot_state).collect()
 }
@@ -304,16 +248,6 @@ fn hotspot_worker_context(work: &HotspotWork) -> String {
         "hotspot collection worker failed while processing task key {} (`{}`) with backend `{backend}`",
         work.task_index, work.task.task_id
     )
-}
-
-fn panic_payload_message(payload: &(dyn std::any::Any + Send)) -> &str {
-    if let Some(message) = payload.downcast_ref::<&str>() {
-        message
-    } else if let Some(message) = payload.downcast_ref::<String>() {
-        message.as_str()
-    } else {
-        "non-string panic payload"
-    }
 }
 
 fn commit_hotspot_result(
