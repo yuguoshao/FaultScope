@@ -68,7 +68,10 @@ def _install_backend(backend: str, target_dir: Path, rev: str | None, dry_run: b
         rev=rev,
         python_executable=sys.executable,
     )
-    print(f"FaultScope will install the optional {backend} native backend.")
+    if plan.unavailable_reason is None:
+        print(f"FaultScope will install the optional {backend} native backend.")
+    else:
+        print(f"FaultScope cannot install the optional {backend} native backend.")
     print(f"backend package: {plan.backend.package_name}")
     print(f"problem kind: {plan.backend.problem_kind}")
     print(f"description: {plan.backend.description}")

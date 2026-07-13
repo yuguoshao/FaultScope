@@ -785,9 +785,10 @@ decoder = NativePyMatchingDecoder.from_dem(dem)
 result = sampler.estimate(shots=1024, seed=1, decoder=decoder)
 ```
 
-External graphlike MWPM backends can use the same post-install mechanism. A
-`faultscope-mwpm` package that registers the `mwpm` entry point can be used
-through `NativeMwpmDecoder` or `create_native_decoder("mwpm", dem=dem)`.
+The `mwpm` proxy is currently unavailable. Its external `faultscope-mwpm`
+package still implements ABI v1 and is not yet migrated to the strict
+FaultScope native decoder ABI v2, so the catalog shows it without an install
+action. `bposd` remains a separate reserved, unimplemented entry.
 
 ```python
 from faultscope import (
@@ -968,9 +969,10 @@ safely compresses identical boundary and two-detector parallel edges. It uses
 normalizes scaled integer weights by a common even-preserving divisor without
 changing that integer MWPM objective. It still rejects ambiguous parallel
 logical effects and has not implemented production partitioning, streaming
-execution, or production performance tuning. Each collection worker receives an
-independent native decoder descriptor with one mutex-protected solver state; the
-backend does not own a separate packed-row scheduler or worker pool. Set
+execution, or production performance tuning. Its public Python object is a
+factory handle; each private collection worker owns one exclusive mutable solver
+while immutable graph data is shared. The backend needs no decoder mutex or
+worker pool. Set
 `NPSIM_FUSION_BLOSSOM_PROFILE=1` for local diagnostics that print the native
 timing split, including solver clear/growth/extraction costs.
 

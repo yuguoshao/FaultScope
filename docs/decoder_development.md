@@ -360,25 +360,29 @@ handles explicitly; a Python subclass that only implements
 native fast path.
 
 Native backends are discovered through built-in handles and post-install plugin
-entry points. The V1 plugin contract is intentionally scoped to FaultScope-owned
-backend packages:
+entry points. FaultScope 0.2 uses the strict pure factory/worker ABI v2:
 
 ```text
 entry point group: faultscope.native_decoders
-ABI name: faultscope.native_decoder_plugin.v1
+ABI and capsule name: faultscope.native_decoder_plugin.v2
+numeric ABI: 2
+capsule method: __faultscope_native_decoder_capsule__
 ```
 
-The plugin package returns decoder classes that construct native handles. The
-runtime still recognizes only native handles; a Python subclass that implements
-`decode_batch_masks(batch)` remains a slow-path Python decoder.
+The plugin package returns public Python decoder classes that are factory
+handles. The factory cannot decode; FaultScope creates private exclusive workers
+for collection, estimate, debug, and composite decoding. Collection caches a
+worker per thread and task, including a one-worker collection, so a backend does
+not need a solver pool or a mutex around mutable solver state. See
+[Native Decoder ABI v2](native_decoder_abi.md) for layouts and lifecycle rules.
 
 Official backend installation metadata lives in the built-in catalog. Each
 entry records the backend name, backend package, proxy class name, target
 problem view, source repository, default revision, installability, and a short
-description. The catalog includes `pymatching` and `fusion-blossom` for
-graphlike MWPM-style decoding, includes `bpdecoder` for BP-family binary-linear
-decoding through the `faultscope-bpdecoder` package, and reserves `bposd` for
-binary-linear BP+OSD/LDPC decoding.
+description. `pymatching`, `fusion-blossom`, and `bpdecoder` are installable.
+`mwpm` remains discoverable but unavailable because its package is ABI v1 and
+not yet migrated to FaultScope native decoder ABI v2; no install action is
+offered. `bposd` is the distinct reserved, unimplemented binary-linear entry.
 
 Python can inspect compiled native backend names:
 
@@ -413,8 +417,6 @@ from faultscope.decoders import (
 
 decoder = NativePyMatchingDecoder.from_dem(dem)
 decoder = create_native_decoder("pymatching", dem=dem)
-decoder = NativeMwpmDecoder.from_dem(dem)
-decoder = create_native_decoder("mwpm", dem=dem)
 decoder = NativeFusionBlossomDecoder.from_dem(dem)
 decoder = create_native_decoder("fusion-blossom", dem=dem)
 Decoder = get_native_decoder_class("fusion-blossom")
@@ -465,7 +467,7 @@ inspect backend status:
 python -m faultscope.backends status
 ```
 
-Installation helpers are uniform for catalog entries:
+Installable catalog entries expose explicit installation helpers:
 
 ```bash
 python -m faultscope.backends install fusion-blossom --dry-run
@@ -475,9 +477,9 @@ python -m faultscope.backends install bposd --dry-run
 ```
 
 The command reserves the install workflow and prints the clone/build/install
-steps. Until official backend packages are available, non-dry-run installation
-fails with a clear package-unavailable or reserved-backend message. `bposd` is
-currently a catalog reservation only; it does not imply a BP+OSD backend exists.
+steps. `mwpm` is shown by `status` as unavailable pending ABI v2 migration and
+has no install action. `bposd` is a separate catalog reservation only; its dry
+run prints the reserved-backend explanation and does not imply an implementation.
 
 When the backend package is missing, the public proxy remains importable but
 construction raises an install hint:
@@ -492,7 +494,7 @@ from faultscope.decoders import (
 
 decoder = NativeBpDecoder.from_dem(dem)  # raises until installed
 decoder = NativeFusionBlossomDecoder.from_dem(dem)  # raises until installed
-decoder = NativeMwpmDecoder.from_dem(dem)  # raises until installed
+decoder = NativeMwpmDecoder.from_dem(dem)  # unavailable pending ABI v2 migration
 decoder = NativePyMatchingDecoder.from_dem(dem)  # raises until installed
 ```
 
@@ -559,10 +561,10 @@ build uses fusion-blossom's compact vertex/edge index mode and rejects graphs
 that exceed that backend index range. The default integer conversion uses
 `weight_scale=10_000`; after scaling, solver weights are normalized by their
 common even-preserving divisor, preserving the integer MWPM objective while
-reducing solver weight magnitudes when possible. Each native descriptor owns one
-mutex-protected solver state and path cache that it reuses across calls.
-Collection parallelism comes from fresh independent decoder descriptors; the
-backend does not maintain a worker-state pool or packed-row scheduler.
+reducing solver weight magnitudes when possible. The factory retains immutable
+graph and path metadata; every private worker owns one exclusive mutable solver.
+Collection reuses that worker through its thread/task cache. The backend does
+not maintain a solver pool, decoder mutex, or packed-row scheduler.
 
 `NPSIM_FUSION_BLOSSOM_PROFILE=1` prints a native per-batch timing
 split for defect collection, solver clear, solver growth, matching extraction,
@@ -588,7 +590,7 @@ decoder.solver_vertex_count
 decoder.solver_edge_count
 decoder.boundary_vertex_count
 decoder.build_summary
-decoder.decode_batch_masks(batch)  # debug fallback only
+decoder.decode_batch_masks(batch)  # explicit Python comparison helper
 ```
 
 FaultScope only calls the capsule method on the native fast path. The plugin ABI is
@@ -639,8 +641,8 @@ The implemented minimal beta adapter is:
    fault-observable indices so the solver prediction
    can be converted back into observable correction masks.
 8. Convert each hot-path `DetectorMaskBatchView` shot into the solver syndrome
-   representation, run serial MWPM, and recover matched-pair paths through a
-   per-descriptor cache without touching Python.
+   representation, run serial MWPM, and recover matched-pair paths through the
+   exclusive worker's cache without touching Python.
 9. Return a checked `CorrectionMaskBatch`.
 
 The construction summary is intentionally lightweight and safe to inspect from

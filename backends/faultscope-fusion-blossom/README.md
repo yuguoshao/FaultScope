@@ -17,10 +17,10 @@ until state drop. ABI consumers should copy error text promptly.
 The default integer conversion uses `weight_scale=10_000`. After scaling,
 solver weights are normalized by their common even-preserving divisor,
 preserving the integer MWPM objective while reducing solver weight magnitudes
-when possible. Each decoder descriptor owns one mutex-protected solver state and
-path cache that it reuses across calls. Collection parallelism comes from fresh,
-independent worker descriptors rather than a backend-owned scheduler or state
-pool. Set `NPSIM_FUSION_BLOSSOM_PROFILE=1` to print
+when possible. The ABI v2 factory shares immutable graph/path data, while each
+private worker owns one exclusive mutable solver. Collection caches workers per
+thread and task; the backend needs no solver mutex, scheduler, or state pool.
+Set `NPSIM_FUSION_BLOSSOM_PROFILE=1` to print
 per-batch native timing split into defect collection, solver clear, solver
 growth, matching extraction, and correction application.
 

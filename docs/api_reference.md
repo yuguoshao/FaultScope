@@ -10,7 +10,7 @@ sparse binary structure. User code should import from the public Python modules:
 `faultscope.collection`, `faultscope.decoders`, `faultscope.io`, and
 `faultscope.viz`.
 
-The package is pre-1.0. Within `0.1.x`, names listed in public Python module
+The package is pre-1.0. Within `0.2.x`, names listed in public Python module
 `__all__` values and the documented root APIs of `faultscope-core` and
 `faultscope-collection` are compatibility contracts. Compatible additions may
 land in patch releases. Removal or renaming requires deprecation before a later
@@ -401,14 +401,15 @@ ordinary Python decoders and do not enter the native fast path.
 
 `available_native_decoders()` returns the names of compiled native decoder
 backends. The default build exposes `"no-correction"` and
-`"graphlike-detector-copy"`. Optional post-install backends can add names such
-as `"pymatching"`, `"fusion-blossom"`, and `"mwpm"` through the
+`"graphlike-detector-copy"`. Compatible post-install backends can add names such
+as `"pymatching"`, `"fusion-blossom"`, and `"bpdecoder"` through the
 `faultscope.native_decoders` entry point group. Use
 `get_native_decoder_class(name)` or `create_native_decoder(name, dem=dem)` for a
 uniform API. Friendly proxies such as `NativePyMatchingDecoder`,
 `NativeFusionBlossomDecoder`, `NativeMwpmDecoder`, and `NativeBposdDecoder` remain importable;
-construction raises an install hint until a compatible backend package is
-installed. A post-install backend enters the native fast path only when the
+construction raises a precise availability error until a compatible backend
+package is installed. `mwpm` is discoverable but unavailable pending its ABI v2
+migration; `bposd` is reserved and unimplemented. A post-install backend enters the native fast path only when the
 constructed decoder exposes the FaultScope native decoder PyCapsule ABI; otherwise it
 remains a normal Python decoder.
 

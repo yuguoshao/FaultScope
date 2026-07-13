@@ -1,12 +1,12 @@
 # Release And Compatibility
 
 FaultScope uses one workspace version for the Python distribution and the
-published Rust libraries. The first release line is `0.1.x`.
+published Rust libraries. The current release line is `0.2.x`.
 
 ## Compatibility Contract
 
 - Python names listed by public-module `__all__` values are stable within
-  `0.1.x`. Private modules and `_`-prefixed names are not public API.
+  `0.2.x`. Private modules and `_`-prefixed names are not public API.
 - The root exports of `faultscope-core` and `faultscope-collection` are the Rust
   compatibility boundary. Their source modules are private.
 - Compatible additions may ship in a patch release. Removal or renaming is
@@ -31,7 +31,7 @@ with an `abi3-py310` wheel tag.
 
 - PyPI: `faultscope` and `faultscope-pymatching`.
 - crates.io: `faultscope-core`, then `faultscope-collection`.
-- `faultscope-fusion-blossom` remains a source-install beta for the `0.1.0`
+- `faultscope-fusion-blossom` remains a source-install beta for the `0.2.0`
   release line.
 
 ## Release Process

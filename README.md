@@ -28,7 +28,7 @@ Python API 暴露；主要能力包括 bit-packed stabilizer batch sampling、de
 
 ## 安装与构建
 
-FaultScope `0.1.x` 支持 CPython 3.10–3.14。预构建 wheels 的目标平台是
+FaultScope `0.2.x` 支持 CPython 3.10–3.14。预构建 wheels 的目标平台是
 manylinux x86_64/aarch64、macOS 11+ x86_64/arm64 和 Windows x86_64；源码构建需要
 Rust 1.85 或更新版本。
 
@@ -135,9 +135,8 @@ print(result.hotspot_table(top_k=5))
   `python -m faultscope.backends status` 查看 catalog/status，
   `python -m faultscope.backends install pymatching --dry-run` 查看安装步骤；FaultScope 不会在
   `import` 或 `estimate(...)` 时隐式联网、clone 或编译。
-- 外部 MWPM 后端可作为 sibling repository 独立开发；按 `faultscope.native_decoders`
-  entry point 和 native decoder PyCapsule ABI 暴露 `mwpm` 后，FaultScope 可通过
-  `NativeMwpmDecoder` 或 `create_native_decoder("mwpm", dem=dem)` 使用。
+- `mwpm` 仍可在 catalog/status 中发现，但外部 `faultscope-mwpm` 包还是 ABI v1，尚未迁移到
+  FaultScope native decoder ABI v2，因此目前不可安装；`bposd` 是另一条独立的预留项。
 - 开发中的 PyMatching 和 fusion-blossom backend 可在激活 venv 后通过
   `.venv/bin/python -m pip install -e backends/faultscope-pymatching --no-build-isolation` 和
   `.venv/bin/python -m pip install -e backends/faultscope-fusion-blossom` 本地安装；当前是最小
@@ -155,7 +154,7 @@ print(result.hotspot_table(top_k=5))
 | 查看原始 measurement/noise masks | Forward sampling |
 | 自定义 measurement-history loss | Forward estimate + `loss_mask_fn` |
 | detector-syndrome decoder | Forward 或 DEM estimate + decoder |
-| graphlike matching decoder | 原型用 `PyMatchingDecoder`；高性能路径安装 `faultscope-pymatching` 后使用 `NativePyMatchingDecoder`，或安装外部 `faultscope-mwpm` 后使用 `NativeMwpmDecoder` |
+| graphlike matching decoder | 原型用 `PyMatchingDecoder`；高性能路径安装 `faultscope-pymatching` 后使用 `NativePyMatchingDecoder`，或使用 `faultscope-fusion-blossom`；`mwpm` 等待 ABI v2 迁移 |
 | circuit 入口的 DEM 采样 | `DemFaultScopeSimulator(circuit)` |
 | DEM edge 级热点排序 | `DemFaultScopeSimulator` 或 `DemHotspotEstimator(dem)` |
 | 重复 detector syndrome sampling | `DemFaultScopeSimulator(circuit)` 或生成 DEM 后复用 DEM sampler |

@@ -65,8 +65,39 @@ class ReleaseMetadataTests(unittest.TestCase):
     def test_workspace_owns_version_and_msrv(self) -> None:
         workspace = _toml("Cargo.toml")["workspace"]
         package = workspace["package"]
-        self.assertEqual(package["version"], "0.1.0")
+        self.assertEqual(package["version"], "0.2.0")
         self.assertEqual(package["rust-version"], "1.85")
+
+    def test_faultscope_workspace_packages_and_internal_dependencies_are_v0_2(self) -> None:
+        manifests = (
+            "crates/faultscope-core/Cargo.toml",
+            "crates/faultscope-collection/Cargo.toml",
+            "crates/faultscope-python/Cargo.toml",
+            "backends/faultscope-pymatching/Cargo.toml",
+            "backends/faultscope-fusion-blossom/Cargo.toml",
+        )
+        internal_packages = {
+            "faultscope-core",
+            "faultscope-collection",
+            "faultscope-python",
+            "faultscope-pymatching-python",
+            "faultscope-fusion-blossom-python",
+        }
+        for path in manifests:
+            manifest = _toml(path)
+            self.assertIs(manifest["package"]["version"]["workspace"], True, path)
+            for dependency_name, dependency in manifest.get("dependencies", {}).items():
+                if dependency_name.startswith("faultscope-"):
+                    self.assertEqual(dependency["version"], "0.2.0", path)
+
+        locked = _toml("Cargo.lock")["package"]
+        locked_versions = {
+            package["name"]: package["version"]
+            for package in locked
+            if package["name"] in internal_packages
+        }
+        self.assertEqual(set(locked_versions), internal_packages)
+        self.assertEqual(set(locked_versions.values()), {"0.2.0"})
 
     def test_python_metadata_uses_maturin_dynamic_version(self) -> None:
         project = _toml("pyproject.toml")["project"]
@@ -133,7 +164,7 @@ class ReleaseMetadataTests(unittest.TestCase):
     def test_published_path_dependencies_have_registry_versions(self) -> None:
         collection = _toml("crates/faultscope-collection/Cargo.toml")
         dependency = collection["dependencies"]["faultscope-core"]
-        self.assertEqual(dependency["version"], "0.1.0")
+        self.assertEqual(dependency["version"], "0.2.0")
         self.assertEqual(dependency["path"], "../faultscope-core")
 
     def test_all_python_extensions_use_abi3_py310(self) -> None:
@@ -147,8 +178,76 @@ class ReleaseMetadataTests(unittest.TestCase):
             self.assertIn("abi3-py310", pyo3["features"], path)
 
     def test_backend_python_package_requires_compatible_faultscope(self) -> None:
-        project = _toml("backends/faultscope-pymatching/pyproject.toml")["project"]
-        self.assertIn("faultscope>=0.1,<0.2", project["dependencies"])
+        for path in (
+            "backends/faultscope-pymatching/pyproject.toml",
+            "backends/faultscope-fusion-blossom/pyproject.toml",
+        ):
+            project = _toml(path)["project"]
+            self.assertIn("faultscope>=0.2,<0.3", project["dependencies"], path)
+
+    def test_native_decoder_public_constants_are_coherent_for_abi_v2(self) -> None:
+        from faultscope import _native
+        from faultscope.backends import NATIVE_DECODER_PLUGIN_ABI
+        from faultscope.backends.registry import NATIVE_DECODER_ENTRY_POINT_GROUP
+
+        self.assertEqual(NATIVE_DECODER_PLUGIN_ABI, "faultscope.native_decoder_plugin.v2")
+        self.assertEqual(_native.NATIVE_DECODER_PLUGIN_ABI_VERSION, 2)
+        self.assertEqual(_native.NATIVE_DECODER_PLUGIN_ABI, NATIVE_DECODER_PLUGIN_ABI)
+        self.assertEqual(
+            _native.NATIVE_DECODER_PLUGIN_ENTRY_POINT_GROUP,
+            "faultscope.native_decoders",
+        )
+        self.assertEqual(
+            NATIVE_DECODER_ENTRY_POINT_GROUP,
+            _native.NATIVE_DECODER_PLUGIN_ENTRY_POINT_GROUP,
+        )
+
+    def test_native_decoder_docs_define_only_the_v2_runtime_contract(self) -> None:
+        abi = (ROOT / "docs/native_decoder_abi.md").read_text()
+        development = (ROOT / "docs/decoder_development.md").read_text()
+        docs = abi + "\n" + development
+
+        for required in (
+            "faultscope.native_decoder_plugin.v2",
+            "faultscope.native_decoders",
+            "__faultscope_native_decoder_capsule__",
+            "FaultScopeNativeDecoderFactoryV2",
+            "FaultScopeNativeDecoderWorkerV2",
+            "72 bytes",
+            "48 bytes",
+            "NATIVE_DECODER_FACTORY_FLAG_THREAD_SAFE",
+            "host-provided capacity",
+            "drop_factory_state",
+            "drop_worker_state",
+            "error string",
+            "must not unwind or panic across FFI",
+            "factory cannot decode",
+            "exclusive worker",
+            "collection task",
+            "one worker",
+            "estimate",
+            "debug",
+            "composite",
+            "thread-local worker cache",
+            "decoder pool or mutex",
+            "no runtime compatibility with ABI v1",
+            "Migrating a third-party ABI v1 backend",
+            "mwpm",
+            "not yet migrated",
+            "bposd",
+            "reserved",
+            "public Python decoder classes are factory handles",
+            "workers are private",
+        ):
+            self.assertIn(required, docs, required)
+
+        for obsolete in (
+            "create_worker_state",
+            "debug fallback only",
+            "single-worker fallback",
+            "runtime ABI v1 fallback",
+        ):
+            self.assertNotIn(obsolete, docs, obsolete)
 
 
 if __name__ == "__main__":
