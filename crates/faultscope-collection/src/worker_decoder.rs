@@ -1,73 +1,62 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use faultscope_core::{NativeBatchDecoder, NpError, NpResult};
+use faultscope_core::{NativeDecoderFactory, NativeDecoderWorker, NpError, NpResult};
 
 pub(crate) struct WorkerDecoderCache {
-    instances: HashMap<usize, Arc<dyn NativeBatchDecoder>>,
-    allow_legacy_single: bool,
+    instances: HashMap<usize, Box<dyn NativeDecoderWorker>>,
 }
 
 impl WorkerDecoderCache {
-    pub(crate) fn new(allow_legacy_single: bool) -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             instances: HashMap::new(),
-            allow_legacy_single,
         }
     }
 
-    pub(crate) fn resolve(
-        &mut self,
+    pub(crate) fn resolve<'a>(
+        &'a mut self,
         task_key: usize,
-        prototype: Option<&Arc<dyn NativeBatchDecoder>>,
-    ) -> NpResult<Option<Arc<dyn NativeBatchDecoder>>> {
-        let Some(prototype) = prototype else {
+        factory: Option<&Arc<dyn NativeDecoderFactory>>,
+    ) -> NpResult<Option<&'a mut (dyn NativeDecoderWorker + 'static)>> {
+        let Some(factory) = factory else {
             return Ok(None);
         };
-        if let Some(instance) = self.instances.get(&task_key) {
-            return Ok(Some(instance.clone()));
-        }
-
-        let instance = match prototype.create_worker_instance() {
-            Ok(instance) => instance,
-            Err(err)
-                if self.allow_legacy_single
-                    && err.message()
-                        == format!(
-                            "{} does not support collection worker instances",
-                            prototype.name()
-                        ) =>
-            {
-                prototype.clone()
+        if !self.instances.contains_key(&task_key) {
+            let instance = factory.create_worker().map_err(|err| {
+                NpError::new(format!(
+                    "failed to create worker for task key {task_key} backend `{}`: {}",
+                    factory.name(),
+                    err.message()
+                ))
+            })?;
+            if instance.name() != factory.name() {
+                return Err(NpError::new(format!(
+                    "worker decoder metadata mismatch for task key {task_key} backend `{}`: name expected `{}`, got `{}`",
+                    factory.name(),
+                    factory.name(),
+                    instance.name()
+                )));
             }
-            Err(err) => return Err(err),
-        };
-        if instance.name() != prototype.name() {
-            return Err(NpError::new(format!(
-                "worker decoder metadata mismatch for task key {task_key} backend `{}`: name expected `{}`, got `{}`",
-                prototype.name(),
-                prototype.name(),
-                instance.name()
-            )));
+            if instance.detector_ids() != factory.detector_ids() {
+                return Err(NpError::new(format!(
+                    "worker decoder metadata mismatch for task key {task_key} backend `{}`: detector_ids expected {:?}, got {:?}",
+                    factory.name(),
+                    factory.detector_ids(),
+                    instance.detector_ids()
+                )));
+            }
+            if instance.observable_ids() != factory.observable_ids() {
+                return Err(NpError::new(format!(
+                    "worker decoder metadata mismatch for task key {task_key} backend `{}`: observable_ids expected {:?}, got {:?}",
+                    factory.name(),
+                    factory.observable_ids(),
+                    instance.observable_ids()
+                )));
+            }
+            self.instances.insert(task_key, instance);
         }
-        if instance.detector_ids() != prototype.detector_ids() {
-            return Err(NpError::new(format!(
-                "worker decoder metadata mismatch for task key {task_key} backend `{}`: detector_ids expected {:?}, got {:?}",
-                prototype.name(),
-                prototype.detector_ids(),
-                instance.detector_ids()
-            )));
-        }
-        if instance.observable_ids() != prototype.observable_ids() {
-            return Err(NpError::new(format!(
-                "worker decoder metadata mismatch for task key {task_key} backend `{}`: observable_ids expected {:?}, got {:?}",
-                prototype.name(),
-                prototype.observable_ids(),
-                instance.observable_ids()
-            )));
-        }
-        self.instances.insert(task_key, instance.clone());
-        Ok(Some(instance))
+        Ok(self.instances.get_mut(&task_key).map(Box::as_mut))
     }
 }
 
@@ -76,7 +65,7 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use faultscope_core::{CorrectionMaskBatch, DetectorMaskBatchView, NpResult};
+    use faultscope_core::{CorrectionMaskBatch, DetectorMaskBatchView};
 
     struct PrototypeDecoder {
         worker_name: &'static str,
@@ -86,7 +75,7 @@ mod tests {
         drops: Arc<AtomicUsize>,
     }
 
-    impl NativeBatchDecoder for PrototypeDecoder {
+    impl NativeDecoderFactory for PrototypeDecoder {
         fn name(&self) -> &str {
             "prototype"
         }
@@ -99,21 +88,14 @@ mod tests {
             &[5]
         }
 
-        fn create_worker_instance(&self) -> NpResult<Arc<dyn NativeBatchDecoder>> {
+        fn create_worker(&self) -> NpResult<Box<dyn NativeDecoderWorker>> {
             self.create_calls.fetch_add(1, Ordering::SeqCst);
-            Ok(Arc::new(WorkerDecoder {
+            Ok(Box::new(WorkerDecoder {
                 name: self.worker_name,
                 detector_ids: self.worker_detector_ids.clone(),
                 observable_ids: self.worker_observable_ids.clone(),
                 drops: Arc::clone(&self.drops),
             }))
-        }
-
-        fn decode_batch(
-            &self,
-            detectors: DetectorMaskBatchView<'_>,
-        ) -> NpResult<CorrectionMaskBatch> {
-            Ok(CorrectionMaskBatch::empty(detectors.shots))
         }
     }
 
@@ -130,7 +112,7 @@ mod tests {
         }
     }
 
-    impl NativeBatchDecoder for WorkerDecoder {
+    impl NativeDecoderWorker for WorkerDecoder {
         fn name(&self) -> &str {
             self.name
         }
@@ -144,7 +126,7 @@ mod tests {
         }
 
         fn decode_batch(
-            &self,
+            &mut self,
             detectors: DetectorMaskBatchView<'_>,
         ) -> NpResult<CorrectionMaskBatch> {
             Ok(CorrectionMaskBatch::empty(detectors.shots))
@@ -157,7 +139,7 @@ mod tests {
         worker_observable_ids: Vec<i64>,
         create_calls: Arc<AtomicUsize>,
         drops: Arc<AtomicUsize>,
-    ) -> Arc<dyn NativeBatchDecoder> {
+    ) -> Arc<dyn NativeDecoderFactory> {
         Arc::new(PrototypeDecoder {
             worker_name,
             worker_detector_ids,
@@ -177,7 +159,7 @@ mod tests {
             Arc::new(AtomicUsize::new(0)),
             Arc::clone(&drops),
         );
-        let mut cache = WorkerDecoderCache::new(false);
+        let mut cache = WorkerDecoderCache::new();
 
         let Err(err) = cache.resolve(7, Some(&prototype)) else {
             panic!("worker name mismatch was accepted");
@@ -200,7 +182,7 @@ mod tests {
             Arc::new(AtomicUsize::new(0)),
             Arc::clone(&drops),
         );
-        let mut cache = WorkerDecoderCache::new(false);
+        let mut cache = WorkerDecoderCache::new();
 
         let Err(err) = cache.resolve(11, Some(&prototype)) else {
             panic!("worker detector IDs mismatch was accepted");
@@ -223,7 +205,7 @@ mod tests {
             Arc::new(AtomicUsize::new(0)),
             Arc::clone(&drops),
         );
-        let mut cache = WorkerDecoderCache::new(false);
+        let mut cache = WorkerDecoderCache::new();
 
         let Err(err) = cache.resolve(13, Some(&prototype)) else {
             panic!("worker observable IDs mismatch was accepted");
@@ -237,7 +219,7 @@ mod tests {
     }
 
     #[test]
-    fn caches_worker_only_after_all_metadata_matches() {
+    fn caches_one_worker_per_task_key() {
         let create_calls = Arc::new(AtomicUsize::new(0));
         let drops = Arc::new(AtomicUsize::new(0));
         let prototype = prototype(
@@ -247,15 +229,12 @@ mod tests {
             Arc::clone(&create_calls),
             Arc::clone(&drops),
         );
-        let mut cache = WorkerDecoderCache::new(false);
+        let mut cache = WorkerDecoderCache::new();
 
-        let first = cache.resolve(17, Some(&prototype)).unwrap().unwrap();
-        let second = cache.resolve(17, Some(&prototype)).unwrap().unwrap();
+        assert!(cache.resolve(17, Some(&prototype)).unwrap().is_some());
+        assert!(cache.resolve(17, Some(&prototype)).unwrap().is_some());
 
-        assert!(Arc::ptr_eq(&first, &second));
         assert_eq!(create_calls.load(Ordering::SeqCst), 1);
-        drop(first);
-        drop(second);
         drop(cache);
         assert_eq!(drops.load(Ordering::SeqCst), 1);
     }

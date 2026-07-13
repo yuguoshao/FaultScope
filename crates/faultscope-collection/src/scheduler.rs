@@ -21,7 +21,7 @@ use crate::api::{
 };
 use crate::counting::{sample_dem_logical_error_stats_with_rng, BatchStats, CountOptions};
 use crate::worker_decoder::WorkerDecoderCache;
-use faultscope_core::{NativeBatchDecoder, NpError, NpResult, SmallRng};
+use faultscope_core::{NativeDecoderWorker, NpError, NpResult, SmallRng};
 
 #[derive(Clone)]
 struct BatchWork {
@@ -192,13 +192,11 @@ fn collect_task_set_inner(
     let work_rx = Arc::new(Mutex::new(work_rx));
     let (result_tx, result_rx) = mpsc::channel::<NpResult<WorkResult>>();
     let mut handles = Vec::with_capacity(worker_count);
-    let allow_legacy_single = run_options.num_workers == 1;
-
     for _ in 0..worker_count {
         let work_rx = work_rx.clone();
         let result_tx = result_tx.clone();
         handles.push(thread::spawn(move || {
-            let mut decoder_cache = WorkerDecoderCache::new(allow_legacy_single);
+            let mut decoder_cache = WorkerDecoderCache::new();
             loop {
                 let work = {
                     let rx = work_rx.lock().unwrap();
@@ -211,23 +209,31 @@ fn collect_task_set_inner(
                     break;
                 }
                 let context = worker_panic_context(&work);
+                let error_context = worker_error_context(&work);
                 let result = catch_unwind(AssertUnwindSafe(|| match work {
                     Work::Batch(work) => decoder_cache
                         .resolve(work.state_index, work.task.decoder.as_ref())
-                        .and_then(|decoder| run_batch_work(work, decoder.as_deref())),
+                        .and_then(|decoder| run_batch_work(work, decoder)),
                     Work::AdaptiveCalibration(work) => decoder_cache
                         .resolve(work.state_index, work.task.decoder.as_ref())
                         .and_then(|decoder| {
-                            run_adaptive_calibration_work(work, decoder.as_deref(), &result_tx)
+                            run_adaptive_calibration_work(work, decoder, &result_tx)
                         }),
                     Work::Shutdown => unreachable!("shutdown work was handled before execution"),
                 }))
-                .unwrap_or_else(|payload| {
-                    Err(NpError::new(format!(
-                        "{context}: {}",
-                        panic_payload_message(payload.as_ref())
-                    )))
-                });
+                .map_or_else(
+                    |payload| {
+                        Err(NpError::new(format!(
+                            "{context}: {}",
+                            panic_payload_message(payload.as_ref())
+                        )))
+                    },
+                    |result| {
+                        result.map_err(|err| {
+                            NpError::new(format!("{error_context}: {}", err.message()))
+                        })
+                    },
+                );
                 if result_tx.send(result).is_err() {
                     break;
                 }
@@ -323,6 +329,19 @@ fn worker_panic_context(work: &Work) -> String {
     let backend = task.decoder_name.as_deref().unwrap_or("none");
     format!(
         "collection worker panicked while processing task key {task_key} (`{}`) with backend `{backend}`",
+        task.task_id
+    )
+}
+
+fn worker_error_context(work: &Work) -> String {
+    let (task_key, task) = match work {
+        Work::Batch(work) => (work.state_index, work.task.as_ref()),
+        Work::AdaptiveCalibration(work) => (work.state_index, work.task.as_ref()),
+        Work::Shutdown => return "collection worker failed while shutting down".to_string(),
+    };
+    let backend = task.decoder_name.as_deref().unwrap_or("none");
+    format!(
+        "collection worker failed while processing task key {task_key} (`{}`) with backend `{backend}`",
         task.task_id
     )
 }
@@ -624,7 +643,7 @@ fn mark_state_complete(
 
 fn run_batch_work(
     work: BatchWork,
-    decoder: Option<&dyn NativeBatchDecoder>,
+    decoder: Option<&mut (dyn NativeDecoderWorker + 'static)>,
 ) -> NpResult<WorkResult> {
     let mut rng = SmallRng::new(batch_seed(work.seed, work.seed_stream, work.ordinal));
     let count_options = CountOptions {
@@ -650,7 +669,7 @@ fn run_batch_work(
 
 fn run_adaptive_calibration_work(
     work: AdaptiveCalibrationWork,
-    decoder: Option<&dyn NativeBatchDecoder>,
+    decoder: Option<&mut (dyn NativeDecoderWorker + 'static)>,
     result_tx: &mpsc::Sender<NpResult<WorkResult>>,
 ) -> NpResult<WorkResult> {
     let result = calibrate_adaptive_task(
@@ -669,7 +688,7 @@ fn run_adaptive_calibration_work(
 
 fn calibrate_adaptive_task(
     task: &DemLogicalCollectionTask,
-    decoder: Option<&dyn NativeBatchDecoder>,
+    mut decoder: Option<&mut (dyn NativeDecoderWorker + 'static)>,
     run_options: &DemLogicalCollectionRunOptions,
     seed_stream: usize,
     state_index: Option<usize>,
@@ -704,14 +723,24 @@ fn calibrate_adaptive_task(
         batch_shots = batch_shots.min(task.options.max_shots - shots_done).max(1);
         let mut rng = SmallRng::new(batch_seed(seed, seed_stream, batch_ordinal));
         let batch_started = Instant::now();
-        let batch_stats = sample_dem_logical_error_stats_with_rng(
-            &task.sampler,
-            batch_shots,
-            &mut rng,
-            decoder,
-            Some(batch_started),
-            &count_options,
-        )?;
+        let batch_stats = match decoder.as_mut() {
+            Some(decoder) => sample_dem_logical_error_stats_with_rng(
+                &task.sampler,
+                batch_shots,
+                &mut rng,
+                Some(&mut **decoder),
+                Some(batch_started),
+                &count_options,
+            )?,
+            None => sample_dem_logical_error_stats_with_rng(
+                &task.sampler,
+                batch_shots,
+                &mut rng,
+                None,
+                Some(batch_started),
+                &count_options,
+            )?,
+        };
         let elapsed = batch_stats.seconds;
         let delta = stats_delta_from_batch(task, batch_stats, elapsed);
         stats.add_assign_checked(&delta)?;

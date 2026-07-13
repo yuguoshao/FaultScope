@@ -6,7 +6,9 @@ use crate::counting::{sample_dem_logical_error_stats_with_rng, validate_mask_sha
 use crate::scheduler::{
     batch_seed, collect_task_set, collect_task_set_with_progress, next_batch_size,
 };
-use faultscope_core::{DemHotspotEstimator, NativeBatchDecoder, NpError, NpResult, SmallRng};
+use faultscope_core::{
+    DemHotspotEstimator, NativeDecoderFactory, NativeDecoderWorker, NpError, NpResult, SmallRng,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct DemLogicalCollectionOptions {
@@ -90,7 +92,7 @@ pub struct DemLogicalCollectionTask {
     pub task_id: String,
     pub strong_id: String,
     pub sampler: Arc<DemHotspotEstimator>,
-    pub decoder: Option<Arc<dyn NativeBatchDecoder>>,
+    pub decoder: Option<Arc<dyn NativeDecoderFactory>>,
     pub decoder_name: Option<String>,
     pub metadata_json: String,
     pub options: DemLogicalCollectionOptions,
@@ -110,10 +112,11 @@ pub struct DemLogicalCollectionRunOptions {
 pub fn collect_dem_logical_error_stats(
     sampler: &DemHotspotEstimator,
     options: DemLogicalCollectionOptions,
-    decoder: Option<&dyn NativeBatchDecoder>,
+    mut decoder: Option<&mut (dyn NativeDecoderWorker + 'static)>,
 ) -> NpResult<DemLogicalCollectionStats> {
     validate_collection_options(options)?;
 
+    let decoder_name = decoder.as_ref().map(|decoder| decoder.name().to_string());
     let started = Instant::now();
     let mut shots_done = 0usize;
     let mut errors = 0usize;
@@ -127,14 +130,24 @@ pub fn collect_dem_logical_error_stats(
         let batch_shots = next_batch_size(options, shots_done, last_batch);
         let mut batch_rng = SmallRng::new(batch_seed(options.seed, 0, batch_ordinal));
         let batch_started = Instant::now();
-        let batch_stats = sample_dem_logical_error_stats_with_rng(
-            sampler,
-            batch_shots,
-            &mut batch_rng,
-            decoder,
-            None,
-            &CountOptions::default(),
-        )?;
+        let batch_stats = match decoder.as_mut() {
+            Some(decoder) => sample_dem_logical_error_stats_with_rng(
+                sampler,
+                batch_shots,
+                &mut batch_rng,
+                Some(&mut **decoder),
+                None,
+                &CountOptions::default(),
+            )?,
+            None => sample_dem_logical_error_stats_with_rng(
+                sampler,
+                batch_shots,
+                &mut batch_rng,
+                None,
+                None,
+                &CountOptions::default(),
+            )?,
+        };
         let elapsed = batch_started.elapsed().as_secs_f64();
         shots_done += batch_stats.shots;
         errors += batch_stats.errors;
@@ -150,7 +163,7 @@ pub fn collect_dem_logical_error_stats(
     Ok(DemLogicalCollectionStats {
         task_id: String::new(),
         strong_id: String::new(),
-        decoder: decoder.map(|decoder| decoder.name().to_string()),
+        decoder: decoder_name,
         metadata_json: "null".to_string(),
         shots: shots_done,
         errors,
@@ -164,13 +177,14 @@ pub fn sample_dem_logical_error_stats(
     sampler: &DemHotspotEstimator,
     shots: usize,
     seed: Option<u64>,
-    decoder: Option<&dyn NativeBatchDecoder>,
+    decoder: Option<&mut (dyn NativeDecoderWorker + 'static)>,
 ) -> NpResult<DemLogicalCollectionStats> {
     if shots == 0 {
         return Err(NpError::new("shots must be positive"));
     }
     let started = Instant::now();
     let mut rng = SmallRng::new(seed.unwrap_or(0x95f2_04dc_4291_a715));
+    let decoder_name = decoder.as_ref().map(|decoder| decoder.name().to_string());
     let batch = sample_dem_logical_error_stats_with_rng(
         sampler,
         shots,
@@ -182,7 +196,7 @@ pub fn sample_dem_logical_error_stats(
     Ok(DemLogicalCollectionStats {
         task_id: String::new(),
         strong_id: String::new(),
-        decoder: decoder.map(|decoder| decoder.name().to_string()),
+        decoder: decoder_name,
         metadata_json: "null".to_string(),
         shots: batch.shots,
         errors: batch.errors,

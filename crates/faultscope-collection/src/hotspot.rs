@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Instant;
 
-use faultscope_core::{compute_dem_estimate, NativeBatchDecoder, NpError, NpResult, SmallRng};
+use faultscope_core::{compute_dem_estimate, NativeDecoderWorker, NpError, NpResult, SmallRng};
 
 use crate::api::{
     stop_error_count, validate_task, DemLogicalCollectionRunOptions, DemLogicalCollectionStats,
@@ -124,12 +124,11 @@ pub fn collect_dem_hotspot_tasks(
     let work_rx = Arc::new(Mutex::new(work_rx));
     let (result_tx, result_rx) = mpsc::channel::<NpResult<HotspotBatchResult>>();
     let mut handles = Vec::with_capacity(worker_count);
-    let allow_legacy_single = run_options.num_workers == 1;
     for _ in 0..worker_count {
         let work_rx = work_rx.clone();
         let result_tx = result_tx.clone();
         handles.push(thread::spawn(move || {
-            let mut decoder_cache = WorkerDecoderCache::new(allow_legacy_single);
+            let mut decoder_cache = WorkerDecoderCache::new();
             loop {
                 let work = {
                     let receiver = work_rx.lock().unwrap();
@@ -138,12 +137,23 @@ pub fn collect_dem_hotspot_tasks(
                 let Ok(work) = work else {
                     break;
                 };
+                let context = hotspot_worker_context(&work);
                 let result = catch_unwind(AssertUnwindSafe(|| {
                     decoder_cache
                         .resolve(work.task_index, work.task.decoder.as_ref())
-                        .and_then(|decoder| run_hotspot_batch(work, decoder.as_deref()))
+                        .and_then(|decoder| run_hotspot_batch(work, decoder))
                 }))
-                .unwrap_or_else(|_| Err(NpError::new("hotspot collection worker panicked")));
+                .map_or_else(
+                    |payload| {
+                        Err(NpError::new(format!(
+                            "{context}: {}",
+                            panic_payload_message(payload.as_ref())
+                        )))
+                    },
+                    |result| {
+                        result.map_err(|err| NpError::new(format!("{context}: {}", err.message())))
+                    },
+                );
                 if result_tx.send(result).is_err() {
                     break;
                 }
@@ -241,7 +251,7 @@ fn schedule_hotspot_work(
 
 fn run_hotspot_batch(
     work: HotspotWork,
-    decoder: Option<&dyn NativeBatchDecoder>,
+    decoder: Option<&mut (dyn NativeDecoderWorker + 'static)>,
 ) -> NpResult<HotspotBatchResult> {
     let started = Instant::now();
     let mut rng = SmallRng::new(batch_seed(work.seed, 0, work.ordinal));
@@ -281,6 +291,24 @@ fn run_hotspot_batch(
         stats,
         edge_sensitivities: estimate.edge_sensitivities,
     })
+}
+
+fn hotspot_worker_context(work: &HotspotWork) -> String {
+    let backend = work.task.decoder_name.as_deref().unwrap_or("none");
+    format!(
+        "hotspot collection worker failed while processing task key {} (`{}`) with backend `{backend}`",
+        work.task_index, work.task.task_id
+    )
+}
+
+fn panic_payload_message(payload: &(dyn std::any::Any + Send)) -> &str {
+    if let Some(message) = payload.downcast_ref::<&str>() {
+        message
+    } else if let Some(message) = payload.downcast_ref::<String>() {
+        message.as_str()
+    } else {
+        "non-string panic payload"
+    }
 }
 
 fn commit_hotspot_result(
