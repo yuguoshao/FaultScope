@@ -4,6 +4,7 @@ mod api;
 mod counting;
 mod hotspot;
 mod scheduler;
+mod worker_decoder;
 
 pub use api::{
     collect_dem_logical_error_stats, collect_dem_logical_error_tasks,

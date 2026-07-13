@@ -1,5 +1,5 @@
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, ThreadId};
 use std::time::{Duration, Instant};
@@ -16,9 +16,140 @@ use faultscope_core::{
     NativeGraphlikeDetectorCopyDecoder,
 };
 
+#[derive(Debug, Default)]
+struct InstanceTracker {
+    created: AtomicUsize,
+    concurrent_reentries: AtomicUsize,
+    cross_thread_uses: AtomicUsize,
+    prototype_decode_calls: AtomicUsize,
+}
+
+#[derive(Debug)]
+struct WorkerOwnedDecoder {
+    tracker: Arc<InstanceTracker>,
+    detector_ids: Vec<i64>,
+    observable_ids: Vec<i64>,
+    is_prototype: bool,
+    active: AtomicBool,
+    owner: Mutex<Option<ThreadId>>,
+}
+
+impl WorkerOwnedDecoder {
+    fn prototype(tracker: Arc<InstanceTracker>) -> Self {
+        Self {
+            tracker,
+            detector_ids: vec![0],
+            observable_ids: vec![0],
+            is_prototype: true,
+            active: AtomicBool::new(false),
+            owner: Mutex::new(None),
+        }
+    }
+
+    fn worker(&self) -> Self {
+        Self {
+            tracker: self.tracker.clone(),
+            detector_ids: self.detector_ids.clone(),
+            observable_ids: self.observable_ids.clone(),
+            is_prototype: false,
+            active: AtomicBool::new(false),
+            owner: Mutex::new(None),
+        }
+    }
+}
+
+impl NativeBatchDecoder for WorkerOwnedDecoder {
+    fn name(&self) -> &str {
+        "worker_owned"
+    }
+
+    fn detector_ids(&self) -> &[i64] {
+        &self.detector_ids
+    }
+
+    fn observable_ids(&self) -> &[i64] {
+        &self.observable_ids
+    }
+
+    fn create_worker_instance(&self) -> faultscope_core::NpResult<Arc<dyn NativeBatchDecoder>> {
+        self.tracker.created.fetch_add(1, Ordering::SeqCst);
+        Ok(Arc::new(self.worker()))
+    }
+
+    fn decode_batch(
+        &self,
+        detectors: DetectorMaskBatchView<'_>,
+    ) -> faultscope_core::NpResult<CorrectionMaskBatch> {
+        if self.is_prototype {
+            self.tracker
+                .prototype_decode_calls
+                .fetch_add(1, Ordering::SeqCst);
+        }
+        if self.active.swap(true, Ordering::SeqCst) {
+            self.tracker
+                .concurrent_reentries
+                .fetch_add(1, Ordering::SeqCst);
+        }
+        let current = thread::current().id();
+        let mut owner = self.owner.lock().unwrap();
+        match *owner {
+            Some(previous) if previous != current => {
+                self.tracker
+                    .cross_thread_uses
+                    .fetch_add(1, Ordering::SeqCst);
+            }
+            None => *owner = Some(current),
+            _ => {}
+        }
+        drop(owner);
+        thread::sleep(Duration::from_millis(5));
+        self.active.store(false, Ordering::SeqCst);
+        Ok(CorrectionMaskBatch::empty(detectors.shots))
+    }
+}
+
+#[derive(Debug)]
+struct LegacyTrackingDecoder {
+    calls: AtomicUsize,
+    detector_ids: Vec<i64>,
+    observable_ids: Vec<i64>,
+}
+
+impl LegacyTrackingDecoder {
+    fn new() -> Self {
+        Self {
+            calls: AtomicUsize::new(0),
+            detector_ids: vec![0],
+            observable_ids: vec![0],
+        }
+    }
+}
+
+impl NativeBatchDecoder for LegacyTrackingDecoder {
+    fn name(&self) -> &str {
+        "legacy_tracking"
+    }
+
+    fn detector_ids(&self) -> &[i64] {
+        &self.detector_ids
+    }
+
+    fn observable_ids(&self) -> &[i64] {
+        &self.observable_ids
+    }
+
+    fn decode_batch(
+        &self,
+        detectors: DetectorMaskBatchView<'_>,
+    ) -> faultscope_core::NpResult<CorrectionMaskBatch> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Ok(CorrectionMaskBatch::empty(detectors.shots))
+    }
+}
+
 #[derive(Debug)]
 struct ThreadRecordingDecoder {
-    threads: Mutex<HashSet<ThreadId>>,
+    threads: Arc<Mutex<HashSet<ThreadId>>>,
     detector_ids: Vec<i64>,
     observable_ids: Vec<i64>,
     sleep: Duration,
@@ -31,7 +162,7 @@ impl ThreadRecordingDecoder {
 
     fn new_with_sleep(detector_ids: Vec<i64>, observable_ids: Vec<i64>, sleep: Duration) -> Self {
         Self {
-            threads: Mutex::new(HashSet::new()),
+            threads: Arc::new(Mutex::new(HashSet::new())),
             detector_ids,
             observable_ids,
             sleep,
@@ -56,6 +187,15 @@ impl NativeBatchDecoder for ThreadRecordingDecoder {
         &self.observable_ids
     }
 
+    fn create_worker_instance(&self) -> faultscope_core::NpResult<Arc<dyn NativeBatchDecoder>> {
+        Ok(Arc::new(Self {
+            threads: self.threads.clone(),
+            detector_ids: self.detector_ids.clone(),
+            observable_ids: self.observable_ids.clone(),
+            sleep: self.sleep,
+        }))
+    }
+
     fn decode_batch(
         &self,
         detectors: DetectorMaskBatchView<'_>,
@@ -68,7 +208,7 @@ impl NativeBatchDecoder for ThreadRecordingDecoder {
 
 #[derive(Debug)]
 struct CountingDecoder {
-    calls: Mutex<usize>,
+    calls: Arc<Mutex<usize>>,
     detector_ids: Vec<i64>,
     observable_ids: Vec<i64>,
 }
@@ -76,7 +216,7 @@ struct CountingDecoder {
 impl CountingDecoder {
     fn new(detector_ids: Vec<i64>, observable_ids: Vec<i64>) -> Self {
         Self {
-            calls: Mutex::new(0),
+            calls: Arc::new(Mutex::new(0)),
             detector_ids,
             observable_ids,
         }
@@ -98,6 +238,14 @@ impl NativeBatchDecoder for CountingDecoder {
 
     fn observable_ids(&self) -> &[i64] {
         &self.observable_ids
+    }
+
+    fn create_worker_instance(&self) -> faultscope_core::NpResult<Arc<dyn NativeBatchDecoder>> {
+        Ok(Arc::new(Self {
+            calls: self.calls.clone(),
+            detector_ids: self.detector_ids.clone(),
+            observable_ids: self.observable_ids.clone(),
+        }))
     }
 
     fn decode_batch(
@@ -157,7 +305,7 @@ impl NativeBatchDecoder for MaskRecordingDecoder {
 
 #[derive(Debug)]
 struct CalibrationCorrectingDecoder {
-    calls: AtomicUsize,
+    calls: Arc<AtomicUsize>,
     detector_ids: Vec<i64>,
     observable_ids: Vec<i64>,
 }
@@ -165,7 +313,7 @@ struct CalibrationCorrectingDecoder {
 impl CalibrationCorrectingDecoder {
     fn new() -> Self {
         Self {
-            calls: AtomicUsize::new(0),
+            calls: Arc::new(AtomicUsize::new(0)),
             detector_ids: vec![0],
             observable_ids: vec![0],
         }
@@ -183,6 +331,14 @@ impl NativeBatchDecoder for CalibrationCorrectingDecoder {
 
     fn observable_ids(&self) -> &[i64] {
         &self.observable_ids
+    }
+
+    fn create_worker_instance(&self) -> faultscope_core::NpResult<Arc<dyn NativeBatchDecoder>> {
+        Ok(Arc::new(Self {
+            calls: self.calls.clone(),
+            detector_ids: self.detector_ids.clone(),
+            observable_ids: self.observable_ids.clone(),
+        }))
     }
 
     fn decode_batch(
@@ -218,6 +374,13 @@ impl NativeBatchDecoder for FailingDecoder {
 
     fn observable_ids(&self) -> &[i64] {
         &self.observable_ids
+    }
+
+    fn create_worker_instance(&self) -> faultscope_core::NpResult<Arc<dyn NativeBatchDecoder>> {
+        Ok(Arc::new(Self {
+            detector_ids: self.detector_ids.clone(),
+            observable_ids: self.observable_ids.clone(),
+        }))
     }
 
     fn decode_batch(
@@ -270,6 +433,108 @@ fn graphlike_dem(probability: f64) -> DetectorErrorModel {
             tags: HashMap::new(),
         }],
     }
+}
+
+fn decoder_collection_task(
+    task_name: &str,
+    decoder: Arc<dyn NativeBatchDecoder>,
+    max_shots: usize,
+    adaptive: bool,
+) -> DemLogicalCollectionTask {
+    DemLogicalCollectionTask {
+        task_id: task_name.to_string(),
+        strong_id: format!("{task_name}-strong"),
+        sampler: Arc::new(DemHotspotEstimator::new(graphlike_dem(1.0)).unwrap()),
+        decoder_name: Some(decoder.name().to_string()),
+        decoder: Some(decoder),
+        metadata_json: "{}".to_string(),
+        options: DemLogicalCollectionOptions {
+            max_shots,
+            min_shots: 0,
+            max_errors: None,
+            batch_size: 1_000,
+            seed: Some(251),
+            start_batch_size: adaptive.then_some(1_000),
+            max_batch_size: adaptive.then_some(1_000),
+            max_batch_seconds: adaptive.then_some(1.0),
+        },
+        postselection_mask: None,
+        postselected_observables_mask: None,
+    }
+}
+
+fn collection_run_options(num_workers: usize) -> DemLogicalCollectionRunOptions {
+    DemLogicalCollectionRunOptions {
+        num_workers,
+        seed: None,
+        count_observable_error_combos: false,
+        count_detection_events: false,
+        custom_error_count_key: None,
+    }
+}
+
+#[test]
+fn collection_uses_worker_local_decoder() {
+    let tracker = Arc::new(InstanceTracker::default());
+    let prototype: Arc<dyn NativeBatchDecoder> =
+        Arc::new(WorkerOwnedDecoder::prototype(tracker.clone()));
+    let task = decoder_collection_task("worker-owned-fixed", prototype, 4_000, false);
+
+    let stats =
+        collect_dem_logical_error_tasks(vec![task], collection_run_options(4), HashMap::new())
+            .unwrap();
+
+    assert_eq!(stats[0].shots, 4_000);
+    assert!(tracker.created.load(Ordering::SeqCst) >= 2);
+    assert_eq!(tracker.concurrent_reentries.load(Ordering::SeqCst), 0);
+    assert_eq!(tracker.cross_thread_uses.load(Ordering::SeqCst), 0);
+    assert_eq!(tracker.prototype_decode_calls.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn adaptive_collection_uses_worker_local_decoder() {
+    let tracker = Arc::new(InstanceTracker::default());
+    let prototype: Arc<dyn NativeBatchDecoder> =
+        Arc::new(WorkerOwnedDecoder::prototype(tracker.clone()));
+    let task = decoder_collection_task("worker-owned-adaptive", prototype, 6_000, true);
+
+    let stats =
+        collect_dem_logical_error_tasks(vec![task], collection_run_options(4), HashMap::new())
+            .unwrap();
+
+    assert_eq!(stats[0].shots, 6_000);
+    assert!(tracker.created.load(Ordering::SeqCst) >= 2);
+    assert_eq!(tracker.concurrent_reentries.load(Ordering::SeqCst), 0);
+    assert_eq!(tracker.cross_thread_uses.load(Ordering::SeqCst), 0);
+    assert_eq!(tracker.prototype_decode_calls.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn legacy_decoder_uses_prototype_with_one_worker() {
+    let decoder = Arc::new(LegacyTrackingDecoder::new());
+    let task = decoder_collection_task("legacy-single", decoder.clone(), 4_000, false);
+
+    let stats =
+        collect_dem_logical_error_tasks(vec![task], collection_run_options(1), HashMap::new())
+            .unwrap();
+
+    assert_eq!(stats[0].shots, 4_000);
+    assert_eq!(decoder.calls.load(Ordering::SeqCst), 4);
+}
+
+#[test]
+fn legacy_decoder_fails_with_multiple_workers_before_decoding() {
+    let decoder = Arc::new(LegacyTrackingDecoder::new());
+    let task = decoder_collection_task("legacy-parallel", decoder.clone(), 4_000, false);
+
+    let err =
+        collect_dem_logical_error_tasks(vec![task], collection_run_options(2), HashMap::new())
+            .unwrap_err();
+
+    assert!(err
+        .message()
+        .contains("does not support collection worker instances"));
+    assert_eq!(decoder.calls.load(Ordering::SeqCst), 0);
 }
 
 #[test]

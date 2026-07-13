@@ -19,7 +19,8 @@ use crate::api::{
     DemLogicalCollectionStats, DemLogicalCollectionTask,
 };
 use crate::counting::{sample_dem_logical_error_stats_with_rng, BatchStats, CountOptions};
-use faultscope_core::{NpError, NpResult, SmallRng};
+use crate::worker_decoder::WorkerDecoderCache;
+use faultscope_core::{NativeBatchDecoder, NpError, NpResult, SmallRng};
 
 #[derive(Clone)]
 struct BatchWork {
@@ -190,31 +191,40 @@ fn collect_task_set_inner(
     let work_rx = Arc::new(Mutex::new(work_rx));
     let (result_tx, result_rx) = mpsc::channel::<NpResult<WorkResult>>();
     let mut handles = Vec::with_capacity(worker_count);
+    let allow_legacy_single = run_options.num_workers == 1;
 
     for _ in 0..worker_count {
         let work_rx = work_rx.clone();
         let result_tx = result_tx.clone();
-        handles.push(thread::spawn(move || loop {
-            let work = {
-                let rx = work_rx.lock().unwrap();
-                rx.recv()
-            };
-            let Ok(work) = work else {
-                break;
-            };
-            match work {
-                Work::Shutdown => break,
-                Work::Batch(work) => {
-                    if result_tx.send(run_batch_work(work)).is_err() {
-                        break;
+        handles.push(thread::spawn(move || {
+            let mut decoder_cache = WorkerDecoderCache::new(allow_legacy_single);
+            loop {
+                let work = {
+                    let rx = work_rx.lock().unwrap();
+                    rx.recv()
+                };
+                let Ok(work) = work else {
+                    break;
+                };
+                match work {
+                    Work::Shutdown => break,
+                    Work::Batch(work) => {
+                        let result = decoder_cache
+                            .resolve(work.state_index, work.task.decoder.as_ref())
+                            .and_then(|decoder| run_batch_work(work, decoder.as_deref()));
+                        if result_tx.send(result).is_err() {
+                            break;
+                        }
                     }
-                }
-                Work::AdaptiveCalibration(work) => {
-                    if result_tx
-                        .send(run_adaptive_calibration_work(work, &result_tx))
-                        .is_err()
-                    {
-                        break;
+                    Work::AdaptiveCalibration(work) => {
+                        let result = decoder_cache
+                            .resolve(work.state_index, work.task.decoder.as_ref())
+                            .and_then(|decoder| {
+                                run_adaptive_calibration_work(work, decoder.as_deref(), &result_tx)
+                            });
+                        if result_tx.send(result).is_err() {
+                            break;
+                        }
                     }
                 }
             }
@@ -580,7 +590,10 @@ fn mark_state_complete(
     Ok(())
 }
 
-fn run_batch_work(work: BatchWork) -> NpResult<WorkResult> {
+fn run_batch_work(
+    work: BatchWork,
+    decoder: Option<&dyn NativeBatchDecoder>,
+) -> NpResult<WorkResult> {
     let mut rng = SmallRng::new(batch_seed(work.seed, work.seed_stream, work.ordinal));
     let count_options = CountOptions {
         postselection_mask: work.task.postselection_mask.as_deref(),
@@ -592,7 +605,7 @@ fn run_batch_work(work: BatchWork) -> NpResult<WorkResult> {
         &work.task.sampler,
         work.shots,
         &mut rng,
-        work.task.decoder.as_deref(),
+        decoder,
         None,
         &count_options,
     )?;
@@ -605,10 +618,12 @@ fn run_batch_work(work: BatchWork) -> NpResult<WorkResult> {
 
 fn run_adaptive_calibration_work(
     work: AdaptiveCalibrationWork,
+    decoder: Option<&dyn NativeBatchDecoder>,
     result_tx: &mpsc::Sender<NpResult<WorkResult>>,
 ) -> NpResult<WorkResult> {
     let result = calibrate_adaptive_task(
         work.task.as_ref(),
+        decoder,
         &work.run_options,
         work.seed_stream,
         Some(work.state_index),
@@ -622,6 +637,7 @@ fn run_adaptive_calibration_work(
 
 fn calibrate_adaptive_task(
     task: &DemLogicalCollectionTask,
+    decoder: Option<&dyn NativeBatchDecoder>,
     run_options: &DemLogicalCollectionRunOptions,
     seed_stream: usize,
     state_index: Option<usize>,
@@ -660,7 +676,7 @@ fn calibrate_adaptive_task(
             &task.sampler,
             batch_shots,
             &mut rng,
-            task.decoder.as_deref(),
+            decoder,
             Some(batch_started),
             &count_options,
         )?;
