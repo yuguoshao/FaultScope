@@ -52,6 +52,84 @@ struct HotspotCommitState {
     completed_seconds: Option<f64>,
 }
 
+struct HotspotTaskCursor {
+    task: Arc<DemLogicalCollectionTask>,
+    seed: Option<u64>,
+    shots_scheduled: usize,
+    next_ordinal: usize,
+}
+
+struct HotspotWorkQueue {
+    tasks: Vec<HotspotTaskCursor>,
+    next_task: usize,
+    total_batches: usize,
+    run_options: Arc<DemLogicalCollectionRunOptions>,
+}
+
+impl HotspotWorkQueue {
+    fn new(
+        tasks: Vec<DemLogicalCollectionTask>,
+        run_options: Arc<DemLogicalCollectionRunOptions>,
+    ) -> Self {
+        let total_batches = tasks.iter().fold(0usize, |total, task| {
+            total.saturating_add(fixed_hotspot_batch_count(task.options))
+        });
+        let tasks = tasks
+            .into_iter()
+            .map(|task| {
+                let seed = task_run_seed(&task, &run_options);
+                HotspotTaskCursor {
+                    task: Arc::new(task),
+                    seed,
+                    shots_scheduled: 0,
+                    next_ordinal: 0,
+                }
+            })
+            .collect();
+        Self {
+            tasks,
+            next_task: 0,
+            total_batches,
+            run_options,
+        }
+    }
+
+    fn next_work(
+        &mut self,
+        states: &[HotspotCommitState],
+        worker_count: usize,
+    ) -> Option<HotspotWork> {
+        for _ in 0..self.tasks.len() {
+            let task_index = self.next_task;
+            let cursor = &mut self.tasks[task_index];
+            if states[task_index].complete
+                || cursor.shots_scheduled >= cursor.task.options.max_shots
+            {
+                self.next_task = (self.next_task + 1) % self.tasks.len();
+                continue;
+            }
+            if cursor.next_ordinal >= states[task_index].next_ordinal + worker_count {
+                return None;
+            }
+
+            let shots = next_batch_size(cursor.task.options, cursor.shots_scheduled, None);
+            let work = HotspotWork {
+                task_index,
+                ordinal: cursor.next_ordinal,
+                shots,
+                seed: cursor.seed,
+                task: cursor.task.clone(),
+                run_options: self.run_options.clone(),
+            };
+            cursor.shots_scheduled += shots;
+            cursor.next_ordinal += 1;
+            self.next_task = (self.next_task + 1) % self.tasks.len();
+            return Some(work);
+        }
+        None
+    }
+}
+
 pub fn collect_dem_hotspot_tasks(
     tasks: Vec<DemLogicalCollectionTask>,
     run_options: DemLogicalCollectionRunOptions,
@@ -88,37 +166,8 @@ pub fn collect_dem_hotspot_tasks(
             completed_seconds: None,
         })
         .collect::<Vec<_>>();
-    let mut work_by_task = (0..tasks.len()).map(|_| Vec::new()).collect::<Vec<_>>();
-    for (task_index, task) in tasks.into_iter().enumerate() {
-        let seed = task_run_seed(&task, &run_options);
-        let task = Arc::new(task);
-        let mut shots_done = 0usize;
-        let mut ordinal = 0usize;
-        while shots_done < task.options.max_shots {
-            let shots = next_batch_size(task.options, shots_done, None);
-            work_by_task[task_index].push(HotspotWork {
-                task_index,
-                ordinal,
-                shots,
-                seed,
-                task: task.clone(),
-                run_options: run_options.clone(),
-            });
-            shots_done += shots;
-            ordinal += 1;
-        }
-    }
-    let mut work_items = Vec::new();
-    let max_batches = work_by_task.iter().map(Vec::len).max().unwrap_or(0);
-    for ordinal in 0..max_batches {
-        for task_work in &work_by_task {
-            if let Some(work) = task_work.get(ordinal) {
-                work_items.push(work.clone());
-            }
-        }
-    }
-
-    let worker_count = run_options.num_workers.min(work_items.len()).max(1);
+    let mut work_queue = HotspotWorkQueue::new(tasks, run_options.clone());
+    let worker_count = run_options.num_workers.min(work_queue.total_batches).max(1);
     let executor = WorkerExecutor::new(
         worker_count,
         WorkerDecoderCache::new,
@@ -130,11 +179,9 @@ pub fn collect_dem_hotspot_tasks(
         hotspot_worker_context,
         hotspot_worker_context,
     );
-    let mut next_work = 0usize;
     let mut in_flight = 0usize;
     schedule_hotspot_work(
-        &work_items,
-        &mut next_work,
+        &mut work_queue,
         &mut states,
         worker_count,
         executor.sender(),
@@ -149,8 +196,7 @@ pub fn collect_dem_hotspot_tasks(
         |result, work_tx, in_flight| {
             commit_hotspot_result(result, &mut states, &run_options)?;
             schedule_hotspot_work(
-                &work_items,
-                &mut next_work,
+                &mut work_queue,
                 &mut states,
                 worker_count,
                 work_tx,
@@ -165,32 +211,37 @@ pub fn collect_dem_hotspot_tasks(
 }
 
 fn schedule_hotspot_work(
-    work_items: &[HotspotWork],
-    next_work: &mut usize,
+    work_queue: &mut HotspotWorkQueue,
     states: &mut [HotspotCommitState],
     worker_count: usize,
     work_tx: &mpsc::Sender<HotspotWork>,
     in_flight: &mut usize,
 ) -> NpResult<()> {
-    while *in_flight < worker_count && *next_work < work_items.len() {
-        let work = &work_items[*next_work];
-        if states[work.task_index].complete {
-            *next_work += 1;
-            continue;
-        }
-        if work.ordinal >= states[work.task_index].next_ordinal + worker_count {
+    while *in_flight < worker_count {
+        let Some(work) = work_queue.next_work(states, worker_count) else {
             break;
-        }
-        *next_work += 1;
+        };
         if states[work.task_index].started.is_none() {
             states[work.task_index].started = Some(Instant::now());
         }
         work_tx
-            .send(work.clone())
+            .send(work)
             .map_err(|_| NpError::new("hotspot collection worker channel closed"))?;
         *in_flight += 1;
     }
     Ok(())
+}
+
+fn fixed_hotspot_batch_count(options: crate::api::DemLogicalCollectionOptions) -> usize {
+    if options.max_shots == 0 {
+        return 0;
+    }
+    let first_batch = next_batch_size(options, 0, None);
+    let regular_batch = options
+        .batch_size
+        .min(options.max_batch_size.unwrap_or(options.batch_size))
+        .max(1);
+    1 + (options.max_shots - first_batch).div_ceil(regular_batch)
 }
 
 fn run_hotspot_batch(
@@ -315,4 +366,56 @@ fn finish_hotspot_state(mut state: HotspotCommitState) -> NpResult<DemHotspotCol
         batch_stats: state.batch_stats,
         edge_sensitivities,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::api::DemLogicalCollectionOptions;
+
+    #[test]
+    fn lazy_hotspot_batch_count_matches_eager_sequence() {
+        let cases = [
+            DemLogicalCollectionOptions {
+                max_shots: 0,
+                min_shots: 0,
+                max_errors: None,
+                batch_size: 100,
+                seed: None,
+                start_batch_size: None,
+                max_batch_size: None,
+                max_batch_seconds: None,
+            },
+            DemLogicalCollectionOptions {
+                max_shots: 1_001,
+                min_shots: 0,
+                max_errors: None,
+                batch_size: 128,
+                seed: Some(7),
+                start_batch_size: Some(17),
+                max_batch_size: Some(64),
+                max_batch_seconds: None,
+            },
+            DemLogicalCollectionOptions {
+                max_shots: 5_000_000,
+                min_shots: 0,
+                max_errors: None,
+                batch_size: 100,
+                seed: None,
+                start_batch_size: Some(1),
+                max_batch_size: Some(1_000),
+                max_batch_seconds: None,
+            },
+        ];
+
+        for options in cases {
+            let mut shots_done = 0usize;
+            let mut expected = 0usize;
+            while shots_done < options.max_shots {
+                shots_done += next_batch_size(options, shots_done, None);
+                expected += 1;
+            }
+            assert_eq!(fixed_hotspot_batch_count(options), expected);
+        }
+    }
 }

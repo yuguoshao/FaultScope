@@ -543,7 +543,15 @@ pub struct NativeCompositeDecoder {
     children: Vec<Arc<dyn NativeDecoderFactory>>,
     detector_ids: Vec<i64>,
     observable_ids: Vec<i64>,
-    child_detector_indices: Vec<Vec<usize>>,
+    observable_indices: HashMap<i64, usize>,
+    child_plans: Vec<CompositeChildPlan>,
+}
+
+#[derive(Clone)]
+struct CompositeChildPlan {
+    detector_indices: Vec<usize>,
+    detector_ids: Vec<i64>,
+    global_to_local: Vec<Option<usize>>,
 }
 
 impl std::fmt::Debug for NativeCompositeDecoder {
@@ -589,11 +597,36 @@ impl NativeCompositeDecoder {
                 observable_ids.push(observable_id);
             }
         }
+        let observable_indices = observable_ids
+            .iter()
+            .copied()
+            .enumerate()
+            .map(|(index, id)| (id, index))
+            .collect();
+        let child_plans = child_detector_indices
+            .into_iter()
+            .map(|detector_indices| {
+                let mut mapping = vec![None; detector_ids.len()];
+                for (local, &global) in detector_indices.iter().enumerate() {
+                    mapping[global] = Some(local);
+                }
+                let child_detector_ids = detector_indices
+                    .iter()
+                    .map(|&index| detector_ids[index])
+                    .collect();
+                CompositeChildPlan {
+                    detector_indices,
+                    detector_ids: child_detector_ids,
+                    global_to_local: mapping,
+                }
+            })
+            .collect();
         Ok(Self {
             children,
             detector_ids,
             observable_ids,
-            child_detector_indices,
+            observable_indices,
+            child_plans,
         })
     }
 }
@@ -654,11 +687,23 @@ impl NativeDecoderFactory for NativeCompositeDecoder {
                 Ok(worker)
             })
             .collect::<NpResult<Vec<_>>>()?;
+        let supports_packed_batch = children.iter().all(|child| child.supports_packed_batch());
+        let supports_detector_event_batch = children
+            .iter()
+            .all(|child| child.supports_detector_event_batch());
         Ok(Box::new(NativeCompositeDecoderWorker {
             children,
             detector_ids: self.detector_ids.clone(),
             observable_ids: self.observable_ids.clone(),
-            child_detector_indices: self.child_detector_indices.clone(),
+            observable_indices: self.observable_indices.clone(),
+            child_scratch: self
+                .child_plans
+                .iter()
+                .cloned()
+                .map(CompositeChildScratch::new)
+                .collect(),
+            supports_packed_batch,
+            supports_detector_event_batch,
         }))
     }
 }
@@ -667,7 +712,30 @@ struct NativeCompositeDecoderWorker {
     children: Vec<Box<dyn NativeDecoderWorker>>,
     detector_ids: Vec<i64>,
     observable_ids: Vec<i64>,
-    child_detector_indices: Vec<Vec<usize>>,
+    observable_indices: HashMap<i64, usize>,
+    child_scratch: Vec<CompositeChildScratch>,
+    supports_packed_batch: bool,
+    supports_detector_event_batch: bool,
+}
+
+struct CompositeChildScratch {
+    plan: CompositeChildPlan,
+    masks: Vec<Mask>,
+    packed: Vec<u8>,
+    event_offsets: Vec<usize>,
+    events: Vec<usize>,
+}
+
+impl CompositeChildScratch {
+    fn new(plan: CompositeChildPlan) -> Self {
+        Self {
+            masks: vec![Mask::zero(0); plan.detector_ids.len()],
+            plan,
+            packed: Vec::new(),
+            event_offsets: Vec::new(),
+            events: Vec::new(),
+        }
+    }
 }
 
 impl NativeCompositeDecoderWorker {
@@ -682,16 +750,11 @@ impl NativeCompositeDecoderWorker {
 
     fn merge_packed_child(
         observable_ids: &[i64],
+        observable_indices: &HashMap<i64, usize>,
         output: &mut [u8],
         child: &PackedObservableShotBatch,
     ) -> NpResult<()> {
         let output_byte_count = observable_ids.len().div_ceil(8);
-        let observable_indices = observable_ids
-            .iter()
-            .copied()
-            .enumerate()
-            .map(|(index, id)| (id, index))
-            .collect::<HashMap<_, _>>();
         for shot in 0..child.shots {
             for (child_index, observable_id) in child.observable_ids.iter().enumerate() {
                 if child.data[shot * child.observable_byte_count + (child_index >> 3)]
@@ -730,37 +793,31 @@ impl NativeDecoderWorker for NativeCompositeDecoderWorker {
         detectors: DetectorMaskBatchView<'_>,
     ) -> NpResult<CorrectionMaskBatch> {
         self.validate_detector_order(detectors.detector_ids)?;
-        let observable_indices = self
-            .observable_ids
-            .iter()
-            .copied()
-            .enumerate()
-            .map(|(index, id)| (id, index))
-            .collect::<HashMap<_, _>>();
         let mut output_masks =
             vec![Mask::zero(crate::word_count(detectors.shots)); self.observable_ids.len()];
-        for (child, indices) in self.children.iter_mut().zip(&self.child_detector_indices) {
-            let child_masks = indices
-                .iter()
-                .map(|&index| detectors.masks[index].clone())
-                .collect::<Vec<_>>();
-            let child_detector_ids = indices
-                .iter()
-                .map(|&index| self.detector_ids[index])
-                .collect::<Vec<_>>();
-            let view =
-                DetectorMaskBatchView::new(&child_detector_ids, &child_masks, detectors.shots)?;
+        for (child, scratch) in self.children.iter_mut().zip(&mut self.child_scratch) {
+            for (&source_index, child_mask) in
+                scratch.plan.detector_indices.iter().zip(&mut scratch.masks)
+            {
+                child_mask.clone_from(&detectors.masks[source_index]);
+            }
+            let view = DetectorMaskBatchView::new(
+                &scratch.plan.detector_ids,
+                &scratch.masks,
+                detectors.shots,
+            )?;
             let corrections = child.decode_batch_checked(view)?;
             for (observable_id, mask) in corrections
                 .observable_ids
                 .into_iter()
                 .zip(corrections.masks)
             {
-                let output_index = observable_indices.get(&observable_id).ok_or_else(|| {
-                    NpError::new(format!(
-                        "native composite child returned unknown observable id {observable_id}"
-                    ))
-                })?;
+                let output_index =
+                    self.observable_indices.get(&observable_id).ok_or_else(|| {
+                        NpError::new(format!(
+                            "native composite child returned unknown observable id {observable_id}"
+                        ))
+                    })?;
                 output_masks[*output_index] = mask;
             }
         }
@@ -768,9 +825,7 @@ impl NativeDecoderWorker for NativeCompositeDecoderWorker {
     }
 
     fn supports_packed_batch(&self) -> bool {
-        self.children
-            .iter()
-            .all(|child| child.supports_packed_batch())
+        self.supports_packed_batch
     }
 
     fn decode_packed_batch(
@@ -785,39 +840,40 @@ impl NativeDecoderWorker for NativeCompositeDecoderWorker {
         }
         let output_byte_count = self.observable_ids.len().div_ceil(8);
         let mut output = vec![0u8; detectors.shots * output_byte_count];
-        for (child, indices) in self.children.iter_mut().zip(&self.child_detector_indices) {
-            let child_byte_count = indices.len().div_ceil(8);
-            let mut child_data = vec![0u8; detectors.shots * child_byte_count];
+        for (child, scratch) in self.children.iter_mut().zip(&mut self.child_scratch) {
+            let child_byte_count = scratch.plan.detector_indices.len().div_ceil(8);
+            scratch.packed.resize(detectors.shots * child_byte_count, 0);
+            scratch.packed.fill(0);
             for shot in 0..detectors.shots {
-                for (child_index, &source_index) in indices.iter().enumerate() {
+                for (child_index, &source_index) in scratch.plan.detector_indices.iter().enumerate()
+                {
                     if detectors.data[shot * detectors.detector_byte_count + (source_index >> 3)]
                         & (1 << (source_index & 7))
                         != 0
                     {
-                        child_data[shot * child_byte_count + (child_index >> 3)] |=
+                        scratch.packed[shot * child_byte_count + (child_index >> 3)] |=
                             1 << (child_index & 7);
                     }
                 }
             }
-            let child_detector_ids = indices
-                .iter()
-                .map(|&index| self.detector_ids[index])
-                .collect::<Vec<_>>();
             let view = PackedDetectorShotBatchView::new(
-                &child_detector_ids,
-                &child_data,
+                &scratch.plan.detector_ids,
+                &scratch.packed,
                 detectors.shots,
             )?;
             let corrections = child.decode_packed_batch_checked(view)?;
-            Self::merge_packed_child(&self.observable_ids, &mut output, &corrections)?;
+            Self::merge_packed_child(
+                &self.observable_ids,
+                &self.observable_indices,
+                &mut output,
+                &corrections,
+            )?;
         }
         PackedObservableShotBatch::new(self.observable_ids.clone(), output, detectors.shots)
     }
 
     fn supports_detector_event_batch(&self) -> bool {
-        self.children
-            .iter()
-            .all(|child| child.supports_detector_event_batch())
+        self.supports_detector_event_batch
     }
 
     fn decode_detector_event_batch(
@@ -832,36 +888,34 @@ impl NativeDecoderWorker for NativeCompositeDecoderWorker {
         }
         let output_byte_count = self.observable_ids.len().div_ceil(8);
         let mut output = vec![0u8; detectors.shots * output_byte_count];
-        for (child, indices) in self.children.iter_mut().zip(&self.child_detector_indices) {
-            let mut global_to_local = vec![None; self.detector_ids.len()];
-            for (local, &global) in indices.iter().enumerate() {
-                global_to_local[global] = Some(local);
-            }
-            let mut child_offsets = Vec::with_capacity(detectors.shots + 1);
-            let mut child_events = Vec::new();
-            child_offsets.push(0);
+        for (child, scratch) in self.children.iter_mut().zip(&mut self.child_scratch) {
+            scratch.event_offsets.clear();
+            scratch.event_offsets.reserve(detectors.shots + 1);
+            scratch.events.clear();
+            scratch.event_offsets.push(0);
             for shot in 0..detectors.shots {
                 for &event in
                     &detectors.events[detectors.offsets[shot]..detectors.offsets[shot + 1]]
                 {
-                    if let Some(local) = global_to_local[event] {
-                        child_events.push(local);
+                    if let Some(local) = scratch.plan.global_to_local[event] {
+                        scratch.events.push(local);
                     }
                 }
-                child_offsets.push(child_events.len());
+                scratch.event_offsets.push(scratch.events.len());
             }
-            let child_detector_ids = indices
-                .iter()
-                .map(|&index| self.detector_ids[index])
-                .collect::<Vec<_>>();
             let view = DetectorEventShotBatchView::new(
-                &child_detector_ids,
-                &child_offsets,
-                &child_events,
+                &scratch.plan.detector_ids,
+                &scratch.event_offsets,
+                &scratch.events,
                 detectors.shots,
             )?;
             let corrections = child.decode_detector_event_batch_checked(view)?;
-            Self::merge_packed_child(&self.observable_ids, &mut output, &corrections)?;
+            Self::merge_packed_child(
+                &self.observable_ids,
+                &self.observable_indices,
+                &mut output,
+                &corrections,
+            )?;
         }
         PackedObservableShotBatch::new(self.observable_ids.clone(), output, detectors.shots)
     }
@@ -1485,6 +1539,49 @@ mod tests {
             .unwrap();
         assert_eq!(event.observable_ids, vec![2, 5]);
         assert_eq!(event.data, vec![0b01, 0b10, 0b11, 0b00]);
+    }
+
+    #[test]
+    fn composite_decoder_reuses_scratch_across_batch_shapes() {
+        let children: Vec<Arc<dyn NativeDecoderFactory>> = vec![
+            Arc::new(FastCopyDecoder {
+                detector_ids: vec![10],
+                observable_ids: vec![2],
+            }),
+            Arc::new(FastCopyDecoder {
+                detector_ids: vec![20],
+                observable_ids: vec![5],
+            }),
+        ];
+        let factory = NativeCompositeDecoder::new(children).unwrap();
+        let mut decoder = factory.create_worker().unwrap();
+        let detector_ids = decoder.detector_ids().to_vec();
+
+        for (shots, words) in [(4, vec![0b1010]), (65, vec![u64::MAX, 1])] {
+            let masks = vec![
+                Mask {
+                    words: words.clone(),
+                },
+                Mask {
+                    words: words.iter().map(|word| !word).collect(),
+                },
+            ];
+            let view = DetectorMaskBatchView::new(&detector_ids, &masks, shots).unwrap();
+            let corrections = decoder.decode_batch_checked(view).unwrap();
+            assert_eq!(corrections.masks, masks);
+        }
+
+        for data in [vec![0b01, 0b10, 0b11, 0b00], vec![0b11; 9]] {
+            let view = PackedDetectorShotBatchView::new(&detector_ids, &data, data.len()).unwrap();
+            let corrections = decoder.decode_packed_batch_checked(view).unwrap();
+            assert_eq!(corrections.data, data);
+        }
+
+        let offsets = [0, 2, 2, 3];
+        let events = [0, 1, 1];
+        let view = DetectorEventShotBatchView::new(&detector_ids, &offsets, &events, 3).unwrap();
+        let corrections = decoder.decode_detector_event_batch_checked(view).unwrap();
+        assert_eq!(corrections.data, vec![0b11, 0b00, 0b10]);
     }
 
     #[test]

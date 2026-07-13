@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass
 import json
 import math
@@ -152,8 +152,7 @@ def analyze_thresholds(
             scaling_nu_bootstrap: list[float] = []
             np = _import_numpy()
             rng = np.random.default_rng(child_seeds[series_id])
-            for _ in range(bootstrap_samples):
-                boot_points = _bootstrap_points(points, rng)
+            for boot_points in _bootstrap_point_samples(points, rng, bootstrap_samples):
                 boot_crossings, boot_pairwise = _pairwise_summary(
                     boot_points,
                     confidence_level=confidence_level,
@@ -804,19 +803,32 @@ def _solve_scaling_fit(
     return threshold, nu, coefficients, chi_squared
 
 
-def _bootstrap_points(points: tuple[ThresholdPoint, ...], rng: Any) -> tuple[ThresholdPoint, ...]:
-    boot_points: list[ThresholdPoint] = []
-    for point in points:
-        errors = int(rng.binomial(point.shots, _continuity_corrected_rate(point)))
-        boot_points.append(
-            _make_point(
-                x=point.x,
-                distance=point.distance,
-                shots=point.shots,
-                errors=errors,
-            )
+def _bootstrap_point_samples(
+    points: tuple[ThresholdPoint, ...],
+    rng: Any,
+    sample_count: int,
+    *,
+    chunk_size: int = 256,
+) -> Iterator[tuple[ThresholdPoint, ...]]:
+    shots = [point.shots for point in points]
+    probabilities = [_continuity_corrected_rate(point) for point in points]
+    for chunk_start in range(0, sample_count, chunk_size):
+        chunk_samples = min(chunk_size, sample_count - chunk_start)
+        error_rows = rng.binomial(
+            shots,
+            probabilities,
+            size=(chunk_samples, len(points)),
         )
-    return tuple(boot_points)
+        for errors in error_rows:
+            yield tuple(
+                _make_point(
+                    x=point.x,
+                    distance=point.distance,
+                    shots=point.shots,
+                    errors=int(error_count),
+                )
+                for point, error_count in zip(points, errors, strict=True)
+            )
 
 
 def _estimate_from_value(

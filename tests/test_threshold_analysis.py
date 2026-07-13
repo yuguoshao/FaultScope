@@ -559,6 +559,42 @@ def test_bootstrap_is_deterministic_input_order_independent_and_counts_successes
     )
 
 
+def test_batched_bootstrap_preserves_scalar_rng_order() -> None:
+    import numpy as np
+
+    from faultscope.collection import threshold
+
+    points = tuple(
+        threshold._make_point(x=x, distance=distance, shots=shots, errors=errors)
+        for x, distance, shots, errors in [
+            (0.01, 3.0, 101, 2),
+            (0.02, 5.0, 203, 9),
+            (0.03, 7.0, 307, 21),
+        ]
+    )
+    scalar_rng = np.random.default_rng(1234)
+    expected = [
+        tuple(
+            int(
+                scalar_rng.binomial(
+                    point.shots,
+                    threshold._continuity_corrected_rate(point),
+                )
+            )
+            for point in points
+        )
+        for _ in range(513)
+    ]
+
+    batched_rng = np.random.default_rng(1234)
+    actual = [
+        tuple(point.errors for point in sample)
+        for sample in threshold._bootstrap_point_samples(points, batched_rng, 513)
+    ]
+
+    assert actual == expected
+
+
 def test_unique_pairwise_crossings_receive_pair_specific_bootstrap_metadata() -> None:
     from faultscope.collection.threshold import analyze_thresholds
 
