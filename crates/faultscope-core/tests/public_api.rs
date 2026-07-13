@@ -325,5 +325,9 @@ fn native_decoder_v1_abi_layout_is_frozen_on_64_bit_targets() {
             offset_of!(FaultScopeNativeDecoderV1, create_worker_state),
             88
         );
+        assert_eq!(
+            offset_of!(FaultScopeNativeDecoderV1, create_worker_state) + size_of::<usize>(),
+            size_of::<FaultScopeNativeDecoderV1>()
+        );
     }
 }

@@ -24,9 +24,7 @@ use std::mem;
 use std::os::raw::c_char;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::slice;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
-use std::thread;
 use std::time::{Duration, Instant};
 
 const BACKEND_NAME: &str = "fusion-blossom";
@@ -62,20 +60,17 @@ impl PyNativeFusionBlossomNativeDecoder {
         let observable_ids = builder.observable_ids.clone();
         let built = builder.build()?;
         let build_summary = built.summary;
-        let solver = SolverBackend::new(&built.initializer).map_err(PyValueError::new_err)?;
-        let worker_states = build_worker_state_slots();
-        let state = Box::new(DecoderState {
-            detector_ids: detector_ids.clone(),
-            observable_ids: observable_ids.clone(),
-            detector_to_solver_vertices: built.detector_to_solver_vertices,
-            is_virtual_vertex: built.is_virtual_vertex,
-            path_resolver: Mutex::new(PathEffectResolver::new(&built.initializer)),
-            initializer: built.initializer.clone(),
-            solver: Mutex::new(solver),
-            worker_states,
-            edge_effects: built.edge_effects,
-            last_error: Mutex::new(CString::new("").expect("empty CString")),
-        });
+        let state = Box::new(
+            DecoderState::new(
+                detector_ids.clone(),
+                observable_ids.clone(),
+                built.detector_to_solver_vertices,
+                built.is_virtual_vertex,
+                built.initializer,
+                built.edge_effects,
+            )
+            .map_err(PyValueError::new_err)?,
+        );
         let descriptor = Box::new(FaultScopeNativeDecoderV1 {
             abi_version: NATIVE_DECODER_PLUGIN_ABI_VERSION,
             struct_size: mem::size_of::<FaultScopeNativeDecoderV1>(),
@@ -88,6 +83,7 @@ impl PyNativeFusionBlossomNativeDecoder {
             decode_batch: Some(decoder_decode_batch),
             decode_packed_batch: Some(decoder_decode_packed_batch),
             decode_detector_event_batch: None,
+            create_worker_state: Some(create_worker_state),
         });
         let capsule = unsafe { create_decoder_capsule(py, Box::into_raw(descriptor))? };
 
@@ -265,19 +261,17 @@ impl PyInvalidNativeDecoderCapsule {
     #[new]
     fn new(py: Python<'_>, kind: &str) -> PyResult<Self> {
         let initializer = SolverInitializer::new(2, Vec::new(), Vec::new());
-        let solver = SolverBackend::new(&initializer).map_err(PyValueError::new_err)?;
-        let state = Box::new(DecoderState {
-            detector_ids: vec![0],
-            observable_ids: vec![0],
-            detector_to_solver_vertices: vec![0],
-            is_virtual_vertex: vec![false, true],
-            path_resolver: Mutex::new(PathEffectResolver::new(&initializer)),
-            initializer,
-            solver: Mutex::new(solver),
-            worker_states: Vec::new(),
-            edge_effects: Vec::new(),
-            last_error: Mutex::new(CString::new("").expect("empty CString")),
-        });
+        let state = Box::new(
+            DecoderState::new(
+                vec![0],
+                vec![0],
+                vec![0],
+                vec![false, true],
+                initializer,
+                Vec::new(),
+            )
+            .map_err(PyValueError::new_err)?,
+        );
         let mut descriptor = FaultScopeNativeDecoderV1 {
             abi_version: NATIVE_DECODER_PLUGIN_ABI_VERSION,
             struct_size: mem::size_of::<FaultScopeNativeDecoderV1>(),
@@ -290,6 +284,7 @@ impl PyInvalidNativeDecoderCapsule {
             decode_batch: Some(decoder_decode_batch),
             decode_packed_batch: None,
             decode_detector_event_batch: None,
+            create_worker_state: Some(create_worker_state),
         };
         match kind {
             "abi-mismatch" => descriptor.abi_version = NATIVE_DECODER_PLUGIN_ABI_VERSION + 1,
@@ -319,12 +314,44 @@ struct DecoderState {
     observable_ids: Vec<i64>,
     detector_to_solver_vertices: Vec<VertexIndex>,
     is_virtual_vertex: Vec<bool>,
-    path_resolver: Mutex<PathEffectResolver>,
     initializer: SolverInitializer,
-    solver: Mutex<SolverBackend>,
-    worker_states: Vec<Mutex<Option<WorkerDecodeState>>>,
+    worker_state: Mutex<WorkerDecodeState>,
     edge_effects: Vec<SolverEdgeEffect>,
     last_error: Mutex<CString>,
+}
+
+impl DecoderState {
+    fn new(
+        detector_ids: Vec<i64>,
+        observable_ids: Vec<i64>,
+        detector_to_solver_vertices: Vec<VertexIndex>,
+        is_virtual_vertex: Vec<bool>,
+        initializer: SolverInitializer,
+        edge_effects: Vec<SolverEdgeEffect>,
+    ) -> Result<Self, String> {
+        let worker_state = WorkerDecodeState::new(&initializer)?;
+        Ok(Self {
+            detector_ids,
+            observable_ids,
+            detector_to_solver_vertices,
+            is_virtual_vertex,
+            initializer,
+            worker_state: Mutex::new(worker_state),
+            edge_effects,
+            last_error: Mutex::new(CString::new("").expect("empty CString")),
+        })
+    }
+
+    fn create_worker(&self) -> Result<Self, String> {
+        Self::new(
+            self.detector_ids.clone(),
+            self.observable_ids.clone(),
+            self.detector_to_solver_vertices.clone(),
+            self.is_virtual_vertex.clone(),
+            self.initializer.clone(),
+            self.edge_effects.clone(),
+        )
+    }
 }
 
 struct WorkerDecodeState {
@@ -872,13 +899,6 @@ impl WorkerDecodeState {
     }
 }
 
-fn build_worker_state_slots() -> Vec<Mutex<Option<WorkerDecodeState>>> {
-    let worker_count = thread::available_parallelism()
-        .map(|count| count.get())
-        .unwrap_or(1);
-    (0..worker_count).map(|_| Mutex::new(None)).collect()
-}
-
 fn validate_weight_scale(weight_scale: f64) -> PyResult<()> {
     if !weight_scale.is_finite() || weight_scale <= 0.0 {
         return Err(PyValueError::new_err(
@@ -1062,6 +1082,30 @@ unsafe extern "C" fn drop_state(state: *mut c_void) {
     }
 }
 
+unsafe extern "C" fn create_worker_state(
+    factory_state: *const c_void,
+    out_state: *mut *mut c_void,
+) -> FaultScopeNativeDecoderStatusV1 {
+    if out_state.is_null() {
+        return static_error("fusion-blossom worker-state factory received null output pointer");
+    }
+    *out_state = std::ptr::null_mut();
+    if factory_state.is_null() {
+        return static_error("fusion-blossom worker-state factory received null factory state");
+    }
+    let factory = &*factory_state.cast::<DecoderState>();
+    match factory.create_worker() {
+        Ok(worker) => {
+            *out_state = Box::into_raw(Box::new(worker)).cast::<c_void>();
+            FaultScopeNativeDecoderStatusV1::ok()
+        }
+        Err(message) => state_error(
+            factory,
+            format!("fusion-blossom worker-state factory failed: {message}"),
+        ),
+    }
+}
+
 unsafe extern "C" fn decoder_name(
     state: *const c_void,
     out: *mut FaultScopeNativeDecoderStringViewV1,
@@ -1237,18 +1281,18 @@ unsafe extern "C" fn decoder_decode_batch(
             return state_error(state, "fusion-blossom output mask words pointer is null");
         }
     }
-    let mut solver = match state.solver.lock() {
-        Ok(solver) => solver,
-        Err(_) => return state_error(state, "fusion-blossom solver mutex poisoned"),
-    };
-    let mut path_resolver = match state.path_resolver.lock() {
-        Ok(path_resolver) => path_resolver,
-        Err(_) => return state_error(state, "fusion-blossom path resolver mutex poisoned"),
+    let mut worker = match state.worker_state.lock() {
+        Ok(worker) => worker,
+        Err(_) => return state_error(state, "fusion-blossom worker-state mutex poisoned"),
     };
     let decode_result = catch_unwind(AssertUnwindSafe(|| {
+        let WorkerDecodeState {
+            solver,
+            path_resolver,
+        } = &mut *worker;
         decode_detector_major_with_solver(
-            &mut solver,
-            &mut path_resolver,
+            solver,
+            path_resolver,
             &state.edge_effects,
             input_masks,
             output_masks,
@@ -1563,186 +1607,44 @@ unsafe extern "C" fn decoder_decode_packed_batch(
     if input.shots == 0 || input.detector_count == 0 || output.observable_count == 0 {
         return FaultScopeNativeDecoderStatusV1::ok();
     }
-    let worker_count = fusion_blossom_worker_count(input.shots, state.worker_states.len());
     let profile_enabled = env::var_os("NPSIM_FUSION_BLOSSOM_PROFILE").is_some();
-    if worker_count <= 1 || input.shots < 1024 {
-        if profile_enabled {
-            eprintln!(
-                "faultscope fusion-blossom scheduler: shots={} workers=1 block_rows={} blocks=1 detector_bytes={} observable_bytes={}",
-                input.shots,
-                input.shots,
-                input.detector_byte_count,
-                output.observable_byte_count,
-            );
-        }
-        let mut solver = match state.solver.lock() {
-            Ok(solver) => solver,
-            Err(_) => return state_error(state, "fusion-blossom solver mutex poisoned"),
-        };
-        let mut path_resolver = match state.path_resolver.lock() {
-            Ok(path_resolver) => path_resolver,
-            Err(_) => return state_error(state, "fusion-blossom path resolver mutex poisoned"),
-        };
-        let result = catch_unwind(AssertUnwindSafe(|| {
-            decode_packed_rows_with_solver(
-                &mut solver,
-                &mut path_resolver,
-                &state.edge_effects,
-                detector_shots,
-                input.detector_count,
-                input.detector_byte_count,
-                observable_predictions,
-                output.observable_byte_count,
-                &state.detector_to_solver_vertices,
-                &state.is_virtual_vertex,
-                profile_enabled,
-            )
-        }));
-        match result {
-            Ok(Ok(())) => {}
-            Ok(Err(message)) => return state_error(state, message),
-            Err(_) => {
-                return state_error(
-                    state,
-                    "fusion-blossom solver panicked during packed MWPM decode",
-                );
-            }
-        }
-        return FaultScopeNativeDecoderStatusV1::ok();
-    }
-
-    let edge_effects = &state.edge_effects;
-    let shots = input.shots;
-    let detector_count = input.detector_count;
-    let detector_byte_count = input.detector_byte_count;
-    let observable_byte_count = output.observable_byte_count;
-    let detector_to_solver_vertices = &state.detector_to_solver_vertices;
-    let is_virtual_vertex = &state.is_virtual_vertex;
-    let initializer = &state.initializer;
-    let worker_states = &state.worker_states;
-    let block_rows = fusion_blossom_block_rows(shots, worker_count);
-    let block_count = shots.div_ceil(block_rows);
     if profile_enabled {
         eprintln!(
-            "faultscope fusion-blossom scheduler: shots={} workers={} block_rows={} blocks={} detector_bytes={} observable_bytes={}",
-            shots,
-            worker_count,
-            block_rows,
-            block_count,
-            detector_byte_count,
-            observable_byte_count,
+            "faultscope fusion-blossom descriptor: shots={} detector_bytes={} observable_bytes={}",
+            input.shots, input.detector_byte_count, output.observable_byte_count,
         );
     }
-    let next_block = AtomicUsize::new(0);
-    let detector_ptr = detector_shots.as_ptr() as usize;
-    let observable_ptr = observable_predictions.as_mut_ptr() as usize;
-    let result = thread::scope(|scope| {
-        let mut handles = Vec::new();
-        for worker_index in 0..worker_count {
-            let next_block = &next_block;
-            handles.push(scope.spawn(move || {
-                let worker_slot = worker_states
-                    .get(worker_index)
-                    .ok_or_else(|| format!("fusion-blossom missing worker slot {worker_index}"))?;
-                let mut worker = worker_slot
-                    .lock()
-                    .map_err(|_| "fusion-blossom worker state mutex poisoned".to_string())?;
-                if worker.is_none() {
-                    *worker = Some(WorkerDecodeState::new(initializer)?);
-                }
-                let worker = worker.as_mut().expect("worker state was just initialized");
-                let worker_result = catch_unwind(AssertUnwindSafe(|| {
-                    loop {
-                        let block_index = next_block.fetch_add(1, Ordering::Relaxed);
-                        if block_index >= block_count {
-                            break;
-                        }
-                        let row_begin = block_index * block_rows;
-                        let row_end = (row_begin + block_rows).min(shots);
-                        let detector_begin = row_begin * detector_byte_count;
-                        let detector_len = (row_end - row_begin) * detector_byte_count;
-                        let observable_begin = row_begin * observable_byte_count;
-                        let observable_len = (row_end - row_begin) * observable_byte_count;
-                        let detector_chunk = unsafe {
-                            slice::from_raw_parts(
-                                (detector_ptr as *const u8).add(detector_begin),
-                                detector_len,
-                            )
-                        };
-                        let observable_chunk = unsafe {
-                            slice::from_raw_parts_mut(
-                                (observable_ptr as *mut u8).add(observable_begin),
-                                observable_len,
-                            )
-                        };
-                        decode_packed_rows_with_solver(
-                            &mut worker.solver,
-                            &mut worker.path_resolver,
-                            edge_effects,
-                            detector_chunk,
-                            detector_count,
-                            detector_byte_count,
-                            observable_chunk,
-                            observable_byte_count,
-                            detector_to_solver_vertices,
-                            is_virtual_vertex,
-                            profile_enabled,
-                        )?;
-                    }
-                    Ok(())
-                }));
-                match worker_result {
-                    Ok(Ok(())) => {}
-                    Ok(Err(message)) => return Err(message),
-                    Err(_) => {
-                        return Err(
-                            "fusion-blossom solver panicked during packed MWPM decode".to_string()
-                        );
-                    }
-                }
-                Ok(())
-            }));
-        }
-        for handle in handles {
-            match handle.join() {
-                Ok(Ok(())) => {}
-                Ok(Err(message)) => return Err(message),
-                Err(_) => return Err("fusion-blossom packed worker thread panicked".to_string()),
-            }
-        }
-        Ok(())
-    });
-    if let Err(message) = result {
-        return state_error(state, message);
+    let mut worker = match state.worker_state.lock() {
+        Ok(worker) => worker,
+        Err(_) => return state_error(state, "fusion-blossom worker-state mutex poisoned"),
+    };
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        let WorkerDecodeState {
+            solver,
+            path_resolver,
+        } = &mut *worker;
+        decode_packed_rows_with_solver(
+            solver,
+            path_resolver,
+            &state.edge_effects,
+            detector_shots,
+            input.detector_count,
+            input.detector_byte_count,
+            observable_predictions,
+            output.observable_byte_count,
+            &state.detector_to_solver_vertices,
+            &state.is_virtual_vertex,
+            profile_enabled,
+        )
+    }));
+    match result {
+        Ok(Ok(())) => FaultScopeNativeDecoderStatusV1::ok(),
+        Ok(Err(message)) => state_error(state, message),
+        Err(_) => state_error(
+            state,
+            "fusion-blossom solver panicked during packed MWPM decode",
+        ),
     }
-    FaultScopeNativeDecoderStatusV1::ok()
-}
-
-fn fusion_blossom_worker_count(shots: usize, worker_slot_count: usize) -> usize {
-    let available_threads = thread::available_parallelism()
-        .map(|count| count.get())
-        .unwrap_or(1);
-    let configured_threads = env::var("NPSIM_FUSION_BLOSSOM_THREADS")
-        .ok()
-        .and_then(|value| value.parse::<usize>().ok())
-        .filter(|value| *value > 0)
-        .unwrap_or(available_threads);
-    configured_threads
-        .min(available_threads)
-        .min(worker_slot_count.max(1))
-        .min(shots)
-}
-
-fn fusion_blossom_block_rows(shots: usize, worker_count: usize) -> usize {
-    if let Some(configured) = env::var("NPSIM_FUSION_BLOSSOM_BLOCK_ROWS")
-        .ok()
-        .and_then(|value| value.parse::<usize>().ok())
-        .filter(|value| *value > 0)
-    {
-        return configured.min(shots.max(1));
-    }
-    let target_blocks = worker_count.saturating_mul(20).max(1);
-    shots.div_ceil(target_blocks).clamp(128, 4096)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2084,6 +1986,92 @@ fn string_view_to_string(view: FaultScopeNativeDecoderStringViewV1) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::ptr;
+
+    fn worker_test_state() -> Box<DecoderState> {
+        let initializer = SolverInitializer::new(2, vec![(0, 1, 2 as Weight)], vec![1]);
+        Box::new(
+            DecoderState::new(
+                vec![7],
+                vec![11],
+                vec![0],
+                vec![false, true],
+                initializer,
+                vec![SolverEdgeEffect::new(
+                    (0, 1),
+                    vec![0],
+                    vec![0],
+                    0.1,
+                    log_likelihood_ratio(0.1),
+                )],
+            )
+            .unwrap(),
+        )
+    }
+
+    unsafe fn decode_worker(state: *mut c_void) -> u64 {
+        let detector_ids = [7];
+        let observable_ids = [11];
+        let detector_words = [1u64];
+        let mut observable_words = [0u64];
+        let masks = [faultscope_core::FaultScopeNativeDecoderMaskViewV1 {
+            words: detector_words.as_ptr(),
+            word_count: 1,
+        }];
+        let mut corrections = [faultscope_core::FaultScopeNativeDecoderMaskMutViewV1 {
+            words: observable_words.as_mut_ptr(),
+            word_count: 1,
+        }];
+        let input = FaultScopeNativeDetectorMaskBatchViewV1 {
+            detector_ids: detector_ids.as_ptr(),
+            detector_count: 1,
+            masks: masks.as_ptr(),
+            shots: 1,
+            word_count: 1,
+        };
+        let mut output = FaultScopeNativeCorrectionMaskBatchMutViewV1 {
+            observable_ids: observable_ids.as_ptr(),
+            observable_count: 1,
+            masks: corrections.as_mut_ptr(),
+            shots: 1,
+            word_count: 1,
+        };
+        let status = decoder_decode_batch(state, &input, &mut output);
+        assert_eq!(
+            status.code,
+            faultscope_core::NATIVE_DECODER_PLUGIN_STATUS_OK
+        );
+        observable_words[0]
+    }
+
+    #[test]
+    fn worker_instances_have_distinct_states_and_matching_corrections() {
+        let factory = Box::into_raw(worker_test_state()).cast::<c_void>();
+        let mut first = ptr::null_mut();
+        let mut second = ptr::null_mut();
+
+        let first_status = unsafe { create_worker_state(factory, &mut first) };
+        let second_status = unsafe { create_worker_state(factory, &mut second) };
+
+        assert_eq!(
+            first_status.code,
+            faultscope_core::NATIVE_DECODER_PLUGIN_STATUS_OK
+        );
+        assert_eq!(
+            second_status.code,
+            faultscope_core::NATIVE_DECODER_PLUGIN_STATUS_OK
+        );
+        assert!(!first.is_null());
+        assert!(!second.is_null());
+        assert_ne!(first, second);
+        assert_eq!(unsafe { decode_worker(first) }, 1);
+        assert_eq!(unsafe { decode_worker(second) }, 1);
+        unsafe {
+            drop_state(first);
+            drop_state(second);
+            drop_state(factory);
+        }
+    }
 
     #[test]
     fn normalizes_weighted_edges_without_creating_odd_weights() {

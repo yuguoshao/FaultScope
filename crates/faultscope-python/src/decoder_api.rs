@@ -426,10 +426,20 @@ impl OwnedPyObjectPtr {
         }
         Self { ptr: obj.as_ptr() }
     }
+
+    #[cfg(test)]
+    fn noop() -> Self {
+        Self {
+            ptr: std::ptr::null_mut(),
+        }
+    }
 }
 
 impl Drop for OwnedPyObjectPtr {
     fn drop(&mut self) {
+        if self.ptr.is_null() {
+            return;
+        }
         Python::with_gil(|_| unsafe {
             pyo3::ffi::Py_DECREF(self.ptr);
         });
@@ -439,9 +449,127 @@ impl Drop for OwnedPyObjectPtr {
 unsafe impl Send for OwnedPyObjectPtr {}
 unsafe impl Sync for OwnedPyObjectPtr {}
 
-struct ExternalNativeBatchDecoder {
+struct ExternalDecoderOwner {
     descriptor: NonNull<FaultScopeNativeDecoderV1>,
-    _capsule: OwnedPyObjectPtr,
+    // Retained solely to keep the descriptor and prototype state alive.
+    #[allow(dead_code)]
+    capsule: OwnedPyObjectPtr,
+}
+
+unsafe impl Send for ExternalDecoderOwner {}
+unsafe impl Sync for ExternalDecoderOwner {}
+
+impl ExternalDecoderOwner {
+    fn struct_size(&self) -> usize {
+        unsafe { std::ptr::addr_of!((*self.descriptor.as_ptr()).struct_size).read() }
+    }
+
+    fn state(&self) -> *mut std::ffi::c_void {
+        unsafe { std::ptr::addr_of!((*self.descriptor.as_ptr()).state).read() }
+    }
+
+    fn drop_state_callback(&self) -> Option<unsafe extern "C" fn(*mut std::ffi::c_void)> {
+        unsafe { std::ptr::addr_of!((*self.descriptor.as_ptr()).drop_state).read() }
+    }
+
+    fn name_callback(
+        &self,
+    ) -> Option<
+        unsafe extern "C" fn(
+            *const std::ffi::c_void,
+            *mut FaultScopeNativeDecoderStringViewV1,
+        ) -> FaultScopeNativeDecoderStatusV1,
+    > {
+        unsafe { std::ptr::addr_of!((*self.descriptor.as_ptr()).name).read() }
+    }
+
+    fn detector_ids_callback(
+        &self,
+    ) -> Option<
+        unsafe extern "C" fn(
+            *const std::ffi::c_void,
+            *mut FaultScopeNativeDecoderI64SliceV1,
+        ) -> FaultScopeNativeDecoderStatusV1,
+    > {
+        unsafe { std::ptr::addr_of!((*self.descriptor.as_ptr()).detector_ids).read() }
+    }
+
+    fn observable_ids_callback(
+        &self,
+    ) -> Option<
+        unsafe extern "C" fn(
+            *const std::ffi::c_void,
+            *mut FaultScopeNativeDecoderI64SliceV1,
+        ) -> FaultScopeNativeDecoderStatusV1,
+    > {
+        unsafe { std::ptr::addr_of!((*self.descriptor.as_ptr()).observable_ids).read() }
+    }
+
+    fn decode_batch_callback(
+        &self,
+    ) -> Option<
+        unsafe extern "C" fn(
+            *mut std::ffi::c_void,
+            *const FaultScopeNativeDetectorMaskBatchViewV1,
+            *mut FaultScopeNativeCorrectionMaskBatchMutViewV1,
+        ) -> FaultScopeNativeDecoderStatusV1,
+    > {
+        unsafe { std::ptr::addr_of!((*self.descriptor.as_ptr()).decode_batch).read() }
+    }
+
+    fn decode_packed_callback(
+        &self,
+    ) -> Option<
+        unsafe extern "C" fn(
+            *mut std::ffi::c_void,
+            *const FaultScopeNativePackedDetectorShotBatchViewV1,
+            *mut FaultScopeNativePackedObservableShotBatchMutViewV1,
+        ) -> FaultScopeNativeDecoderStatusV1,
+    > {
+        if self.struct_size()
+            < mem::offset_of!(FaultScopeNativeDecoderV1, decode_detector_event_batch)
+        {
+            return None;
+        }
+        unsafe { std::ptr::addr_of!((*self.descriptor.as_ptr()).decode_packed_batch).read() }
+    }
+
+    fn decode_detector_event_callback(
+        &self,
+    ) -> Option<
+        unsafe extern "C" fn(
+            *mut std::ffi::c_void,
+            *const FaultScopeNativeDetectorEventShotBatchViewV1,
+            *mut FaultScopeNativePackedObservableShotBatchMutViewV1,
+        ) -> FaultScopeNativeDecoderStatusV1,
+    > {
+        if self.struct_size() < native_decoder_v1_decode_event_field_end() {
+            return None;
+        }
+        unsafe {
+            std::ptr::addr_of!((*self.descriptor.as_ptr()).decode_detector_event_batch).read()
+        }
+    }
+
+    fn create_worker_state_callback(
+        &self,
+    ) -> Option<
+        unsafe extern "C" fn(
+            *const std::ffi::c_void,
+            *mut *mut std::ffi::c_void,
+        ) -> FaultScopeNativeDecoderStatusV1,
+    > {
+        if self.struct_size() < native_decoder_v1_create_worker_state_field_end() {
+            return None;
+        }
+        unsafe { std::ptr::addr_of!((*self.descriptor.as_ptr()).create_worker_state).read() }
+    }
+}
+
+struct ExternalNativeBatchDecoder {
+    owner: Arc<ExternalDecoderOwner>,
+    state: NonNull<std::ffi::c_void>,
+    owns_worker_state: bool,
     name: String,
     detector_ids: Vec<i64>,
     observable_ids: Vec<i64>,
@@ -467,58 +595,47 @@ impl ExternalNativeBatchDecoder {
             NonNull::new(pointer.cast::<FaultScopeNativeDecoderV1>()).ok_or_else(|| {
                 PyValueError::new_err("native decoder capsule contained a null descriptor pointer")
             })?;
-        let descriptor_ref = unsafe { descriptor.as_ref() };
-        validate_external_decoder_descriptor(descriptor_ref)?;
-        let name = unsafe { call_decoder_name(descriptor_ref)? };
-        let detector_ids =
-            unsafe { call_decoder_ids(descriptor_ref, descriptor_ref.detector_ids)? };
-        let observable_ids =
-            unsafe { call_decoder_ids(descriptor_ref, descriptor_ref.observable_ids)? };
-        Ok(Self {
+        Self::from_descriptor(descriptor, OwnedPyObjectPtr::new(capsule))
+    }
+
+    fn from_descriptor(
+        descriptor: NonNull<FaultScopeNativeDecoderV1>,
+        capsule: OwnedPyObjectPtr,
+    ) -> PyResult<Self> {
+        validate_external_decoder_descriptor(descriptor)?;
+        let owner = Arc::new(ExternalDecoderOwner {
             descriptor,
-            _capsule: OwnedPyObjectPtr::new(capsule),
+            capsule,
+        });
+        let state = NonNull::new(owner.state()).expect("external descriptor state was validated");
+        let name = unsafe { call_decoder_name(&owner, state).map_err(PyValueError::new_err)? };
+        let detector_ids = unsafe {
+            call_decoder_ids(state, owner.detector_ids_callback()).map_err(PyValueError::new_err)?
+        };
+        let observable_ids = unsafe {
+            call_decoder_ids(state, owner.observable_ids_callback())
+                .map_err(PyValueError::new_err)?
+        };
+        Ok(Self {
+            owner,
+            state,
+            owns_worker_state: false,
             name,
             detector_ids,
             observable_ids,
         })
     }
+}
 
-    fn descriptor(&self) -> &FaultScopeNativeDecoderV1 {
-        unsafe { self.descriptor.as_ref() }
-    }
-
-    fn decode_packed_callback(
-        &self,
-    ) -> Option<
-        unsafe extern "C" fn(
-            *mut std::ffi::c_void,
-            *const FaultScopeNativePackedDetectorShotBatchViewV1,
-            *mut FaultScopeNativePackedObservableShotBatchMutViewV1,
-        ) -> FaultScopeNativeDecoderStatusV1,
-    > {
-        let descriptor = self.descriptor();
-        if descriptor.struct_size
-            < mem::offset_of!(FaultScopeNativeDecoderV1, decode_detector_event_batch)
-        {
-            return None;
+impl Drop for ExternalNativeBatchDecoder {
+    fn drop(&mut self) {
+        if self.owns_worker_state {
+            if let Some(drop_state) = self.owner.drop_state_callback() {
+                unsafe {
+                    drop_state(self.state.as_ptr());
+                }
+            }
         }
-        descriptor.decode_packed_batch
-    }
-
-    fn decode_detector_event_callback(
-        &self,
-    ) -> Option<
-        unsafe extern "C" fn(
-            *mut std::ffi::c_void,
-            *const FaultScopeNativeDetectorEventShotBatchViewV1,
-            *mut FaultScopeNativePackedObservableShotBatchMutViewV1,
-        ) -> FaultScopeNativeDecoderStatusV1,
-    > {
-        let descriptor = self.descriptor();
-        if descriptor.struct_size < native_decoder_v1_decode_event_field_end() {
-            return None;
-        }
-        descriptor.decode_detector_event_batch
     }
 }
 
@@ -535,6 +652,18 @@ fn native_decoder_v1_decode_event_field_end() -> usize {
         >()
 }
 
+fn native_decoder_v1_create_worker_state_field_end() -> usize {
+    mem::offset_of!(FaultScopeNativeDecoderV1, create_worker_state)
+        + mem::size_of::<
+            Option<
+                unsafe extern "C" fn(
+                    *const std::ffi::c_void,
+                    *mut *mut std::ffi::c_void,
+                ) -> FaultScopeNativeDecoderStatusV1,
+            >,
+        >()
+}
+
 impl CoreNativeBatchDecoder for ExternalNativeBatchDecoder {
     fn name(&self) -> &str {
         &self.name
@@ -546,6 +675,80 @@ impl CoreNativeBatchDecoder for ExternalNativeBatchDecoder {
 
     fn observable_ids(&self) -> &[i64] {
         &self.observable_ids
+    }
+
+    fn create_worker_instance(&self) -> faultscope_core::NpResult<Arc<dyn CoreNativeBatchDecoder>> {
+        let create_worker_state = self.owner.create_worker_state_callback().ok_or_else(|| {
+            faultscope_core::NpError::new(format!(
+                "{} does not support collection worker instances",
+                self.name
+            ))
+        })?;
+        let drop_state = self.owner.drop_state_callback().ok_or_else(|| {
+            faultscope_core::NpError::new(format!(
+                "{} worker-state factory requires a drop_state callback",
+                self.name
+            ))
+        })?;
+        let mut worker_state = std::ptr::null_mut();
+        let status =
+            unsafe { create_worker_state(self.owner.state().cast_const(), &mut worker_state) };
+        if let Err(error) = status_to_np_result(status) {
+            if let Some(worker_state) = NonNull::new(worker_state) {
+                unsafe {
+                    drop_state(worker_state.as_ptr());
+                }
+            }
+            return Err(error);
+        }
+        let worker_state = NonNull::new(worker_state).ok_or_else(|| {
+            faultscope_core::NpError::new(format!(
+                "{} worker-state factory returned a null state pointer",
+                self.name
+            ))
+        })?;
+        let worker_metadata = unsafe {
+            (|| {
+                let name = call_decoder_name(&self.owner, worker_state)
+                    .map_err(faultscope_core::NpError::new)?;
+                let detector_ids =
+                    call_decoder_ids(worker_state, self.owner.detector_ids_callback())
+                        .map_err(faultscope_core::NpError::new)?;
+                let observable_ids =
+                    call_decoder_ids(worker_state, self.owner.observable_ids_callback())
+                        .map_err(faultscope_core::NpError::new)?;
+                Ok::<_, faultscope_core::NpError>((name, detector_ids, observable_ids))
+            })()
+        };
+        let (name, detector_ids, observable_ids) = match worker_metadata {
+            Ok(metadata) => metadata,
+            Err(error) => {
+                unsafe {
+                    drop_state(worker_state.as_ptr());
+                }
+                return Err(error);
+            }
+        };
+        if name != self.name
+            || detector_ids != self.detector_ids
+            || observable_ids != self.observable_ids
+        {
+            unsafe {
+                drop_state(worker_state.as_ptr());
+            }
+            return Err(faultscope_core::NpError::new(format!(
+                "{} worker-state factory returned mismatched decoder metadata",
+                self.name
+            )));
+        }
+        Ok(Arc::new(Self {
+            owner: Arc::clone(&self.owner),
+            state: worker_state,
+            owns_worker_state: true,
+            name,
+            detector_ids,
+            observable_ids,
+        }))
     }
 
     fn decode_batch(
@@ -589,17 +792,17 @@ impl CoreNativeBatchDecoder for ExternalNativeBatchDecoder {
             shots: detectors.shots,
             word_count,
         };
-        let descriptor = self.descriptor();
-        let decode_batch = descriptor
-            .decode_batch
+        let decode_batch = self
+            .owner
+            .decode_batch_callback()
             .expect("external decoder descriptor was validated");
-        let status = unsafe { decode_batch(descriptor.state, &input, &mut output) };
+        let status = unsafe { decode_batch(self.state.as_ptr(), &input, &mut output) };
         status_to_np_result(status)?;
         CorrectionMaskBatch::new(self.observable_ids.clone(), output_masks, detectors.shots)
     }
 
     fn supports_packed_batch(&self) -> bool {
-        self.decode_packed_callback().is_some()
+        self.owner.decode_packed_callback().is_some()
     }
 
     fn decode_packed_batch(
@@ -612,7 +815,7 @@ impl CoreNativeBatchDecoder for ExternalNativeBatchDecoder {
                 self.name
             )));
         }
-        let decode_packed_batch = self.decode_packed_callback().ok_or_else(|| {
+        let decode_packed_batch = self.owner.decode_packed_callback().ok_or_else(|| {
             faultscope_core::NpError::new(format!(
                 "{} does not support packed-row batch decode",
                 self.name
@@ -634,14 +837,13 @@ impl CoreNativeBatchDecoder for ExternalNativeBatchDecoder {
             shots: detectors.shots,
             observable_byte_count,
         };
-        let descriptor = self.descriptor();
-        let status = unsafe { decode_packed_batch(descriptor.state, &input, &mut output) };
+        let status = unsafe { decode_packed_batch(self.state.as_ptr(), &input, &mut output) };
         status_to_np_result(status)?;
         PackedObservableShotBatch::new(self.observable_ids.clone(), output_data, detectors.shots)
     }
 
     fn supports_detector_event_batch(&self) -> bool {
-        self.decode_detector_event_callback().is_some()
+        self.owner.decode_detector_event_callback().is_some()
     }
 
     fn decode_detector_event_batch(
@@ -655,7 +857,7 @@ impl CoreNativeBatchDecoder for ExternalNativeBatchDecoder {
             )));
         }
         let decode_detector_event_batch =
-            self.decode_detector_event_callback().ok_or_else(|| {
+            self.owner.decode_detector_event_callback().ok_or_else(|| {
                 faultscope_core::NpError::new(format!(
                     "{} does not support detector-event batch decode",
                     self.name
@@ -679,8 +881,8 @@ impl CoreNativeBatchDecoder for ExternalNativeBatchDecoder {
             shots: detectors.shots,
             observable_byte_count,
         };
-        let descriptor = self.descriptor();
-        let status = unsafe { decode_detector_event_batch(descriptor.state, &input, &mut output) };
+        let status =
+            unsafe { decode_detector_event_batch(self.state.as_ptr(), &input, &mut output) };
         status_to_np_result(status)?;
         PackedObservableShotBatch::new(self.observable_ids.clone(), output_data, detectors.shots)
     }
@@ -718,34 +920,45 @@ pub(crate) fn native_decoder_from_py(
     }
 }
 
-fn validate_external_decoder_descriptor(descriptor: &FaultScopeNativeDecoderV1) -> PyResult<()> {
-    if descriptor.abi_version != NATIVE_DECODER_PLUGIN_ABI_VERSION {
+fn validate_external_decoder_descriptor(
+    descriptor: NonNull<FaultScopeNativeDecoderV1>,
+) -> PyResult<()> {
+    let abi_version = unsafe { std::ptr::addr_of!((*descriptor.as_ptr()).abi_version).read() };
+    if abi_version != NATIVE_DECODER_PLUGIN_ABI_VERSION {
         return Err(PyValueError::new_err(format!(
             "native decoder plugin ABI version {} is unsupported; expected {}",
-            descriptor.abi_version, NATIVE_DECODER_PLUGIN_ABI_VERSION
+            abi_version, NATIVE_DECODER_PLUGIN_ABI_VERSION
         )));
     }
+    let struct_size = unsafe { std::ptr::addr_of!((*descriptor.as_ptr()).struct_size).read() };
     let minimum_descriptor_size = mem::offset_of!(FaultScopeNativeDecoderV1, decode_packed_batch);
-    if descriptor.struct_size < minimum_descriptor_size {
+    if struct_size < minimum_descriptor_size {
         return Err(PyValueError::new_err(format!(
             "native decoder descriptor has size {}; expected at least {}",
-            descriptor.struct_size, minimum_descriptor_size
+            struct_size, minimum_descriptor_size
         )));
     }
-    if descriptor.flags & NATIVE_DECODER_PLUGIN_FLAG_THREAD_SAFE == 0 {
+    let flags = unsafe { std::ptr::addr_of!((*descriptor.as_ptr()).flags).read() };
+    if flags & NATIVE_DECODER_PLUGIN_FLAG_THREAD_SAFE == 0 {
         return Err(PyValueError::new_err(
             "native decoder descriptor must declare thread-safe decode callbacks",
         ));
     }
-    if descriptor.state.is_null() {
+    let state = unsafe { std::ptr::addr_of!((*descriptor.as_ptr()).state).read() };
+    if state.is_null() {
         return Err(PyValueError::new_err(
             "native decoder descriptor has a null state pointer",
         ));
     }
-    if descriptor.name.is_none()
-        || descriptor.detector_ids.is_none()
-        || descriptor.observable_ids.is_none()
-        || descriptor.decode_batch.is_none()
+    let name = unsafe { std::ptr::addr_of!((*descriptor.as_ptr()).name).read() };
+    let detector_ids = unsafe { std::ptr::addr_of!((*descriptor.as_ptr()).detector_ids).read() };
+    let observable_ids =
+        unsafe { std::ptr::addr_of!((*descriptor.as_ptr()).observable_ids).read() };
+    let decode_batch = unsafe { std::ptr::addr_of!((*descriptor.as_ptr()).decode_batch).read() };
+    if name.is_none()
+        || detector_ids.is_none()
+        || observable_ids.is_none()
+        || decode_batch.is_none()
     {
         return Err(PyValueError::new_err(
             "native decoder descriptor is missing required callbacks",
@@ -754,48 +967,49 @@ fn validate_external_decoder_descriptor(descriptor: &FaultScopeNativeDecoderV1) 
     Ok(())
 }
 
-unsafe fn call_decoder_name(descriptor: &FaultScopeNativeDecoderV1) -> PyResult<String> {
+unsafe fn call_decoder_name(
+    owner: &ExternalDecoderOwner,
+    state: NonNull<std::ffi::c_void>,
+) -> Result<String, String> {
     let mut out = FaultScopeNativeDecoderStringViewV1::empty();
-    let callback = descriptor
-        .name
+    let callback = owner
+        .name_callback()
         .expect("external decoder descriptor was validated");
-    let status = callback(descriptor.state.cast_const(), &mut out);
-    status_to_py_result(status)?;
-    string_view_to_string(out)
+    let status = callback(state.as_ptr().cast_const(), &mut out);
+    status_to_decoder_result(status)?;
+    string_view_to_string_result(out)
 }
 
 unsafe fn call_decoder_ids(
-    descriptor: &FaultScopeNativeDecoderV1,
+    state: NonNull<std::ffi::c_void>,
     callback: Option<
         unsafe extern "C" fn(
             *const std::ffi::c_void,
             *mut FaultScopeNativeDecoderI64SliceV1,
         ) -> FaultScopeNativeDecoderStatusV1,
     >,
-) -> PyResult<Vec<i64>> {
+) -> Result<Vec<i64>, String> {
     let mut out = FaultScopeNativeDecoderI64SliceV1::empty();
     let callback = callback.expect("external decoder descriptor was validated");
-    let status = callback(descriptor.state.cast_const(), &mut out);
-    status_to_py_result(status)?;
+    let status = callback(state.as_ptr().cast_const(), &mut out);
+    status_to_decoder_result(status)?;
     if out.len == 0 {
         return Ok(Vec::new());
     }
     if out.ptr.is_null() {
-        return Err(PyValueError::new_err(
-            "native decoder callback returned a null id pointer",
-        ));
+        return Err("native decoder callback returned a null id pointer".to_string());
     }
     Ok(slice::from_raw_parts(out.ptr, out.len).to_vec())
 }
 
-fn status_to_py_result(status: FaultScopeNativeDecoderStatusV1) -> PyResult<()> {
+fn status_to_decoder_result(status: FaultScopeNativeDecoderStatusV1) -> Result<(), String> {
     if status.code == NATIVE_DECODER_PLUGIN_STATUS_OK {
         return Ok(());
     }
-    Err(PyValueError::new_err(format!(
+    Err(format!(
         "native decoder plugin error: {}",
         status_message(status)
-    )))
+    ))
 }
 
 fn status_to_np_result(status: FaultScopeNativeDecoderStatusV1) -> faultscope_core::NpResult<()> {
@@ -809,17 +1023,18 @@ fn status_to_np_result(status: FaultScopeNativeDecoderStatusV1) -> faultscope_co
 }
 
 fn status_message(status: FaultScopeNativeDecoderStatusV1) -> String {
-    string_view_to_string(status.message).unwrap_or_else(|_| format!("status code {}", status.code))
+    string_view_to_string_result(status.message)
+        .unwrap_or_else(|_| format!("status code {}", status.code))
 }
 
-fn string_view_to_string(view: FaultScopeNativeDecoderStringViewV1) -> PyResult<String> {
+fn string_view_to_string_result(
+    view: FaultScopeNativeDecoderStringViewV1,
+) -> Result<String, String> {
     if view.len == 0 {
         return Ok(String::new());
     }
     if view.ptr.is_null() {
-        return Err(PyValueError::new_err(
-            "native decoder callback returned a null string pointer",
-        ));
+        return Err("native decoder callback returned a null string pointer".to_string());
     }
     let bytes = unsafe { slice::from_raw_parts(view.ptr.cast::<u8>(), view.len) };
     Ok(String::from_utf8_lossy(bytes).into_owned())
@@ -1339,4 +1554,330 @@ fn binary_edge_summary_to_py(
 
 fn tuple_py_objects(py: Python<'_>, items: Vec<PyObject>) -> PyResult<PyObject> {
     Ok(PyTuple::new(py, items.iter().map(|item| item.clone_ref(py)))?.into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::alloc::{alloc, dealloc, Layout};
+    use std::ffi::c_void;
+    use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
+
+    const TEST_NAME: &str = "test-external";
+    const TEST_METADATA_ERROR: &str = "test metadata failure";
+    const TEST_DETECTOR_IDS: [i64; 1] = [7];
+    const TEST_OBSERVABLE_IDS: [i64; 1] = [11];
+
+    struct TestState {
+        next_worker: AtomicU64,
+        value: AtomicU64,
+        drops: Arc<AtomicUsize>,
+        worker_pointers: Arc<Mutex<Vec<usize>>>,
+        metadata_error: bool,
+    }
+
+    impl TestState {
+        fn prototype(drops: Arc<AtomicUsize>, worker_pointers: Arc<Mutex<Vec<usize>>>) -> Self {
+            Self {
+                next_worker: AtomicU64::new(0),
+                value: AtomicU64::new(0),
+                drops,
+                worker_pointers,
+                metadata_error: false,
+            }
+        }
+    }
+
+    unsafe extern "C" fn test_drop_state(state: *mut c_void) {
+        if !state.is_null() {
+            let state = Box::from_raw(state.cast::<TestState>());
+            state.drops.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    unsafe extern "C" fn test_name(
+        _state: *const c_void,
+        out: *mut FaultScopeNativeDecoderStringViewV1,
+    ) -> FaultScopeNativeDecoderStatusV1 {
+        *out = FaultScopeNativeDecoderStringViewV1 {
+            ptr: TEST_NAME.as_ptr().cast(),
+            len: TEST_NAME.len(),
+        };
+        FaultScopeNativeDecoderStatusV1::ok()
+    }
+
+    unsafe extern "C" fn test_detector_ids(
+        state: *const c_void,
+        out: *mut FaultScopeNativeDecoderI64SliceV1,
+    ) -> FaultScopeNativeDecoderStatusV1 {
+        if (*state.cast::<TestState>()).metadata_error {
+            return FaultScopeNativeDecoderStatusV1 {
+                code: faultscope_core::NATIVE_DECODER_PLUGIN_STATUS_ERROR,
+                message: FaultScopeNativeDecoderStringViewV1 {
+                    ptr: TEST_METADATA_ERROR.as_ptr().cast(),
+                    len: TEST_METADATA_ERROR.len(),
+                },
+            };
+        }
+        *out = FaultScopeNativeDecoderI64SliceV1 {
+            ptr: TEST_DETECTOR_IDS.as_ptr(),
+            len: TEST_DETECTOR_IDS.len(),
+        };
+        FaultScopeNativeDecoderStatusV1::ok()
+    }
+
+    unsafe extern "C" fn test_observable_ids(
+        _state: *const c_void,
+        out: *mut FaultScopeNativeDecoderI64SliceV1,
+    ) -> FaultScopeNativeDecoderStatusV1 {
+        *out = FaultScopeNativeDecoderI64SliceV1 {
+            ptr: TEST_OBSERVABLE_IDS.as_ptr(),
+            len: TEST_OBSERVABLE_IDS.len(),
+        };
+        FaultScopeNativeDecoderStatusV1::ok()
+    }
+
+    unsafe extern "C" fn test_decode_batch(
+        state: *mut c_void,
+        _input: *const FaultScopeNativeDetectorMaskBatchViewV1,
+        output: *mut FaultScopeNativeCorrectionMaskBatchMutViewV1,
+    ) -> FaultScopeNativeDecoderStatusV1 {
+        let state = &*state.cast::<TestState>();
+        let value = state.value.fetch_add(1, Ordering::SeqCst) + 1;
+        let output = &mut *output;
+        *(*output.masks).words = value;
+        FaultScopeNativeDecoderStatusV1::ok()
+    }
+
+    unsafe extern "C" fn test_create_worker_state(
+        factory_state: *const c_void,
+        out_state: *mut *mut c_void,
+    ) -> FaultScopeNativeDecoderStatusV1 {
+        let factory = &*factory_state.cast::<TestState>();
+        let worker_id = factory.next_worker.fetch_add(1, Ordering::SeqCst) + 1;
+        let worker = Box::new(TestState {
+            next_worker: AtomicU64::new(0),
+            value: AtomicU64::new(worker_id * 10),
+            drops: Arc::clone(&factory.drops),
+            worker_pointers: Arc::clone(&factory.worker_pointers),
+            metadata_error: false,
+        });
+        let worker = Box::into_raw(worker).cast::<c_void>();
+        factory
+            .worker_pointers
+            .lock()
+            .expect("worker pointer mutex poisoned")
+            .push(worker as usize);
+        *out_state = worker;
+        FaultScopeNativeDecoderStatusV1::ok()
+    }
+
+    unsafe extern "C" fn test_create_null_worker_state(
+        _factory_state: *const c_void,
+        _out_state: *mut *mut c_void,
+    ) -> FaultScopeNativeDecoderStatusV1 {
+        FaultScopeNativeDecoderStatusV1::ok()
+    }
+
+    unsafe extern "C" fn test_create_metadata_error_worker_state(
+        factory_state: *const c_void,
+        out_state: *mut *mut c_void,
+    ) -> FaultScopeNativeDecoderStatusV1 {
+        let factory = &*factory_state.cast::<TestState>();
+        let worker = Box::new(TestState {
+            next_worker: AtomicU64::new(0),
+            value: AtomicU64::new(0),
+            drops: Arc::clone(&factory.drops),
+            worker_pointers: Arc::clone(&factory.worker_pointers),
+            metadata_error: true,
+        });
+        *out_state = Box::into_raw(worker).cast::<c_void>();
+        FaultScopeNativeDecoderStatusV1::ok()
+    }
+
+    fn test_descriptor(
+        state: *mut c_void,
+        struct_size: usize,
+        create_worker_state: Option<
+            unsafe extern "C" fn(
+                *const c_void,
+                *mut *mut c_void,
+            ) -> FaultScopeNativeDecoderStatusV1,
+        >,
+    ) -> FaultScopeNativeDecoderV1 {
+        FaultScopeNativeDecoderV1 {
+            abi_version: NATIVE_DECODER_PLUGIN_ABI_VERSION,
+            struct_size,
+            flags: NATIVE_DECODER_PLUGIN_FLAG_THREAD_SAFE,
+            state,
+            drop_state: Some(test_drop_state),
+            name: Some(test_name),
+            detector_ids: Some(test_detector_ids),
+            observable_ids: Some(test_observable_ids),
+            decode_batch: Some(test_decode_batch),
+            decode_packed_batch: None,
+            decode_detector_event_batch: None,
+            create_worker_state,
+        }
+    }
+
+    unsafe fn external_from_test_descriptor(
+        descriptor: *mut FaultScopeNativeDecoderV1,
+    ) -> ExternalNativeBatchDecoder {
+        let descriptor = NonNull::new(descriptor).expect("test descriptor must not be null");
+        ExternalNativeBatchDecoder::from_descriptor(descriptor, OwnedPyObjectPtr::noop()).unwrap()
+    }
+
+    unsafe fn drop_test_descriptor(descriptor: *mut FaultScopeNativeDecoderV1) {
+        let descriptor = Box::from_raw(descriptor);
+        descriptor.drop_state.unwrap()(descriptor.state);
+    }
+
+    #[test]
+    fn external_worker_instance_legacy_descriptor_is_unsupported() {
+        let drops = Arc::new(AtomicUsize::new(0));
+        let worker_pointers = Arc::new(Mutex::new(Vec::new()));
+        let state = Box::into_raw(Box::new(TestState::prototype(
+            Arc::clone(&drops),
+            worker_pointers,
+        )))
+        .cast::<c_void>();
+        let legacy_size = mem::offset_of!(FaultScopeNativeDecoderV1, create_worker_state);
+        let legacy_descriptor = test_descriptor(state, legacy_size, None);
+        let layout =
+            Layout::from_size_align(legacy_size, mem::align_of::<FaultScopeNativeDecoderV1>())
+                .unwrap();
+        let descriptor = unsafe { alloc(layout).cast::<FaultScopeNativeDecoderV1>() };
+        assert!(!descriptor.is_null());
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                (&legacy_descriptor as *const FaultScopeNativeDecoderV1).cast::<u8>(),
+                descriptor.cast::<u8>(),
+                legacy_size,
+            );
+        }
+        let decoder = unsafe { external_from_test_descriptor(descriptor) };
+
+        let error = match decoder.create_worker_instance() {
+            Ok(_) => panic!("legacy external descriptor unexpectedly created a worker"),
+            Err(error) => error,
+        };
+
+        assert_eq!(
+            error.to_string(),
+            "test-external does not support collection worker instances"
+        );
+        drop(decoder);
+        unsafe {
+            test_drop_state(state);
+            dealloc(descriptor.cast::<u8>(), layout);
+        }
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn external_worker_instances_are_independent_and_drop_once() {
+        let drops = Arc::new(AtomicUsize::new(0));
+        let worker_pointers = Arc::new(Mutex::new(Vec::new()));
+        let state = Box::into_raw(Box::new(TestState::prototype(
+            Arc::clone(&drops),
+            Arc::clone(&worker_pointers),
+        )))
+        .cast::<c_void>();
+        let descriptor = Box::into_raw(Box::new(test_descriptor(
+            state,
+            mem::size_of::<FaultScopeNativeDecoderV1>(),
+            Some(test_create_worker_state),
+        )));
+        let decoder = unsafe { external_from_test_descriptor(descriptor) };
+
+        let first = decoder.create_worker_instance().unwrap();
+        let second = decoder.create_worker_instance().unwrap();
+        let third = first.create_worker_instance().unwrap();
+        let masks = [Mask { words: vec![1] }];
+        let first_view = DetectorMaskBatchView::new(first.detector_ids(), &masks, 1).unwrap();
+        let second_view = DetectorMaskBatchView::new(second.detector_ids(), &masks, 1).unwrap();
+        let third_view = DetectorMaskBatchView::new(third.detector_ids(), &masks, 1).unwrap();
+        assert_eq!(first.decode_batch(first_view).unwrap().masks[0].words, [11]);
+        let first_view = DetectorMaskBatchView::new(first.detector_ids(), &masks, 1).unwrap();
+        assert_eq!(first.decode_batch(first_view).unwrap().masks[0].words, [12]);
+        assert_eq!(
+            second.decode_batch(second_view).unwrap().masks[0].words,
+            [21]
+        );
+        assert_eq!(third.decode_batch(third_view).unwrap().masks[0].words, [31]);
+        let pointers = worker_pointers.lock().unwrap();
+        assert_eq!(pointers.len(), 3);
+        assert_ne!(pointers[0], pointers[1]);
+        assert_ne!(pointers[0], pointers[2]);
+        assert_ne!(pointers[1], pointers[2]);
+        drop(pointers);
+
+        drop(first);
+        drop(second);
+        drop(third);
+        assert_eq!(drops.load(Ordering::SeqCst), 3);
+        drop(decoder);
+        unsafe { drop_test_descriptor(descriptor) };
+        assert_eq!(drops.load(Ordering::SeqCst), 4);
+    }
+
+    #[test]
+    fn external_worker_instance_rejects_null_factory_state() {
+        let drops = Arc::new(AtomicUsize::new(0));
+        let worker_pointers = Arc::new(Mutex::new(Vec::new()));
+        let state = Box::into_raw(Box::new(TestState::prototype(
+            Arc::clone(&drops),
+            worker_pointers,
+        )))
+        .cast::<c_void>();
+        let descriptor = Box::into_raw(Box::new(test_descriptor(
+            state,
+            mem::size_of::<FaultScopeNativeDecoderV1>(),
+            Some(test_create_null_worker_state),
+        )));
+        let decoder = unsafe { external_from_test_descriptor(descriptor) };
+
+        let error = match decoder.create_worker_instance() {
+            Ok(_) => panic!("null worker-state factory unexpectedly created a worker"),
+            Err(error) => error,
+        };
+
+        assert_eq!(
+            error.to_string(),
+            "test-external worker-state factory returned a null state pointer"
+        );
+        drop(decoder);
+        unsafe { drop_test_descriptor(descriptor) };
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn external_worker_instance_drops_state_when_metadata_validation_fails() {
+        let drops = Arc::new(AtomicUsize::new(0));
+        let worker_pointers = Arc::new(Mutex::new(Vec::new()));
+        let state = Box::into_raw(Box::new(TestState::prototype(
+            Arc::clone(&drops),
+            worker_pointers,
+        )))
+        .cast::<c_void>();
+        let descriptor = Box::into_raw(Box::new(test_descriptor(
+            state,
+            mem::size_of::<FaultScopeNativeDecoderV1>(),
+            Some(test_create_metadata_error_worker_state),
+        )));
+        let decoder = unsafe { external_from_test_descriptor(descriptor) };
+
+        let error = match decoder.create_worker_instance() {
+            Ok(_) => panic!("invalid worker metadata unexpectedly created a worker"),
+            Err(error) => error,
+        };
+
+        assert!(error.to_string().contains(TEST_METADATA_ERROR));
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+        drop(decoder);
+        unsafe { drop_test_descriptor(descriptor) };
+        assert_eq!(drops.load(Ordering::SeqCst), 2);
+    }
 }

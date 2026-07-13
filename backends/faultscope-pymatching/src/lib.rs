@@ -241,20 +241,20 @@ fn build_py_native_decoder(
     let detector_ids = builder.detector_ids.clone();
     let observable_ids = builder.observable_ids.clone();
     let built = builder.build()?;
-    let native =
-        PymatchingNativeDecoder::new(detector_ids.len(), observable_ids.len(), &built.edges)?;
+    let state = Box::new(
+        DecoderState::new(
+            detector_ids.clone(),
+            observable_ids.clone(),
+            built.edges.clone(),
+        )
+        .map_err(PyValueError::new_err)?,
+    );
     let build_summary = BuildSummary {
         dem_edge_count: built.dem_edge_count,
         solver_edge_count: built.edges.len(),
         merged_parallel_edge_count: built.merged_parallel_edge_count,
         edges: built.edges,
     };
-    let state = Box::new(DecoderState {
-        detector_ids: detector_ids.clone(),
-        observable_ids: observable_ids.clone(),
-        native: Mutex::new(native),
-        last_error: Mutex::new(CString::new("").expect("empty CString")),
-    });
     let descriptor = Box::new(FaultScopeNativeDecoderV1 {
         abi_version: NATIVE_DECODER_PLUGIN_ABI_VERSION,
         struct_size: mem::size_of::<FaultScopeNativeDecoderV1>(),
@@ -267,6 +267,7 @@ fn build_py_native_decoder(
         decode_batch: Some(decoder_decode_batch),
         decode_packed_batch: Some(decoder_decode_packed_batch),
         decode_detector_event_batch: None,
+        create_worker_state: Some(create_worker_state),
     });
     let capsule = unsafe { create_decoder_capsule(py, Box::into_raw(descriptor))? };
     Ok(PyNativePyMatchingNativeDecoder {
@@ -282,8 +283,35 @@ fn build_py_native_decoder(
 struct DecoderState {
     detector_ids: Vec<i64>,
     observable_ids: Vec<i64>,
+    edges: Vec<BuiltPyMatchingEdge>,
     native: Mutex<PymatchingNativeDecoder>,
     last_error: Mutex<CString>,
+}
+
+impl DecoderState {
+    fn new(
+        detector_ids: Vec<i64>,
+        observable_ids: Vec<i64>,
+        edges: Vec<BuiltPyMatchingEdge>,
+    ) -> Result<Self, String> {
+        let native =
+            PymatchingNativeDecoder::new(detector_ids.len(), observable_ids.len(), &edges)?;
+        Ok(Self {
+            detector_ids,
+            observable_ids,
+            edges,
+            native: Mutex::new(native),
+            last_error: Mutex::new(CString::new("").expect("empty CString")),
+        })
+    }
+
+    fn create_worker(&self) -> Result<Self, String> {
+        Self::new(
+            self.detector_ids.clone(),
+            self.observable_ids.clone(),
+            self.edges.clone(),
+        )
+    }
 }
 
 struct PymatchingNativeDecoder {
@@ -297,7 +325,7 @@ impl PymatchingNativeDecoder {
         detector_count: usize,
         observable_count: usize,
         edges: &[BuiltPyMatchingEdge],
-    ) -> PyResult<Self> {
+    ) -> Result<Self, String> {
         let observable_storage = edges
             .iter()
             .map(|edge| edge.fault_observables.clone())
@@ -326,10 +354,10 @@ impl PymatchingNativeDecoder {
             )
         };
         if ptr.is_null() {
-            return Err(PyValueError::new_err(format!(
+            return Err(format!(
                 "pymatching native build failed: {}",
                 error.message()
-            )));
+            ));
         }
         Ok(Self { ptr })
     }
@@ -751,6 +779,30 @@ fn normalized_endpoint(left: usize, right: usize) -> (usize, Option<usize>) {
 unsafe extern "C" fn drop_state(state: *mut c_void) {
     if !state.is_null() {
         drop(Box::from_raw(state.cast::<DecoderState>()));
+    }
+}
+
+unsafe extern "C" fn create_worker_state(
+    factory_state: *const c_void,
+    out_state: *mut *mut c_void,
+) -> FaultScopeNativeDecoderStatusV1 {
+    if out_state.is_null() {
+        return static_error("pymatching worker-state factory received null output pointer");
+    }
+    *out_state = std::ptr::null_mut();
+    if factory_state.is_null() {
+        return static_error("pymatching worker-state factory received null factory state");
+    }
+    let factory = &*factory_state.cast::<DecoderState>();
+    match factory.create_worker() {
+        Ok(worker) => {
+            *out_state = Box::into_raw(Box::new(worker)).cast::<c_void>();
+            FaultScopeNativeDecoderStatusV1::ok()
+        }
+        Err(message) => state_error(
+            factory,
+            format!("pymatching worker-state factory failed: {message}"),
+        ),
     }
 }
 
@@ -1251,6 +1303,89 @@ fn string_view_to_string(view: FaultScopeNativeDecoderStringViewV1) -> String {
     }
     let bytes = unsafe { slice::from_raw_parts(view.ptr.cast::<u8>(), view.len) };
     String::from_utf8_lossy(bytes).into_owned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::ptr;
+
+    fn worker_test_state() -> Box<DecoderState> {
+        let edges = vec![BuiltPyMatchingEdge {
+            left: 0,
+            right: None,
+            dem_edge_indices: vec![0],
+            fault_observables: vec![0],
+            probability: 0.1,
+            weight: log_likelihood_ratio(0.1),
+            scaled_weight: 2,
+        }];
+        Box::new(DecoderState::new(vec![7], vec![11], edges).unwrap())
+    }
+
+    unsafe fn decode_worker(state: *mut c_void) -> u64 {
+        let detector_ids = [7];
+        let observable_ids = [11];
+        let detector_words = [1u64];
+        let mut observable_words = [0u64];
+        let masks = [faultscope_core::FaultScopeNativeDecoderMaskViewV1 {
+            words: detector_words.as_ptr(),
+            word_count: 1,
+        }];
+        let mut corrections = [faultscope_core::FaultScopeNativeDecoderMaskMutViewV1 {
+            words: observable_words.as_mut_ptr(),
+            word_count: 1,
+        }];
+        let input = FaultScopeNativeDetectorMaskBatchViewV1 {
+            detector_ids: detector_ids.as_ptr(),
+            detector_count: 1,
+            masks: masks.as_ptr(),
+            shots: 1,
+            word_count: 1,
+        };
+        let mut output = FaultScopeNativeCorrectionMaskBatchMutViewV1 {
+            observable_ids: observable_ids.as_ptr(),
+            observable_count: 1,
+            masks: corrections.as_mut_ptr(),
+            shots: 1,
+            word_count: 1,
+        };
+        let status = decoder_decode_batch(state, &input, &mut output);
+        assert_eq!(
+            status.code,
+            faultscope_core::NATIVE_DECODER_PLUGIN_STATUS_OK
+        );
+        observable_words[0]
+    }
+
+    #[test]
+    fn worker_instances_have_distinct_states_and_matching_corrections() {
+        let factory = Box::into_raw(worker_test_state()).cast::<c_void>();
+        let mut first = ptr::null_mut();
+        let mut second = ptr::null_mut();
+
+        let first_status = unsafe { create_worker_state(factory, &mut first) };
+        let second_status = unsafe { create_worker_state(factory, &mut second) };
+
+        assert_eq!(
+            first_status.code,
+            faultscope_core::NATIVE_DECODER_PLUGIN_STATUS_OK
+        );
+        assert_eq!(
+            second_status.code,
+            faultscope_core::NATIVE_DECODER_PLUGIN_STATUS_OK
+        );
+        assert!(!first.is_null());
+        assert!(!second.is_null());
+        assert_ne!(first, second);
+        assert_eq!(unsafe { decode_worker(first) }, 1);
+        assert_eq!(unsafe { decode_worker(second) }, 1);
+        unsafe {
+            drop_state(first);
+            drop_state(second);
+            drop_state(factory);
+        }
+    }
 }
 
 #[pymodule]
