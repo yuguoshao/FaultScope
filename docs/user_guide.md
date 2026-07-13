@@ -477,6 +477,7 @@ dem = DetectorErrorModel(
 collector = Collector(
     options=CollectionOptions(
         max_shots=10_000,
+        min_shots=2_000,
         max_errors=200,
         batch_size=1_000,
     ),
@@ -513,8 +514,14 @@ stats = collect(
 Each `CollectionTask` must provide exactly one of `dem` or `circuit`.
 `max_shots` is required after combining the Collector's base options with each
 task's `collection_options`. The final batch is capped so collection never exceeds
-`max_shots`. `max_errors` stops after a completed batch reaches the threshold,
-which means the returned `errors` can be greater than `max_errors`.
+`max_shots`. `max_errors` stops only after both it and `min_shots` are reached;
+the returned error count can exceed the threshold by one committed batch.
+
+Use `collect_hotspots(...)` (or `Collector.collect_hotspots(...)`) when the same
+run must also return ordered per-batch `TaskStats` and shot-weighted DEM edge
+sensitivities. This path keeps edge-event masks, decoding, residual counting,
+and sensitivity calculation inside Rust. CSV partial resume is intentionally
+unsupported for hotspot collection.
 
 Native decoders can be passed directly or resolved by name:
 
@@ -778,9 +785,12 @@ decoder = NativePyMatchingDecoder.from_dem(dem)
 result = sampler.estimate(shots=1024, seed=1, decoder=decoder)
 ```
 
-External graphlike MWPM backends can use the same post-install mechanism. A
-`faultscope-mwpm` package that registers the `mwpm` entry point can be used
-through `NativeMwpmDecoder` or `create_native_decoder("mwpm", dem=dem)`.
+The `mwpm` proxy is currently unavailable. Its external `faultscope-mwpm`
+package still implements ABI v1 and is not yet migrated to the strict
+FaultScope native decoder ABI v2, so it remains non-installable. `bposd` is a
+reserved, unimplemented, non-installable catalog/status entry. The generic
+install subcommand accepts these names but only reports their unavailability;
+it returns no install plan or steps and installs nothing.
 
 ```python
 from faultscope import (
@@ -914,7 +924,8 @@ Inspect the built-in backend catalog and installed backend status with:
 python -m faultscope.backends status
 ```
 
-Inspect backend installation steps with:
+Inspect backend installation steps, or check the reserved `bposd` entry with
+the same generic subcommand:
 
 ```bash
 python -m faultscope.backends install pymatching --dry-run
@@ -922,6 +933,10 @@ python -m faultscope.backends install fusion-blossom --dry-run
 python -m faultscope.backends install bpdecoder --dry-run
 python -m faultscope.backends install bposd --dry-run
 ```
+
+The first three commands produce install plans. For `bposd`, the command only
+reports that the reserved catalog/status entry is unavailable; it produces no
+install plan or steps and installs nothing.
 
 The `bpdecoder` entry is the optional BP-family binary-linear backend. Its
 backend package is `faultscope-bpdecoder`; the install helper's dry run shows
@@ -961,11 +976,12 @@ safely compresses identical boundary and two-detector parallel edges. It uses
 normalizes scaled integer weights by a common even-preserving divisor without
 changing that integer MWPM objective. It still rejects ambiguous parallel
 logical effects and has not implemented production partitioning, streaming
-execution, or production performance tuning. For local diagnostics,
-`NPSIM_FUSION_BLOSSOM_THREADS=<n>` caps the packed batch worker count; by
-default the backend uses available native parallelism. Set
-`NPSIM_FUSION_BLOSSOM_PROFILE=1` to print the native timing split used for
-backend performance diagnosis, including solver clear/growth/extraction costs.
+execution, or production performance tuning. Its public Python object is a
+factory handle; each private collection worker owns one exclusive mutable solver
+while immutable graph data is shared. The backend needs no decoder mutex or
+worker pool. Set
+`NPSIM_FUSION_BLOSSOM_PROFILE=1` for local diagnostics that print the native
+timing split, including solver clear/growth/extraction costs.
 
 The local `faultscope-pymatching` package links pinned PyMatching sparse-blossom C++
 source and exposes `NativePyMatchingDecoder`. It is graphlike-only and keeps

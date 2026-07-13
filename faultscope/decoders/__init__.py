@@ -4,6 +4,7 @@ from typing import Any, Mapping
 
 from faultscope._native import (
     NativeBatchDecoder,
+    NativeCompositeDecoder,
     NativeGraphlikeDetectorCopyDecoder,
     NativeNoCorrectionDecoder,
 )
@@ -265,6 +266,7 @@ class NativePyMatchingDecoder(_NativeDecoderProxy):
 
 __all__ = [
     "NativeBatchDecoder",
+    "NativeCompositeDecoder",
     "NativeBpDecoder",
     "NativeBposdDecoder",
     "NativeDecoderBackendUnavailable",

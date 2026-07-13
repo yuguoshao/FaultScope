@@ -10,7 +10,7 @@ sparse binary structure. User code should import from the public Python modules:
 `faultscope.collection`, `faultscope.decoders`, `faultscope.io`, and
 `faultscope.viz`.
 
-The package is pre-1.0. Within `0.1.x`, names listed in public Python module
+The package is pre-1.0. Within `0.2.x`, names listed in public Python module
 `__all__` values and the documented root APIs of `faultscope-core` and
 `faultscope-collection` are compatibility contracts. Compatible additions may
 land in patch releases. Removal or renaming requires deprecation before a later
@@ -376,6 +376,7 @@ Native decoder handles:
 ```python
 from faultscope.decoders import (
     NativeBatchDecoder,
+    NativeCompositeDecoder,
     NativeGraphlikeDetectorCopyDecoder,
     NativeNoCorrectionDecoder,
     available_native_decoders,
@@ -386,6 +387,7 @@ decoder = NativeNoCorrectionDecoder(observable_ids=(0,))
 decoder.name
 decoder.detector_ids
 decoder.observable_ids
+composite = NativeCompositeDecoder((decoder_a, decoder_b))
 ```
 
 Native decoders are Python-owned handles around Rust decoder objects. When a
@@ -399,16 +401,20 @@ ordinary Python decoders and do not enter the native fast path.
 
 `available_native_decoders()` returns the names of compiled native decoder
 backends. The default build exposes `"no-correction"` and
-`"graphlike-detector-copy"`. Optional post-install backends can add names such
-as `"pymatching"`, `"fusion-blossom"`, and `"mwpm"` through the
+`"graphlike-detector-copy"`. Compatible post-install backends can add names such
+as `"pymatching"`, `"fusion-blossom"`, and `"bpdecoder"` through the
 `faultscope.native_decoders` entry point group. Use
 `get_native_decoder_class(name)` or `create_native_decoder(name, dem=dem)` for a
 uniform API. Friendly proxies such as `NativePyMatchingDecoder`,
 `NativeFusionBlossomDecoder`, `NativeMwpmDecoder`, and `NativeBposdDecoder` remain importable;
-construction raises an install hint until a compatible backend package is
-installed. A post-install backend enters the native fast path only when the
-constructed decoder exposes the FaultScope native decoder PyCapsule ABI; otherwise it
-remains a normal Python decoder.
+construction raises a precise availability error when no compatible backend is
+available. `mwpm` is discoverable but unavailable pending its ABI v2 migration.
+`bposd` is a reserved, unimplemented, non-installable catalog/status entry. The
+generic `python -m faultscope.backends install bposd --dry-run` subcommand only
+reports that unavailability; it creates no install plan or steps and installs
+nothing. A post-install backend enters the native fast path only
+when the constructed decoder exposes the FaultScope native decoder PyCapsule
+ABI; otherwise it remains a normal Python decoder.
 
 ## Detector Error Models
 
@@ -620,7 +626,8 @@ from faultscope.collection import (
 
 The top-level `faultscope` collection exports are `Collector`,
 `CollectionOptions`, `CollectionRunOptions`, `CollectionTask`, `Progress`,
-`TaskStats`, `collect`, `iter_collect`, and `iter_progress`.
+`TaskStats`, `HotspotCollectionResult`, `collect`, `collect_hotspots`,
+`iter_collect`, and `iter_progress`.
 Threshold analysis types and helpers are exported from `faultscope.collection`
 only, not from top-level `faultscope`.
 
@@ -634,13 +641,16 @@ CollectionOptions(
     start_batch_size: int | None = None,
     max_batch_size: int | None = None,
     max_batch_seconds: float | None = None,
+    *,
+    min_shots: int = 0,
 )
 ```
 
 `max_shots`, `batch_size`, `start_batch_size`, `max_batch_size`, and
 `max_batch_seconds` must be positive when set. `max_errors` must be
-non-negative when set. `max_shots` is required after merging the Collector's
-base options with per-task options.
+non-negative when set; `min_shots` must be non-negative and no larger than
+`max_shots`. Collection stops at `max_shots`, or when both `min_shots` and
+`max_errors` have been reached.
 
 `CollectionRunOptions` is a frozen dataclass:
 
@@ -735,6 +745,7 @@ Collection functions:
 Collector(*, options=None, run_options=None)
 
 Collector.collect(tasks) -> list[TaskStats]
+Collector.collect_hotspots(tasks) -> list[HotspotCollectionResult]
 Collector.iter_collect(tasks) -> Iterator[TaskStats]
 Collector.iter_progress(tasks) -> Iterator[Progress]
 
@@ -747,6 +758,7 @@ iter_collect(
 
 iter_progress(tasks, *, options=None, run_options=None) -> Iterator[Progress]
 collect(tasks, *, options=None, run_options=None) -> list[TaskStats]
+collect_hotspots(tasks, *, options=None, run_options=None) -> list[HotspotCollectionResult]
 ```
 
 The functions are one-shot wrappers around `Collector`. Sampling options come
@@ -756,7 +768,8 @@ final batch is capped to the remaining shot budget. `max_errors` and
 
 `num_workers` defaults to `1`. With fixed batch settings, the Rust scheduler can
 parallelize both multiple tasks and a single large task. Fixed seed plus fixed
-batch settings gives deterministic stats independent of worker count.
+batch settings gives deterministic stats, ordered hotspot batches, and edge
+sensitivities independent of worker count.
 Adaptive tasks using `max_batch_seconds` execute two or three serial calibration
 batches, freeze the median-throughput batch estimate, and parallelize the
 remaining fixed-size batches through the same worker pool. Calibration and

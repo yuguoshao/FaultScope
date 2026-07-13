@@ -27,6 +27,7 @@ from faultscope.collection import (
     CollectionRunOptions,
     CollectionTask,
     FiniteSizeScalingFit,
+    HotspotCollectionResult,
     PairwiseCrossing,
     Progress,
     TaskStats,
@@ -35,6 +36,7 @@ from faultscope.collection import (
     ThresholdPoint,
     analyze_thresholds,
     collect,
+    collect_hotspots,
     iter_collect,
     iter_progress,
     plot_threshold_analysis,
@@ -48,11 +50,9 @@ API_SNAPSHOT = REPO_ROOT / "tests" / "api_contract_v0_1.json"
 
 
 class ReleaseContractTests(unittest.TestCase):
-    def test_python_version_comes_from_distribution_metadata(self) -> None:
-        self.assertEqual(
-            faultscope.__version__,
-            importlib.metadata.version("faultscope"),
-        )
+    def test_python_distribution_version_is_v0_2(self) -> None:
+        self.assertEqual(faultscope.__version__, "0.2.0")
+        self.assertEqual(importlib.metadata.version("faultscope"), "0.2.0")
 
     def test_package_contains_pep561_marker_and_native_stub(self) -> None:
         package_root = Path(faultscope.__file__).resolve().parent
@@ -87,6 +87,7 @@ class ReleaseContractTests(unittest.TestCase):
     def test_public_python_function_signatures_are_frozen_for_v0_1(self) -> None:
         expected_parameters = {
             collect: ("tasks", "options", "run_options"),
+            collect_hotspots: ("tasks", "options", "run_options"),
             iter_collect: ("tasks", "options", "run_options"),
             iter_progress: ("tasks", "options", "run_options"),
             analyze_thresholds: (
@@ -129,6 +130,7 @@ class ReleaseContractTests(unittest.TestCase):
                 "start_batch_size",
                 "max_batch_size",
                 "max_batch_seconds",
+                "min_shots",
             ),
             CollectionRunOptions: (
                 "seed",
@@ -164,6 +166,11 @@ class ReleaseContractTests(unittest.TestCase):
                 "metadata",
                 "strong_id",
                 "custom_counts",
+            ),
+            HotspotCollectionResult: (
+                "stats",
+                "batch_stats",
+                "edge_sensitivities",
             ),
             Progress: ("new_stats", "status_message"),
             ThresholdPoint: ("x", "distance", "shots", "errors", "rate", "stderr"),
@@ -224,7 +231,7 @@ class ReleaseContractTests(unittest.TestCase):
         )
         self.assertEqual(
             sorted(name for name in Collector.__dict__ if not name.startswith("_")),
-            ["collect", "iter_collect", "iter_progress"],
+            ["collect", "collect_hotspots", "iter_collect", "iter_progress"],
         )
         self.assertEqual(
             sorted(name for name in ThresholdAnalysisResult.__dict__ if not name.startswith("_")),

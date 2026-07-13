@@ -9,6 +9,7 @@
 //! seed stream, and ordinal, not from the worker that executes the work.
 
 use std::collections::HashMap;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -19,7 +20,8 @@ use crate::api::{
     DemLogicalCollectionStats, DemLogicalCollectionTask,
 };
 use crate::counting::{sample_dem_logical_error_stats_with_rng, BatchStats, CountOptions};
-use faultscope_core::{NpError, NpResult, SmallRng};
+use crate::worker_decoder::WorkerDecoderCache;
+use faultscope_core::{NativeDecoderWorker, NpError, NpResult, SmallRng};
 
 #[derive(Clone)]
 struct BatchWork {
@@ -84,6 +86,7 @@ struct TaskState {
     task: Arc<DemLogicalCollectionTask>,
     stats: DemLogicalCollectionStats,
     target_shots: usize,
+    min_shots: usize,
     stop_error_limit: Option<usize>,
     specs: Vec<usize>,
     next_scheduled: usize,
@@ -189,32 +192,50 @@ fn collect_task_set_inner(
     let work_rx = Arc::new(Mutex::new(work_rx));
     let (result_tx, result_rx) = mpsc::channel::<NpResult<WorkResult>>();
     let mut handles = Vec::with_capacity(worker_count);
-
     for _ in 0..worker_count {
         let work_rx = work_rx.clone();
         let result_tx = result_tx.clone();
-        handles.push(thread::spawn(move || loop {
-            let work = {
-                let rx = work_rx.lock().unwrap();
-                rx.recv()
-            };
-            let Ok(work) = work else {
-                break;
-            };
-            match work {
-                Work::Shutdown => break,
-                Work::Batch(work) => {
-                    if result_tx.send(run_batch_work(work)).is_err() {
-                        break;
-                    }
+        handles.push(thread::spawn(move || {
+            let mut decoder_cache = WorkerDecoderCache::new();
+            loop {
+                let work = {
+                    let rx = work_rx.lock().unwrap();
+                    rx.recv()
+                };
+                let Ok(work) = work else {
+                    break;
+                };
+                if matches!(work, Work::Shutdown) {
+                    break;
                 }
-                Work::AdaptiveCalibration(work) => {
-                    if result_tx
-                        .send(run_adaptive_calibration_work(work, &result_tx))
-                        .is_err()
-                    {
-                        break;
-                    }
+                let context = worker_panic_context(&work);
+                let error_context = worker_error_context(&work);
+                let result = catch_unwind(AssertUnwindSafe(|| match work {
+                    Work::Batch(work) => decoder_cache
+                        .resolve(work.state_index, work.task.decoder.as_ref())
+                        .and_then(|decoder| run_batch_work(work, decoder)),
+                    Work::AdaptiveCalibration(work) => decoder_cache
+                        .resolve(work.state_index, work.task.decoder.as_ref())
+                        .and_then(|decoder| {
+                            run_adaptive_calibration_work(work, decoder, &result_tx)
+                        }),
+                    Work::Shutdown => unreachable!("shutdown work was handled before execution"),
+                }))
+                .map_or_else(
+                    |payload| {
+                        Err(NpError::new(format!(
+                            "{context}: {}",
+                            panic_payload_message(payload.as_ref())
+                        )))
+                    },
+                    |result| {
+                        result.map_err(|err| {
+                            NpError::new(format!("{error_context}: {}", err.message()))
+                        })
+                    },
+                );
+                if result_tx.send(result).is_err() {
+                    break;
                 }
             }
         }));
@@ -245,6 +266,11 @@ fn collect_task_set_inner(
             in_flight -= 1;
         }
         if first_error.is_some() {
+            if let Ok(WorkResult::AdaptiveDelta { ack, .. }) = result {
+                let _ = ack.send(Err(NpError::new(
+                    "adaptive collection cancelled after an earlier worker error",
+                )));
+            }
             continue;
         }
         match result {
@@ -294,6 +320,50 @@ fn collect_task_set_inner(
     collect_results(results)
 }
 
+fn worker_panic_context(work: &Work) -> String {
+    let (task_key, task) = match work {
+        Work::Batch(work) => (work.state_index, work.task.as_ref()),
+        Work::AdaptiveCalibration(work) => (work.state_index, work.task.as_ref()),
+        Work::Shutdown => return "collection worker panicked while shutting down".to_string(),
+    };
+    let backend = task
+        .decoder
+        .as_deref()
+        .map(|factory| factory.name())
+        .unwrap_or("none");
+    format!(
+        "collection worker panicked while processing task key {task_key} (`{}`) with backend `{backend}`",
+        task.task_id
+    )
+}
+
+fn worker_error_context(work: &Work) -> String {
+    let (task_key, task) = match work {
+        Work::Batch(work) => (work.state_index, work.task.as_ref()),
+        Work::AdaptiveCalibration(work) => (work.state_index, work.task.as_ref()),
+        Work::Shutdown => return "collection worker failed while shutting down".to_string(),
+    };
+    let backend = task
+        .decoder
+        .as_deref()
+        .map(|factory| factory.name())
+        .unwrap_or("none");
+    format!(
+        "collection worker failed while processing task key {task_key} (`{}`) with backend `{backend}`",
+        task.task_id
+    )
+}
+
+fn panic_payload_message(payload: &(dyn std::any::Any + Send)) -> &str {
+    if let Some(message) = payload.downcast_ref::<&str>() {
+        message
+    } else if let Some(message) = payload.downcast_ref::<String>() {
+        message.as_str()
+    } else {
+        "non-string panic payload"
+    }
+}
+
 fn make_task_state(
     output_index: usize,
     task: DemLogicalCollectionTask,
@@ -301,6 +371,7 @@ fn make_task_state(
     run_options: &DemLogicalCollectionRunOptions,
 ) -> NpResult<TaskState> {
     let target_shots = task.options.max_shots;
+    let min_shots = task.options.min_shots;
     let stop_error_limit = task.options.max_errors;
     let resume_shots = stats.shots;
     let remaining_shots = target_shots.saturating_sub(stats.shots);
@@ -310,6 +381,7 @@ fn make_task_state(
             task: Arc::new(task),
             stats,
             target_shots,
+            min_shots,
             stop_error_limit,
             specs: Vec::new(),
             next_scheduled: 0,
@@ -344,6 +416,7 @@ fn make_task_state(
         task: Arc::new(adjusted),
         stats,
         target_shots,
+        min_shots,
         stop_error_limit,
         specs,
         next_scheduled: 0,
@@ -365,6 +438,7 @@ fn adjusted_task_for_remaining(
 ) -> NpResult<DemLogicalCollectionTask> {
     let remaining_shots = task.options.max_shots.saturating_sub(stats.shots);
     task.options.max_shots = remaining_shots;
+    task.options.min_shots = task.options.min_shots.saturating_sub(stats.shots);
     if let Some(max_errors) = task.options.max_errors {
         let current = stop_error_count(stats, &run_options.custom_error_count_key);
         if current >= max_errors {
@@ -555,9 +629,10 @@ fn commit_ready_batches(
 
 fn reached_task_limit(state: &TaskState, run_options: &DemLogicalCollectionRunOptions) -> bool {
     state.stats.shots >= state.target_shots
-        || state.stop_error_limit.is_some_and(|limit| {
-            stop_error_count(&state.stats, &run_options.custom_error_count_key) >= limit
-        })
+        || (state.stats.shots >= state.min_shots
+            && state.stop_error_limit.is_some_and(|limit| {
+                stop_error_count(&state.stats, &run_options.custom_error_count_key) >= limit
+            }))
 }
 
 fn mark_state_complete(
@@ -574,7 +649,10 @@ fn mark_state_complete(
     Ok(())
 }
 
-fn run_batch_work(work: BatchWork) -> NpResult<WorkResult> {
+fn run_batch_work(
+    work: BatchWork,
+    decoder: Option<&mut dyn NativeDecoderWorker>,
+) -> NpResult<WorkResult> {
     let mut rng = SmallRng::new(batch_seed(work.seed, work.seed_stream, work.ordinal));
     let count_options = CountOptions {
         postselection_mask: work.task.postselection_mask.as_deref(),
@@ -586,7 +664,7 @@ fn run_batch_work(work: BatchWork) -> NpResult<WorkResult> {
         &work.task.sampler,
         work.shots,
         &mut rng,
-        work.task.decoder.as_deref(),
+        decoder,
         None,
         &count_options,
     )?;
@@ -599,10 +677,12 @@ fn run_batch_work(work: BatchWork) -> NpResult<WorkResult> {
 
 fn run_adaptive_calibration_work(
     work: AdaptiveCalibrationWork,
+    decoder: Option<&mut dyn NativeDecoderWorker>,
     result_tx: &mpsc::Sender<NpResult<WorkResult>>,
 ) -> NpResult<WorkResult> {
     let result = calibrate_adaptive_task(
         work.task.as_ref(),
+        decoder,
         &work.run_options,
         work.seed_stream,
         Some(work.state_index),
@@ -616,6 +696,7 @@ fn run_adaptive_calibration_work(
 
 fn calibrate_adaptive_task(
     task: &DemLogicalCollectionTask,
+    mut decoder: Option<&mut dyn NativeDecoderWorker>,
     run_options: &DemLogicalCollectionRunOptions,
     seed_stream: usize,
     state_index: Option<usize>,
@@ -650,14 +731,24 @@ fn calibrate_adaptive_task(
         batch_shots = batch_shots.min(task.options.max_shots - shots_done).max(1);
         let mut rng = SmallRng::new(batch_seed(seed, seed_stream, batch_ordinal));
         let batch_started = Instant::now();
-        let batch_stats = sample_dem_logical_error_stats_with_rng(
-            &task.sampler,
-            batch_shots,
-            &mut rng,
-            task.decoder.as_deref(),
-            Some(batch_started),
-            &count_options,
-        )?;
+        let batch_stats = match decoder.as_mut() {
+            Some(decoder) => sample_dem_logical_error_stats_with_rng(
+                &task.sampler,
+                batch_shots,
+                &mut rng,
+                Some(&mut **decoder),
+                Some(batch_started),
+                &count_options,
+            )?,
+            None => sample_dem_logical_error_stats_with_rng(
+                &task.sampler,
+                batch_shots,
+                &mut rng,
+                None,
+                Some(batch_started),
+                &count_options,
+            )?,
+        };
         let elapsed = batch_stats.seconds;
         let delta = stats_delta_from_batch(task, batch_stats, elapsed);
         stats.add_assign_checked(&delta)?;
@@ -677,9 +768,11 @@ fn calibrate_adaptive_task(
         observations.push((batch_shots, elapsed));
         batch_ordinal += 1;
 
-        if task.options.max_errors.is_some_and(|limit| {
-            stop_error_count(&stats, &run_options.custom_error_count_key) >= limit
-        }) {
+        if shots_done >= task.options.min_shots
+            && task.options.max_errors.is_some_and(|limit| {
+                stop_error_count(&stats, &run_options.custom_error_count_key) >= limit
+            })
+        {
             break;
         }
         if shots_done >= task.options.max_shots {
@@ -858,9 +951,10 @@ fn task_is_complete(
     custom_error_count_key: &Option<String>,
 ) -> bool {
     stats.shots >= options.max_shots
-        || options
-            .max_errors
-            .is_some_and(|limit| stop_error_count(stats, custom_error_count_key) >= limit)
+        || (stats.shots >= options.min_shots
+            && options
+                .max_errors
+                .is_some_and(|limit| stop_error_count(stats, custom_error_count_key) >= limit))
 }
 
 fn collect_results(
@@ -909,6 +1003,7 @@ mod tests {
     fn options() -> DemLogicalCollectionOptions {
         DemLogicalCollectionOptions {
             max_shots: 1_000,
+            min_shots: 0,
             max_errors: None,
             batch_size: 40,
             seed: Some(1),

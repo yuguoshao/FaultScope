@@ -2,9 +2,10 @@ use std::collections::HashMap;
 use std::time::Instant;
 
 use faultscope_core::{
-    logical_residual_loss_mask_native, word_count, CorrectionMaskBatch, DemHotspotEstimator,
-    DetectorEventShotBatchView, DetectorMaskBatchView, Mask, NativeBatchDecoder, NpError, NpResult,
-    PackedDetectorShotBatchView, PackedObservableShotBatch, SmallRng,
+    logical_residual_loss_mask_native, word_count, CorrectionMaskBatch, DemBatch,
+    DemHotspotEstimator, DetectorEventShotBatchView, DetectorMaskBatchView, Mask,
+    NativeDecoderWorker, NpError, NpResult, PackedDetectorShotBatchView, PackedObservableShotBatch,
+    SmallRng,
 };
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -14,6 +15,11 @@ pub(crate) struct BatchStats {
     pub(crate) discards: usize,
     pub(crate) seconds: f64,
     pub(crate) custom_counts: HashMap<String, usize>,
+}
+
+pub(crate) struct DetailedBatchResult {
+    pub(crate) stats: BatchStats,
+    pub(crate) loss_mask: Mask,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -28,7 +34,7 @@ pub(crate) fn sample_dem_logical_error_stats_with_rng(
     sampler: &DemHotspotEstimator,
     shots: usize,
     rng: &mut SmallRng,
-    decoder: Option<&dyn NativeBatchDecoder>,
+    decoder: Option<&mut dyn NativeDecoderWorker>,
     started: Option<Instant>,
     count_options: &CountOptions<'_>,
 ) -> NpResult<BatchStats> {
@@ -67,7 +73,7 @@ fn sample_detailed_batch(
     sampler: &DemHotspotEstimator,
     shots: usize,
     rng: &mut SmallRng,
-    decoder: Option<&dyn NativeBatchDecoder>,
+    decoder: Option<&mut dyn NativeDecoderWorker>,
     count_options: &CountOptions<'_>,
 ) -> NpResult<BatchStats> {
     validate_mask_shape(
@@ -82,11 +88,31 @@ fn sample_detailed_batch(
     )?;
 
     let batch = sampler.run_batch_with_rng(shots, rng, false);
+    Ok(count_detailed_batch(sampler, &batch, decoder, count_options)?.stats)
+}
+
+pub(crate) fn count_detailed_batch(
+    sampler: &DemHotspotEstimator,
+    batch: &DemBatch,
+    decoder: Option<&mut dyn NativeDecoderWorker>,
+    count_options: &CountOptions<'_>,
+) -> NpResult<DetailedBatchResult> {
+    let shots = batch.shots;
+    validate_mask_shape(
+        count_options.postselection_mask,
+        sampler.detector_ids.len(),
+        "postselection_mask",
+    )?;
+    validate_mask_shape(
+        count_options.postselected_observables_mask,
+        sampler.observable_ids.len(),
+        "postselected_observables_mask",
+    )?;
     let corrections = match decoder {
         Some(decoder) => {
-            let detector_masks =
-                detector_mask_view_from_map(&batch.detectors, decoder.detector_ids())?;
-            let view = DetectorMaskBatchView::new(decoder.detector_ids(), &detector_masks, shots)?;
+            let detector_ids = decoder.detector_ids().to_vec();
+            let detector_masks = detector_mask_view_from_map(&batch.detectors, &detector_ids)?;
+            let view = DetectorMaskBatchView::new(&detector_ids, &detector_masks, shots)?;
             decoder.decode_batch_checked(view)?
         }
         None => CorrectionMaskBatch::empty(shots),
@@ -98,6 +124,7 @@ fn sample_detailed_batch(
         &sampler.observable_ids,
         shots,
     );
+    let mut loss_mask = Mask::zero(word_count(shots));
     let detector_discard_mask = detector_postselection_loss_mask(
         &batch.detectors,
         &sampler.detector_ids,
@@ -147,6 +174,7 @@ fn sample_detailed_batch(
         }
         if logical_error {
             errors += 1;
+            set_mask_bit(&mut loss_mask, shot);
             if count_options.count_observable_error_combos {
                 *custom_counts
                     .entry(format!("obs_mistake_mask={combo}"))
@@ -155,12 +183,15 @@ fn sample_detailed_batch(
         }
     }
 
-    Ok(BatchStats {
-        shots,
-        errors,
-        discards,
-        seconds: 0.0,
-        custom_counts,
+    Ok(DetailedBatchResult {
+        stats: BatchStats {
+            shots,
+            errors,
+            discards,
+            seconds: 0.0,
+            custom_counts,
+        },
+        loss_mask,
     })
 }
 
@@ -168,17 +199,18 @@ fn sample_dem_logical_error_count_with_decoder(
     sampler: &DemHotspotEstimator,
     shots: usize,
     rng: &mut SmallRng,
-    decoder: &dyn NativeBatchDecoder,
+    decoder: &mut dyn NativeDecoderWorker,
 ) -> NpResult<usize> {
     if decoder.supports_detector_event_batch() {
+        let detector_ids = decoder.detector_ids().to_vec();
         let event_batch = sampler.run_detector_event_shot_batch_with_rng(
             shots,
             rng,
-            decoder.detector_ids(),
+            &detector_ids,
             &sampler.observable_ids,
         )?;
         let detector_view = DetectorEventShotBatchView::new(
-            decoder.detector_ids(),
+            &detector_ids,
             &event_batch.offsets,
             &event_batch.events,
             event_batch.shots,
@@ -194,14 +226,15 @@ fn sample_dem_logical_error_count_with_decoder(
     }
 
     if decoder.supports_packed_batch() {
+        let detector_ids = decoder.detector_ids().to_vec();
         let packed_batch = sampler.run_packed_shot_batch_with_rng(
             shots,
             rng,
-            decoder.detector_ids(),
+            &detector_ids,
             &sampler.observable_ids,
         )?;
         let detector_view = PackedDetectorShotBatchView::new(
-            decoder.detector_ids(),
+            &detector_ids,
             &packed_batch.detector_data,
             packed_batch.shots,
         )?;
@@ -216,8 +249,9 @@ fn sample_dem_logical_error_count_with_decoder(
     }
 
     let batch = sampler.run_batch_with_rng(shots, rng, false);
-    let detector_masks = detector_mask_view_from_map(&batch.detectors, decoder.detector_ids())?;
-    let view = DetectorMaskBatchView::new(decoder.detector_ids(), &detector_masks, shots)?;
+    let detector_ids = decoder.detector_ids().to_vec();
+    let detector_masks = detector_mask_view_from_map(&batch.detectors, &detector_ids)?;
+    let view = DetectorMaskBatchView::new(&detector_ids, &detector_masks, shots)?;
     let corrections = decoder.decode_batch_checked(view)?;
     let loss_mask = logical_residual_loss_mask_native(
         &batch.observables,
@@ -376,6 +410,12 @@ fn mask_bit(mask: &Mask, shot: usize) -> bool {
     mask.words
         .get(shot >> 6)
         .is_some_and(|word| ((word >> (shot & 63)) & 1) != 0)
+}
+
+fn set_mask_bit(mask: &mut Mask, shot: usize) {
+    if let Some(word) = mask.words.get_mut(shot >> 6) {
+        *word |= 1u64 << (shot & 63);
+    }
 }
 
 fn packed_mask_bit(mask: Option<&[u8]>, index: usize) -> bool {

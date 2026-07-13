@@ -80,6 +80,56 @@ pub(crate) fn _collect_dem_logical_error_stats_many(
         .collect()
 }
 
+#[pyfunction]
+#[pyo3(signature = (
+    tasks,
+    num_workers=1,
+    seed=None,
+    count_observable_error_combos=false,
+    count_detection_events=false,
+    custom_error_count_key=None
+))]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn _collect_dem_hotspots_many(
+    py: Python<'_>,
+    tasks: &Bound<'_, PyAny>,
+    num_workers: usize,
+    seed: Option<u64>,
+    count_observable_error_combos: bool,
+    count_detection_events: bool,
+    custom_error_count_key: Option<String>,
+) -> PyResult<Vec<PyObject>> {
+    let rust_tasks = py_collection_tasks_to_rust(tasks)?;
+    let run_options = faultscope_collection::DemLogicalCollectionRunOptions {
+        num_workers,
+        seed,
+        count_observable_error_combos,
+        count_detection_events,
+        custom_error_count_key,
+    };
+    let results = py
+        .allow_threads(|| faultscope_collection::collect_dem_hotspot_tasks(rust_tasks, run_options))
+        .map_err(collection_error_to_py)?;
+    results
+        .iter()
+        .map(|result| {
+            let out = PyDict::new(py);
+            out.set_item("stats", collection_stats_to_py(py, &result.stats)?)?;
+            let batches = result
+                .batch_stats
+                .iter()
+                .map(|stats| collection_stats_to_py(py, stats))
+                .collect::<PyResult<Vec<_>>>()?;
+            out.set_item("batch_stats", PyTuple::new(py, batches)?)?;
+            out.set_item(
+                "edge_sensitivities",
+                PyTuple::new(py, result.edge_sensitivities.iter().copied())?,
+            )?;
+            Ok(out.into())
+        })
+        .collect()
+}
+
 fn collection_error_to_py(err: faultscope_core::NpError) -> PyErr {
     let message = err.to_string();
     if message.contains("collection progress callback failed") {
@@ -130,6 +180,7 @@ fn py_collection_task_to_rust(
         metadata_json: required_string(dict, "metadata_json")?,
         options: faultscope_collection::DemLogicalCollectionOptions {
             max_shots: required_item(dict, "max_shots")?.extract::<usize>()?,
+            min_shots: required_item(dict, "min_shots")?.extract::<usize>()?,
             max_errors: optional_usize(dict, "max_errors")?,
             batch_size: required_item(dict, "batch_size")?.extract::<usize>()?,
             seed: optional_u64(dict, "seed")?,

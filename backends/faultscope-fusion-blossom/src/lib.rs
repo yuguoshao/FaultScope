@@ -1,10 +1,11 @@
 use faultscope_core::{
     log_likelihood_ratio, FaultScopeNativeCorrectionMaskBatchMutViewV1,
-    FaultScopeNativeDecoderI64SliceV1, FaultScopeNativeDecoderStatusV1,
-    FaultScopeNativeDecoderStringViewV1, FaultScopeNativeDecoderV1,
+    FaultScopeNativeDecoderFactoryV2, FaultScopeNativeDecoderI64SliceV1,
+    FaultScopeNativeDecoderStatusV1, FaultScopeNativeDecoderStringViewV1,
+    FaultScopeNativeDecoderWorkerV2, FaultScopeNativeDetectorEventShotBatchViewV1,
     FaultScopeNativeDetectorMaskBatchViewV1, FaultScopeNativePackedDetectorShotBatchViewV1,
-    FaultScopeNativePackedObservableShotBatchMutViewV1, NATIVE_DECODER_PLUGIN_ABI_VERSION,
-    NATIVE_DECODER_PLUGIN_FLAG_THREAD_SAFE, NATIVE_DECODER_PLUGIN_STATUS_ERROR,
+    FaultScopeNativePackedObservableShotBatchMutViewV1, NATIVE_DECODER_FACTORY_FLAG_THREAD_SAFE,
+    NATIVE_DECODER_PLUGIN_ABI_VERSION, NATIVE_DECODER_PLUGIN_STATUS_ERROR,
 };
 use fusion_blossom::complete_graph::CompleteGraph;
 use fusion_blossom::dual_module::{DualNodeClass, DualNodePtr};
@@ -24,18 +25,18 @@ use std::mem;
 use std::os::raw::c_char;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::slice;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Mutex;
-use std::thread;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 const BACKEND_NAME: &str = "fusion-blossom";
-const CAPSULE_NAME: &[u8] = b"faultscope.native_decoder_plugin.v1\0";
+const CAPSULE_NAME: &[u8] = b"faultscope.native_decoder_plugin.v2\0";
 const DEFAULT_WEIGHT_SCALE: f64 = 10_000.0;
 
 #[pyclass(name = "NativeFusionBlossomNativeDecoder")]
 struct PyNativeFusionBlossomNativeDecoder {
     capsule: Py<PyAny>,
+    test_stats: Arc<NativeDecoderTestStats>,
     detector_ids: Vec<i64>,
     detector_coords: Vec<Vec<f64>>,
     observable_ids: Vec<i64>,
@@ -62,37 +63,33 @@ impl PyNativeFusionBlossomNativeDecoder {
         let observable_ids = builder.observable_ids.clone();
         let built = builder.build()?;
         let build_summary = built.summary;
-        let solver = SolverBackend::new(&built.initializer).map_err(PyValueError::new_err)?;
-        let worker_states = build_worker_state_slots();
-        let state = Box::new(DecoderState {
-            detector_ids: detector_ids.clone(),
-            observable_ids: observable_ids.clone(),
-            detector_to_solver_vertices: built.detector_to_solver_vertices,
-            is_virtual_vertex: built.is_virtual_vertex,
-            path_resolver: Mutex::new(PathEffectResolver::new(&built.initializer)),
-            initializer: built.initializer.clone(),
-            solver: Mutex::new(solver),
-            worker_states,
-            edge_effects: built.edge_effects,
-            last_error: Mutex::new(CString::new("").expect("empty CString")),
-        });
-        let descriptor = Box::new(FaultScopeNativeDecoderV1 {
+        let state = FactoryState::new(
+            detector_ids.clone(),
+            observable_ids.clone(),
+            built.detector_to_solver_vertices,
+            built.is_virtual_vertex,
+            built.initializer,
+            built.edge_effects,
+        )
+        .map_err(PyValueError::new_err)?;
+        let test_stats = Arc::clone(&state.test_stats);
+        let state = Box::new(state);
+        let descriptor = Box::new(FaultScopeNativeDecoderFactoryV2 {
             abi_version: NATIVE_DECODER_PLUGIN_ABI_VERSION,
-            struct_size: mem::size_of::<FaultScopeNativeDecoderV1>(),
-            flags: NATIVE_DECODER_PLUGIN_FLAG_THREAD_SAFE,
-            state: Box::into_raw(state).cast::<c_void>(),
-            drop_state: Some(drop_state),
+            struct_size: mem::size_of::<FaultScopeNativeDecoderFactoryV2>(),
+            flags: NATIVE_DECODER_FACTORY_FLAG_THREAD_SAFE,
+            factory_state: Box::into_raw(state).cast::<c_void>(),
+            drop_factory_state: Some(drop_factory_state),
             name: Some(decoder_name),
             detector_ids: Some(decoder_detector_ids),
             observable_ids: Some(decoder_observable_ids),
-            decode_batch: Some(decoder_decode_batch),
-            decode_packed_batch: Some(decoder_decode_packed_batch),
-            decode_detector_event_batch: None,
+            create_worker: Some(create_worker),
         });
         let capsule = unsafe { create_decoder_capsule(py, Box::into_raw(descriptor))? };
 
         Ok(Self {
             capsule,
+            test_stats,
             detector_ids,
             detector_coords,
             observable_ids,
@@ -209,18 +206,14 @@ impl PyNativeFusionBlossomNativeDecoder {
             shots,
             word_count,
         };
-        let descriptor = unsafe {
-            &*(pyo3::ffi::PyCapsule_GetPointer(
-                self.capsule.as_ptr(),
-                CAPSULE_NAME.as_ptr().cast::<c_char>(),
-            )
-            .cast::<FaultScopeNativeDecoderV1>())
-        };
+        let worker =
+            unsafe { create_temporary_worker(&self.capsule) }.map_err(PyValueError::new_err)?;
         let status = unsafe {
-            descriptor
+            worker
+                .descriptor
                 .decode_batch
-                .expect("fusion-blossom descriptor has decode callback")(
-                descriptor.state,
+                .expect("fusion-blossom worker has decode callback")(
+                worker.descriptor.worker_state,
                 &input,
                 &mut output,
             )
@@ -243,6 +236,18 @@ impl PyNativeFusionBlossomNativeDecoder {
         self.capsule.clone_ref(py)
     }
 
+    fn _test_stats_for_test(&self, py: Python<'_>) -> PyResult<Py<PyNativeDecoderTestStats>> {
+        self.test_stats
+            .collect_enabled
+            .store(true, Ordering::SeqCst);
+        Py::new(
+            py,
+            PyNativeDecoderTestStats {
+                stats: Arc::clone(&self.test_stats),
+            },
+        )
+    }
+
     fn __repr__(&self) -> String {
         format!(
             "NativeFusionBlossomNativeDecoder(name={:?}, detector_ids={:?}, observable_ids={:?}, solver_vertex_count={}, solver_edge_count={})",
@@ -258,6 +263,7 @@ impl PyNativeFusionBlossomNativeDecoder {
 #[pyclass(name = "InvalidNativeDecoderCapsule")]
 struct PyInvalidNativeDecoderCapsule {
     capsule: Py<PyAny>,
+    worker_drops: Arc<AtomicUsize>,
 }
 
 #[pymethods]
@@ -265,37 +271,40 @@ impl PyInvalidNativeDecoderCapsule {
     #[new]
     fn new(py: Python<'_>, kind: &str) -> PyResult<Self> {
         let initializer = SolverInitializer::new(2, Vec::new(), Vec::new());
-        let solver = SolverBackend::new(&initializer).map_err(PyValueError::new_err)?;
-        let state = Box::new(DecoderState {
-            detector_ids: vec![0],
-            observable_ids: vec![0],
-            detector_to_solver_vertices: vec![0],
-            is_virtual_vertex: vec![false, true],
-            path_resolver: Mutex::new(PathEffectResolver::new(&initializer)),
+        let mut state = FactoryState::new(
+            vec![0],
+            vec![0],
+            vec![0],
+            vec![false, true],
             initializer,
-            solver: Mutex::new(solver),
-            worker_states: Vec::new(),
-            edge_effects: Vec::new(),
-            last_error: Mutex::new(CString::new("").expect("empty CString")),
-        });
-        let mut descriptor = FaultScopeNativeDecoderV1 {
+            Vec::new(),
+        )
+        .map_err(PyValueError::new_err)?;
+        let worker_drops = Arc::new(AtomicUsize::new(0));
+        state.worker_drop_counter = Some(Arc::clone(&worker_drops));
+        let mut descriptor = FaultScopeNativeDecoderFactoryV2 {
             abi_version: NATIVE_DECODER_PLUGIN_ABI_VERSION,
-            struct_size: mem::size_of::<FaultScopeNativeDecoderV1>(),
-            flags: NATIVE_DECODER_PLUGIN_FLAG_THREAD_SAFE,
-            state: Box::into_raw(state).cast::<c_void>(),
-            drop_state: Some(drop_state),
+            struct_size: mem::size_of::<FaultScopeNativeDecoderFactoryV2>(),
+            flags: NATIVE_DECODER_FACTORY_FLAG_THREAD_SAFE,
+            factory_state: std::ptr::null_mut(),
+            drop_factory_state: Some(drop_factory_state),
             name: Some(decoder_name),
             detector_ids: Some(decoder_detector_ids),
             observable_ids: Some(decoder_observable_ids),
-            decode_batch: Some(decoder_decode_batch),
-            decode_packed_batch: None,
-            decode_detector_event_batch: None,
+            create_worker: Some(create_worker),
         };
         match kind {
             "abi-mismatch" => descriptor.abi_version = NATIVE_DECODER_PLUGIN_ABI_VERSION + 1,
-            "missing-callback" => descriptor.decode_batch = None,
+            "missing-callback" => descriptor.create_worker = None,
             "not-thread-safe" => descriptor.flags = 0,
-            "decode-error" => descriptor.decode_batch = Some(forced_error_decode_batch),
+            "decode-error" => descriptor.create_worker = Some(create_forced_error_worker),
+            "create-error" => state.worker_create_mode = WorkerCreateMode::Error,
+            "create-error-after-allocation" => {
+                state.worker_create_mode = WorkerCreateMode::ErrorAfterAllocation
+            }
+            "create-panic" => state.worker_create_mode = WorkerCreateMode::Panic,
+            "missing-worker-decode" => state.worker_create_mode = WorkerCreateMode::MissingDecode,
+            "invalid-worker-size" => state.worker_create_mode = WorkerCreateMode::InvalidSize,
             _ => {
                 unsafe {
                     drop_descriptor(Box::into_raw(Box::new(descriptor)));
@@ -305,26 +314,306 @@ impl PyInvalidNativeDecoderCapsule {
                 )));
             }
         }
+        descriptor.factory_state = Box::into_raw(Box::new(state)).cast::<c_void>();
         let capsule = unsafe { create_decoder_capsule(py, Box::into_raw(Box::new(descriptor)))? };
-        Ok(Self { capsule })
+        Ok(Self {
+            capsule,
+            worker_drops,
+        })
+    }
+
+    #[getter]
+    fn worker_drops(&self) -> usize {
+        self.worker_drops.load(Ordering::SeqCst)
     }
 
     fn __faultscope_native_decoder_capsule__(&self, py: Python<'_>) -> Py<PyAny> {
         self.capsule.clone_ref(py)
     }
+
+    fn _try_create_temporary_worker_for_test(&self) -> PyResult<()> {
+        let worker =
+            unsafe { create_temporary_worker(&self.capsule) }.map_err(PyValueError::new_err)?;
+        drop(worker);
+        Ok(())
+    }
 }
 
-struct DecoderState {
+struct FactoryState {
     detector_ids: Vec<i64>,
     observable_ids: Vec<i64>,
     detector_to_solver_vertices: Vec<VertexIndex>,
     is_virtual_vertex: Vec<bool>,
-    path_resolver: Mutex<PathEffectResolver>,
     initializer: SolverInitializer,
-    solver: Mutex<SolverBackend>,
-    worker_states: Vec<Mutex<Option<WorkerDecodeState>>>,
     edge_effects: Vec<SolverEdgeEffect>,
-    last_error: Mutex<CString>,
+    error_messages: Mutex<Vec<CString>>,
+    worker_create_mode: WorkerCreateMode,
+    worker_drop_counter: Option<Arc<AtomicUsize>>,
+    test_stats: Arc<NativeDecoderTestStats>,
+}
+
+#[derive(Clone, Copy)]
+enum WorkerCreateMode {
+    Normal,
+    Error,
+    ErrorAfterAllocation,
+    Panic,
+    MissingDecode,
+    InvalidSize,
+}
+
+impl FactoryState {
+    fn new(
+        detector_ids: Vec<i64>,
+        observable_ids: Vec<i64>,
+        detector_to_solver_vertices: Vec<VertexIndex>,
+        is_virtual_vertex: Vec<bool>,
+        initializer: SolverInitializer,
+        edge_effects: Vec<SolverEdgeEffect>,
+    ) -> Result<Self, String> {
+        WorkerDecodeState::new(&initializer)?;
+        Ok(Self {
+            detector_ids,
+            observable_ids,
+            detector_to_solver_vertices,
+            is_virtual_vertex,
+            initializer,
+            edge_effects,
+            error_messages: Mutex::new(Vec::new()),
+            worker_create_mode: WorkerCreateMode::Normal,
+            worker_drop_counter: None,
+            test_stats: Arc::new(NativeDecoderTestStats::default()),
+        })
+    }
+
+    fn create_worker(&self) -> Result<WorkerState, String> {
+        match self.worker_create_mode {
+            WorkerCreateMode::Error => {
+                return Err("injected fusion-blossom worker creation error".to_string())
+            }
+            WorkerCreateMode::Panic => panic!("injected fusion-blossom worker creation panic"),
+            _ => {}
+        }
+        let mut worker = WorkerState::new(
+            self.detector_ids.clone(),
+            self.observable_ids.clone(),
+            self.detector_to_solver_vertices.clone(),
+            self.is_virtual_vertex.clone(),
+            self.initializer.clone(),
+            self.edge_effects.clone(),
+            Arc::clone(&self.test_stats),
+        )?;
+        worker.drop_counter = self.worker_drop_counter.clone();
+        Ok(worker)
+    }
+}
+
+impl Drop for FactoryState {
+    fn drop(&mut self) {
+        if self.test_stats.collect_enabled.load(Ordering::SeqCst) {
+            self.test_stats.factory_drops.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+}
+
+struct WorkerState {
+    detector_ids: Vec<i64>,
+    observable_ids: Vec<i64>,
+    detector_to_solver_vertices: Vec<VertexIndex>,
+    is_virtual_vertex: Vec<bool>,
+    edge_effects: Vec<SolverEdgeEffect>,
+    decode: WorkerDecodeState,
+    error_messages: Vec<CString>,
+    drop_counter: Option<Arc<AtomicUsize>>,
+    test_stats: Arc<NativeDecoderTestStats>,
+}
+
+impl WorkerState {
+    fn new(
+        detector_ids: Vec<i64>,
+        observable_ids: Vec<i64>,
+        detector_to_solver_vertices: Vec<VertexIndex>,
+        is_virtual_vertex: Vec<bool>,
+        initializer: SolverInitializer,
+        edge_effects: Vec<SolverEdgeEffect>,
+        test_stats: Arc<NativeDecoderTestStats>,
+    ) -> Result<Self, String> {
+        let decode = WorkerDecodeState::new(&initializer)?;
+        Ok(Self {
+            detector_ids,
+            observable_ids,
+            detector_to_solver_vertices,
+            is_virtual_vertex,
+            edge_effects,
+            decode,
+            error_messages: Vec::new(),
+            drop_counter: None,
+            test_stats,
+        })
+    }
+}
+
+impl Drop for WorkerState {
+    fn drop(&mut self) {
+        if self.test_stats.collect_enabled.load(Ordering::SeqCst) {
+            self.test_stats.worker_drops.fetch_add(1, Ordering::SeqCst);
+        }
+        if let Some(counter) = &self.drop_counter {
+            counter.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+}
+
+#[derive(Default)]
+struct NativeDecoderTestStats {
+    collect_enabled: AtomicBool,
+    overlap_enabled: AtomicBool,
+    factory_drops: AtomicUsize,
+    worker_creates: AtomicUsize,
+    worker_drops: AtomicUsize,
+    active_decodes: AtomicUsize,
+    max_active_decodes: AtomicUsize,
+    worker_addresses: Mutex<Vec<usize>>,
+}
+
+impl NativeDecoderTestStats {
+    fn record_worker_create(&self, address: usize) {
+        if !self.collect_enabled.load(Ordering::SeqCst) {
+            return;
+        }
+        self.worker_creates.fetch_add(1, Ordering::SeqCst);
+        self.worker_addresses
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push(address);
+    }
+
+    fn enter_decode(self: &Arc<Self>) -> Option<DecodeActivityGuard> {
+        if !self.overlap_enabled.load(Ordering::SeqCst) {
+            return None;
+        }
+        let active = self.active_decodes.fetch_add(1, Ordering::SeqCst) + 1;
+        self.max_active_decodes.fetch_max(active, Ordering::SeqCst);
+        std::thread::sleep(Duration::from_millis(5));
+        Some(DecodeActivityGuard {
+            stats: Arc::clone(self),
+        })
+    }
+}
+
+struct DecodeActivityGuard {
+    stats: Arc<NativeDecoderTestStats>,
+}
+
+impl Drop for DecodeActivityGuard {
+    fn drop(&mut self) {
+        self.stats.active_decodes.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+#[pyclass(name = "_NativeDecoderTestStats")]
+struct PyNativeDecoderTestStats {
+    stats: Arc<NativeDecoderTestStats>,
+}
+
+#[pymethods]
+impl PyNativeDecoderTestStats {
+    #[getter]
+    fn factory_drops(&self) -> usize {
+        self.stats.factory_drops.load(Ordering::SeqCst)
+    }
+
+    #[getter]
+    fn worker_creates(&self) -> usize {
+        self.stats.worker_creates.load(Ordering::SeqCst)
+    }
+
+    #[getter]
+    fn worker_drops(&self) -> usize {
+        self.stats.worker_drops.load(Ordering::SeqCst)
+    }
+
+    #[getter]
+    fn active_decodes(&self) -> usize {
+        self.stats.active_decodes.load(Ordering::SeqCst)
+    }
+
+    #[getter]
+    fn max_active_decodes(&self) -> usize {
+        self.stats.max_active_decodes.load(Ordering::SeqCst)
+    }
+
+    #[getter]
+    fn worker_addresses(&self) -> Vec<usize> {
+        self.stats
+            .worker_addresses
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
+    fn enable_decode_overlap(&self) {
+        self.stats.collect_enabled.store(true, Ordering::SeqCst);
+        self.stats.overlap_enabled.store(true, Ordering::SeqCst);
+    }
+}
+
+struct TemporaryWorker {
+    descriptor: FaultScopeNativeDecoderWorkerV2,
+}
+
+impl Drop for TemporaryWorker {
+    fn drop(&mut self) {
+        if !self.descriptor.worker_state.is_null() {
+            if let Some(drop_worker_state) = self.descriptor.drop_worker_state {
+                unsafe { drop_worker_state(self.descriptor.worker_state) };
+                self.descriptor.worker_state = std::ptr::null_mut();
+            }
+        }
+    }
+}
+
+unsafe fn create_temporary_worker(capsule: &Py<PyAny>) -> Result<TemporaryWorker, String> {
+    let factory =
+        pyo3::ffi::PyCapsule_GetPointer(capsule.as_ptr(), CAPSULE_NAME.as_ptr().cast::<c_char>())
+            .cast::<FaultScopeNativeDecoderFactoryV2>();
+    if factory.is_null() {
+        return Err("fusion-blossom capsule contained a null factory descriptor".to_string());
+    }
+    let factory = &*factory;
+    let create_worker = factory
+        .create_worker
+        .ok_or_else(|| "fusion-blossom factory is missing create_worker".to_string())?;
+    let mut descriptor = FaultScopeNativeDecoderWorkerV2 {
+        struct_size: mem::size_of::<FaultScopeNativeDecoderWorkerV2>(),
+        worker_state: std::ptr::null_mut(),
+        drop_worker_state: None,
+        decode_batch: None,
+        decode_packed_batch: None,
+        decode_detector_event_batch: None,
+    };
+    let status = create_worker(
+        factory.factory_state.cast_const(),
+        &mut descriptor,
+        mem::size_of::<FaultScopeNativeDecoderWorkerV2>(),
+    );
+    let worker = TemporaryWorker { descriptor };
+    if status.code != faultscope_core::NATIVE_DECODER_PLUGIN_STATUS_OK {
+        return Err(format!(
+            "native decoder plugin error: {}",
+            string_view_to_string(status.message)
+        ));
+    }
+    if worker.descriptor.struct_size
+        < mem::offset_of!(FaultScopeNativeDecoderWorkerV2, decode_packed_batch)
+        || worker.descriptor.struct_size > mem::size_of::<FaultScopeNativeDecoderWorkerV2>()
+        || worker.descriptor.worker_state.is_null()
+        || worker.descriptor.drop_worker_state.is_none()
+        || worker.descriptor.decode_batch.is_none()
+    {
+        return Err("fusion-blossom factory returned an invalid worker descriptor".to_string());
+    }
+    Ok(worker)
 }
 
 struct WorkerDecodeState {
@@ -872,13 +1161,6 @@ impl WorkerDecodeState {
     }
 }
 
-fn build_worker_state_slots() -> Vec<Mutex<Option<WorkerDecodeState>>> {
-    let worker_count = thread::available_parallelism()
-        .map(|count| count.get())
-        .unwrap_or(1);
-    (0..worker_count).map(|_| Mutex::new(None)).collect()
-}
-
 fn validate_weight_scale(weight_scale: f64) -> PyResult<()> {
     if !weight_scale.is_finite() || weight_scale <= 0.0 {
         return Err(PyValueError::new_err(
@@ -1051,15 +1333,89 @@ unsafe extern "C" fn forced_error_decode_batch(
         return static_error("forced error decoder received null state pointer");
     }
     state_error(
-        &*state.cast::<DecoderState>(),
+        &mut *state.cast::<WorkerState>(),
         "forced native decoder decode failure",
     )
 }
 
-unsafe extern "C" fn drop_state(state: *mut c_void) {
+unsafe extern "C" fn drop_factory_state(state: *mut c_void) {
     if !state.is_null() {
-        drop(Box::from_raw(state.cast::<DecoderState>()));
+        drop(Box::from_raw(state.cast::<FactoryState>()));
     }
+}
+
+unsafe extern "C" fn drop_worker_state(state: *mut c_void) {
+    if !state.is_null() {
+        drop(Box::from_raw(state.cast::<WorkerState>()));
+    }
+}
+
+unsafe extern "C" fn create_worker(
+    factory_state: *const c_void,
+    out: *mut FaultScopeNativeDecoderWorkerV2,
+    capacity: usize,
+) -> FaultScopeNativeDecoderStatusV1 {
+    if out.is_null() {
+        return static_error("fusion-blossom worker factory received null output pointer");
+    }
+    if factory_state.is_null() {
+        return static_error("fusion-blossom worker factory received null factory state");
+    }
+    if capacity < mem::size_of::<FaultScopeNativeDecoderWorkerV2>() {
+        return static_error("fusion-blossom worker descriptor capacity is too small");
+    }
+    let factory = &*factory_state.cast::<FactoryState>();
+    match catch_unwind(AssertUnwindSafe(|| factory.create_worker())) {
+        Ok(Ok(worker)) => {
+            let worker = Box::new(worker);
+            let worker_state = Box::into_raw(worker).cast::<c_void>();
+            factory
+                .test_stats
+                .record_worker_create(worker_state as usize);
+            let mut descriptor = FaultScopeNativeDecoderWorkerV2 {
+                struct_size: mem::size_of::<FaultScopeNativeDecoderWorkerV2>(),
+                worker_state,
+                drop_worker_state: Some(drop_worker_state),
+                decode_batch: Some(decoder_decode_batch),
+                decode_packed_batch: Some(decoder_decode_packed_batch),
+                decode_detector_event_batch: Some(decoder_decode_detector_event_batch),
+            };
+            match factory.worker_create_mode {
+                WorkerCreateMode::MissingDecode => descriptor.decode_batch = None,
+                WorkerCreateMode::InvalidSize => descriptor.struct_size = 0,
+                _ => {}
+            }
+            std::ptr::write(out, descriptor);
+            if matches!(
+                factory.worker_create_mode,
+                WorkerCreateMode::ErrorAfterAllocation
+            ) {
+                factory_error(
+                    factory,
+                    "fusion-blossom worker creation failed after allocation",
+                )
+            } else {
+                FaultScopeNativeDecoderStatusV1::ok()
+            }
+        }
+        Ok(Err(message)) => factory_error(
+            factory,
+            format!("fusion-blossom worker creation failed: {message}"),
+        ),
+        Err(_) => factory_error(factory, "fusion-blossom worker creation panicked"),
+    }
+}
+
+unsafe extern "C" fn create_forced_error_worker(
+    factory_state: *const c_void,
+    out: *mut FaultScopeNativeDecoderWorkerV2,
+    capacity: usize,
+) -> FaultScopeNativeDecoderStatusV1 {
+    let status = create_worker(factory_state, out, capacity);
+    if status.code == faultscope_core::NATIVE_DECODER_PLUGIN_STATUS_OK {
+        (*out).decode_batch = Some(forced_error_decode_batch);
+    }
+    status
 }
 
 unsafe extern "C" fn decoder_name(
@@ -1096,7 +1452,7 @@ unsafe extern "C" fn decoder_observable_ids(
 unsafe fn ids_callback(
     state: *const c_void,
     out: *mut FaultScopeNativeDecoderI64SliceV1,
-    ids: impl FnOnce(&DecoderState) -> &[i64],
+    ids: impl FnOnce(&FactoryState) -> &[i64],
 ) -> FaultScopeNativeDecoderStatusV1 {
     if out.is_null() {
         return static_error("fusion-blossom ids callback received null output pointer");
@@ -1104,7 +1460,7 @@ unsafe fn ids_callback(
     if state.is_null() {
         return static_error("fusion-blossom ids callback received null state pointer");
     }
-    let state = &*state.cast::<DecoderState>();
+    let state = &*state.cast::<FactoryState>();
     let ids = ids(state);
     *out = FaultScopeNativeDecoderI64SliceV1 {
         ptr: ids.as_ptr(),
@@ -1121,7 +1477,8 @@ unsafe extern "C" fn decoder_decode_batch(
     if state.is_null() {
         return static_error("fusion-blossom decode callback received null state pointer");
     }
-    let state = &*state.cast::<DecoderState>();
+    let state = &mut *state.cast::<WorkerState>();
+    let _activity = state.test_stats.enter_decode();
     if input.is_null() {
         return state_error(
             state,
@@ -1237,24 +1594,27 @@ unsafe extern "C" fn decoder_decode_batch(
             return state_error(state, "fusion-blossom output mask words pointer is null");
         }
     }
-    let mut solver = match state.solver.lock() {
-        Ok(solver) => solver,
-        Err(_) => return state_error(state, "fusion-blossom solver mutex poisoned"),
-    };
-    let mut path_resolver = match state.path_resolver.lock() {
-        Ok(path_resolver) => path_resolver,
-        Err(_) => return state_error(state, "fusion-blossom path resolver mutex poisoned"),
-    };
     let decode_result = catch_unwind(AssertUnwindSafe(|| {
+        let WorkerState {
+            detector_to_solver_vertices,
+            is_virtual_vertex,
+            edge_effects,
+            decode:
+                WorkerDecodeState {
+                    solver,
+                    path_resolver,
+                },
+            ..
+        } = state;
         decode_detector_major_with_solver(
-            &mut solver,
-            &mut path_resolver,
-            &state.edge_effects,
+            solver,
+            path_resolver,
+            edge_effects,
             input_masks,
             output_masks,
             input.shots,
-            &state.detector_to_solver_vertices,
-            &state.is_virtual_vertex,
+            detector_to_solver_vertices,
+            is_virtual_vertex,
         )
     }));
     match decode_result {
@@ -1430,7 +1790,8 @@ unsafe extern "C" fn decoder_decode_packed_batch(
     if state.is_null() {
         return static_error("fusion-blossom packed decode callback received null state pointer");
     }
-    let state = &*state.cast::<DecoderState>();
+    let state = &mut *state.cast::<WorkerState>();
+    let _activity = state.test_stats.enter_decode();
     if input.is_null() {
         return state_error(
             state,
@@ -1563,186 +1924,146 @@ unsafe extern "C" fn decoder_decode_packed_batch(
     if input.shots == 0 || input.detector_count == 0 || output.observable_count == 0 {
         return FaultScopeNativeDecoderStatusV1::ok();
     }
-    let worker_count = fusion_blossom_worker_count(input.shots, state.worker_states.len());
     let profile_enabled = env::var_os("NPSIM_FUSION_BLOSSOM_PROFILE").is_some();
-    if worker_count <= 1 || input.shots < 1024 {
-        if profile_enabled {
-            eprintln!(
-                "faultscope fusion-blossom scheduler: shots={} workers=1 block_rows={} blocks=1 detector_bytes={} observable_bytes={}",
-                input.shots,
-                input.shots,
-                input.detector_byte_count,
-                output.observable_byte_count,
-            );
-        }
-        let mut solver = match state.solver.lock() {
-            Ok(solver) => solver,
-            Err(_) => return state_error(state, "fusion-blossom solver mutex poisoned"),
-        };
-        let mut path_resolver = match state.path_resolver.lock() {
-            Ok(path_resolver) => path_resolver,
-            Err(_) => return state_error(state, "fusion-blossom path resolver mutex poisoned"),
-        };
-        let result = catch_unwind(AssertUnwindSafe(|| {
-            decode_packed_rows_with_solver(
-                &mut solver,
-                &mut path_resolver,
-                &state.edge_effects,
-                detector_shots,
-                input.detector_count,
-                input.detector_byte_count,
-                observable_predictions,
-                output.observable_byte_count,
-                &state.detector_to_solver_vertices,
-                &state.is_virtual_vertex,
-                profile_enabled,
-            )
-        }));
-        match result {
-            Ok(Ok(())) => {}
-            Ok(Err(message)) => return state_error(state, message),
-            Err(_) => {
-                return state_error(
-                    state,
-                    "fusion-blossom solver panicked during packed MWPM decode",
-                );
-            }
-        }
-        return FaultScopeNativeDecoderStatusV1::ok();
-    }
-
-    let edge_effects = &state.edge_effects;
-    let shots = input.shots;
-    let detector_count = input.detector_count;
-    let detector_byte_count = input.detector_byte_count;
-    let observable_byte_count = output.observable_byte_count;
-    let detector_to_solver_vertices = &state.detector_to_solver_vertices;
-    let is_virtual_vertex = &state.is_virtual_vertex;
-    let initializer = &state.initializer;
-    let worker_states = &state.worker_states;
-    let block_rows = fusion_blossom_block_rows(shots, worker_count);
-    let block_count = shots.div_ceil(block_rows);
     if profile_enabled {
         eprintln!(
-            "faultscope fusion-blossom scheduler: shots={} workers={} block_rows={} blocks={} detector_bytes={} observable_bytes={}",
-            shots,
-            worker_count,
-            block_rows,
-            block_count,
-            detector_byte_count,
-            observable_byte_count,
+            "faultscope fusion-blossom descriptor: shots={} detector_bytes={} observable_bytes={}",
+            input.shots, input.detector_byte_count, output.observable_byte_count,
         );
     }
-    let next_block = AtomicUsize::new(0);
-    let detector_ptr = detector_shots.as_ptr() as usize;
-    let observable_ptr = observable_predictions.as_mut_ptr() as usize;
-    let result = thread::scope(|scope| {
-        let mut handles = Vec::new();
-        for worker_index in 0..worker_count {
-            let next_block = &next_block;
-            handles.push(scope.spawn(move || {
-                let worker_slot = worker_states
-                    .get(worker_index)
-                    .ok_or_else(|| format!("fusion-blossom missing worker slot {worker_index}"))?;
-                let mut worker = worker_slot
-                    .lock()
-                    .map_err(|_| "fusion-blossom worker state mutex poisoned".to_string())?;
-                if worker.is_none() {
-                    *worker = Some(WorkerDecodeState::new(initializer)?);
-                }
-                let worker = worker.as_mut().expect("worker state was just initialized");
-                let worker_result = catch_unwind(AssertUnwindSafe(|| {
-                    loop {
-                        let block_index = next_block.fetch_add(1, Ordering::Relaxed);
-                        if block_index >= block_count {
-                            break;
-                        }
-                        let row_begin = block_index * block_rows;
-                        let row_end = (row_begin + block_rows).min(shots);
-                        let detector_begin = row_begin * detector_byte_count;
-                        let detector_len = (row_end - row_begin) * detector_byte_count;
-                        let observable_begin = row_begin * observable_byte_count;
-                        let observable_len = (row_end - row_begin) * observable_byte_count;
-                        let detector_chunk = unsafe {
-                            slice::from_raw_parts(
-                                (detector_ptr as *const u8).add(detector_begin),
-                                detector_len,
-                            )
-                        };
-                        let observable_chunk = unsafe {
-                            slice::from_raw_parts_mut(
-                                (observable_ptr as *mut u8).add(observable_begin),
-                                observable_len,
-                            )
-                        };
-                        decode_packed_rows_with_solver(
-                            &mut worker.solver,
-                            &mut worker.path_resolver,
-                            edge_effects,
-                            detector_chunk,
-                            detector_count,
-                            detector_byte_count,
-                            observable_chunk,
-                            observable_byte_count,
-                            detector_to_solver_vertices,
-                            is_virtual_vertex,
-                            profile_enabled,
-                        )?;
-                    }
-                    Ok(())
-                }));
-                match worker_result {
-                    Ok(Ok(())) => {}
-                    Ok(Err(message)) => return Err(message),
-                    Err(_) => {
-                        return Err(
-                            "fusion-blossom solver panicked during packed MWPM decode".to_string()
-                        );
-                    }
-                }
-                Ok(())
-            }));
-        }
-        for handle in handles {
-            match handle.join() {
-                Ok(Ok(())) => {}
-                Ok(Err(message)) => return Err(message),
-                Err(_) => return Err("fusion-blossom packed worker thread panicked".to_string()),
-            }
-        }
-        Ok(())
-    });
-    if let Err(message) = result {
-        return state_error(state, message);
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        let WorkerState {
+            detector_to_solver_vertices,
+            is_virtual_vertex,
+            edge_effects,
+            decode:
+                WorkerDecodeState {
+                    solver,
+                    path_resolver,
+                },
+            ..
+        } = state;
+        decode_packed_rows_with_solver(
+            solver,
+            path_resolver,
+            edge_effects,
+            detector_shots,
+            input.detector_count,
+            input.detector_byte_count,
+            observable_predictions,
+            output.observable_byte_count,
+            detector_to_solver_vertices,
+            is_virtual_vertex,
+            profile_enabled,
+        )
+    }));
+    match result {
+        Ok(Ok(())) => FaultScopeNativeDecoderStatusV1::ok(),
+        Ok(Err(message)) => state_error(state, message),
+        Err(_) => state_error(
+            state,
+            "fusion-blossom solver panicked during packed MWPM decode",
+        ),
     }
-    FaultScopeNativeDecoderStatusV1::ok()
 }
 
-fn fusion_blossom_worker_count(shots: usize, worker_slot_count: usize) -> usize {
-    let available_threads = thread::available_parallelism()
-        .map(|count| count.get())
-        .unwrap_or(1);
-    let configured_threads = env::var("NPSIM_FUSION_BLOSSOM_THREADS")
-        .ok()
-        .and_then(|value| value.parse::<usize>().ok())
-        .filter(|value| *value > 0)
-        .unwrap_or(available_threads);
-    configured_threads
-        .min(available_threads)
-        .min(worker_slot_count.max(1))
-        .min(shots)
+unsafe extern "C" fn decoder_decode_detector_event_batch(
+    state: *mut c_void,
+    input: *const FaultScopeNativeDetectorEventShotBatchViewV1,
+    output: *mut FaultScopeNativePackedObservableShotBatchMutViewV1,
+) -> FaultScopeNativeDecoderStatusV1 {
+    if state.is_null() {
+        return static_error("fusion-blossom event decode callback received null state pointer");
+    }
+    let worker = &mut *state.cast::<WorkerState>();
+    let packed = match catch_unwind(AssertUnwindSafe(|| pack_detector_events(worker, input))) {
+        Ok(Ok(packed)) => packed,
+        Ok(Err(message)) => return state_error(worker, message),
+        Err(_) => {
+            return state_error(
+                worker,
+                "fusion-blossom decoder panicked during event decode",
+            )
+        }
+    };
+    let packed_input = FaultScopeNativePackedDetectorShotBatchViewV1 {
+        detector_ids: worker.detector_ids.as_ptr(),
+        detector_count: worker.detector_ids.len(),
+        data: packed.as_ptr(),
+        shots: if input.is_null() { 0 } else { (*input).shots },
+        detector_byte_count: worker.detector_ids.len().div_ceil(8),
+    };
+    decoder_decode_packed_batch(state, &packed_input, output)
 }
 
-fn fusion_blossom_block_rows(shots: usize, worker_count: usize) -> usize {
-    if let Some(configured) = env::var("NPSIM_FUSION_BLOSSOM_BLOCK_ROWS")
-        .ok()
-        .and_then(|value| value.parse::<usize>().ok())
-        .filter(|value| *value > 0)
+unsafe fn pack_detector_events(
+    state: &WorkerState,
+    input: *const FaultScopeNativeDetectorEventShotBatchViewV1,
+) -> Result<Vec<u8>, String> {
+    if input.is_null() {
+        return Err("fusion-blossom event decode callback received null input pointer".to_string());
+    }
+    let input = &*input;
+    if input.detector_count != state.detector_ids.len() {
+        return Err(format!(
+            "fusion-blossom expected {} event detector columns but received {}",
+            state.detector_ids.len(),
+            input.detector_count
+        ));
+    }
+    if input.detector_count > 0 && input.detector_ids.is_null() {
+        return Err("fusion-blossom event detector ids pointer is null".to_string());
+    }
+    let detector_ids = if input.detector_count == 0 {
+        &[]
+    } else {
+        slice::from_raw_parts(input.detector_ids, input.detector_count)
+    };
+    if detector_ids != state.detector_ids.as_slice() {
+        return Err("fusion-blossom event detector id order mismatch".to_string());
+    }
+    let expected_offsets = input
+        .shots
+        .checked_add(1)
+        .ok_or_else(|| "fusion-blossom event offset length overflow".to_string())?;
+    if input.offsets_len != expected_offsets || input.offsets.is_null() {
+        return Err(format!(
+            "fusion-blossom event offsets length is {}; expected {expected_offsets}",
+            input.offsets_len
+        ));
+    }
+    if input.event_count > 0 && input.events.is_null() {
+        return Err("fusion-blossom event indices pointer is null".to_string());
+    }
+    let offsets = slice::from_raw_parts(input.offsets, input.offsets_len);
+    let events = if input.event_count == 0 {
+        &[]
+    } else {
+        slice::from_raw_parts(input.events, input.event_count)
+    };
+    if offsets.first().copied() != Some(0)
+        || offsets.last().copied() != Some(input.event_count)
+        || offsets.windows(2).any(|window| window[0] > window[1])
     {
-        return configured.min(shots.max(1));
+        return Err("fusion-blossom event offsets are invalid".to_string());
     }
-    let target_blocks = worker_count.saturating_mul(20).max(1);
-    shots.div_ceil(target_blocks).clamp(128, 4096)
+    let detector_byte_count = state.detector_ids.len().div_ceil(8);
+    let len = input
+        .shots
+        .checked_mul(detector_byte_count)
+        .ok_or_else(|| "fusion-blossom event packed length overflow".to_string())?;
+    let mut packed = vec![0u8; len];
+    for shot in 0..input.shots {
+        for &detector in &events[offsets[shot]..offsets[shot + 1]] {
+            if detector >= state.detector_ids.len() {
+                return Err(format!(
+                    "fusion-blossom event detector index {detector} is out of range"
+                ));
+            }
+            packed[shot * detector_byte_count + detector / 8] ^= 1 << (detector % 8);
+        }
+    }
+    Ok(packed)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2010,7 +2331,7 @@ fn build_summary_to_py(py: Python<'_>, summary: &BuildSummary) -> PyResult<PyObj
 
 unsafe fn create_decoder_capsule(
     py: Python<'_>,
-    descriptor: *mut FaultScopeNativeDecoderV1,
+    descriptor: *mut FaultScopeNativeDecoderFactoryV2,
 ) -> PyResult<Py<PyAny>> {
     let ptr = pyo3::ffi::PyCapsule_New(
         descriptor.cast::<c_void>(),
@@ -2027,17 +2348,17 @@ unsafe fn create_decoder_capsule(
 unsafe extern "C" fn capsule_destructor(capsule: *mut pyo3::ffi::PyObject) {
     let pointer = pyo3::ffi::PyCapsule_GetPointer(capsule, CAPSULE_NAME.as_ptr().cast::<c_char>());
     if !pointer.is_null() {
-        drop_descriptor(pointer.cast::<FaultScopeNativeDecoderV1>());
+        drop_descriptor(pointer.cast::<FaultScopeNativeDecoderFactoryV2>());
     }
 }
 
-unsafe fn drop_descriptor(descriptor: *mut FaultScopeNativeDecoderV1) {
+unsafe fn drop_descriptor(descriptor: *mut FaultScopeNativeDecoderFactoryV2) {
     if descriptor.is_null() {
         return;
     }
     let descriptor = Box::from_raw(descriptor);
-    if let Some(drop_state) = descriptor.drop_state {
-        drop_state(descriptor.state);
+    if let Some(drop_factory_state) = descriptor.drop_factory_state {
+        drop_factory_state(descriptor.factory_state);
     }
 }
 
@@ -2052,21 +2373,35 @@ fn static_error(message: &'static str) -> FaultScopeNativeDecoderStatusV1 {
 }
 
 fn state_error(
-    state: &DecoderState,
+    state: &mut WorkerState,
     message: impl Into<String>,
 ) -> FaultScopeNativeDecoderStatusV1 {
     let sanitized = message.into().replace('\0', "\\0");
-    let mut last_error = state
-        .last_error
-        .lock()
-        .expect("fusion-blossom error mutex poisoned");
-    *last_error = CString::new(sanitized).expect("NUL was sanitized");
+    let error = CString::new(sanitized).expect("NUL was sanitized");
+    let ptr = error.as_ptr();
+    let len = error.as_bytes().len();
+    state.error_messages.push(error);
     FaultScopeNativeDecoderStatusV1 {
         code: NATIVE_DECODER_PLUGIN_STATUS_ERROR,
-        message: FaultScopeNativeDecoderStringViewV1 {
-            ptr: last_error.as_ptr(),
-            len: last_error.as_bytes().len(),
-        },
+        message: FaultScopeNativeDecoderStringViewV1 { ptr, len },
+    }
+}
+
+fn factory_error(
+    state: &FactoryState,
+    message: impl Into<String>,
+) -> FaultScopeNativeDecoderStatusV1 {
+    let sanitized = message.into().replace('\0', "\\0");
+    let error = CString::new(sanitized).expect("NUL was sanitized");
+    let ptr = error.as_ptr();
+    let len = error.as_bytes().len();
+    match state.error_messages.lock() {
+        Ok(mut errors) => errors.push(error),
+        Err(_) => return static_error("fusion-blossom factory error storage is unavailable"),
+    }
+    FaultScopeNativeDecoderStatusV1 {
+        code: NATIVE_DECODER_PLUGIN_STATUS_ERROR,
+        message: FaultScopeNativeDecoderStringViewV1 { ptr, len },
     }
 }
 
@@ -2127,5 +2462,6 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add("__version__", env!("CARGO_PKG_VERSION"))?;
     module.add_class::<PyNativeFusionBlossomNativeDecoder>()?;
     module.add_class::<PyInvalidNativeDecoderCapsule>()?;
+    module.add_class::<PyNativeDecoderTestStats>()?;
     Ok(())
 }

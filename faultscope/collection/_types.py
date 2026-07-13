@@ -25,7 +25,15 @@ COLLECTION_CSV_FIELDS = (
 COLLECTION_CSV_HEADER = ",".join(COLLECTION_CSV_FIELDS)
 
 
-@dataclass(frozen=True)
+class _UnsetMinShots:
+    def __repr__(self) -> str:
+        return "0"
+
+
+_UNSET_MIN_SHOTS = _UnsetMinShots()
+
+
+@dataclass(frozen=True, init=False)
 class CollectionOptions:
     max_shots: int | None = None
     max_errors: int | None = None
@@ -33,10 +41,40 @@ class CollectionOptions:
     start_batch_size: int | None = None
     max_batch_size: int | None = None
     max_batch_seconds: float | None = None
+    min_shots: int = 0
+
+    def __init__(
+        self,
+        max_shots: int | None = None,
+        max_errors: int | None = None,
+        batch_size: int = 10_000,
+        start_batch_size: int | None = None,
+        max_batch_size: int | None = None,
+        max_batch_seconds: float | None = None,
+        *,
+        min_shots: int | _UnsetMinShots = _UNSET_MIN_SHOTS,
+    ) -> None:
+        explicit_min_shots = min_shots is not _UNSET_MIN_SHOTS
+        resolved_min_shots = 0 if not explicit_min_shots else min_shots
+        object.__setattr__(self, "max_shots", max_shots)
+        object.__setattr__(self, "max_errors", max_errors)
+        object.__setattr__(self, "batch_size", batch_size)
+        object.__setattr__(self, "start_batch_size", start_batch_size)
+        object.__setattr__(self, "max_batch_size", max_batch_size)
+        object.__setattr__(self, "max_batch_seconds", max_batch_seconds)
+        object.__setattr__(self, "min_shots", resolved_min_shots)
+        object.__setattr__(self, "_min_shots_explicit", explicit_min_shots)
+        self.__post_init__()
 
     def __post_init__(self) -> None:
         if self.max_shots is not None and self.max_shots <= 0:
             raise ValueError("max_shots must be positive")
+        if not isinstance(self.min_shots, int) or isinstance(self.min_shots, bool):
+            raise TypeError("min_shots must be an integer")
+        if self.min_shots < 0:
+            raise ValueError("min_shots must be non-negative")
+        if self.max_shots is not None and self.min_shots > self.max_shots:
+            raise ValueError("min_shots must not exceed max_shots")
         if self.max_errors is not None and self.max_errors < 0:
             raise ValueError("max_errors must be non-negative")
         if self.batch_size <= 0:
@@ -202,6 +240,13 @@ class TaskStats:
             metadata=dict(self.metadata),
             custom_counts=custom_counts,
         )
+
+
+@dataclass(frozen=True)
+class HotspotCollectionResult:
+    stats: TaskStats
+    batch_stats: tuple[TaskStats, ...]
+    edge_sensitivities: tuple[float, ...]
 
 
 @dataclass(frozen=True)
