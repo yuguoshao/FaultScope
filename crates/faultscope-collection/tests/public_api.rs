@@ -1226,35 +1226,36 @@ fn direct_counting_apis_accept_non_static_borrowed_workers() {
     let detector_ids = [0];
     let observable_ids = [0];
     let mut calls = 0;
-    let mut decoder = BorrowedDecoder {
-        name: &name,
-        detector_ids: &detector_ids,
-        observable_ids: &observable_ids,
-        calls: &mut calls,
-    };
-    let sampler = DemHotspotEstimator::new(graphlike_dem(1.0)).unwrap();
+    {
+        let mut decoder = BorrowedDecoder {
+            name: &name,
+            detector_ids: &detector_ids,
+            observable_ids: &observable_ids,
+            calls: &mut calls,
+        };
+        let sampler = DemHotspotEstimator::new(graphlike_dem(1.0)).unwrap();
 
-    let sampled = sample_dem_logical_error_stats(&sampler, 4, Some(17), Some(&mut decoder))
-        .expect("sample API should accept a borrowed worker");
-    let collected = collect_dem_logical_error_stats(
-        &sampler,
-        DemLogicalCollectionOptions {
-            max_shots: 4,
-            min_shots: 0,
-            max_errors: None,
-            batch_size: 4,
-            seed: Some(19),
-            start_batch_size: None,
-            max_batch_size: None,
-            max_batch_seconds: None,
-        },
-        Some(&mut decoder),
-    )
-    .expect("collection API should accept a borrowed worker");
+        let sampled = sample_dem_logical_error_stats(&sampler, 4, Some(17), Some(&mut decoder))
+            .expect("sample API should accept a borrowed worker");
+        let collected = collect_dem_logical_error_stats(
+            &sampler,
+            DemLogicalCollectionOptions {
+                max_shots: 4,
+                min_shots: 0,
+                max_errors: None,
+                batch_size: 4,
+                seed: Some(19),
+                start_batch_size: None,
+                max_batch_size: None,
+                max_batch_seconds: None,
+            },
+            Some(&mut decoder),
+        )
+        .expect("collection API should accept a borrowed worker");
 
-    assert_eq!(sampled.decoder.as_deref(), Some("borrowed"));
-    assert_eq!(collected.decoder.as_deref(), Some("borrowed"));
-    drop(decoder);
+        assert_eq!(sampled.decoder.as_deref(), Some("borrowed"));
+        assert_eq!(collected.decoder.as_deref(), Some("borrowed"));
+    }
     assert_eq!(calls, 2);
 }
 

@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{hash_map::Entry, HashMap};
 use std::sync::Arc;
 
 use faultscope_core::{NativeDecoderFactory, NativeDecoderWorker, NpError, NpResult};
@@ -22,44 +22,44 @@ impl WorkerDecoderCache {
         let Some(factory) = factory else {
             return Ok(None);
         };
-        if !self.instances.contains_key(&task_key) {
-            let instance = factory.create_worker().map_err(|err| {
-                NpError::new(format!(
-                    "failed to create worker for task key {task_key} backend `{}`: {}",
-                    factory.name(),
-                    err.message()
-                ))
-            })?;
-            if instance.name() != factory.name() {
-                return Err(NpError::new(format!(
-                    "worker decoder metadata mismatch for task key {task_key} backend `{}`: name expected `{}`, got `{}`",
-                    factory.name(),
-                    factory.name(),
-                    instance.name()
-                )));
+        let worker = match self.instances.entry(task_key) {
+            Entry::Occupied(entry) => entry.into_mut(),
+            Entry::Vacant(entry) => {
+                let instance = factory.create_worker().map_err(|err| {
+                    NpError::new(format!(
+                        "failed to create worker for task key {task_key} backend `{}`: {}",
+                        factory.name(),
+                        err.message()
+                    ))
+                })?;
+                if instance.name() != factory.name() {
+                    return Err(NpError::new(format!(
+                        "worker decoder metadata mismatch for task key {task_key} backend `{}`: name expected `{}`, got `{}`",
+                        factory.name(),
+                        factory.name(),
+                        instance.name()
+                    )));
+                }
+                if instance.detector_ids() != factory.detector_ids() {
+                    return Err(NpError::new(format!(
+                        "worker decoder metadata mismatch for task key {task_key} backend `{}`: detector_ids expected {:?}, got {:?}",
+                        factory.name(),
+                        factory.detector_ids(),
+                        instance.detector_ids()
+                    )));
+                }
+                if instance.observable_ids() != factory.observable_ids() {
+                    return Err(NpError::new(format!(
+                        "worker decoder metadata mismatch for task key {task_key} backend `{}`: observable_ids expected {:?}, got {:?}",
+                        factory.name(),
+                        factory.observable_ids(),
+                        instance.observable_ids()
+                    )));
+                }
+                entry.insert(instance)
             }
-            if instance.detector_ids() != factory.detector_ids() {
-                return Err(NpError::new(format!(
-                    "worker decoder metadata mismatch for task key {task_key} backend `{}`: detector_ids expected {:?}, got {:?}",
-                    factory.name(),
-                    factory.detector_ids(),
-                    instance.detector_ids()
-                )));
-            }
-            if instance.observable_ids() != factory.observable_ids() {
-                return Err(NpError::new(format!(
-                    "worker decoder metadata mismatch for task key {task_key} backend `{}`: observable_ids expected {:?}, got {:?}",
-                    factory.name(),
-                    factory.observable_ids(),
-                    instance.observable_ids()
-                )));
-            }
-            self.instances.insert(task_key, instance);
-        }
-        Ok(self
-            .instances
-            .get_mut(&task_key)
-            .map(|worker| &mut **worker as &mut (dyn NativeDecoderWorker + 'a)))
+        };
+        Ok(Some(&mut **worker as &mut (dyn NativeDecoderWorker + 'a)))
     }
 }
 
