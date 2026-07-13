@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Instant;
 
-use faultscope_core::{compute_dem_estimate, NpError, NpResult, SmallRng};
+use faultscope_core::{compute_dem_estimate, NativeBatchDecoder, NpError, NpResult, SmallRng};
 
 use crate::api::{
     stop_error_count, validate_task, DemLogicalCollectionRunOptions, DemLogicalCollectionStats,
@@ -13,6 +13,7 @@ use crate::api::{
 };
 use crate::counting::{count_detailed_batch, CountOptions};
 use crate::scheduler::{batch_seed, next_batch_size, task_run_seed};
+use crate::worker_decoder::WorkerDecoderCache;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct DemHotspotCollectionResult {
@@ -123,21 +124,29 @@ pub fn collect_dem_hotspot_tasks(
     let work_rx = Arc::new(Mutex::new(work_rx));
     let (result_tx, result_rx) = mpsc::channel::<NpResult<HotspotBatchResult>>();
     let mut handles = Vec::with_capacity(worker_count);
+    let allow_legacy_single = run_options.num_workers == 1;
     for _ in 0..worker_count {
         let work_rx = work_rx.clone();
         let result_tx = result_tx.clone();
-        handles.push(thread::spawn(move || loop {
-            let work = {
-                let receiver = work_rx.lock().unwrap();
-                receiver.recv()
-            };
-            let Ok(work) = work else {
-                break;
-            };
-            let result = catch_unwind(AssertUnwindSafe(|| run_hotspot_batch(work)))
+        handles.push(thread::spawn(move || {
+            let mut decoder_cache = WorkerDecoderCache::new(allow_legacy_single);
+            loop {
+                let work = {
+                    let receiver = work_rx.lock().unwrap();
+                    receiver.recv()
+                };
+                let Ok(work) = work else {
+                    break;
+                };
+                let result = catch_unwind(AssertUnwindSafe(|| {
+                    decoder_cache
+                        .resolve(work.task_index, work.task.decoder.as_ref())
+                        .and_then(|decoder| run_hotspot_batch(work, decoder.as_deref()))
+                }))
                 .unwrap_or_else(|_| Err(NpError::new("hotspot collection worker panicked")));
-            if result_tx.send(result).is_err() {
-                break;
+                if result_tx.send(result).is_err() {
+                    break;
+                }
             }
         }));
     }
@@ -230,7 +239,10 @@ fn schedule_hotspot_work(
     Ok(())
 }
 
-fn run_hotspot_batch(work: HotspotWork) -> NpResult<HotspotBatchResult> {
+fn run_hotspot_batch(
+    work: HotspotWork,
+    decoder: Option<&dyn NativeBatchDecoder>,
+) -> NpResult<HotspotBatchResult> {
     let started = Instant::now();
     let mut rng = SmallRng::new(batch_seed(work.seed, 0, work.ordinal));
     let batch = work
@@ -243,12 +255,7 @@ fn run_hotspot_batch(work: HotspotWork) -> NpResult<HotspotBatchResult> {
         count_observable_error_combos: work.run_options.count_observable_error_combos,
         count_detection_events: work.run_options.count_detection_events,
     };
-    let detailed = count_detailed_batch(
-        &work.task.sampler,
-        &batch,
-        work.task.decoder.as_deref(),
-        &count_options,
-    )?;
+    let detailed = count_detailed_batch(&work.task.sampler, &batch, decoder, &count_options)?;
     let estimate = compute_dem_estimate(
         &work.task.sampler.edges,
         &work.task.sampler.location_groups,

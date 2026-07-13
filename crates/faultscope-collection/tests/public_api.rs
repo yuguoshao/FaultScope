@@ -5,7 +5,7 @@ use std::thread::{self, ThreadId};
 use std::time::{Duration, Instant};
 
 use faultscope_collection::{
-    collect_dem_logical_error_stats, collect_dem_logical_error_tasks,
+    collect_dem_hotspot_tasks, collect_dem_logical_error_stats, collect_dem_logical_error_tasks,
     collect_dem_logical_error_tasks_with_progress, sample_dem_logical_error_stats,
     DemLogicalCollectionOptions, DemLogicalCollectionRunOptions, DemLogicalCollectionStats,
     DemLogicalCollectionTask,
@@ -137,6 +137,91 @@ struct GatedAdaptiveDecoder {
     detector_ids: Vec<i64>,
     observable_ids: Vec<i64>,
     is_worker: bool,
+}
+
+#[derive(Debug, Default)]
+struct HotspotFactoryFailureTracker {
+    factory_calls: AtomicUsize,
+    created: AtomicUsize,
+    dropped: AtomicUsize,
+}
+
+#[derive(Debug, Default)]
+struct HotspotFactoryFailureState {
+    first_decode_started: bool,
+    release_decode: bool,
+}
+
+#[derive(Debug)]
+struct SecondInstanceFailingDecoder {
+    tracker: Arc<HotspotFactoryFailureTracker>,
+    coordination: Arc<(Mutex<HotspotFactoryFailureState>, Condvar)>,
+    detector_ids: Vec<i64>,
+    observable_ids: Vec<i64>,
+    is_worker: bool,
+}
+
+impl Drop for SecondInstanceFailingDecoder {
+    fn drop(&mut self) {
+        if self.is_worker {
+            self.tracker.dropped.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+}
+
+impl NativeBatchDecoder for SecondInstanceFailingDecoder {
+    fn name(&self) -> &str {
+        "second_instance_failing"
+    }
+
+    fn detector_ids(&self) -> &[i64] {
+        &self.detector_ids
+    }
+
+    fn observable_ids(&self) -> &[i64] {
+        &self.observable_ids
+    }
+
+    fn create_worker_instance(&self) -> faultscope_core::NpResult<Arc<dyn NativeBatchDecoder>> {
+        let call = self.tracker.factory_calls.fetch_add(1, Ordering::SeqCst) + 1;
+        if call == 2 {
+            let (lock, changed) = self.coordination.as_ref();
+            let mut state = lock.lock().unwrap();
+            while !state.first_decode_started {
+                state = changed.wait(state).unwrap();
+            }
+            state.release_decode = true;
+            changed.notify_all();
+            return Err(faultscope_core::NpError::new(
+                "intentional hotspot second worker factory failure",
+            ));
+        }
+        self.tracker.created.fetch_add(1, Ordering::SeqCst);
+        Ok(Arc::new(Self {
+            tracker: self.tracker.clone(),
+            coordination: self.coordination.clone(),
+            detector_ids: self.detector_ids.clone(),
+            observable_ids: self.observable_ids.clone(),
+            is_worker: true,
+        }))
+    }
+
+    fn decode_batch(
+        &self,
+        detectors: DetectorMaskBatchView<'_>,
+    ) -> faultscope_core::NpResult<CorrectionMaskBatch> {
+        if !self.is_worker {
+            return Ok(CorrectionMaskBatch::empty(detectors.shots));
+        }
+        let (lock, changed) = self.coordination.as_ref();
+        let mut state = lock.lock().unwrap();
+        state.first_decode_started = true;
+        changed.notify_all();
+        while !state.release_decode {
+            state = changed.wait(state).unwrap();
+        }
+        Ok(CorrectionMaskBatch::empty(detectors.shots))
+    }
 }
 
 impl Drop for GatedAdaptiveDecoder {
@@ -646,6 +731,80 @@ fn collection_uses_worker_local_decoder() {
     assert_eq!(tracker.concurrent_reentries.load(Ordering::SeqCst), 0);
     assert_eq!(tracker.cross_thread_uses.load(Ordering::SeqCst), 0);
     assert_eq!(tracker.prototype_decode_calls.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn hotspot_uses_worker_local_decoder() {
+    let serial_tracker = Arc::new(InstanceTracker::default());
+    let serial_decoder: Arc<dyn NativeBatchDecoder> =
+        Arc::new(WorkerOwnedDecoder::prototype(serial_tracker));
+    let mut serial_task =
+        decoder_collection_task("hotspot-worker-owned", serial_decoder, 4_000, false);
+    serial_task.sampler = Arc::new(DemHotspotEstimator::new(graphlike_dem(0.37)).unwrap());
+    let serial = collect_dem_hotspot_tasks(vec![serial_task], collection_run_options(1)).unwrap();
+
+    let tracker = Arc::new(InstanceTracker::default());
+    let prototype: Arc<dyn NativeBatchDecoder> =
+        Arc::new(WorkerOwnedDecoder::prototype_with_barrier(
+            tracker.clone(),
+            Some(Arc::new(Barrier::new(4))),
+        ));
+    let mut parallel_task =
+        decoder_collection_task("hotspot-worker-owned", prototype, 4_000, false);
+    parallel_task.sampler = Arc::new(DemHotspotEstimator::new(graphlike_dem(0.37)).unwrap());
+
+    let parallel =
+        collect_dem_hotspot_tasks(vec![parallel_task], collection_run_options(4)).unwrap();
+
+    assert_eq!(parallel[0].stats.shots, 4_000);
+    assert!(tracker.created.load(Ordering::SeqCst) >= 2);
+    assert_eq!(tracker.concurrent_reentries.load(Ordering::SeqCst), 0);
+    assert_eq!(tracker.cross_thread_uses.load(Ordering::SeqCst), 0);
+    assert_eq!(tracker.prototype_decode_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(parallel[0].batch_stats.len(), 4);
+    assert_eq!(
+        parallel[0]
+            .batch_stats
+            .iter()
+            .map(|batch| (batch.shots, batch.errors, batch.discards))
+            .collect::<Vec<_>>(),
+        serial[0]
+            .batch_stats
+            .iter()
+            .map(|batch| (batch.shots, batch.errors, batch.discards))
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(parallel[0].edge_sensitivities, serial[0].edge_sensitivities);
+}
+
+#[test]
+fn hotspot_worker_factory_failure() {
+    let tracker = Arc::new(HotspotFactoryFailureTracker::default());
+    let decoder: Arc<dyn NativeBatchDecoder> = Arc::new(SecondInstanceFailingDecoder {
+        tracker: tracker.clone(),
+        coordination: Arc::new((
+            Mutex::new(HotspotFactoryFailureState::default()),
+            Condvar::new(),
+        )),
+        detector_ids: vec![0],
+        observable_ids: vec![0],
+        is_worker: false,
+    });
+    let task = decoder_collection_task("hotspot-factory-failure", decoder, 4_000, false);
+
+    let err = collect_dem_hotspot_tasks(vec![task], collection_run_options(4)).unwrap_err();
+
+    assert_eq!(
+        err.message(),
+        "intentional hotspot second worker factory failure"
+    );
+    assert!(tracker.factory_calls.load(Ordering::SeqCst) >= 2);
+    assert!(tracker.created.load(Ordering::SeqCst) > 0);
+    assert_eq!(
+        tracker.created.load(Ordering::SeqCst),
+        tracker.dropped.load(Ordering::SeqCst),
+        "hotspot collection must return only after every worker-local decoder is dropped"
+    );
 }
 
 #[test]
