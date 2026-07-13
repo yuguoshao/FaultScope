@@ -304,6 +304,66 @@ struct SecondInstanceFailingDecoder {
     is_worker: bool,
 }
 
+#[derive(Debug)]
+struct SecondInstancePanickingDecoder {
+    tracker: Arc<HotspotFactoryFailureTracker>,
+    coordination: Arc<HotspotFactoryFailureCoordination>,
+    detector_ids: Vec<i64>,
+    observable_ids: Vec<i64>,
+    is_worker: bool,
+}
+
+impl Drop for SecondInstancePanickingDecoder {
+    fn drop(&mut self) {
+        if self.is_worker {
+            self.tracker.dropped.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+}
+
+impl NativeBatchDecoder for SecondInstancePanickingDecoder {
+    fn name(&self) -> &str {
+        "second_instance_panicking"
+    }
+
+    fn detector_ids(&self) -> &[i64] {
+        &self.detector_ids
+    }
+
+    fn observable_ids(&self) -> &[i64] {
+        &self.observable_ids
+    }
+
+    fn create_worker_instance(&self) -> faultscope_core::NpResult<Arc<dyn NativeBatchDecoder>> {
+        let call = self.tracker.factory_calls.fetch_add(1, Ordering::SeqCst) + 1;
+        if call == 2 {
+            self.coordination.first_decode_started.wait()?;
+            self.coordination.release_decode.signal()?;
+            panic!("intentional ordinary worker factory panic");
+        }
+        self.tracker.created.fetch_add(1, Ordering::SeqCst);
+        Ok(Arc::new(Self {
+            tracker: self.tracker.clone(),
+            coordination: self.coordination.clone(),
+            detector_ids: self.detector_ids.clone(),
+            observable_ids: self.observable_ids.clone(),
+            is_worker: true,
+        }))
+    }
+
+    fn decode_batch(
+        &self,
+        detectors: DetectorMaskBatchView<'_>,
+    ) -> faultscope_core::NpResult<CorrectionMaskBatch> {
+        if !self.is_worker {
+            return Ok(CorrectionMaskBatch::empty(detectors.shots));
+        }
+        self.coordination.first_decode_started.signal()?;
+        self.coordination.release_decode.wait()?;
+        Ok(CorrectionMaskBatch::empty(detectors.shots))
+    }
+}
+
 impl Drop for SecondInstanceFailingDecoder {
     fn drop(&mut self) {
         if self.is_worker {
@@ -1115,6 +1175,42 @@ fn worker_error_drain_cancels_late_adaptive_delta_and_joins_workers() {
         adaptive_tracker.created.load(Ordering::SeqCst),
         adaptive_tracker.dropped.load(Ordering::SeqCst),
         "collection must return only after every worker-local decoder is dropped"
+    );
+}
+
+#[test]
+fn ordinary_worker_panic_returns_contextual_error_and_joins_workers() {
+    let tracker = Arc::new(HotspotFactoryFailureTracker::default());
+    let decoder: Arc<dyn NativeBatchDecoder> = Arc::new(SecondInstancePanickingDecoder {
+        tracker: tracker.clone(),
+        coordination: Arc::new(HotspotFactoryFailureCoordination::new()),
+        detector_ids: vec![0],
+        observable_ids: vec![0],
+        is_worker: false,
+    });
+    let task = decoder_collection_task("ordinary-panic", decoder, 2_000, false);
+    let (done_tx, done_rx) = mpsc::sync_channel(0);
+    let collect_handle = thread::spawn(move || {
+        let result =
+            collect_dem_logical_error_tasks(vec![task], collection_run_options(2), HashMap::new());
+        let _ = done_tx.send(result);
+    });
+
+    let result = done_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("ordinary collection hung after a worker panic");
+    collect_handle.join().unwrap();
+    let err = result.unwrap_err();
+    assert_eq!(
+        err.message(),
+        "collection worker panicked while processing task key 0 (`ordinary-panic`) with backend `second_instance_panicking`: intentional ordinary worker factory panic"
+    );
+    assert!(tracker.factory_calls.load(Ordering::SeqCst) >= 2);
+    assert!(tracker.created.load(Ordering::SeqCst) > 0);
+    assert_eq!(
+        tracker.created.load(Ordering::SeqCst),
+        tracker.dropped.load(Ordering::SeqCst),
+        "ordinary collection must return only after every worker-local decoder is dropped"
     );
 }
 

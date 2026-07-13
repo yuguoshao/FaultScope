@@ -318,7 +318,7 @@ struct DecoderState {
     initializer: SolverInitializer,
     worker_state: Mutex<WorkerDecodeState>,
     edge_effects: Vec<SolverEdgeEffect>,
-    last_error: Mutex<CString>,
+    error_messages: Mutex<Vec<Box<CString>>>,
 }
 
 impl DecoderState {
@@ -339,7 +339,7 @@ impl DecoderState {
             initializer,
             worker_state: Mutex::new(worker_state),
             edge_effects,
-            last_error: Mutex::new(CString::new("").expect("empty CString")),
+            error_messages: Mutex::new(Vec::new()),
         })
     }
 
@@ -1960,17 +1960,17 @@ fn state_error(
     message: impl Into<String>,
 ) -> FaultScopeNativeDecoderStatusV1 {
     let sanitized = message.into().replace('\0', "\\0");
-    let mut last_error = state
-        .last_error
+    let error = Box::new(CString::new(sanitized).expect("NUL was sanitized"));
+    let ptr = error.as_ptr();
+    let len = error.as_bytes().len();
+    state
+        .error_messages
         .lock()
-        .expect("fusion-blossom error mutex poisoned");
-    *last_error = CString::new(sanitized).expect("NUL was sanitized");
+        .expect("fusion-blossom error mutex poisoned")
+        .push(error);
     FaultScopeNativeDecoderStatusV1 {
         code: NATIVE_DECODER_PLUGIN_STATUS_ERROR,
-        message: FaultScopeNativeDecoderStringViewV1 {
-            ptr: last_error.as_ptr(),
-            len: last_error.as_bytes().len(),
-        },
+        message: FaultScopeNativeDecoderStringViewV1 { ptr, len },
     }
 }
 
@@ -2101,6 +2101,36 @@ mod tests {
         for (pointer, len) in statuses {
             assert_eq!(pointer, expected.as_ptr() as usize);
             assert_eq!(len, expected.len());
+            let message = unsafe { slice::from_raw_parts(pointer as *const u8, len) };
+            assert_eq!(message, expected.as_bytes());
+        }
+    }
+
+    #[test]
+    fn dynamic_error_messages_remain_valid_across_concurrent_callbacks() {
+        let state = Arc::from(worker_test_state());
+        let barrier = Arc::new(Barrier::new(3));
+        let handles = ["first dynamic error", "second dynamic error"]
+            .into_iter()
+            .map(|expected| {
+                let state = Arc::clone(&state);
+                let barrier = Arc::clone(&barrier);
+                thread::spawn(move || {
+                    barrier.wait();
+                    let status = state_error(&state, expected);
+                    (status.message.ptr as usize, status.message.len, expected)
+                })
+            })
+            .collect::<Vec<_>>();
+
+        barrier.wait();
+        let statuses = handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .collect::<Vec<_>>();
+
+        assert_eq!(state.error_messages.lock().unwrap().len(), 2);
+        for (pointer, len, expected) in statuses {
             let message = unsafe { slice::from_raw_parts(pointer as *const u8, len) };
             assert_eq!(message, expected.as_bytes());
         }

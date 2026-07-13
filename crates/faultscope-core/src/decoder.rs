@@ -175,6 +175,9 @@ pub struct FaultScopeNativeDecoderV1 {
             *mut FaultScopeNativePackedObservableShotBatchMutViewV1,
         ) -> FaultScopeNativeDecoderStatusV1,
     >,
+    /// Creates an independent worker state. Any non-null `out_state` transfers
+    /// to the caller regardless of the returned status and must be released
+    /// exactly once with `drop_state`; producers should leave it null on error.
     pub create_worker_state: Option<
         unsafe extern "C" fn(*const c_void, *mut *mut c_void) -> FaultScopeNativeDecoderStatusV1,
     >,
@@ -649,7 +652,17 @@ impl NativeBatchDecoder for NativeCompositeDecoder {
         let children = self
             .children
             .iter()
-            .map(|child| child.create_worker_instance())
+            .enumerate()
+            .map(|(index, child)| {
+                child.create_worker_instance().map_err(|err| {
+                    NpError::new(format!(
+                        "composite decoder `{}` child {index} (`{}`) worker factory failed: {}",
+                        self.name(),
+                        child.name(),
+                        err.message()
+                    ))
+                })
+            })
             .collect::<NpResult<Vec<_>>>()?;
         Ok(Arc::new(NativeCompositeDecoder::new(children)?))
     }

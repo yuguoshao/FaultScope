@@ -14,6 +14,7 @@ create_worker_state(factory_state, out_state)
 - returns a new independent mutable state
 - uses the descriptor's existing decode and drop_state callbacks
 - must preserve detector/observable metadata
+- transfers every non-null out_state to the caller, regardless of status
 - may be absent in descriptors ending before this field
 ```
 
@@ -31,13 +32,19 @@ decoder-owned solver pool. Calling the descriptor's name, detector-id, and
 observable-id callbacks with the worker pointer must return the same metadata as
 the prototype.
 
-Ownership transfers to FaultScope only after a successful status and non-null
-output. FaultScope keeps the capsule alive while any worker wrapper exists, uses
-the descriptor's existing decode callbacks with the worker pointer, and calls the
-descriptor's `drop_state` callback exactly once when that worker wrapper is
-dropped. A plugin must set `out_state` to null before work begins and leave it null
-on failure. A descriptor that exports `create_worker_state` must also export
-`drop_state`.
+Every non-null pointer written to `out_state` transfers ownership to FaultScope,
+regardless of whether the callback returns success or failure. On success the
+pointer becomes the worker wrapper's state and is passed to the descriptor's
+decode callbacks. On failure FaultScope immediately calls the descriptor's
+`drop_state` callback exactly once before returning the error. This defensive
+rule prevents leaks from a producer that reports an error after allocating its
+state; the producer must not retain or free a non-null pointer after returning.
+
+Producers SHOULD initialize `out_state` to null before work begins and leave it
+null on every failure path. Success still requires a non-null state. FaultScope
+keeps the capsule alive while any worker wrapper exists and calls `drop_state`
+exactly once when that wrapper is dropped. A descriptor that exports
+`create_worker_state` must also export `drop_state`.
 
 The descriptor itself and its prototype state remain capsule-owned. Dropping a
 worker does not drop either one. Dropping the capsule eventually destroys the

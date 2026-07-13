@@ -9,6 +9,7 @@
 //! seed stream, and ordinal, not from the worker that executes the work.
 
 use std::collections::HashMap;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -206,26 +207,29 @@ fn collect_task_set_inner(
                 let Ok(work) = work else {
                     break;
                 };
-                match work {
-                    Work::Shutdown => break,
-                    Work::Batch(work) => {
-                        let result = decoder_cache
-                            .resolve(work.state_index, work.task.decoder.as_ref())
-                            .and_then(|decoder| run_batch_work(work, decoder.as_deref()));
-                        if result_tx.send(result).is_err() {
-                            break;
-                        }
-                    }
-                    Work::AdaptiveCalibration(work) => {
-                        let result = decoder_cache
-                            .resolve(work.state_index, work.task.decoder.as_ref())
-                            .and_then(|decoder| {
-                                run_adaptive_calibration_work(work, decoder.as_deref(), &result_tx)
-                            });
-                        if result_tx.send(result).is_err() {
-                            break;
-                        }
-                    }
+                if matches!(work, Work::Shutdown) {
+                    break;
+                }
+                let context = worker_panic_context(&work);
+                let result = catch_unwind(AssertUnwindSafe(|| match work {
+                    Work::Batch(work) => decoder_cache
+                        .resolve(work.state_index, work.task.decoder.as_ref())
+                        .and_then(|decoder| run_batch_work(work, decoder.as_deref())),
+                    Work::AdaptiveCalibration(work) => decoder_cache
+                        .resolve(work.state_index, work.task.decoder.as_ref())
+                        .and_then(|decoder| {
+                            run_adaptive_calibration_work(work, decoder.as_deref(), &result_tx)
+                        }),
+                    Work::Shutdown => unreachable!("shutdown work was handled before execution"),
+                }))
+                .unwrap_or_else(|payload| {
+                    Err(NpError::new(format!(
+                        "{context}: {}",
+                        panic_payload_message(payload.as_ref())
+                    )))
+                });
+                if result_tx.send(result).is_err() {
+                    break;
                 }
             }
         }));
@@ -308,6 +312,29 @@ fn collect_task_set_inner(
     }
 
     collect_results(results)
+}
+
+fn worker_panic_context(work: &Work) -> String {
+    let (task_key, task) = match work {
+        Work::Batch(work) => (work.state_index, work.task.as_ref()),
+        Work::AdaptiveCalibration(work) => (work.state_index, work.task.as_ref()),
+        Work::Shutdown => return "collection worker panicked while shutting down".to_string(),
+    };
+    let backend = task.decoder_name.as_deref().unwrap_or("none");
+    format!(
+        "collection worker panicked while processing task key {task_key} (`{}`) with backend `{backend}`",
+        task.task_id
+    )
+}
+
+fn panic_payload_message(payload: &(dyn std::any::Any + Send)) -> &str {
+    if let Some(message) = payload.downcast_ref::<&str>() {
+        message
+    } else if let Some(message) = payload.downcast_ref::<String>() {
+        message.as_str()
+    } else {
+        "non-string panic payload"
+    }
 }
 
 fn make_task_state(

@@ -50,6 +50,41 @@ struct FactoryWorkerDecoder {
     observable_ids: Vec<i64>,
 }
 
+struct SharedNameFactoryDecoder {
+    detector_ids: Vec<i64>,
+    observable_ids: Vec<i64>,
+    fail: bool,
+}
+
+impl NativeBatchDecoder for SharedNameFactoryDecoder {
+    fn name(&self) -> &str {
+        "shared-child"
+    }
+
+    fn detector_ids(&self) -> &[i64] {
+        &self.detector_ids
+    }
+
+    fn observable_ids(&self) -> &[i64] {
+        &self.observable_ids
+    }
+
+    fn create_worker_instance(&self) -> NpResult<Arc<dyn NativeBatchDecoder>> {
+        if self.fail {
+            return Err(NpError::new("factory exploded"));
+        }
+        Ok(Arc::new(FactoryWorkerDecoder::new(
+            0,
+            self.detector_ids.clone(),
+            self.observable_ids.clone(),
+        )))
+    }
+
+    fn decode_batch(&self, _: DetectorMaskBatchView<'_>) -> NpResult<CorrectionMaskBatch> {
+        Err(NpError::new("prototype must not decode"))
+    }
+}
+
 impl FactoryWorkerDecoder {
     fn new(id: usize, detector_ids: Vec<i64>, observable_ids: Vec<i64>) -> Self {
         Self {
@@ -271,6 +306,32 @@ fn composite_worker_instance_recursively_creates_fresh_children() {
             .map(|mask| mask.words[0])
             .collect::<Vec<_>>(),
         vec![3, 4]
+    );
+}
+
+#[test]
+fn composite_worker_factory_error_identifies_duplicate_named_child_by_index() {
+    let prototype = NativeCompositeDecoder::new(vec![
+        Arc::new(SharedNameFactoryDecoder {
+            detector_ids: vec![10],
+            observable_ids: vec![2],
+            fail: false,
+        }),
+        Arc::new(SharedNameFactoryDecoder {
+            detector_ids: vec![20],
+            observable_ids: vec![5],
+            fail: true,
+        }),
+    ])
+    .unwrap();
+
+    let Err(err) = prototype.create_worker_instance() else {
+        panic!("composite accepted a child worker factory failure");
+    };
+
+    assert_eq!(
+        err.message(),
+        "composite decoder `composite` child 1 (`shared-child`) worker factory failed: factory exploded"
     );
 }
 
