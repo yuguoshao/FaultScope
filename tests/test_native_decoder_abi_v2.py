@@ -325,16 +325,18 @@ class NativeDecoderAbiV2Tests(unittest.TestCase):
     def test_collection_task_uses_factory_worker(self):
         fixture = self.fixture(0)
         sampler = compile_native_dem_sampler(self.dem())
-        tasks = ({
-            "task_id": "abi-v2",
-            "strong_id": "abi-v2-strong",
-            "sampler": sampler,
-            "decoder": fixture,
-            "metadata_json": "{}",
-            "max_shots": 8,
-            "min_shots": 8,
-            "batch_size": 4,
-        },)
+        tasks = (
+            {
+                "task_id": "abi-v2",
+                "strong_id": "abi-v2-strong",
+                "sampler": sampler,
+                "decoder": fixture,
+                "metadata_json": "{}",
+                "max_shots": 8,
+                "min_shots": 8,
+                "batch_size": 4,
+            },
+        )
 
         stats = _native._collect_dem_logical_error_stats_many(tasks, num_workers=1, seed=789)
 

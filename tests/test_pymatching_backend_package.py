@@ -113,16 +113,18 @@ class PyMatchingBackendPackageTests(unittest.TestCase):
         decoder = faultscope_pymatching.NativePyMatchingDecoder.from_dem(dem)
         test_stats = decoder._inner._test_stats_for_test()
         test_stats.enable_decode_overlap()
-        tasks = ({
-            "task_id": "pymatching-v2-workers",
-            "strong_id": "pymatching-v2-workers-strong",
-            "sampler": compile_native_dem_sampler(dem),
-            "decoder": decoder,
-            "metadata_json": "{}",
-            "max_shots": 128,
-            "min_shots": 128,
-            "batch_size": 8,
-        },)
+        tasks = (
+            {
+                "task_id": "pymatching-v2-workers",
+                "strong_id": "pymatching-v2-workers-strong",
+                "sampler": compile_native_dem_sampler(dem),
+                "decoder": decoder,
+                "metadata_json": "{}",
+                "max_shots": 128,
+                "min_shots": 128,
+                "batch_size": 8,
+            },
+        )
 
         (stats,) = faultscope_native._collect_dem_logical_error_stats_many(
             tasks,

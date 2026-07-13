@@ -154,9 +154,7 @@ class HotspotCollectionTests(unittest.TestCase):
                 collect_hotspots(
                     [CollectionTask(dem=logical_dem(0.1))],
                     options=CollectionOptions(max_shots=4, batch_size=4),
-                    run_options=CollectionRunOptions(
-                        save_resume_filepath=f"{tmp}/resume.csv"
-                    ),
+                    run_options=CollectionRunOptions(save_resume_filepath=f"{tmp}/resume.csv"),
                 )
 
     def test_postselected_shots_do_not_contribute_to_sensitivity(self) -> None:

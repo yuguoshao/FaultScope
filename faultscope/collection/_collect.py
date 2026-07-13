@@ -60,9 +60,7 @@ class Collector:
 
         yield from self.collect(tasks)
 
-    def collect_hotspots(
-        self, tasks: Iterable[CollectionTask]
-    ) -> list[HotspotCollectionResult]:
+    def collect_hotspots(self, tasks: Iterable[CollectionTask]) -> list[HotspotCollectionResult]:
         """Collect logical statistics and shot-weighted edge sensitivities."""
 
         return _run_collect_hotspots(tasks, self.options, self.run_options)
