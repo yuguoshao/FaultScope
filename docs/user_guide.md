@@ -787,9 +787,10 @@ result = sampler.estimate(shots=1024, seed=1, decoder=decoder)
 
 The `mwpm` proxy is currently unavailable. Its external `faultscope-mwpm`
 package still implements ABI v1 and is not yet migrated to the strict
-FaultScope native decoder ABI v2, so the catalog shows it without an install
-action. `bposd` is status-only metadata: it is reserved, unimplemented,
-non-installable, and has no install action.
+FaultScope native decoder ABI v2, so it remains non-installable. `bposd` is a
+reserved, unimplemented, non-installable catalog/status entry. The generic
+install subcommand accepts these names but only reports their unavailability;
+it returns no install plan or steps and installs nothing.
 
 ```python
 from faultscope import (
@@ -923,16 +924,19 @@ Inspect the built-in backend catalog and installed backend status with:
 python -m faultscope.backends status
 ```
 
-Inspect backend installation steps with:
+Inspect backend installation steps, or check the reserved `bposd` entry with
+the same generic subcommand:
 
 ```bash
 python -m faultscope.backends install pymatching --dry-run
 python -m faultscope.backends install fusion-blossom --dry-run
 python -m faultscope.backends install bpdecoder --dry-run
+python -m faultscope.backends install bposd --dry-run
 ```
 
-`bposd` is a reserved, unimplemented, non-installable status entry; there is no
-corresponding install command or install-step output.
+The first three commands produce install plans. For `bposd`, the command only
+reports that the reserved catalog/status entry is unavailable; it produces no
+install plan or steps and installs nothing.
 
 The `bpdecoder` entry is the optional BP-family binary-linear backend. Its
 backend package is `faultscope-bpdecoder`; the install helper's dry run shows
