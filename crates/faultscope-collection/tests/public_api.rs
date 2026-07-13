@@ -1061,6 +1061,36 @@ impl NativeDecoderWorker for CalibrationCorrectingDecoder {
 }
 
 #[derive(Debug)]
+struct BorrowedDecoder<'a> {
+    name: &'a str,
+    detector_ids: &'a [i64],
+    observable_ids: &'a [i64],
+    calls: &'a mut usize,
+}
+
+impl NativeDecoderWorker for BorrowedDecoder<'_> {
+    fn name(&self) -> &str {
+        self.name
+    }
+
+    fn detector_ids(&self) -> &[i64] {
+        self.detector_ids
+    }
+
+    fn observable_ids(&self) -> &[i64] {
+        self.observable_ids
+    }
+
+    fn decode_batch(
+        &mut self,
+        detectors: DetectorMaskBatchView<'_>,
+    ) -> faultscope_core::NpResult<CorrectionMaskBatch> {
+        *self.calls += 1;
+        Ok(CorrectionMaskBatch::empty(detectors.shots))
+    }
+}
+
+#[derive(Debug)]
 struct FailingDecoder {
     detector_ids: Vec<i64>,
     observable_ids: Vec<i64>,
@@ -1188,6 +1218,44 @@ fn collection_run_options(num_workers: usize) -> DemLogicalCollectionRunOptions 
         count_detection_events: false,
         custom_error_count_key: None,
     }
+}
+
+#[test]
+fn direct_counting_apis_accept_non_static_borrowed_workers() {
+    let name = String::from("borrowed");
+    let detector_ids = [0];
+    let observable_ids = [0];
+    let mut calls = 0;
+    let mut decoder = BorrowedDecoder {
+        name: &name,
+        detector_ids: &detector_ids,
+        observable_ids: &observable_ids,
+        calls: &mut calls,
+    };
+    let sampler = DemHotspotEstimator::new(graphlike_dem(1.0)).unwrap();
+
+    let sampled = sample_dem_logical_error_stats(&sampler, 4, Some(17), Some(&mut decoder))
+        .expect("sample API should accept a borrowed worker");
+    let collected = collect_dem_logical_error_stats(
+        &sampler,
+        DemLogicalCollectionOptions {
+            max_shots: 4,
+            min_shots: 0,
+            max_errors: None,
+            batch_size: 4,
+            seed: Some(19),
+            start_batch_size: None,
+            max_batch_size: None,
+            max_batch_seconds: None,
+        },
+        Some(&mut decoder),
+    )
+    .expect("collection API should accept a borrowed worker");
+
+    assert_eq!(sampled.decoder.as_deref(), Some("borrowed"));
+    assert_eq!(collected.decoder.as_deref(), Some("borrowed"));
+    drop(decoder);
+    assert_eq!(calls, 2);
 }
 
 #[test]
@@ -1371,6 +1439,21 @@ fn hotspot_worker_factory_failure() {
         tracker.dropped.load(Ordering::SeqCst),
         "hotspot collection must return only after every worker-local decoder is dropped"
     );
+}
+
+#[test]
+fn hotspot_error_context_uses_factory_name_when_output_label_mismatches() {
+    let decoder: Arc<dyn NativeDecoderFactory> = Arc::new(FailingDecoder {
+        detector_ids: vec![0],
+        observable_ids: vec![0],
+    });
+    let mut task = decoder_collection_task("hotspot-backend-context", decoder, 1, false);
+    task.decoder_name = Some("spoofed-output-label".to_string());
+
+    let err = collect_dem_hotspot_tasks(vec![task], collection_run_options(1)).unwrap_err();
+
+    assert!(err.message().contains("with backend `failing`"));
+    assert!(!err.message().contains("spoofed-output-label"));
 }
 
 #[test]
@@ -2994,6 +3077,23 @@ fn global_scheduler_returns_worker_errors() {
     .unwrap_err();
 
     assert!(err.message().contains("intentional decoder failure"));
+}
+
+#[test]
+fn scheduler_error_context_uses_factory_name_when_output_label_is_missing() {
+    let decoder: Arc<dyn NativeDecoderFactory> = Arc::new(FailingDecoder {
+        detector_ids: vec![0],
+        observable_ids: vec![0],
+    });
+    let mut task = decoder_collection_task("scheduler-backend-context", decoder, 1, false);
+    task.decoder_name = None;
+
+    let err =
+        collect_dem_logical_error_tasks(vec![task], collection_run_options(1), HashMap::new())
+            .unwrap_err();
+
+    assert!(err.message().contains("with backend `failing`"));
+    assert!(!err.message().contains("with backend `none`"));
 }
 
 #[test]

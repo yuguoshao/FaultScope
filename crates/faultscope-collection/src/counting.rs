@@ -34,7 +34,7 @@ pub(crate) fn sample_dem_logical_error_stats_with_rng(
     sampler: &DemHotspotEstimator,
     shots: usize,
     rng: &mut SmallRng,
-    decoder: Option<&mut (dyn NativeDecoderWorker + 'static)>,
+    decoder: Option<&mut dyn NativeDecoderWorker>,
     started: Option<Instant>,
     count_options: &CountOptions<'_>,
 ) -> NpResult<BatchStats> {
@@ -73,7 +73,7 @@ fn sample_detailed_batch(
     sampler: &DemHotspotEstimator,
     shots: usize,
     rng: &mut SmallRng,
-    decoder: Option<&mut (dyn NativeDecoderWorker + 'static)>,
+    decoder: Option<&mut dyn NativeDecoderWorker>,
     count_options: &CountOptions<'_>,
 ) -> NpResult<BatchStats> {
     validate_mask_shape(
@@ -94,7 +94,7 @@ fn sample_detailed_batch(
 pub(crate) fn count_detailed_batch(
     sampler: &DemHotspotEstimator,
     batch: &DemBatch,
-    decoder: Option<&mut (dyn NativeDecoderWorker + 'static)>,
+    decoder: Option<&mut dyn NativeDecoderWorker>,
     count_options: &CountOptions<'_>,
 ) -> NpResult<DetailedBatchResult> {
     let shots = batch.shots;
@@ -199,7 +199,7 @@ fn sample_dem_logical_error_count_with_decoder(
     sampler: &DemHotspotEstimator,
     shots: usize,
     rng: &mut SmallRng,
-    decoder: &mut (dyn NativeDecoderWorker + 'static),
+    decoder: &mut dyn NativeDecoderWorker,
 ) -> NpResult<usize> {
     if decoder.supports_detector_event_batch() {
         let detector_ids = decoder.detector_ids().to_vec();

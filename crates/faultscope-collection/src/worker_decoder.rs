@@ -18,7 +18,7 @@ impl WorkerDecoderCache {
         &'a mut self,
         task_key: usize,
         factory: Option<&Arc<dyn NativeDecoderFactory>>,
-    ) -> NpResult<Option<&'a mut (dyn NativeDecoderWorker + 'static)>> {
+    ) -> NpResult<Option<&'a mut (dyn NativeDecoderWorker + 'a)>> {
         let Some(factory) = factory else {
             return Ok(None);
         };
@@ -56,7 +56,10 @@ impl WorkerDecoderCache {
             }
             self.instances.insert(task_key, instance);
         }
-        Ok(self.instances.get_mut(&task_key).map(Box::as_mut))
+        Ok(self
+            .instances
+            .get_mut(&task_key)
+            .map(|worker| &mut **worker as &mut (dyn NativeDecoderWorker + 'a)))
     }
 }
 

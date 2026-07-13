@@ -326,7 +326,11 @@ fn worker_panic_context(work: &Work) -> String {
         Work::AdaptiveCalibration(work) => (work.state_index, work.task.as_ref()),
         Work::Shutdown => return "collection worker panicked while shutting down".to_string(),
     };
-    let backend = task.decoder_name.as_deref().unwrap_or("none");
+    let backend = task
+        .decoder
+        .as_deref()
+        .map(|factory| factory.name())
+        .unwrap_or("none");
     format!(
         "collection worker panicked while processing task key {task_key} (`{}`) with backend `{backend}`",
         task.task_id
@@ -339,7 +343,11 @@ fn worker_error_context(work: &Work) -> String {
         Work::AdaptiveCalibration(work) => (work.state_index, work.task.as_ref()),
         Work::Shutdown => return "collection worker failed while shutting down".to_string(),
     };
-    let backend = task.decoder_name.as_deref().unwrap_or("none");
+    let backend = task
+        .decoder
+        .as_deref()
+        .map(|factory| factory.name())
+        .unwrap_or("none");
     format!(
         "collection worker failed while processing task key {task_key} (`{}`) with backend `{backend}`",
         task.task_id
@@ -643,7 +651,7 @@ fn mark_state_complete(
 
 fn run_batch_work(
     work: BatchWork,
-    decoder: Option<&mut (dyn NativeDecoderWorker + 'static)>,
+    decoder: Option<&mut dyn NativeDecoderWorker>,
 ) -> NpResult<WorkResult> {
     let mut rng = SmallRng::new(batch_seed(work.seed, work.seed_stream, work.ordinal));
     let count_options = CountOptions {
@@ -669,7 +677,7 @@ fn run_batch_work(
 
 fn run_adaptive_calibration_work(
     work: AdaptiveCalibrationWork,
-    decoder: Option<&mut (dyn NativeDecoderWorker + 'static)>,
+    decoder: Option<&mut dyn NativeDecoderWorker>,
     result_tx: &mpsc::Sender<NpResult<WorkResult>>,
 ) -> NpResult<WorkResult> {
     let result = calibrate_adaptive_task(
@@ -688,7 +696,7 @@ fn run_adaptive_calibration_work(
 
 fn calibrate_adaptive_task(
     task: &DemLogicalCollectionTask,
-    mut decoder: Option<&mut (dyn NativeDecoderWorker + 'static)>,
+    mut decoder: Option<&mut dyn NativeDecoderWorker>,
     run_options: &DemLogicalCollectionRunOptions,
     seed_stream: usize,
     state_index: Option<usize>,

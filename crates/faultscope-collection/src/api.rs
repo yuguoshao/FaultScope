@@ -112,7 +112,7 @@ pub struct DemLogicalCollectionRunOptions {
 pub fn collect_dem_logical_error_stats(
     sampler: &DemHotspotEstimator,
     options: DemLogicalCollectionOptions,
-    mut decoder: Option<&mut (dyn NativeDecoderWorker + 'static)>,
+    mut decoder: Option<&mut dyn NativeDecoderWorker>,
 ) -> NpResult<DemLogicalCollectionStats> {
     validate_collection_options(options)?;
 
@@ -177,7 +177,7 @@ pub fn sample_dem_logical_error_stats(
     sampler: &DemHotspotEstimator,
     shots: usize,
     seed: Option<u64>,
-    decoder: Option<&mut (dyn NativeDecoderWorker + 'static)>,
+    decoder: Option<&mut dyn NativeDecoderWorker>,
 ) -> NpResult<DemLogicalCollectionStats> {
     if shots == 0 {
         return Err(NpError::new("shots must be positive"));

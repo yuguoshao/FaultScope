@@ -251,7 +251,7 @@ fn schedule_hotspot_work(
 
 fn run_hotspot_batch(
     work: HotspotWork,
-    decoder: Option<&mut (dyn NativeDecoderWorker + 'static)>,
+    decoder: Option<&mut dyn NativeDecoderWorker>,
 ) -> NpResult<HotspotBatchResult> {
     let started = Instant::now();
     let mut rng = SmallRng::new(batch_seed(work.seed, 0, work.ordinal));
@@ -294,7 +294,12 @@ fn run_hotspot_batch(
 }
 
 fn hotspot_worker_context(work: &HotspotWork) -> String {
-    let backend = work.task.decoder_name.as_deref().unwrap_or("none");
+    let backend = work
+        .task
+        .decoder
+        .as_deref()
+        .map(|factory| factory.name())
+        .unwrap_or("none");
     format!(
         "hotspot collection worker failed while processing task key {} (`{}`) with backend `{backend}`",
         work.task_index, work.task.task_id
