@@ -8,6 +8,11 @@ PyCapsule ABI. It uses pinned
 PyMatching sparse-blossom C++ source internally; it does not call the Python
 `PyMatchingDecoder` hot path.
 
+Dynamic native error views remain valid until the associated decoder state is
+dropped. The backend retains every dynamic error message in state-owned storage
+to keep concurrent callback consumption safe, so repeated errors retain memory
+until state drop. ABI consumers should copy error text promptly.
+
 Development install from the FaultScope repository root:
 
 ```bash

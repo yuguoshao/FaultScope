@@ -10,6 +10,10 @@ exposes the decoder through the FaultScope native decoder PyCapsule ABI. It is n
 yet the production partitioned or streaming adapter, and it does not support
 erasure or dynamic weights. The development build uses fusion-blossom's compact
 vertex/edge index mode and rejects graphs that exceed that backend index range.
+Dynamic native error views remain valid until the associated decoder state is
+dropped. The backend retains every dynamic error message in state-owned storage
+to keep concurrent callback consumption safe, so repeated errors retain memory
+until state drop. ABI consumers should copy error text promptly.
 The default integer conversion uses `weight_scale=10_000`. After scaling,
 solver weights are normalized by their common even-preserving divisor,
 preserving the integer MWPM objective while reducing solver weight magnitudes

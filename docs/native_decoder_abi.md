@@ -50,6 +50,18 @@ The descriptor itself and its prototype state remain capsule-owned. Dropping a
 worker does not drop either one. Dropping the capsule eventually destroys the
 descriptor and invokes `drop_state` once for the prototype state.
 
+## Dynamic error-view lifetime
+
+A dynamic `FaultScopeNativeErrorView` returned by a decoder callback remains
+valid until the associated decoder state is dropped. This includes views from
+overlapping callbacks on the same state: producing a later error must not
+invalidate a view that another caller may still be consuming.
+
+Bundled backends satisfy this lifetime by retaining each dynamic error message
+in state-owned append-only storage. Consequently, repeated errors retain their
+message memory until state drop. Consumers should copy an error view promptly
+and must not use its pointer after the state has been dropped.
+
 ## Legacy descriptors
 
 A version-1 descriptor whose `struct_size` ends before
@@ -72,4 +84,6 @@ The bundled pymatching and fusion-blossom plugins retain immutable construction
 data in the prototype. Each factory call rebuilds one independent native solver
 state. A descriptor state contains one mutex-protected mutable solver workspace;
 parallelism across collection workers comes from separate descriptors rather than
-from a decoder-owned state pool.
+from a decoder-owned state pool. Dynamic error messages use the state-owned
+lifetime described above so concurrent callback consumers cannot observe an
+invalidated error view.
