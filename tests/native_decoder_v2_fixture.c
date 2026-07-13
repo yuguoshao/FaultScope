@@ -80,6 +80,9 @@ struct TestFactory {
     uint64_t creates;
     uint64_t worker_drops;
     uint64_t factory_drops;
+    uint64_t mask_decode_calls;
+    uint64_t packed_decode_calls;
+    uint64_t event_decode_calls;
     size_t last_capacity;
     uintptr_t worker_addresses[32];
 };
@@ -162,6 +165,7 @@ static void drop_worker(void *state) {
 
 static FsStatus decode_masks(void *state, const FsMaskBatch *input, FsCorrectionBatch *output) {
     TestWorker *worker = (TestWorker *)state;
+    worker->factory->mask_decode_calls += 1;
     if (worker->factory->mode == MODE_INVALID_MASK_OUTPUT) {
         output->shots += 1;
         return ok();
@@ -175,6 +179,7 @@ static FsStatus decode_masks(void *state, const FsMaskBatch *input, FsCorrection
 
 static FsStatus decode_packed(void *state, const FsPackedBatch *input, FsPackedOutput *output) {
     TestWorker *worker = (TestWorker *)state;
+    worker->factory->packed_decode_calls += 1;
     if (worker->factory->mode == MODE_INVALID_PACKED_OUTPUT) {
         output->shots += 1;
         return ok();
@@ -188,6 +193,7 @@ static FsStatus decode_packed(void *state, const FsPackedBatch *input, FsPackedO
 
 static FsStatus decode_events(void *state, const FsEventBatch *input, FsPackedOutput *output) {
     TestWorker *worker = (TestWorker *)state;
+    worker->factory->event_decode_calls += 1;
     if (worker->factory->mode == MODE_INVALID_EVENT_OUTPUT) {
         output->shots += 1;
         return ok();
@@ -262,6 +268,15 @@ void *fs_fixture_descriptor(void *pointer) { return pointer; }
 uint64_t fs_fixture_creates(void *pointer) { return ((TestFactory *)pointer)->creates; }
 uint64_t fs_fixture_worker_drops(void *pointer) { return ((TestFactory *)pointer)->worker_drops; }
 uint64_t fs_fixture_factory_drops(void *pointer) { return ((TestFactory *)pointer)->factory_drops; }
+uint64_t fs_fixture_mask_decode_calls(void *pointer) {
+    return ((TestFactory *)pointer)->mask_decode_calls;
+}
+uint64_t fs_fixture_packed_decode_calls(void *pointer) {
+    return ((TestFactory *)pointer)->packed_decode_calls;
+}
+uint64_t fs_fixture_event_decode_calls(void *pointer) {
+    return ((TestFactory *)pointer)->event_decode_calls;
+}
 size_t fs_fixture_last_capacity(void *pointer) { return ((TestFactory *)pointer)->last_capacity; }
 size_t fs_fixture_worker_size(void) { return sizeof(FsWorkerV2); }
 uintptr_t fs_fixture_worker_address(void *pointer, size_t index) {

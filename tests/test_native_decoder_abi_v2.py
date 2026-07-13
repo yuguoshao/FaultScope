@@ -62,6 +62,14 @@ class _FixtureDecoder:
         return self._library.fs_fixture_factory_drops(self._pointer)
 
     @property
+    def callback_calls(self):
+        return (
+            self._library.fs_fixture_mask_decode_calls(self._pointer),
+            self._library.fs_fixture_packed_decode_calls(self._pointer),
+            self._library.fs_fixture_event_decode_calls(self._pointer),
+        )
+
+    @property
     def last_capacity(self):
         return self._library.fs_fixture_last_capacity(self._pointer)
 
@@ -105,6 +113,9 @@ class NativeDecoderAbiV2Tests(unittest.TestCase):
             "fs_fixture_creates",
             "fs_fixture_worker_drops",
             "fs_fixture_factory_drops",
+            "fs_fixture_mask_decode_calls",
+            "fs_fixture_packed_decode_calls",
+            "fs_fixture_event_decode_calls",
         ):
             function = getattr(cls.library, name)
             function.argtypes = [ctypes.c_void_p]
@@ -252,15 +263,22 @@ class NativeDecoderAbiV2Tests(unittest.TestCase):
         self.assertEqual(partial.worker_drops, 1)
 
     def test_dem_estimate_uses_event_packed_and_mask_workers(self):
-        for mode in (1, 2, 0):
-            with self.subTest(mode=mode):
+        cases = {
+            "event": (1, False, (0, 0, 1)),
+            "packed": (2, False, (0, 1, 0)),
+            "mask": (0, True, (1, 0, 0)),
+        }
+        for path, (mode, aggregate_hotspots, expected_calls) in cases.items():
+            with self.subTest(path=path):
                 fixture = self.fixture(mode)
                 result = compile_native_dem_sampler(self.dem()).estimate(
                     shots=16,
                     seed=123,
                     decoder=fixture,
+                    aggregate_hotspots=aggregate_hotspots,
                 )
                 self.assertEqual(result.mean_loss, 0.0)
+                self.assertEqual(fixture.callback_calls, expected_calls)
                 self.assertEqual(fixture.creates, 1)
                 self.assertEqual(fixture.worker_drops, 1)
 
