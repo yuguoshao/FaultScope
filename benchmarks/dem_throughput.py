@@ -15,6 +15,8 @@ Stim is required.
 from __future__ import annotations
 
 import argparse
+import multiprocessing
+import resource
 import statistics
 import sys
 import time
@@ -66,6 +68,11 @@ def main() -> None:
     parser.add_argument("--rounds", type=int, default=3)
     parser.add_argument("--shots", type=int, default=100_000)
     parser.add_argument("--repeats", type=int, default=5)
+    parser.add_argument(
+        "--repeat-comparison",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+    )
     args = parser.parse_args()
 
     _validate_distances(args.distances)
@@ -81,6 +88,17 @@ def main() -> None:
     )
     for case in _make_cases(args.distances, args.rounds):
         _run_case(case, shots=args.shots, repeats=args.repeats)
+    if args.repeat_comparison:
+        print(
+            "repeat_case\tdistance\trounds\tcompact_compile_s\tflat_compile_s\t"
+            "compact_generate_s\tflat_generate_s\tcompile_ratio\tgenerate_ratio\t"
+            "compact_stored_operations\tflat_stored_operations\tcompact_peak_rss_kib\t"
+            "flat_peak_rss_kib\trss_ratio\tstatus",
+            flush=True,
+        )
+        for distance in args.distances:
+            for memory in ("z", "x"):
+                _run_repeat_comparison(memory, distance, args.rounds, args.repeats)
 
 
 def _make_cases(distances: list[int], rounds: int) -> list[BenchmarkCase]:
@@ -338,6 +356,176 @@ def _make_surface_memory_case(memory: str, distance: int, rounds: int) -> Benchm
     )
 
 
+def _make_compact_surface_memory_case(
+    memory: str,
+    distance: int,
+    rounds: int,
+) -> BenchmarkCase:
+    x_checks, z_checks = _rotated_surface_code_checks(distance)
+    operations: list[Operation] = []
+    if memory == "z":
+        checks = z_checks
+        basis = "Z"
+        data_error = "X"
+        logical_qubits = tuple(_data_index(distance, row, 0) for row in range(distance))
+    elif memory == "x":
+        checks = x_checks
+        basis = "X"
+        data_error = "Z"
+        logical_qubits = tuple(_data_index(distance, 0, col) for col in range(distance))
+        operations.extend(Operation.h(qubit) for qubit in range(distance * distance))
+    else:
+        raise ValueError(f"unknown surface memory case {memory!r}")
+
+    _append_surface_memory_checks(
+        operations,
+        distance=distance,
+        round_idx=0,
+        checks=checks,
+        basis=basis,
+        noise=False,
+    )
+    body: list[Operation] = []
+    for qubit in range(distance * distance):
+        body.append(
+            Operation.noise(
+                NoiseLocation(
+                    id=f"surface_{memory}_data_q{qubit}",
+                    model=BernoulliPauliNoise(data_error),
+                    rate=0.04,
+                    qubits=(qubit,),
+                    tags={
+                        "layout": "rotated_surface_code",
+                        "memory": memory,
+                        "operation": "data_noise",
+                    },
+                )
+            )
+        )
+    for check in checks:
+        check_id = str(check["id"])
+        qubits = tuple(_data_index(distance, row, col) for row, col in check["data"])
+        body.append(
+            Operation.measure_pauli(
+                qubits,
+                basis * len(qubits),
+                key=f"cycle_{check_id}",
+                noise=NoiseLocation(
+                    id=f"surface_{memory}_meas_{check_id}",
+                    model=MeasurementBitFlip(),
+                    rate=0.02,
+                    qubits=qubits[:1],
+                    tags={
+                        "layout": "rotated_surface_code",
+                        "memory": memory,
+                        "operation": "measurement_noise",
+                    },
+                ),
+            )
+        )
+    operations.append(Operation.repeat(rounds, body))
+    for idx, qubit in enumerate(logical_qubits):
+        operations.append(Operation.measure(qubit, key=f"logical_{idx}", basis=basis))
+
+    detectors = tuple(
+        Detector(
+            id=idx,
+            measurement_keys=(
+                f"cycle_{check['id']}@r[{rounds - 1}]",
+                f"r0_{check['id']}",
+            ),
+            coords=(float(check["x"]), float(check["y"])),
+        )
+        for idx, check in enumerate(checks)
+    )
+    observables = (
+        LogicalObservable(
+            id=0,
+            measurement_keys=_path_keys("logical", len(logical_qubits)),
+        ),
+    )
+    return BenchmarkCase(
+        label=f"surface-{memory}-repeat-d{distance}",
+        distance=distance,
+        rounds=rounds,
+        circuit=Circuit(n_qubits=distance * distance, operations=tuple(operations)),
+        detectors=detectors,
+        observables=observables,
+    )
+
+
+def _run_repeat_comparison(memory: str, distance: int, rounds: int, repeats: int) -> None:
+    compact = _run_repeat_worker_isolated(memory, distance, rounds, repeats, True)
+    flat = _run_repeat_worker_isolated(memory, distance, rounds, repeats, False)
+    status = "ok" if compact["edges"] == flat["edges"] else "dem-mismatch"
+    compile_ratio = compact["compile_s"] / flat["compile_s"] if flat["compile_s"] else float("inf")
+    generate_ratio = compact["generate_s"] / flat["generate_s"] if flat["generate_s"] else float("inf")
+    rss_ratio = compact["peak_rss_kib"] / flat["peak_rss_kib"] if flat["peak_rss_kib"] else float("inf")
+    print(
+        f"surface-{memory}-repeat-d{distance}\t{distance}\t{rounds}\t"
+        f"{compact['compile_s']:.6f}\t{flat['compile_s']:.6f}\t"
+        f"{compact['generate_s']:.6f}\t{flat['generate_s']:.6f}\t"
+        f"{compile_ratio:.3f}\t{generate_ratio:.3f}\t"
+        f"{compact['stored_operations']}\t{flat['stored_operations']}\t"
+        f"{compact['peak_rss_kib']}\t{flat['peak_rss_kib']}\t{rss_ratio:.3f}\t{status}",
+        flush=True,
+    )
+
+
+def _run_repeat_worker_isolated(
+    memory: str,
+    distance: int,
+    rounds: int,
+    repeats: int,
+    compact: bool,
+) -> dict[str, Any]:
+    context = multiprocessing.get_context("spawn")
+    with context.Pool(processes=1) as pool:
+        return pool.apply(
+            _repeat_worker,
+            ((memory, distance, rounds, repeats, compact),),
+        )
+
+
+def _repeat_worker(args: tuple[str, int, int, int, bool]) -> dict[str, Any]:
+    memory, distance, rounds, repeats, compact = args
+    case = (
+        _make_compact_surface_memory_case(memory, distance, rounds)
+        if compact
+        else _make_surface_memory_case(memory, distance, rounds)
+    )
+    compile_s, generator = _median_batched_time(
+        lambda: compile_native_dem_generator(
+            case.circuit,
+            detectors=case.detectors,
+            observables=case.observables,
+        ),
+        repeats=repeats,
+    )
+    generate_s, dem = _median_batched_time(generator.generate_dem, repeats=repeats)
+    return {
+        "compile_s": compile_s,
+        "generate_s": generate_s,
+        "stored_operations": _stored_operation_count(case.circuit.operations),
+        "peak_rss_kib": _peak_rss_kib(),
+        "edges": _canonical_dem_error_edges(faultscope_dem_error_edges(dem)),
+    }
+
+
+def _stored_operation_count(operations: Any) -> int:
+    count = 0
+    for operation in operations:
+        count += 1
+        if operation.kind == "repeat":
+            count += _stored_operation_count(operation.body)
+    return count
+
+
+def _peak_rss_kib() -> int:
+    rss = int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
+    return rss // 1024 if sys.platform == "darwin" else rss
+
+
 def _append_surface_memory_checks(
     operations: list[Operation],
     *,
@@ -462,6 +650,25 @@ def _median_time(fn: Any, *, repeats: int) -> tuple[float, Any]:
         start = time.perf_counter()
         result = fn()
         values.append(time.perf_counter() - start)
+    return statistics.median(values), result
+
+
+def _median_batched_time(
+    fn: Any,
+    *,
+    repeats: int,
+    minimum_batch_seconds: float = 0.05,
+) -> tuple[float, Any]:
+    start = time.perf_counter()
+    result = fn()
+    pilot = max(time.perf_counter() - start, 1e-9)
+    iterations = max(1, min(10_000, int(minimum_batch_seconds / pilot) + 1))
+    values: list[float] = []
+    for _ in range(max(1, repeats)):
+        start = time.perf_counter()
+        for _ in range(iterations):
+            result = fn()
+        values.append((time.perf_counter() - start) / iterations)
     return statistics.median(values), result
 
 

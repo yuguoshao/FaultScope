@@ -370,10 +370,13 @@ pub fn frame_measurement_flip_bits(
 /// supports are packed into u64 words. Keeping the dual destabilizer basis lets
 /// deterministic measurements recover their stabilizer coefficients directly,
 /// instead of rebuilding and eliminating a dense row span for every result.
+#[derive(Clone)]
 pub(crate) struct SymbolicStabilizer {
     n_qubits: usize,
     x: Vec<Vec<u64>>,
     z: Vec<Vec<u64>>,
+    x_columns: Vec<Vec<u64>>,
+    z_columns: Vec<Vec<u64>>,
     sign: Vec<Expr>,
     random_source_count: usize,
 }
@@ -387,10 +390,19 @@ impl SymbolicStabilizer {
             toggle_packed_bit(&mut x[qubit], qubit);
             toggle_packed_bit(&mut z[n_qubits + qubit], qubit);
         }
+        let row_words = (n_qubits * 2).div_ceil(64);
+        let mut x_columns = vec![vec![0; row_words]; n_qubits];
+        let mut z_columns = vec![vec![0; row_words]; n_qubits];
+        for qubit in 0..n_qubits {
+            toggle_packed_bit(&mut x_columns[qubit], qubit);
+            toggle_packed_bit(&mut z_columns[qubit], n_qubits + qubit);
+        }
         Self {
             n_qubits,
             x,
             z,
+            x_columns,
+            z_columns,
             sign: vec![Expr::default(); n_qubits * 2],
             random_source_count: 0,
         }
@@ -400,51 +412,75 @@ impl SymbolicStabilizer {
         self.random_source_count
     }
 
+    pub(crate) fn affine_template(&self) -> Self {
+        let mut template = self.clone();
+        template.sign = (0..self.sign.len()).map(Expr::random).collect();
+        template.random_source_count = self.sign.len();
+        template
+    }
+
+    pub(crate) fn support_equals(&self, other: &Self) -> bool {
+        self.n_qubits == other.n_qubits && self.x == other.x && self.z == other.z
+    }
+
+    pub(crate) fn signs(&self) -> &[Expr] {
+        &self.sign
+    }
+
+    pub(crate) fn replace_affine_state(&mut self, signs: Vec<Expr>, random_source_count: usize) {
+        self.sign = signs;
+        self.random_source_count = random_source_count;
+    }
+
     pub(crate) fn apply_h(&mut self, qubit: usize) {
-        for row in 0..self.x.len() {
-            let old_x = packed_bit(&self.x[row], qubit);
-            let old_z = packed_bit(&self.z[row], qubit);
-            if old_x && old_z {
-                self.sign[row].toggle_constant();
-            }
-            set_packed_bit(&mut self.x[row], qubit, old_z);
-            set_packed_bit(&mut self.z[row], qubit, old_x);
-        }
+        let old_x = self.x_columns[qubit].clone();
+        let old_z = self.z_columns[qubit].clone();
+        let sign_rows = and_words(&old_x, &old_z);
+        self.toggle_sign_constants(&sign_rows);
+        let changed_rows = xor_word_vectors(&old_x, &old_z);
+        for_each_set_bit(&changed_rows, |row| {
+            toggle_packed_bit(&mut self.x[row], qubit);
+            toggle_packed_bit(&mut self.z[row], qubit);
+        });
+        self.x_columns[qubit] = old_z;
+        self.z_columns[qubit] = old_x;
     }
 
     pub(crate) fn apply_s(&mut self, qubit: usize) {
-        for row in 0..self.x.len() {
-            let old_x = packed_bit(&self.x[row], qubit);
-            let old_z = packed_bit(&self.z[row], qubit);
-            if old_x && old_z {
-                self.sign[row].toggle_constant();
-            }
-            set_packed_bit(&mut self.z[row], qubit, old_z ^ old_x);
-        }
+        let x_rows = self.x_columns[qubit].clone();
+        let sign_rows = and_words(&x_rows, &self.z_columns[qubit]);
+        self.toggle_sign_constants(&sign_rows);
+        for_each_set_bit(&x_rows, |row| toggle_packed_bit(&mut self.z[row], qubit));
+        xor_words_in_place(&mut self.z_columns[qubit], &x_rows);
     }
 
     pub(crate) fn apply_s_dag(&mut self, qubit: usize) {
-        for row in 0..self.x.len() {
-            let old_x = packed_bit(&self.x[row], qubit);
-            let old_z = packed_bit(&self.z[row], qubit);
-            if old_x && !old_z {
-                self.sign[row].toggle_constant();
-            }
-            set_packed_bit(&mut self.z[row], qubit, old_z ^ old_x);
-        }
+        let x_rows = self.x_columns[qubit].clone();
+        let sign_rows = and_not_words(&x_rows, &self.z_columns[qubit]);
+        self.toggle_sign_constants(&sign_rows);
+        for_each_set_bit(&x_rows, |row| toggle_packed_bit(&mut self.z[row], qubit));
+        xor_words_in_place(&mut self.z_columns[qubit], &x_rows);
     }
 
     pub(crate) fn apply_cx(&mut self, control: usize, target: usize) {
-        for row in 0..self.x.len() {
-            let x_c = packed_bit(&self.x[row], control);
-            let z_c = packed_bit(&self.z[row], control);
-            let x_t = packed_bit(&self.x[row], target);
-            let z_t = packed_bit(&self.z[row], target);
-            if x_t && z_c && !(x_c ^ z_t) {
-                self.sign[row].toggle_constant();
-            }
-            set_packed_bit(&mut self.x[row], target, x_t ^ x_c);
-            set_packed_bit(&mut self.z[row], control, z_c ^ z_t);
+        let x_c = self.x_columns[control].clone();
+        let z_c = self.z_columns[control].clone();
+        let x_t = self.x_columns[target].clone();
+        let z_t = self.z_columns[target].clone();
+        let mut sign_rows = and_words(&x_t, &z_c);
+        let x_c_xor_z_t = xor_word_vectors(&x_c, &z_t);
+        for (word, excluded) in sign_rows.iter_mut().zip(x_c_xor_z_t) {
+            *word &= !excluded;
+        }
+        self.toggle_sign_constants(&sign_rows);
+        for_each_set_bit(&x_c, |row| toggle_packed_bit(&mut self.x[row], target));
+        for_each_set_bit(&z_t, |row| toggle_packed_bit(&mut self.z[row], control));
+        if control == target {
+            self.x_columns[target].fill(0);
+            self.z_columns[control].fill(0);
+        } else {
+            xor_words_in_place(&mut self.x_columns[target], &x_c);
+            xor_words_in_place(&mut self.z_columns[control], &z_t);
         }
     }
 
@@ -469,11 +505,8 @@ impl SymbolicStabilizer {
         pauli: &str,
     ) -> NpResult<()> {
         let target = SparsePackedPauli::new(self.n_qubits, qubits, pauli)?;
-        for row in 0..self.x.len() {
-            if target.symplectic_product(&self.x[row], &self.z[row]) {
-                self.sign[row].toggle_constant();
-            }
-        }
+        let rows = target.anticommuting_rows(&self.x_columns, &self.z_columns);
+        self.toggle_sign_constants(&rows);
         Ok(())
     }
 
@@ -484,11 +517,8 @@ impl SymbolicStabilizer {
         expr: &Expr,
     ) -> NpResult<()> {
         let target = SparsePackedPauli::new(self.n_qubits, qubits, pauli)?;
-        for row in 0..self.x.len() {
-            if target.symplectic_product(&self.x[row], &self.z[row]) {
-                self.sign[row].xor_assign(expr);
-            }
-        }
+        let rows = target.anticommuting_rows(&self.x_columns, &self.z_columns);
+        for_each_set_bit(&rows, |row| self.sign[row].xor_assign(expr));
         Ok(())
     }
 
@@ -498,10 +528,10 @@ impl SymbolicStabilizer {
         pauli: &str,
     ) -> NpResult<Expr> {
         let target = SparsePackedPauli::new(self.n_qubits, qubits, pauli)?;
-        let pivot = (self.n_qubits..self.n_qubits * 2)
-            .find(|row| target.symplectic_product(&self.x[*row], &self.z[*row]));
+        let anticommuting_rows = target.anticommuting_rows(&self.x_columns, &self.z_columns);
+        let pivot = first_set_bit_from(&anticommuting_rows, self.n_qubits);
         match pivot {
-            Some(pivot) => self.measure_random_sparse_pauli(pivot, &target),
+            Some(pivot) => self.measure_random_sparse_pauli(pivot, &target, &anticommuting_rows),
             None => self.deterministic_sparse_measurement_expr(&target),
         }
     }
@@ -510,26 +540,19 @@ impl SymbolicStabilizer {
         &mut self,
         pivot: usize,
         target: &SparsePackedPauli,
+        anticommuting_rows: &[u64],
     ) -> NpResult<Expr> {
         let paired_destabilizer = pivot - self.n_qubits;
         let pivot_x = self.x[pivot].clone();
         let pivot_z = self.z[pivot].clone();
         let pivot_sign = self.sign[pivot].clone();
-        for row in 0..self.x.len() {
-            if row != pivot
-                && row != paired_destabilizer
-                && target.symplectic_product(&self.x[row], &self.z[row])
-            {
-                packed_rowsum(
-                    &mut self.x[row],
-                    &mut self.z[row],
-                    &mut self.sign[row],
-                    &pivot_x,
-                    &pivot_z,
-                    &pivot_sign,
-                )?;
+        let rows = anticommuting_rows.to_vec();
+        for_each_set_bit_result(&rows, |row| {
+            if row != pivot && row != paired_destabilizer {
+                self.rowsum_with_support(row, &pivot_x, &pivot_z, &pivot_sign)?;
             }
-        }
+            Ok(())
+        })?;
         self.finish_random_measurement(
             pivot,
             paired_destabilizer,
@@ -552,23 +575,20 @@ impl SymbolicStabilizer {
         target_x: Vec<u64>,
         target_z: Vec<u64>,
     ) -> NpResult<Expr> {
-        self.x[paired_destabilizer] = pivot_x;
-        self.z[paired_destabilizer] = pivot_z;
+        self.replace_row_support(paired_destabilizer, &pivot_x, &pivot_z);
         self.sign[paired_destabilizer] = pivot_sign;
 
         let source = self.random_source_count;
         self.random_source_count += 1;
         let outcome = Expr::random(source);
-        self.x[pivot] = target_x;
-        self.z[pivot] = target_z;
+        self.replace_row_support(pivot, &target_x, &target_z);
         self.sign[pivot] = outcome.clone();
         Ok(outcome)
     }
 
     fn deterministic_sparse_measurement_expr(&self, target: &SparsePackedPauli) -> NpResult<Expr> {
-        self.combine_stabilizers_selected_by(|destabilizer| {
-            target.symplectic_product(&self.x[destabilizer], &self.z[destabilizer])
-        })
+        let rows = target.anticommuting_rows(&self.x_columns, &self.z_columns);
+        self.combine_stabilizers_selected_by(|destabilizer| packed_bit(&rows, destabilizer))
     }
 
     fn combine_stabilizers_selected_by<F>(&self, mut selected: F) -> NpResult<Expr>
@@ -594,12 +614,124 @@ impl SymbolicStabilizer {
         }
         Ok(acc_sign)
     }
+
+    fn toggle_sign_constants(&mut self, rows: &[u64]) {
+        for_each_set_bit(rows, |row| self.sign[row].toggle_constant());
+    }
+
+    fn rowsum_with_support(
+        &mut self,
+        target: usize,
+        source_x: &[u64],
+        source_z: &[u64],
+        source_sign: &Expr,
+    ) -> NpResult<()> {
+        packed_rowsum(
+            &mut self.x[target],
+            &mut self.z[target],
+            &mut self.sign[target],
+            source_x,
+            source_z,
+            source_sign,
+        )?;
+        for_each_set_bit(source_x, |qubit| {
+            toggle_packed_bit(&mut self.x_columns[qubit], target)
+        });
+        for_each_set_bit(source_z, |qubit| {
+            toggle_packed_bit(&mut self.z_columns[qubit], target)
+        });
+        Ok(())
+    }
+
+    fn replace_row_support(&mut self, row: usize, new_x: &[u64], new_z: &[u64]) {
+        let changed_x = xor_word_vectors(&self.x[row], new_x);
+        let changed_z = xor_word_vectors(&self.z[row], new_z);
+        for_each_set_bit(&changed_x, |qubit| {
+            toggle_packed_bit(&mut self.x_columns[qubit], row)
+        });
+        for_each_set_bit(&changed_z, |qubit| {
+            toggle_packed_bit(&mut self.z_columns[qubit], row)
+        });
+        self.x[row].clone_from_slice(new_x);
+        self.z[row].clone_from_slice(new_z);
+    }
 }
 
 struct SparsePackedPauli {
     entries: Vec<(usize, bool, bool)>,
     x: Vec<u64>,
     z: Vec<u64>,
+}
+
+fn xor_words_in_place(target: &mut [u64], source: &[u64]) {
+    for (target, source) in target.iter_mut().zip(source) {
+        *target ^= source;
+    }
+}
+
+fn xor_word_vectors(left: &[u64], right: &[u64]) -> Vec<u64> {
+    left.iter()
+        .zip(right)
+        .map(|(left, right)| left ^ right)
+        .collect()
+}
+
+fn and_words(left: &[u64], right: &[u64]) -> Vec<u64> {
+    left.iter()
+        .zip(right)
+        .map(|(left, right)| left & right)
+        .collect()
+}
+
+fn and_not_words(left: &[u64], right: &[u64]) -> Vec<u64> {
+    left.iter()
+        .zip(right)
+        .map(|(left, right)| left & !right)
+        .collect()
+}
+
+fn for_each_set_bit(words: &[u64], mut function: impl FnMut(usize)) {
+    for (word_index, word) in words.iter().copied().enumerate() {
+        let mut remaining = word;
+        while remaining != 0 {
+            let bit = remaining.trailing_zeros() as usize;
+            function(word_index * 64 + bit);
+            remaining &= remaining - 1;
+        }
+    }
+}
+
+fn for_each_set_bit_result(
+    words: &[u64],
+    mut function: impl FnMut(usize) -> NpResult<()>,
+) -> NpResult<()> {
+    for (word_index, word) in words.iter().copied().enumerate() {
+        let mut remaining = word;
+        while remaining != 0 {
+            let bit = remaining.trailing_zeros() as usize;
+            function(word_index * 64 + bit)?;
+            remaining &= remaining - 1;
+        }
+    }
+    Ok(())
+}
+
+fn first_set_bit_from(words: &[u64], start: usize) -> Option<usize> {
+    let mut word_index = start / 64;
+    if word_index >= words.len() {
+        return None;
+    }
+    let mut word = words[word_index] & (!0u64 << (start % 64));
+    loop {
+        if word != 0 {
+            return Some(word_index * 64 + word.trailing_zeros() as usize);
+        }
+        word_index += 1;
+        if word_index >= words.len() {
+            return None;
+        }
+        word = words[word_index];
+    }
 }
 
 impl SparsePackedPauli {
@@ -629,24 +761,22 @@ impl SparsePackedPauli {
         Ok(Self { entries, x, z })
     }
 
-    fn symplectic_product(&self, row_x: &[u64], row_z: &[u64]) -> bool {
-        self.entries.iter().fold(false, |acc, (qubit, x, z)| {
-            acc ^ (packed_bit(row_x, *qubit) && *z) ^ (packed_bit(row_z, *qubit) && *x)
-        })
+    fn anticommuting_rows(&self, x_columns: &[Vec<u64>], z_columns: &[Vec<u64>]) -> Vec<u64> {
+        let mut rows = vec![0; x_columns.first().map_or(0, Vec::len)];
+        for (qubit, x, z) in &self.entries {
+            if *z {
+                xor_words_in_place(&mut rows, &x_columns[*qubit]);
+            }
+            if *x {
+                xor_words_in_place(&mut rows, &z_columns[*qubit]);
+            }
+        }
+        rows
     }
 }
 
 fn packed_bit(words: &[u64], qubit: usize) -> bool {
     ((words[qubit / 64] >> (qubit % 64)) & 1) != 0
-}
-
-fn set_packed_bit(words: &mut [u64], qubit: usize, value: bool) {
-    let mask = 1u64 << (qubit % 64);
-    if value {
-        words[qubit / 64] |= mask;
-    } else {
-        words[qubit / 64] &= !mask;
-    }
 }
 
 fn toggle_packed_bit(words: &mut [u64], qubit: usize) {

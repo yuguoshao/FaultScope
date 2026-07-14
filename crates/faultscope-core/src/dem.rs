@@ -51,6 +51,7 @@ impl DetectorErrorModelGenerator {
         detectors: Option<Vec<Detector>>,
         observables: Option<Vec<LogicalObservable>>,
     ) -> NpResult<Self> {
+        let (circuit, _) = crate::program::expand_circuit(&circuit)?;
         let detectors = detectors.unwrap_or_else(|| detectors_from_circuit(&circuit));
         let observables = observables.unwrap_or_else(|| observables_from_circuit(&circuit));
         let event_plan = collect_dem_event_plan(&circuit.operations)?;
@@ -152,8 +153,10 @@ pub fn generate_dem_edges(
     detectors: &[Detector],
     observables: &[LogicalObservable],
 ) -> NpResult<Vec<GeneratedDemEdge>> {
-    let event_plan = collect_dem_event_plan(operations)?;
-    generate_dem_edges_from_plan(n_qubits, operations, detectors, observables, &event_plan)
+    let expanded = crate::program::expand_operations(operations)?;
+    let operations = expanded.operations;
+    let event_plan = collect_dem_event_plan(&operations)?;
+    generate_dem_edges_from_plan(n_qubits, &operations, detectors, observables, &event_plan)
 }
 
 pub fn generate_dem_edges_from_plan(
@@ -220,8 +223,12 @@ fn generate_sampling_edges_from_compiled_plan(
 
 /// Infer detector declarations from detector operations in a circuit.
 pub fn detectors_from_circuit(circuit: &Circuit) -> Vec<Detector> {
+    let expanded = match crate::program::expand_operations(&circuit.operations) {
+        Ok(expanded) => expanded.operations,
+        Err(_) => return Vec::new(),
+    };
     let mut detectors = Vec::new();
-    for operation in &circuit.operations {
+    for operation in &expanded {
         let Operation::Detector {
             detector_id,
             measurement_keys,
@@ -241,8 +248,12 @@ pub fn detectors_from_circuit(circuit: &Circuit) -> Vec<Detector> {
 
 /// Infer logical observable declarations from observable include operations.
 pub fn observables_from_circuit(circuit: &Circuit) -> Vec<LogicalObservable> {
+    let expanded = match crate::program::expand_operations(&circuit.operations) {
+        Ok(expanded) => expanded.operations,
+        Err(_) => return Vec::new(),
+    };
     let mut keys_by_id = HashMap::<i64, Vec<String>>::new();
-    for operation in &circuit.operations {
+    for operation in &expanded {
         let Operation::ObservableInclude {
             observable_id,
             measurement_keys,

@@ -37,22 +37,37 @@ pub(crate) fn parse_core_circuit_object(
     })
 }
 
-pub(crate) fn cached_core_circuit(
-    value: &Bound<'_, PyAny>,
-) -> Option<std::sync::Arc<faultscope_core::Circuit>> {
-    value
-        .extract::<PyRef<'_, PyCircuit>>()
-        .ok()
-        .and_then(|circuit| circuit.core_circuit.clone())
-}
-
 pub(crate) fn cached_core_event_plan(
     value: &Bound<'_, PyAny>,
 ) -> Option<std::sync::Arc<faultscope_core::DemEventPlan>> {
-    value
-        .extract::<PyRef<'_, PyCircuit>>()
-        .ok()
-        .and_then(|circuit| circuit.core_event_plan.clone())
+    let circuit = value.extract::<PyRef<'_, PyCircuit>>().ok()?;
+    if let Some(event_plan) = circuit.core_event_plan.get() {
+        return Some(event_plan.clone());
+    }
+    let dem_circuit = cached_core_dem_circuit_from_ref(&circuit)?;
+    let event_plan =
+        std::sync::Arc::new(faultscope_core::collect_dem_event_plan(&dem_circuit.operations).ok()?);
+    let _ = circuit.core_event_plan.set(event_plan.clone());
+    Some(event_plan)
+}
+
+pub(crate) fn cached_core_dem_circuit(
+    value: &Bound<'_, PyAny>,
+) -> Option<std::sync::Arc<faultscope_core::Circuit>> {
+    let circuit = value.extract::<PyRef<'_, PyCircuit>>().ok()?;
+    cached_core_dem_circuit_from_ref(&circuit)
+}
+
+fn cached_core_dem_circuit_from_ref(
+    circuit: &PyRef<'_, PyCircuit>,
+) -> Option<std::sync::Arc<faultscope_core::Circuit>> {
+    if let Some(expanded) = circuit.core_dem_circuit.get() {
+        return Some(expanded.clone());
+    }
+    let source = circuit.core_circuit.as_ref()?;
+    let expanded = std::sync::Arc::new(faultscope_core::expand_circuit_operations(source).ok()?);
+    let _ = circuit.core_dem_circuit.set(expanded.clone());
+    Some(expanded)
 }
 
 pub(crate) fn parse_circuit_object(value: &Bound<'_, PyAny>) -> PyResult<(usize, Vec<Op>)> {
@@ -93,6 +108,21 @@ pub(crate) fn parse_operation_object(value: &Bound<'_, PyAny>) -> PyResult<Op> {
     let kind = required_attr(value, "kind", "Operation")?.extract::<String>()?;
     let qubits = required_attr(value, "qubits", "Operation")?.extract::<Vec<usize>>()?;
     match kind.as_str() {
+        "tick" => Ok(Op::Tick),
+        "shift_coords" => {
+            let metadata = required_attr(value, "metadata", "Operation")?;
+            let offsets = required_mapping_item(&metadata, "offsets", "shift_coords")?
+                .extract::<Vec<f64>>()?;
+            Ok(Op::ShiftCoords(offsets))
+        }
+        "repeat" => {
+            let count = required_attr(value, "repeat_count", "Operation")?.extract::<usize>()?;
+            if count == 0 {
+                return Err(PyValueError::new_err("repeat count must be positive"));
+            }
+            let body = parse_operation_sequence(&required_attr(value, "body", "Operation")?)?;
+            Ok(Op::Repeat { count, body })
+        }
         "h" => Ok(Op::H(one_qubit(&qubits, "h")?)),
         "s" => Ok(Op::S(one_qubit(&qubits, "s")?)),
         "s_dag" => Ok(Op::SDag(one_qubit(&qubits, "s_dag")?)),
@@ -135,6 +165,12 @@ pub(crate) fn parse_operation_object(value: &Bound<'_, PyAny>) -> PyResult<Op> {
             key: optional_string_attr(value, "key")?,
             noise: optional_noise_location_attr(value, "noise_location")?,
         }),
+        "measure_reset" => Ok(Op::MeasureReset {
+            qubit: one_qubit(&qubits, "measure_reset")?,
+            basis: required_attr(value, "basis", "Operation")?
+                .extract::<String>()?
+                .to_uppercase(),
+        }),
         "reset" => Ok(Op::Reset {
             qubit: one_qubit(&qubits, "reset")?,
             key: optional_string_attr(value, "key")?,
@@ -162,11 +198,43 @@ pub(crate) fn parse_operation_object(value: &Bound<'_, PyAny>) -> PyResult<Op> {
                 coords,
             })
         }
+        "detector_rec" => {
+            let metadata = required_attr(value, "metadata", "Operation")?;
+            let metadata = metadata
+                .downcast::<PyDict>()
+                .map_err(|_| PyValueError::new_err("Operation.metadata must be a dict"))?;
+            let detector_id = match metadata.get_item("detector_id")? {
+                Some(item) if !item.is_none() => Some(item.extract::<i64>()?),
+                _ => None,
+            };
+            let coords = match metadata.get_item("coords")? {
+                Some(item) if !item.is_none() => item.extract::<Vec<f64>>()?,
+                _ => Vec::new(),
+            };
+            let lookbacks =
+                required_attr(value, "record_lookbacks", "Operation")?.extract::<Vec<usize>>()?;
+            validate_record_lookbacks(&lookbacks)?;
+            Ok(Op::DetectorRec {
+                detector_id,
+                lookbacks,
+                coords,
+            })
+        }
         "observable_include" => Ok(Op::ObservableInclude {
             observable_id: required_attr(value, "observable_id", "Operation")?.extract::<i64>()?,
             measurement_keys: required_attr(value, "measurement_keys", "Operation")?
                 .extract::<Vec<String>>()?,
         }),
+        "observable_include_rec" => {
+            let lookbacks =
+                required_attr(value, "record_lookbacks", "Operation")?.extract::<Vec<usize>>()?;
+            validate_record_lookbacks(&lookbacks)?;
+            Ok(Op::ObservableIncludeRec {
+                observable_id: required_attr(value, "observable_id", "Operation")?
+                    .extract::<i64>()?,
+                lookbacks,
+            })
+        }
         _ => Err(PyValueError::new_err(format!(
             "unsupported native operation kind {kind:?}"
         ))),
@@ -178,6 +246,33 @@ fn parse_native_operation_object(py: Python<'_>, operation: &PyOperation) -> PyR
         return Ok(core_op.clone());
     }
     match operation.kind.as_str() {
+        "tick" => Ok(Op::Tick),
+        "shift_coords" => {
+            let metadata = operation
+                .metadata
+                .bind(py)
+                .downcast::<PyDict>()
+                .map_err(|_| PyValueError::new_err("Operation.metadata must be a dict"))?;
+            let offsets = metadata
+                .get_item("offsets")?
+                .ok_or_else(|| PyValueError::new_err("shift_coords requires offsets"))?
+                .extract::<Vec<f64>>()?;
+            Ok(Op::ShiftCoords(offsets))
+        }
+        "repeat" => {
+            let count = operation
+                .repeat_count
+                .ok_or_else(|| PyValueError::new_err("repeat requires repeat_count"))?;
+            if count == 0 {
+                return Err(PyValueError::new_err("repeat count must be positive"));
+            }
+            let body = operation
+                .body
+                .iter()
+                .map(|item| parse_operation_object(item.bind(py)))
+                .collect::<PyResult<Vec<_>>>()?;
+            Ok(Op::Repeat { count, body })
+        }
         "h" => Ok(Op::H(one_qubit(&operation.qubits, "h")?)),
         "s" => Ok(Op::S(one_qubit(&operation.qubits, "s")?)),
         "s_dag" => Ok(Op::SDag(one_qubit(&operation.qubits, "s_dag")?)),
@@ -222,6 +317,10 @@ fn parse_native_operation_object(py: Python<'_>, operation: &PyOperation) -> PyR
             key: operation.key.clone(),
             noise: optional_native_noise_location(py, &operation.noise_location)?,
         }),
+        "measure_reset" => Ok(Op::MeasureReset {
+            qubit: one_qubit(&operation.qubits, "measure_reset")?,
+            basis: operation.basis.to_uppercase(),
+        }),
         "reset" => Ok(Op::Reset {
             qubit: one_qubit(&operation.qubits, "reset")?,
             key: operation.key.clone(),
@@ -247,16 +346,68 @@ fn parse_native_operation_object(py: Python<'_>, operation: &PyOperation) -> PyR
                 coords,
             })
         }
+        "detector_rec" => {
+            validate_record_lookbacks(&operation.record_lookbacks)?;
+            let metadata = operation
+                .metadata
+                .bind(py)
+                .downcast::<PyDict>()
+                .map_err(|_| PyValueError::new_err("Operation.metadata must be a dict"))?;
+            let detector_id = match metadata.get_item("detector_id")? {
+                Some(item) if !item.is_none() => Some(item.extract::<i64>()?),
+                _ => None,
+            };
+            let coords = match metadata.get_item("coords")? {
+                Some(item) if !item.is_none() => item.extract::<Vec<f64>>()?,
+                _ => Vec::new(),
+            };
+            Ok(Op::DetectorRec {
+                detector_id,
+                lookbacks: operation.record_lookbacks.clone(),
+                coords,
+            })
+        }
         "observable_include" => Ok(Op::ObservableInclude {
             observable_id: operation.observable_id.ok_or_else(|| {
                 PyValueError::new_err("observable_include requires observable_id")
             })?,
             measurement_keys: operation.measurement_keys.clone(),
         }),
+        "observable_include_rec" => {
+            validate_record_lookbacks(&operation.record_lookbacks)?;
+            Ok(Op::ObservableIncludeRec {
+                observable_id: operation.observable_id.ok_or_else(|| {
+                    PyValueError::new_err("observable_include_rec requires observable_id")
+                })?,
+                lookbacks: operation.record_lookbacks.clone(),
+            })
+        }
         kind => Err(PyValueError::new_err(format!(
             "unsupported native operation kind {kind:?}"
         ))),
     }
+}
+
+fn validate_record_lookbacks(lookbacks: &[usize]) -> PyResult<()> {
+    if lookbacks.iter().any(|lookback| *lookback == 0) {
+        return Err(PyValueError::new_err(
+            "measurement record lookbacks must be positive",
+        ));
+    }
+    Ok(())
+}
+
+fn required_mapping_item<'py>(
+    mapping: &'py Bound<'py, PyAny>,
+    key: &str,
+    context: &str,
+) -> PyResult<Bound<'py, PyAny>> {
+    let mapping = mapping
+        .downcast::<PyDict>()
+        .map_err(|_| PyValueError::new_err("Operation.metadata must be a dict"))?;
+    mapping
+        .get_item(key)?
+        .ok_or_else(|| PyValueError::new_err(format!("{context} requires {key}")))
 }
 
 pub(crate) fn optional_native_noise_location(

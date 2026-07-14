@@ -2,11 +2,19 @@ use crate::*;
 pub(crate) use faultscope_core::{Mask, RuntimeState};
 
 pub(crate) fn mask_to_py(py: Python<'_>, mask: &Mask) -> PyResult<PyObject> {
+    let int_type = py.import("builtins")?.getattr("int")?;
+    mask_to_py_with_type(py, mask, &int_type)
+}
+
+fn mask_to_py_with_type(
+    py: Python<'_>,
+    mask: &Mask,
+    int_type: &Bound<'_, PyAny>,
+) -> PyResult<PyObject> {
     let mut bytes = Vec::with_capacity(mask.words.len() * 8);
     for word in &mask.words {
         bytes.extend_from_slice(&word.to_le_bytes());
     }
-    let int_type = py.import("builtins")?.getattr("int")?;
     Ok(int_type
         .call_method1("from_bytes", (PyBytes::new(py, &bytes), "little"))?
         .into())
@@ -46,25 +54,28 @@ pub(crate) fn mask_bit(mask: &Mask, shot: usize) -> PyResult<u8> {
 }
 
 pub(crate) fn mask_vec_to_py(py: Python<'_>, values: &[Mask]) -> PyResult<PyObject> {
+    let int_type = py.import("builtins")?.getattr("int")?;
     let list = PyList::empty(py);
     for value in values {
-        list.append(mask_to_py(py, value)?)?;
+        list.append(mask_to_py_with_type(py, value, &int_type)?)?;
     }
     Ok(list.into())
 }
 
 pub(crate) fn map_to_py(py: Python<'_>, values: &HashMap<String, Mask>) -> PyResult<PyObject> {
+    let int_type = py.import("builtins")?.getattr("int")?;
     let dict = PyDict::new(py);
     for (key, value) in values {
-        dict.set_item(key, mask_to_py(py, value)?)?;
+        dict.set_item(key, mask_to_py_with_type(py, value, &int_type)?)?;
     }
     Ok(dict.into())
 }
 
 pub(crate) fn int_map_to_py(py: Python<'_>, values: &HashMap<i64, Mask>) -> PyResult<PyObject> {
+    let int_type = py.import("builtins")?.getattr("int")?;
     let dict = PyDict::new(py);
     for (key, value) in values {
-        dict.set_item(key, mask_to_py(py, value)?)?;
+        dict.set_item(key, mask_to_py_with_type(py, value, &int_type)?)?;
     }
     Ok(dict.into())
 }

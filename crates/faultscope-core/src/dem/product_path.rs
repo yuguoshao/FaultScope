@@ -70,6 +70,11 @@ pub(super) fn supports_product_reference_fast_path(
     let mut basis = vec![ProductAxis::Z; n_qubits];
     for operation in operations {
         match operation {
+            Operation::Tick
+            | Operation::ShiftCoords(_)
+            | Operation::Repeat { .. }
+            | Operation::DetectorRec { .. }
+            | Operation::ObservableIncludeRec { .. } => return false,
             Operation::H(q) => {
                 let Some(axis) = basis.get_mut(*q) else {
                     return false;
@@ -115,6 +120,7 @@ pub(super) fn supports_product_reference_fast_path(
             | Operation::Noise(_)
             | Operation::Measure { .. }
             | Operation::MeasurePauli { .. }
+            | Operation::MeasureReset { .. }
             | Operation::Detector { .. }
             | Operation::ObservableInclude { .. } => {}
         }
@@ -243,6 +249,11 @@ fn apply_indexed_product_fault_propagation_operation(
     state: &mut IndexedProductFaultPropagationState,
 ) -> NpResult<()> {
     match operation {
+        Operation::Tick
+        | Operation::ShiftCoords(_)
+        | Operation::Repeat { .. }
+        | Operation::DetectorRec { .. }
+        | Operation::ObservableIncludeRec { .. } => {}
         Operation::H(q) => {
             state.basis[*q] = state.basis[*q].apply_h();
             swap_flat_rows_between_frames(
@@ -345,6 +356,7 @@ fn apply_indexed_product_fault_propagation_operation(
                 )?;
             }
         }
+        Operation::MeasureReset { .. } => {}
         Operation::Reset { qubit, key, basis } => {
             let qubits = [*qubit];
             if key.is_some() {

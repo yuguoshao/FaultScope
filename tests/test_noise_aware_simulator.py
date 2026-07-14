@@ -3297,15 +3297,120 @@ class StimImportTests(unittest.TestCase):
         self.assertEqual(len(imported.observables), stim_circuit.num_observables)
         self.assertIn("reset", [operation.kind for operation in imported.circuit.operations])
 
-    def test_rejects_repeat_blocks(self) -> None:
-        with self.assertRaises(StimImportError):
-            parse_stim_circuit(
-                """
-                REPEAT 3 {
+    def test_imports_repeat_blocks(self) -> None:
+        imported = parse_stim_circuit(
+            """
+            REPEAT 3 {
+                M 0
+                DETECTOR rec[-1]
+            }
+            """
+        )
+        self.assertEqual(imported.measurement_keys, ("m0", "m1", "m2"))
+        self.assertEqual(len(imported.detectors), 3)
+        self.assertEqual(imported.circuit.operations[0].kind, "repeat")
+
+    def test_nested_repeat_rec_and_shift_coords(self) -> None:
+        imported = parse_stim_circuit(
+            """
+            M 0
+            REPEAT 2 {
+                REPEAT 2 {
                     M 0
+                    SHIFT_COORDS(0, 0, 0.5)
+                    DETECTOR(1, 2, 0) rec[-1] rec[-2]
                 }
-                """
+            }
+            """
+        )
+        self.assertEqual(imported.measurement_keys, ("m0", "m1", "m2", "m3", "m4"))
+        self.assertEqual(len(imported.detectors), 4)
+        self.assertEqual(
+            tuple(detector.coords for detector in imported.detectors),
+            (
+                (1.0, 2.0, 0.5),
+                (1.0, 2.0, 1.0),
+                (1.0, 2.0, 1.5),
+                (1.0, 2.0, 2.0),
+            ),
+        )
+        self.assertEqual(imported.detectors[-1].measurement_keys, ("m4", "m3"))
+
+    def test_compact_and_flattened_surface_code_compile_identically(self) -> None:
+        try:
+            import stim
+        except ImportError as exc:
+            self.skipTest(f"Stim is not installed: {exc}")
+        circuit = stim.Circuit.generated(
+            "surface_code:rotated_memory_z",
+            distance=3,
+            rounds=3,
+        )
+        compact = parse_stim_circuit(str(circuit))
+        flattened = parse_stim_circuit(str(circuit.flattened()))
+        compact_sampler = compile_native_sampler(compact.circuit)
+        flattened_sampler = compile_native_sampler(flattened.circuit)
+        self.assertLess(compact_sampler.stored_operation_count, compact_sampler.operation_count)
+        self.assertLess(flattened_sampler.stored_operation_count, flattened_sampler.operation_count)
+        self.assertEqual(compact_sampler.operation_count, flattened_sampler.operation_count)
+        self.assertEqual(
+            compact_sampler.sample_measurements(shots=257, seed=9123),
+            flattened_sampler.sample_measurements(shots=257, seed=9123),
+        )
+
+    def test_repeat_noise_ids_and_dem_match_flattened_reference(self) -> None:
+        compact = parse_stim_circuit(
+            """
+            R 0
+            REPEAT 3 {
+                X_ERROR(0.125) 0
+                M 0
+                DETECTOR rec[-1]
+                R 0
+            }
+            """
+        )
+        flattened = parse_stim_circuit(
+            """
+            R 0
+            X_ERROR(0.125) 0
+            M 0
+            DETECTOR rec[-1]
+            R 0
+            X_ERROR(0.125) 0
+            M 0
+            DETECTOR rec[-1]
+            R 0
+            X_ERROR(0.125) 0
+            M 0
+            DETECTOR rec[-1]
+            R 0
+            """
+        )
+        self.assertEqual(len(compact.circuit.noise_locations()), 3)
+        compact_dem = DetectorErrorModelGenerator(compact.circuit).generate()
+        flattened_dem = DetectorErrorModelGenerator(flattened.circuit).generate()
+        canonical = lambda dem: sorted(
+            (
+                edge.probability,
+                tuple(edge.detectors),
+                tuple(edge.observables),
+                edge.event,
             )
+            for edge in dem.edges
+        )
+        self.assertEqual(canonical(compact_dem), canonical(flattened_dem))
+
+    def test_repeat_parser_validation(self) -> None:
+        for source in (
+            "REPEAT 0 {\nM 0\n}",
+            "REPEAT 2 {\nM 0",
+            "}",
+            "REPEAT 2 {\nDETECTOR rec[-1]\n}",
+        ):
+            with self.subTest(source=source):
+                with self.assertRaises(StimImportError):
+                    parse_stim_circuit(source)
 
 
 if __name__ == "__main__":

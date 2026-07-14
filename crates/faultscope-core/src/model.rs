@@ -97,6 +97,15 @@ impl NoiseLocation {
 /// Typed circuit operation understood by the Rust core.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Operation {
+    /// A semantic no-op used to preserve Stim scheduling boundaries.
+    Tick,
+    /// Add an offset to subsequent detector coordinates.
+    ShiftCoords(Vec<f64>),
+    /// Repeat a nested operation body `count` times.
+    Repeat {
+        count: usize,
+        body: Vec<Operation>,
+    },
     H(usize),
     S(usize),
     SDag(usize),
@@ -120,6 +129,11 @@ pub enum Operation {
         key: Option<String>,
         noise: Option<NoiseLocation>,
     },
+    /// Combined measurement and reset with an automatically assigned record key.
+    MeasureReset {
+        qubit: usize,
+        basis: String,
+    },
     Reset {
         qubit: usize,
         key: Option<String>,
@@ -130,9 +144,20 @@ pub enum Operation {
         measurement_keys: Vec<String>,
         coords: Vec<f64>,
     },
+    /// Detector declaration using positive measurement-record lookbacks.
+    DetectorRec {
+        detector_id: Option<i64>,
+        lookbacks: Vec<usize>,
+        coords: Vec<f64>,
+    },
     ObservableInclude {
         observable_id: i64,
         measurement_keys: Vec<String>,
+    },
+    /// Observable declaration using positive measurement-record lookbacks.
+    ObservableIncludeRec {
+        observable_id: i64,
+        lookbacks: Vec<usize>,
     },
 }
 
@@ -180,6 +205,7 @@ impl Operation {
                 noise: Some(location),
                 ..
             } => vec![location],
+            Self::Repeat { body, .. } => body.iter().flat_map(Operation::noise_locations).collect(),
             _ => Vec::new(),
         }
     }

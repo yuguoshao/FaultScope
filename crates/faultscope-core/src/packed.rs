@@ -21,6 +21,9 @@ pub struct FaultScopeSimulator {
     pub observables: Vec<LogicalObservable>,
     pub noise_location_ids: Vec<String>,
     pub noise_locations: Vec<NoiseLocation>,
+    pub stored_operation_count: usize,
+    pub logical_operation_count: usize,
+    pub loop_kernel_count: usize,
 }
 
 impl FaultScopeSimulator {
@@ -33,6 +36,9 @@ impl FaultScopeSimulator {
             observables,
             noise_location_ids: compiled.noise_location_ids,
             noise_locations: compiled.noise_locations,
+            stored_operation_count: compiled.stored_operation_count,
+            logical_operation_count: compiled.logical_operation_count,
+            loop_kernel_count: compiled.loop_kernel_count,
         })
     }
 

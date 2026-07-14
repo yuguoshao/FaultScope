@@ -182,6 +182,11 @@ fn apply_fault_propagation_operation(
     state: &mut DemFaultPropagationState,
 ) -> NpResult<()> {
     match operation {
+        Operation::Tick
+        | Operation::ShiftCoords(_)
+        | Operation::Repeat { .. }
+        | Operation::DetectorRec { .. }
+        | Operation::ObservableIncludeRec { .. } => {}
         Operation::H(q) => {
             state.reference.apply_h(*q);
             std::mem::swap(&mut state.x_frame[*q], &mut state.z_frame[*q]);
@@ -252,6 +257,7 @@ fn apply_fault_propagation_operation(
                 )?;
             }
         }
+        Operation::MeasureReset { .. } => {}
         Operation::Reset { qubit, key, basis } => {
             let qubits = vec![*qubit];
             if let Some(key) = key {

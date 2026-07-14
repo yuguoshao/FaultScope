@@ -55,6 +55,16 @@ impl NativePackedSampler {
         self.simulator.runtime_operations.len()
     }
 
+    #[getter]
+    pub(crate) fn stored_operation_count(&self) -> usize {
+        self.simulator.stored_operation_count
+    }
+
+    #[getter]
+    pub(crate) fn loop_kernel_count(&self) -> usize {
+        self.simulator.loop_kernel_count
+    }
+
     #[pyo3(signature = (shots, seed=None, rng=None))]
     pub(crate) fn sample(
         &self,
@@ -1548,7 +1558,7 @@ pub(crate) fn core_dem_generator_from_circuit(
     observables: Option<&Bound<'_, PyAny>>,
 ) -> PyResult<CoreDetectorErrorModelGenerator> {
     if let (Some(core_circuit), Some(event_plan)) = (
-        cached_core_circuit(circuit),
+        cached_core_dem_circuit(circuit),
         cached_core_event_plan(circuit),
     ) {
         let detector_specs = match detectors {
@@ -1582,22 +1592,22 @@ pub(crate) fn core_dem_generator_from_circuit(
         Some(items) if !items.is_none() => Some(parse_dem_observable_sequence(items)?),
         _ => None,
     };
-    let detector_specs =
-        detector_specs.unwrap_or_else(|| faultscope_core::detectors_from_circuit(&core_circuit));
-    let observable_specs = observable_specs
-        .unwrap_or_else(|| faultscope_core::observables_from_circuit(&core_circuit));
     match cached_event_plan {
-        Some(event_plan) => CoreDetectorErrorModelGenerator::new_with_shared_event_plan(
-            std::sync::Arc::new(core_circuit),
-            detector_specs,
-            observable_specs,
-            event_plan,
-        ),
-        None => CoreDetectorErrorModelGenerator::new(
-            core_circuit,
-            Some(detector_specs),
-            Some(observable_specs),
-        ),
+        Some(event_plan) => {
+            let detector_specs = detector_specs
+                .unwrap_or_else(|| faultscope_core::detectors_from_circuit(&core_circuit));
+            let observable_specs = observable_specs
+                .unwrap_or_else(|| faultscope_core::observables_from_circuit(&core_circuit));
+            CoreDetectorErrorModelGenerator::new_with_shared_event_plan(
+                std::sync::Arc::new(core_circuit),
+                detector_specs,
+                observable_specs,
+                event_plan,
+            )
+        }
+        None => {
+            CoreDetectorErrorModelGenerator::new(core_circuit, detector_specs, observable_specs)
+        }
     }
     .map_err(|err| PyValueError::new_err(err.to_string()))
 }

@@ -16,6 +16,7 @@ mod mask;
 mod model;
 mod packed;
 mod pauli;
+mod program;
 mod rng;
 mod sampling;
 mod stabilizer;
@@ -67,6 +68,7 @@ pub use pauli::{
     coeff_bit, highest_bit, multiply_concrete_rows, pauli_product, pauli_to_xz, solve_row_span,
     sparse_pauli_to_xz, support_to_words, symplectic_product, xor_words, xz_to_pauli,
 };
+pub use program::expand_circuit_operations;
 pub use rng::SmallRng;
 pub use sampling::{
     bernoulli_mask, choose_weighted_event, compile_pauli_channel_events, for_each_bernoulli_event,
