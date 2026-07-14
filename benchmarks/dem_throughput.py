@@ -459,8 +459,12 @@ def _run_repeat_comparison(memory: str, distance: int, rounds: int, repeats: int
     flat = _run_repeat_worker_isolated(memory, distance, rounds, repeats, False)
     status = "ok" if compact["edges"] == flat["edges"] else "dem-mismatch"
     compile_ratio = compact["compile_s"] / flat["compile_s"] if flat["compile_s"] else float("inf")
-    generate_ratio = compact["generate_s"] / flat["generate_s"] if flat["generate_s"] else float("inf")
-    rss_ratio = compact["peak_rss_kib"] / flat["peak_rss_kib"] if flat["peak_rss_kib"] else float("inf")
+    generate_ratio = (
+        compact["generate_s"] / flat["generate_s"] if flat["generate_s"] else float("inf")
+    )
+    rss_ratio = (
+        compact["peak_rss_kib"] / flat["peak_rss_kib"] if flat["peak_rss_kib"] else float("inf")
+    )
     print(
         f"surface-{memory}-repeat-d{distance}\t{distance}\t{rounds}\t"
         f"{compact['compile_s']:.6f}\t{flat['compile_s']:.6f}\t"

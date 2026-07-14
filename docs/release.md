@@ -31,7 +31,7 @@ with an `abi3-py310` wheel tag.
 
 - PyPI: `faultscope` and `faultscope-pymatching`.
 - crates.io: `faultscope-core`, then `faultscope-collection`.
-- `faultscope-fusion-blossom` remains a source-install beta for the `0.2.0`
+- `faultscope-fusion-blossom` remains a source-install beta for the `0.2.x`
   release line.
 
 ## Release Process

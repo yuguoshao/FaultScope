@@ -894,6 +894,12 @@ Forward estimate callbacks use bit-packed integer masks:
 - `loss_mask_fn(batch) -> int`
 - `loss_mask_fn(batch, corrections) -> int`
 
+Native forward batches also provide
+`batch.measurement_masks(keys) -> dict[str, int]`. Python decoders should call
+it once when they need a known subset of measurement records; it materializes
+only the requested packed masks. `batch.measurements` remains the compatible
+full mapping.
+
 DEM estimate callbacks also use bit-packed masks. The DEM loss callback is
 always called with a correction mapping:
 
@@ -977,7 +983,7 @@ Core data types include:
 - `LogicalObservable`
 - `DetectorErrorEdge`
 - `DetectorErrorModel`
-- `PackedBatch`
+- `SamplerProgram` and `RuntimeState` (integer-indexed forward-sampler IR and batch state)
 - `DemBatch`
 - `HotspotEstimate`
 - `DemHotspotEstimate`

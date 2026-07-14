@@ -246,8 +246,7 @@ def _normalized_lines(stim_circuit: Any, remap: dict[int, int], indent: str = ""
         args = instruction.gate_args_copy()
         arg_text = "" if not args else f"({','.join(format(value, '.17g') for value in args)})"
         lines.append(
-            f"{indent}{instruction.name}{arg_text} "
-            + " ".join(str(target) for target in targets)
+            f"{indent}{instruction.name}{arg_text} " + " ".join(str(target) for target in targets)
         )
     return lines
 

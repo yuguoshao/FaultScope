@@ -790,7 +790,7 @@ impl PyOperation {
 }
 
 fn validate_lookbacks(lookbacks: &[usize]) -> PyResult<()> {
-    if lookbacks.iter().any(|lookback| *lookback == 0) {
+    if lookbacks.contains(&0) {
         return Err(PyValueError::new_err(
             "measurement record lookbacks must be positive",
         ));
@@ -804,7 +804,6 @@ pub(crate) struct PyCircuit {
     pub(crate) n_qubits: usize,
     pub(crate) operations: Vec<Py<PyAny>>,
     pub(crate) core_circuit: Option<std::sync::Arc<faultscope_core::Circuit>>,
-    pub(crate) core_dem_circuit: std::sync::OnceLock<std::sync::Arc<faultscope_core::Circuit>>,
     pub(crate) core_event_plan: std::sync::OnceLock<std::sync::Arc<faultscope_core::DemEventPlan>>,
 }
 
@@ -849,13 +848,7 @@ impl PyCircuit {
                     .map(std::sync::Arc::new)
             }
         });
-        let core_dem_circuit = std::sync::OnceLock::new();
         let core_event_plan = std::sync::OnceLock::new();
-        if let Some(circuit) = &core_circuit {
-            if initial_event_plan.is_some() {
-                let _ = core_dem_circuit.set(circuit.clone());
-            }
-        }
         if let Some(event_plan) = initial_event_plan {
             let _ = core_event_plan.set(event_plan);
         }
@@ -863,7 +856,6 @@ impl PyCircuit {
             n_qubits,
             operations,
             core_circuit,
-            core_dem_circuit,
             core_event_plan,
         }
     }
@@ -1221,7 +1213,6 @@ impl PyDetectorErrorEdge {
 /// Typed detector error model with detector and observable declarations.
 #[pyclass(name = "DetectorErrorModel", module = "faultscope._native", frozen)]
 pub(crate) struct PyDetectorErrorModel {
-    core_dem: Option<faultscope_core::DetectorErrorModel>,
     core_lazy_dem: Option<faultscope_core::LazyDetectorErrorModel>,
     detectors: Vec<Py<PyAny>>,
     observables: Vec<Py<PyAny>>,
@@ -1246,7 +1237,6 @@ impl PyDetectorErrorModel {
         edges: Vec<Py<PyAny>>,
     ) -> Self {
         Self {
-            core_dem: None,
             core_lazy_dem: None,
             detectors,
             observables,
@@ -1256,12 +1246,6 @@ impl PyDetectorErrorModel {
 
     #[getter]
     pub(crate) fn detectors(&self, py: Python<'_>) -> PyResult<PyObject> {
-        if let Some(dem) = &self.core_dem {
-            let detectors = detectors_to_py_objects(py, &dem.detectors)?;
-            return Ok(
-                PyTuple::new(py, detectors.iter().map(|detector| detector.clone_ref(py)))?.into(),
-            );
-        }
         if let Some(dem) = &self.core_lazy_dem {
             let detectors = detectors_to_py_objects(py, &dem.detectors)?;
             return Ok(
@@ -1277,16 +1261,6 @@ impl PyDetectorErrorModel {
 
     #[getter]
     pub(crate) fn observables(&self, py: Python<'_>) -> PyResult<PyObject> {
-        if let Some(dem) = &self.core_dem {
-            let observables = observables_to_py_objects(py, &dem.observables)?;
-            return Ok(PyTuple::new(
-                py,
-                observables
-                    .iter()
-                    .map(|observable| observable.clone_ref(py)),
-            )?
-            .into());
-        }
         if let Some(dem) = &self.core_lazy_dem {
             let observables = observables_to_py_objects(py, &dem.observables)?;
             return Ok(PyTuple::new(
@@ -1308,10 +1282,6 @@ impl PyDetectorErrorModel {
 
     #[getter]
     pub(crate) fn edges(&self, py: Python<'_>) -> PyResult<PyObject> {
-        if let Some(dem) = &self.core_dem {
-            let edges = edges_to_py_objects(py, &dem.edges)?;
-            return Ok(PyTuple::new(py, edges.iter().map(|edge| edge.clone_ref(py)))?.into());
-        }
         if let Some(dem) = &self.core_lazy_dem {
             let dem = dem.materialize();
             let edges = edges_to_py_objects(py, &dem.edges)?;
@@ -1328,11 +1298,7 @@ impl PyDetectorErrorModel {
     ) -> PyResult<String> {
         let mut lines = Vec::<String>::new();
         if include_detector_coords {
-            if let Some(dem) = &self.core_dem {
-                for detector in &dem.detectors {
-                    lines.push(detector_dem_line(py, detector.id, &detector.coords)?);
-                }
-            } else if let Some(dem) = &self.core_lazy_dem {
+            if let Some(dem) = &self.core_lazy_dem {
                 for detector in &dem.detectors {
                     lines.push(detector_dem_line(py, detector.id, &detector.coords)?);
                 }
@@ -1345,11 +1311,7 @@ impl PyDetectorErrorModel {
                 }
             }
         }
-        if let Some(dem) = &self.core_dem {
-            for edge in &dem.edges {
-                lines.push(core_edge_dem_line(py, edge)?);
-            }
-        } else if let Some(dem) = &self.core_lazy_dem {
+        if let Some(dem) = &self.core_lazy_dem {
             let dem = dem.materialize();
             for edge in &dem.edges {
                 lines.push(core_edge_dem_line(py, edge)?);
@@ -1368,21 +1330,6 @@ impl PyDetectorErrorModel {
 
     pub(crate) fn edges_by_location(&self, py: Python<'_>) -> PyResult<PyObject> {
         let out = PyDict::new(py);
-        if let Some(dem) = &self.core_dem {
-            let edges = edges_to_py_objects(py, &dem.edges)?;
-            for (core_edge, edge) in dem.edges.iter().zip(edges.iter()) {
-                let list = match out.get_item(core_edge.location_id.as_str())? {
-                    Some(list) => list.downcast::<PyList>()?.clone(),
-                    None => {
-                        let list = PyList::empty(py);
-                        out.set_item(core_edge.location_id.as_str(), &list)?;
-                        list
-                    }
-                };
-                list.append(edge.clone_ref(py))?;
-            }
-            return Ok(out.into());
-        }
         if let Some(dem) = &self.core_lazy_dem {
             let dem = dem.materialize();
             let edges = edges_to_py_objects(py, &dem.edges)?;
@@ -1607,19 +1554,8 @@ impl PyDetectorErrorModel {
 }
 
 impl PyDetectorErrorModel {
-    pub(crate) fn from_core_dem(dem: faultscope_core::DetectorErrorModel) -> Self {
-        Self {
-            core_dem: Some(dem),
-            core_lazy_dem: None,
-            detectors: Vec::new(),
-            observables: Vec::new(),
-            edges: Vec::new(),
-        }
-    }
-
     pub(crate) fn from_core_lazy_dem(dem: faultscope_core::LazyDetectorErrorModel) -> Self {
         Self {
-            core_dem: None,
             core_lazy_dem: Some(dem),
             detectors: Vec::new(),
             observables: Vec::new(),
@@ -1631,9 +1567,6 @@ impl PyDetectorErrorModel {
         &self,
         py: Python<'_>,
     ) -> PyResult<faultscope_core::DetectorErrorModel> {
-        if let Some(dem) = &self.core_dem {
-            return Ok(dem.clone());
-        }
         if let Some(dem) = &self.core_lazy_dem {
             return Ok(dem.materialize());
         }
@@ -1658,21 +1591,6 @@ impl PyDetectorErrorModel {
     }
 
     fn edge_views(&self, py: Python<'_>) -> PyResult<Vec<PyDemEdgeView>> {
-        if let Some(dem) = &self.core_dem {
-            return dem
-                .edges
-                .iter()
-                .map(|edge| {
-                    Ok(PyDemEdgeView {
-                        location_id: edge.location_id.clone(),
-                        event: dem_event_to_py(py, &edge.event)?,
-                        probability: edge.probability,
-                        detectors: edge.detectors.clone(),
-                        observables: edge.observables.clone(),
-                    })
-                })
-                .collect::<PyResult<Vec<_>>>();
-        }
         if let Some(dem) = &self.core_lazy_dem {
             let dem = dem.materialize();
             return dem

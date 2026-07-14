@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use super::*;
-use crate::{NoiseLocation, NoiseModel};
+use crate::{DemEvent, NoiseLocation, NoiseModel};
 
 #[test]
 fn measurement_bit_flip_generates_detector_edge() {
@@ -38,6 +38,64 @@ fn measurement_bit_flip_generates_detector_edge() {
     assert_eq!(edges[0].detectors, vec![0]);
     assert_eq!(edges[0].location_id, "m_noise");
     assert_eq!(edges[0].event, DemEvent::Bool(true));
+}
+
+#[test]
+fn event_and_measurement_plans_share_integer_program_ids() {
+    let location = NoiseLocation {
+        id: "x0".to_string(),
+        model: NoiseModel::BernoulliPauli("X".to_string()),
+        rate: 0.125,
+        qubits: vec![0],
+        tags: HashMap::new(),
+    };
+    let operations = vec![
+        Operation::Noise(location),
+        Operation::Measure {
+            qubit: 0,
+            key: Some("syndrome".to_string()),
+            basis: "Z".to_string(),
+            noise: None,
+        },
+        Operation::Detector {
+            detector_id: Some(4),
+            measurement_keys: vec!["syndrome".to_string()],
+            coords: vec![2.0],
+        },
+    ];
+
+    let event_plan = collect_dem_event_plan(&operations).unwrap();
+    assert!(matches!(
+        event_plan.program.operations.as_slice(),
+        [
+            ExpandedOperation::Noise(0),
+            ExpandedOperation::MeasureSingle {
+                measurement_id: 0,
+                ..
+            },
+            ExpandedOperation::Detector {
+                detector_id: 4,
+                measurement_ids,
+            }
+        ] if measurement_ids.as_slice() == [0]
+    ));
+    assert_eq!(event_plan.fault_events[0].noise_id, 0);
+    assert_eq!(event_plan.fault_event_range_by_noise, vec![0..1]);
+    let location = &event_plan.program.noise_locations[0];
+    assert_eq!(
+        event_plan
+            .program
+            .location_catalog
+            .label(location.location_id),
+        "x0"
+    );
+    assert_eq!(event_plan.program.detector_coords, vec![vec![2.0]]);
+
+    let detectors = event_plan.inferred_detectors();
+    let measurement_plan =
+        compile_dem_measurement_plan(&event_plan.program, &detectors, &[]).unwrap();
+    assert_eq!(measurement_plan.measurement_index_by_id, vec![Some(0)]);
+    assert_eq!(measurement_plan.detectors[0].measurement_indices, vec![0]);
 }
 
 #[test]
@@ -129,7 +187,8 @@ fn generator_sampler_edges_match_full_dem_edges() {
 
     let first = generator.generate().unwrap();
     let second = generator.generate().unwrap();
-    let sampler_edges = generator.generate_sampler_edges().unwrap();
+    let lazy = generator.generate_lazy().unwrap();
+    let sampler_edges = lazy.compile_hotspot_estimator().edges();
 
     assert_eq!(first, second);
     assert_eq!(sampler_edges.len(), first.edges.len());
@@ -141,6 +200,47 @@ fn generator_sampler_edges_match_full_dem_edges() {
         assert_eq!(sampler_edge.event, dem_edge.event);
         assert_eq!(sampler_edge.tags, dem_edge.tags);
     }
+}
+
+#[test]
+fn consuming_sampling_estimator_skips_metadata_and_preserves_seeded_batches() {
+    let circuit = Circuit {
+        n_qubits: 1,
+        operations: vec![
+            Operation::Noise(NoiseLocation {
+                id: "x0".to_string(),
+                model: NoiseModel::BernoulliPauli("X".to_string()),
+                rate: 0.25,
+                qubits: vec![0],
+                tags: HashMap::new(),
+            }),
+            Operation::Measure {
+                qubit: 0,
+                key: Some("m0".to_string()),
+                basis: "Z".to_string(),
+                noise: None,
+            },
+            Operation::Detector {
+                detector_id: Some(0),
+                measurement_keys: vec!["m0".to_string()],
+                coords: Vec::new(),
+            },
+        ],
+    };
+    let generator = DetectorErrorModelGenerator::new(circuit, None, None).unwrap();
+    let metadata_estimator = generator
+        .generate_lazy()
+        .unwrap()
+        .compile_hotspot_estimator();
+    let sampling_estimator = generator.generate_lazy().unwrap().into_sampling_estimator();
+
+    assert_eq!(sampling_estimator.location_groups(), Vec::new());
+    assert_eq!(sampling_estimator.edges()[0].location_id, "");
+    assert_eq!(sampling_estimator.edges()[0].event, DemEvent::Bool(false));
+    assert_eq!(
+        sampling_estimator.run_batch(129, Some(7), true).unwrap(),
+        metadata_estimator.run_batch(129, Some(7), true).unwrap()
+    );
 }
 
 #[test]

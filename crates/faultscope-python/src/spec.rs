@@ -10,7 +10,7 @@ pub(crate) type NoiseLocationSpec = CoreNoiseLocation;
 pub(crate) type DemDetectorSpec = CoreDetector;
 pub(crate) type DemObservableSpec = CoreLogicalObservable;
 pub(crate) type Op = faultscope_core::Operation;
-pub(crate) type DemEdgeSpec = faultscope_core::DemSamplerEdge;
+pub(crate) type DemEdgeSpec = faultscope_core::DetectorErrorEdge;
 
 pub(crate) fn parse_core_circuit_object(
     value: &Bound<'_, PyAny>,
@@ -44,30 +44,18 @@ pub(crate) fn cached_core_event_plan(
     if let Some(event_plan) = circuit.core_event_plan.get() {
         return Some(event_plan.clone());
     }
-    let dem_circuit = cached_core_dem_circuit_from_ref(&circuit)?;
+    let source = circuit.core_circuit.as_ref()?;
     let event_plan =
-        std::sync::Arc::new(faultscope_core::collect_dem_event_plan(&dem_circuit.operations).ok()?);
+        std::sync::Arc::new(faultscope_core::collect_dem_event_plan(&source.operations).ok()?);
     let _ = circuit.core_event_plan.set(event_plan.clone());
     Some(event_plan)
 }
 
-pub(crate) fn cached_core_dem_circuit(
+pub(crate) fn cached_core_circuit(
     value: &Bound<'_, PyAny>,
 ) -> Option<std::sync::Arc<faultscope_core::Circuit>> {
     let circuit = value.extract::<PyRef<'_, PyCircuit>>().ok()?;
-    cached_core_dem_circuit_from_ref(&circuit)
-}
-
-fn cached_core_dem_circuit_from_ref(
-    circuit: &PyRef<'_, PyCircuit>,
-) -> Option<std::sync::Arc<faultscope_core::Circuit>> {
-    if let Some(expanded) = circuit.core_dem_circuit.get() {
-        return Some(expanded.clone());
-    }
-    let source = circuit.core_circuit.as_ref()?;
-    let expanded = std::sync::Arc::new(faultscope_core::expand_circuit_operations(source).ok()?);
-    let _ = circuit.core_dem_circuit.set(expanded.clone());
-    Some(expanded)
+    circuit.core_circuit.clone()
 }
 
 pub(crate) fn parse_circuit_object(value: &Bound<'_, PyAny>) -> PyResult<(usize, Vec<Op>)> {
@@ -76,16 +64,23 @@ pub(crate) fn parse_circuit_object(value: &Bound<'_, PyAny>) -> PyResult<(usize,
     Ok((n_qubits, operations))
 }
 
-pub(crate) fn parse_py_noise_location_map(
+pub(crate) fn parse_py_noise_locations(
     circuit: &Bound<'_, PyAny>,
-) -> PyResult<HashMap<String, Py<PyAny>>> {
+    program: &faultscope_core::SamplerProgram,
+) -> PyResult<Vec<Py<PyAny>>> {
     let locations = circuit.call_method0("noise_locations")?;
     let locations = locations
         .downcast::<PyDict>()
         .map_err(|_| PyValueError::new_err("Circuit.noise_locations() must return a dict"))?;
-    let mut out = HashMap::new();
-    for (location_id, location) in locations.iter() {
-        out.insert(location_id.extract::<String>()?, location.unbind());
+    let mut out = Vec::with_capacity(program.noise_locations.len());
+    for location in &program.noise_locations {
+        let label = program.location_catalog.label(location.location_id);
+        let value = locations.get_item(label)?.ok_or_else(|| {
+            PyValueError::new_err(format!(
+                "Circuit.noise_locations() did not return compiled location {label:?}"
+            ))
+        })?;
+        out.push(value.unbind());
     }
     Ok(out)
 }
@@ -389,7 +384,7 @@ fn parse_native_operation_object(py: Python<'_>, operation: &PyOperation) -> PyR
 }
 
 fn validate_record_lookbacks(lookbacks: &[usize]) -> PyResult<()> {
-    if lookbacks.iter().any(|lookback| *lookback == 0) {
+    if lookbacks.contains(&0) {
         return Err(PyValueError::new_err(
             "measurement record lookbacks must be positive",
         ));

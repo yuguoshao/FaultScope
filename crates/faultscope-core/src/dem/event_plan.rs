@@ -1,102 +1,107 @@
-use std::collections::{HashMap, HashSet};
+use std::ops::Range;
+use std::sync::Arc;
 
-use crate::{DemEvent, NoiseLocation, NoiseModel, NpError, NpResult, Operation};
+use crate::program::{ExpandedOperation, ExpandedProgram, ExpansionMode};
+use crate::{DemEvent, IndexedNoiseLocation, NoiseModel, NpError, NpResult, Operation};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct DemEventPlan {
+    pub(super) program: Arc<ExpandedProgram>,
     pub(super) fault_events: Vec<DemFaultEvent>,
-    pub(super) fault_events_by_op: Vec<Vec<usize>>,
+    pub(super) fault_event_range_by_noise: Vec<Range<usize>>,
+}
+
+impl DemEventPlan {
+    pub(super) fn measurement_noise_event_range(&self, noise_id: Option<usize>) -> Range<usize> {
+        let range = noise_id
+            .map(|noise_id| self.fault_event_range_by_noise[noise_id].clone())
+            .unwrap_or(0..0);
+        debug_assert!(range.clone().all(|event_index| matches!(
+            &self.fault_events[event_index].event,
+            DemEvent::Bool(true)
+        )));
+        range
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub(super) struct DemFaultEvent {
-    pub(super) location_id: String,
-    pub(super) qubits: Vec<usize>,
+    pub(super) noise_id: usize,
     pub(super) event: DemEvent,
     pub(super) probability: f64,
-    pub(super) tags: HashMap<String, crate::TagValue>,
 }
 
 pub fn collect_dem_event_plan(operations: &[Operation]) -> NpResult<DemEventPlan> {
-    let (fault_events, fault_events_by_op) = collect_dem_fault_events(operations)?;
+    let program = crate::program::expand_operations(operations, ExpansionMode::Dem)?;
+    collect_dem_event_plan_from_program(program)
+}
+
+pub(super) fn collect_dem_event_plan_from_program(
+    program: ExpandedProgram,
+) -> NpResult<DemEventPlan> {
+    let program = Arc::new(program);
+    let (fault_events, fault_event_range_by_noise) = collect_dem_fault_events(&program)?;
     Ok(DemEventPlan {
+        program,
         fault_events,
-        fault_events_by_op,
+        fault_event_range_by_noise,
     })
 }
 
 fn collect_dem_fault_events(
-    operations: &[Operation],
-) -> NpResult<(Vec<DemFaultEvent>, Vec<Vec<usize>>)> {
+    program: &ExpandedProgram,
+) -> NpResult<(Vec<DemFaultEvent>, Vec<Range<usize>>)> {
     let mut fault_events = Vec::new();
-    let mut fault_events_by_op = vec![Vec::new(); operations.len()];
-    let mut seen = HashSet::new();
-    for (op_index, operation) in operations.iter().enumerate() {
+    let mut fault_event_range_by_noise = vec![0..0; program.noise_locations.len()];
+    for operation in &program.operations {
         match operation {
-            Operation::Noise(location) => {
-                collect_dem_fault_events_for_location(
+            ExpandedOperation::Noise(noise_id) => {
+                fault_event_range_by_noise[*noise_id] = collect_dem_fault_events_for_location(
                     &mut fault_events,
-                    &mut fault_events_by_op,
-                    &mut seen,
-                    op_index,
-                    location,
+                    *noise_id,
+                    &program.noise_locations[*noise_id],
                 )?;
             }
-            Operation::Measure {
-                noise: Some(location),
+            ExpandedOperation::MeasureSingle {
+                noise: Some(noise_id),
                 ..
             }
-            | Operation::MeasurePauli {
-                noise: Some(location),
+            | ExpandedOperation::MeasurePauli {
+                noise: Some(noise_id),
                 ..
             } => {
+                let location = &program.noise_locations[*noise_id];
                 if !matches!(location.model, NoiseModel::MeasurementBitFlip) {
                     return Err(NpError::new(
                         "DEM generation currently supports MeasurementBitFlip on measurement operations",
                     ));
                 }
-                collect_dem_fault_events_for_location(
-                    &mut fault_events,
-                    &mut fault_events_by_op,
-                    &mut seen,
-                    op_index,
-                    location,
-                )?;
+                fault_event_range_by_noise[*noise_id] =
+                    collect_dem_fault_events_for_location(&mut fault_events, *noise_id, location)?;
             }
             _ => {}
         }
     }
-    Ok((fault_events, fault_events_by_op))
+    Ok((fault_events, fault_event_range_by_noise))
 }
 
 fn collect_dem_fault_events_for_location(
     fault_events: &mut Vec<DemFaultEvent>,
-    fault_events_by_op: &mut [Vec<usize>],
-    seen: &mut HashSet<String>,
-    op_index: usize,
-    location: &NoiseLocation,
-) -> NpResult<()> {
-    if !seen.insert(location.id.clone()) {
-        return Err(NpError::new(format!(
-            "DetectorErrorModelGenerator requires unique noise location ids; duplicate id {:?}",
-            location.id
-        )));
-    }
+    noise_id: usize,
+    location: &IndexedNoiseLocation,
+) -> NpResult<Range<usize>> {
+    let start = fault_events.len();
     for (event, probability) in non_identity_events(location)? {
-        let event_index = fault_events.len();
         fault_events.push(DemFaultEvent {
-            location_id: location.id.clone(),
-            qubits: location.qubits.clone(),
+            noise_id,
             event,
             probability,
-            tags: location.tags.clone(),
         });
-        fault_events_by_op[op_index].push(event_index);
     }
-    Ok(())
+    Ok(start..fault_events.len())
 }
 
-fn non_identity_events(location: &NoiseLocation) -> NpResult<Vec<(DemEvent, f64)>> {
+fn non_identity_events(location: &IndexedNoiseLocation) -> NpResult<Vec<(DemEvent, f64)>> {
     match &location.model {
         NoiseModel::BernoulliPauli(pauli) => {
             Ok(vec![(DemEvent::Pauli(pauli.clone()), location.rate)])

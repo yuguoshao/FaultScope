@@ -3,20 +3,25 @@ pub(crate) use faultscope_core::{Mask, RuntimeState};
 
 pub(crate) fn mask_to_py(py: Python<'_>, mask: &Mask) -> PyResult<PyObject> {
     let int_type = py.import("builtins")?.getattr("int")?;
-    mask_to_py_with_type(py, mask, &int_type)
+    let from_bytes = int_type.getattr("from_bytes")?;
+    let byteorder = PyString::new(py, "little");
+    mask_to_py_with_converter(py, mask, &from_bytes, &byteorder, &mut Vec::new())
 }
 
-fn mask_to_py_with_type(
+pub(crate) fn mask_to_py_with_converter(
     py: Python<'_>,
     mask: &Mask,
-    int_type: &Bound<'_, PyAny>,
+    from_bytes: &Bound<'_, PyAny>,
+    byteorder: &Bound<'_, PyString>,
+    bytes: &mut Vec<u8>,
 ) -> PyResult<PyObject> {
-    let mut bytes = Vec::with_capacity(mask.words.len() * 8);
+    bytes.clear();
+    bytes.reserve(mask.words.len() * 8);
     for word in &mask.words {
         bytes.extend_from_slice(&word.to_le_bytes());
     }
-    Ok(int_type
-        .call_method1("from_bytes", (PyBytes::new(py, &bytes), "little"))?
+    Ok(from_bytes
+        .call1((PyBytes::new(py, bytes), byteorder))?
         .into())
 }
 
@@ -55,27 +60,80 @@ pub(crate) fn mask_bit(mask: &Mask, shot: usize) -> PyResult<u8> {
 
 pub(crate) fn mask_vec_to_py(py: Python<'_>, values: &[Mask]) -> PyResult<PyObject> {
     let int_type = py.import("builtins")?.getattr("int")?;
+    let from_bytes = int_type.getattr("from_bytes")?;
+    let byteorder = PyString::new(py, "little");
+    let mut bytes = Vec::new();
     let list = PyList::empty(py);
     for value in values {
-        list.append(mask_to_py_with_type(py, value, &int_type)?)?;
+        list.append(mask_to_py_with_converter(
+            py,
+            value,
+            &from_bytes,
+            &byteorder,
+            &mut bytes,
+        )?)?;
     }
     Ok(list.into())
 }
 
-pub(crate) fn map_to_py(py: Python<'_>, values: &HashMap<String, Mask>) -> PyResult<PyObject> {
+pub(crate) fn measurement_masks_to_py(
+    py: Python<'_>,
+    program: &faultscope_core::SamplerProgram,
+    values: &[Option<Mask>],
+) -> PyResult<PyObject> {
     let int_type = py.import("builtins")?.getattr("int")?;
+    let from_bytes = int_type.getattr("from_bytes")?;
+    let byteorder = PyString::new(py, "little");
+    let mut bytes = Vec::new();
     let dict = PyDict::new(py);
-    for (key, value) in values {
-        dict.set_item(key, mask_to_py_with_type(py, value, &int_type)?)?;
+    for (measurement_id, value) in values.iter().enumerate() {
+        let Some(value) = value else {
+            continue;
+        };
+        let Some(key) = program.measurement_keys.get(measurement_id) else {
+            continue;
+        };
+        dict.set_item(
+            key,
+            mask_to_py_with_converter(py, value, &from_bytes, &byteorder, &mut bytes)?,
+        )?;
+    }
+    Ok(dict.into())
+}
+
+pub(crate) fn noise_event_masks_to_py(
+    py: Python<'_>,
+    program: &faultscope_core::SamplerProgram,
+    values: &[Mask],
+) -> PyResult<PyObject> {
+    let int_type = py.import("builtins")?.getattr("int")?;
+    let from_bytes = int_type.getattr("from_bytes")?;
+    let byteorder = PyString::new(py, "little");
+    let mut bytes = Vec::new();
+    let dict = PyDict::new(py);
+    for (noise_id, value) in values.iter().enumerate() {
+        let Some(location) = program.noise_locations.get(noise_id) else {
+            continue;
+        };
+        dict.set_item(
+            program.location_catalog.label(location.location_id),
+            mask_to_py_with_converter(py, value, &from_bytes, &byteorder, &mut bytes)?,
+        )?;
     }
     Ok(dict.into())
 }
 
 pub(crate) fn int_map_to_py(py: Python<'_>, values: &HashMap<i64, Mask>) -> PyResult<PyObject> {
     let int_type = py.import("builtins")?.getattr("int")?;
+    let from_bytes = int_type.getattr("from_bytes")?;
+    let byteorder = PyString::new(py, "little");
+    let mut bytes = Vec::new();
     let dict = PyDict::new(py);
     for (key, value) in values {
-        dict.set_item(key, mask_to_py_with_type(py, value, &int_type)?)?;
+        dict.set_item(
+            key,
+            mask_to_py_with_converter(py, value, &from_bytes, &byteorder, &mut bytes)?,
+        )?;
     }
     Ok(dict.into())
 }

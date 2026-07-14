@@ -24,9 +24,14 @@ pub(crate) fn compute_packed_estimate(
     baseline: Option<f64>,
     top_k: usize,
 ) -> PackedEstimate {
-    sampler
-        .simulator
-        .estimate_from_loss(state, loss_mask, baseline, top_k)
+    faultscope_core::compute_packed_estimate(
+        &sampler.program.noise_locations,
+        &sampler.program.location_catalog,
+        state,
+        loss_mask,
+        baseline,
+        top_k,
+    )
 }
 
 pub(crate) fn compute_dem_estimate(

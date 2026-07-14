@@ -1,38 +1,55 @@
-use std::collections::HashSet;
-
+use crate::program::{ExpandedOperation, ExpansionMode};
 use crate::stabilizer::SymbolicStabilizer;
-use crate::{Expr, NoiseLocation, NpError, NpResult, Operation, RunOperation};
+use crate::{
+    Expr, IndexedNoiseLocation, LocationCatalog, LogicalObservable, NpError, NpResult, Operation,
+    RuntimeCapacities, SamplerObservable, SamplerOperation, SamplerProgram,
+};
 
-#[derive(Debug, Clone, PartialEq)]
-pub struct CompiledCircuit {
-    pub runtime_operations: Vec<RunOperation>,
-    pub noise_location_ids: Vec<String>,
-    pub noise_locations: Vec<NoiseLocation>,
-    pub random_source_count: usize,
-    pub stored_operation_count: usize,
-    pub logical_operation_count: usize,
-    pub loop_kernel_count: usize,
+#[cfg(test)]
+thread_local! {
+    static SYMBOLIC_OPERATION_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
-pub fn compile_runtime_operations(
+/// Compile a borrowed operation tree into the canonical compact sampler program.
+pub fn compile_sampler_program_ref(
     n_qubits: usize,
-    operations: Vec<Operation>,
-) -> NpResult<CompiledCircuit> {
-    let expanded = crate::program::expand_operations(&operations)?;
-    let stored_operation_count = expanded.stored_operation_count;
-    let logical_operation_count = expanded.logical_operation_count;
-    let operations = expanded.operations;
+    operations: &[Operation],
+    observables: Vec<LogicalObservable>,
+) -> NpResult<SamplerProgram> {
+    let expanded = crate::program::expand_operations(operations, ExpansionMode::Sampler)?;
+    compile_expanded_program(n_qubits, expanded, observables)
+}
+
+struct SymbolicCompilation {
+    operations: Vec<ExpandedOperation>,
+    ideals: Vec<Expr>,
+    measurement_keys: Vec<String>,
+    noise_locations: Vec<IndexedNoiseLocation>,
+    location_catalog: LocationCatalog,
+    random_source_count: usize,
+    stored_operation_count: usize,
+    logical_operation_count: usize,
+    loop_kernel_count: usize,
+}
+
+fn compile_expanded_program(
+    n_qubits: usize,
+    expanded: crate::program::ExpandedProgram,
+    observables: Vec<LogicalObservable>,
+) -> NpResult<SamplerProgram> {
+    let crate::program::ExpandedProgram {
+        operations,
+        measurement_keys,
+        noise_locations,
+        location_catalog,
+        stored_operation_count,
+        logical_operation_count,
+        ideal_count,
+        mut loop_ranges,
+        ..
+    } = expanded;
     let mut symbolic = SymbolicStabilizer::zero(n_qubits);
-    let operation_count = operations.len();
-    let noise_location_count = operations
-        .iter()
-        .map(|operation| operation.noise_locations().len())
-        .sum();
-    let mut runtime_operations = Vec::with_capacity(operation_count);
-    let mut seen_noise_ids = HashSet::with_capacity(noise_location_count);
-    let mut noise_location_ids = Vec::with_capacity(noise_location_count);
-    let mut noise_locations = Vec::with_capacity(noise_location_count);
-    let mut loop_ranges = expanded.loop_ranges;
+    let mut ideals = Vec::with_capacity(ideal_count);
     loop_ranges.retain(|range| range.iterations.len() >= 2);
     loop_ranges.sort_by(|left, right| {
         let left_start = left.iterations[0].start;
@@ -55,146 +72,179 @@ pub fn compile_runtime_operations(
         if start < cursor || end > operations.len() {
             continue;
         }
-        compile_regular_segment(
-            &mut symbolic,
-            &operations[cursor..start],
-            &mut runtime_operations,
-            &mut seen_noise_ids,
-            &mut noise_location_ids,
-            &mut noise_locations,
-        )?;
+        compile_regular_segment(&mut symbolic, &operations[cursor..start], &mut ideals)?;
         let used_affine_cycle = compile_affine_loop(
             &mut symbolic,
             &operations,
             &loop_range.iterations,
-            &mut runtime_operations,
-            &mut seen_noise_ids,
-            &mut noise_location_ids,
-            &mut noise_locations,
+            &mut ideals,
         )?;
         loop_kernel_count += usize::from(used_affine_cycle);
         cursor = end;
     }
-    compile_regular_segment(
-        &mut symbolic,
-        &operations[cursor..],
-        &mut runtime_operations,
-        &mut seen_noise_ids,
-        &mut noise_location_ids,
-        &mut noise_locations,
-    )?;
-    Ok(CompiledCircuit {
-        runtime_operations,
-        noise_location_ids,
-        noise_locations,
-        random_source_count: symbolic.random_source_count(),
-        stored_operation_count,
-        logical_operation_count,
-        loop_kernel_count,
-    })
+    compile_regular_segment(&mut symbolic, &operations[cursor..], &mut ideals)?;
+    emit_sampler_program(
+        n_qubits,
+        SymbolicCompilation {
+            operations,
+            ideals,
+            measurement_keys,
+            noise_locations,
+            location_catalog,
+            random_source_count: symbolic.random_source_count(),
+            stored_operation_count,
+            logical_operation_count,
+            loop_kernel_count,
+        },
+        observables,
+    )
 }
 
-#[allow(clippy::too_many_arguments)]
 fn compile_regular_segment(
     symbolic: &mut SymbolicStabilizer,
-    operations: &[Operation],
-    runtime_operations: &mut Vec<RunOperation>,
-    seen_noise_ids: &mut HashSet<String>,
-    noise_location_ids: &mut Vec<String>,
-    noise_locations: &mut Vec<NoiseLocation>,
+    operations: &[ExpandedOperation],
+    ideals: &mut Vec<Expr>,
 ) -> NpResult<()> {
     if operations.is_empty() {
         return Ok(());
     }
-    register_noise_locations(
-        operations,
-        seen_noise_ids,
-        noise_location_ids,
-        noise_locations,
-    )?;
-    let ideals = simulate_symbolic_segment(symbolic, operations)?;
-    emit_runtime_segment(operations, &ideals, runtime_operations)
+    simulate_symbolic_segment(symbolic, operations, ideals)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn compile_affine_loop(
     symbolic: &mut SymbolicStabilizer,
-    operations: &[Operation],
+    operations: &[ExpandedOperation],
     iterations: &[std::ops::Range<usize>],
-    runtime_operations: &mut Vec<RunOperation>,
-    seen_noise_ids: &mut HashSet<String>,
-    noise_location_ids: &mut Vec<String>,
-    noise_locations: &mut Vec<NoiseLocation>,
+    ideals: &mut Vec<Expr>,
 ) -> NpResult<bool> {
     let iteration_len = iterations[0].end - iterations[0].start;
-    if iterations
-        .iter()
-        .any(|iteration| iteration.end - iteration.start != iteration_len)
+    let has_clifford = operations[iterations[0].clone()].iter().any(|operation| {
+        matches!(
+            operation,
+            ExpandedOperation::H(_)
+                | ExpandedOperation::S(_)
+                | ExpandedOperation::SDag(_)
+                | ExpandedOperation::Cx(_, _)
+                | ExpandedOperation::Cz(_, _)
+                | ExpandedOperation::Swap(_, _)
+        )
+    });
+    let minimum_iterations = if has_clifford { 8 } else { 4 };
+    if iterations.len() < minimum_iterations
+        || iteration_len < symbolic.n_qubits().saturating_mul(2)
+        || iterations
+            .iter()
+            .any(|iteration| iteration.end - iteration.start != iteration_len)
     {
         for iteration in iterations {
-            compile_regular_segment(
-                symbolic,
-                &operations[iteration.clone()],
-                runtime_operations,
-                seen_noise_ids,
-                noise_location_ids,
-                noise_locations,
-            )?;
+            compile_regular_segment(symbolic, &operations[iteration.clone()], ideals)?;
         }
         return Ok(false);
     }
-    let mut iteration_index = 0usize;
-    while iteration_index < iterations.len() {
-        let iteration = &iterations[iteration_index];
-        let body = &operations[iteration.clone()];
-        let mut template = symbolic.affine_template();
-        let template_ideals = simulate_symbolic_segment(&mut template, body)?;
-        if !symbolic.support_equals(&template) {
-            compile_regular_segment(
-                symbolic,
-                body,
-                runtime_operations,
-                seen_noise_ids,
-                noise_location_ids,
-                noise_locations,
-            )?;
-            iteration_index += 1;
-            continue;
+
+    let mut template = symbolic.affine_template();
+    let mut template_ideals = Vec::new();
+    simulate_symbolic_segment(
+        &mut template,
+        &operations[iterations[0].clone()],
+        &mut template_ideals,
+    )?;
+    let mut period = usize::from(symbolic.support_equals(&template));
+    let mut probed_iterations = 1usize;
+    if period == 0 && has_clifford {
+        simulate_symbolic_segment(
+            &mut template,
+            &operations[iterations[1].clone()],
+            &mut template_ideals,
+        )?;
+        probed_iterations = 2;
+        if symbolic.support_equals(&template) {
+            period = 2;
         }
-        let basis_count = symbolic.signs().len();
-        let local_random_count = template
-            .random_source_count()
-            .checked_sub(basis_count)
-            .ok_or_else(|| NpError::new("invalid affine loop random-source count"))?;
-        for remaining in &iterations[iteration_index..] {
-            let body = &operations[remaining.clone()];
-            register_noise_locations(body, seen_noise_ids, noise_location_ids, noise_locations)?;
-            let input_signs = symbolic.signs().to_vec();
-            let source_base = symbolic.random_source_count();
-            let ideals = template_ideals
-                .iter()
-                .map(|ideal| {
-                    ideal
-                        .as_ref()
-                        .map(|ideal| substitute_affine_expr(ideal, &input_signs, source_base))
-                })
-                .collect::<Vec<_>>();
-            emit_runtime_segment(body, &ideals, runtime_operations)?;
-            let signs = template
-                .signs()
-                .iter()
-                .map(|sign| substitute_affine_expr(sign, &input_signs, source_base))
-                .collect();
-            symbolic.replace_affine_state(
-                signs,
-                source_base
-                    .checked_add(local_random_count)
-                    .ok_or_else(|| NpError::new("random-source count overflow"))?,
-            );
-        }
-        return Ok(true);
     }
-    Ok(false)
+
+    let basis_count = symbolic.signs().len();
+    let local_random_count = template
+        .random_source_count()
+        .checked_sub(basis_count)
+        .ok_or_else(|| NpError::new("invalid affine loop random-source count"))?;
+    let input_signs = symbolic.signs().to_vec();
+    let source_base = symbolic.random_source_count();
+    instantiate_affine_ideals_into(&template_ideals, &input_signs, source_base, ideals);
+    let probed_signs = instantiate_affine_signs(&template, &input_signs, source_base);
+    let probed_random_source_count = source_base
+        .checked_add(local_random_count)
+        .ok_or_else(|| NpError::new("random-source count overflow"))?;
+
+    let reusable_periods = (iterations.len() - probed_iterations)
+        .checked_div(period)
+        .unwrap_or(0);
+    let use_affine_cycle = period != 0
+        && reusable_periods >= 2
+        && affine_template_is_compact(template.signs(), &template_ideals);
+    if !use_affine_cycle {
+        symbolic.replace_with_affine_template(template, probed_signs, probed_random_source_count);
+        let remaining = &iterations[probed_iterations..];
+        for iteration in remaining {
+            compile_regular_segment(symbolic, &operations[iteration.clone()], ideals)?;
+        }
+        return Ok(false);
+    }
+
+    symbolic.replace_affine_state(probed_signs, probed_random_source_count);
+    let mut next_iteration = probed_iterations;
+    while next_iteration + period <= iterations.len() {
+        let input_signs = symbolic.signs().to_vec();
+        let source_base = symbolic.random_source_count();
+        instantiate_affine_ideals_into(&template_ideals, &input_signs, source_base, ideals);
+        let signs = instantiate_affine_signs(&template, &input_signs, source_base);
+        symbolic.replace_affine_state(
+            signs,
+            source_base
+                .checked_add(local_random_count)
+                .ok_or_else(|| NpError::new("random-source count overflow"))?,
+        );
+        next_iteration += period;
+    }
+    for remaining in &iterations[next_iteration..] {
+        compile_regular_segment(symbolic, &operations[remaining.clone()], ideals)?;
+    }
+    Ok(true)
+}
+
+fn affine_template_is_compact(signs: &[Expr], ideals: &[Expr]) -> bool {
+    let expression_count = signs.len() + ideals.len();
+    let expression_term_count = signs
+        .iter()
+        .chain(ideals)
+        .map(|expr| expr.terms().len())
+        .sum::<usize>();
+    expression_term_count <= expression_count.saturating_mul(16)
+}
+
+fn instantiate_affine_ideals_into(
+    template_ideals: &[Expr],
+    input_signs: &[Expr],
+    source_base: usize,
+    ideals: &mut Vec<Expr>,
+) {
+    ideals.extend(
+        template_ideals
+            .iter()
+            .map(|ideal| substitute_affine_expr(ideal, input_signs, source_base)),
+    );
+}
+
+fn instantiate_affine_signs(
+    template: &SymbolicStabilizer,
+    input_signs: &[Expr],
+    source_base: usize,
+) -> Vec<Expr> {
+    template
+        .signs()
+        .iter()
+        .map(|sign| substitute_affine_expr(sign, input_signs, source_base))
+        .collect()
 }
 
 fn substitute_affine_expr(template: &Expr, input_signs: &[Expr], source_base: usize) -> Expr {
@@ -204,7 +254,7 @@ fn substitute_affine_expr(template: &Expr, input_signs: &[Expr], source_base: us
         if *term < basis_count {
             result.xor_assign(&input_signs[*term]);
         } else {
-            result.xor_assign(&Expr::random(source_base + term - basis_count));
+            result.toggle_term(source_base + term - basis_count);
         }
     }
     result
@@ -212,191 +262,258 @@ fn substitute_affine_expr(template: &Expr, input_signs: &[Expr], source_base: us
 
 fn simulate_symbolic_segment(
     symbolic: &mut SymbolicStabilizer,
-    operations: &[Operation],
-) -> NpResult<Vec<Option<Expr>>> {
+    operations: &[ExpandedOperation],
+    ideals: &mut Vec<Expr>,
+) -> NpResult<()> {
+    #[cfg(test)]
+    SYMBOLIC_OPERATION_COUNT.with(|count| count.set(count.get() + operations.len()));
+
     let reset_reuse = find_measure_reset_reuse(operations);
-    let mut measurement_reused = vec![false; operations.len()];
-    for measurement_index in reset_reuse.iter().flatten() {
-        measurement_reused[*measurement_index] = true;
-    }
-    let mut cached_measurement_ideals = vec![None; operations.len()];
-    let mut ideals = vec![None; operations.len()];
-    for (operation_index, operation) in operations.iter().enumerate() {
-        match operation {
-            Operation::H(qubit) => symbolic.apply_h(*qubit),
-            Operation::S(qubit) => symbolic.apply_s(*qubit),
-            Operation::SDag(qubit) => symbolic.apply_s_dag(*qubit),
-            Operation::Cx(control, target) => symbolic.apply_cx(*control, *target),
-            Operation::Cz(left, right) => symbolic.apply_cz(*left, *right),
-            Operation::Swap(left, right) => symbolic.apply_swap(*left, *right),
-            Operation::Pauli { qubits, pauli } => {
+    let mut reuse_index = 0usize;
+    let mut operation_index = 0usize;
+    while operation_index < operations.len() {
+        if let Some(reuse) = reset_reuse.get(reuse_index) {
+            if reuse.measurement_start == operation_index {
+                let mut cached_ideals = Vec::with_capacity(reuse.count);
+                for operation in
+                    &operations[reuse.measurement_start..reuse.measurement_start + reuse.count]
+                {
+                    let ExpandedOperation::MeasureSingle { qubit, basis, .. } = operation else {
+                        return Err(NpError::new(
+                            "internal error: invalid fused measurement block",
+                        ));
+                    };
+                    let ideal = symbolic.measure_single_pauli_expr(*qubit, basis.as_str())?;
+                    ideals.push(ideal.clone());
+                    cached_ideals.push(ideal);
+                }
+                for (offset, ideal) in cached_ideals.iter().enumerate() {
+                    let reset_index = reuse.measurement_start + reuse.count + offset;
+                    let ExpandedOperation::Reset { qubit, basis, .. } = &operations[reset_index]
+                    else {
+                        return Err(NpError::new("internal error: invalid fused reset block"));
+                    };
+                    symbolic.apply_single_pauli_string_expr(
+                        *qubit,
+                        reset_correction(basis.as_str())?,
+                        ideal,
+                    )?;
+                    ideals.push(Expr::constant(false));
+                }
+                operation_index += reuse.count * 2;
+                reuse_index += 1;
+                continue;
+            }
+        }
+
+        match &operations[operation_index] {
+            ExpandedOperation::H(qubit) => symbolic.apply_h(*qubit),
+            ExpandedOperation::S(qubit) => symbolic.apply_s(*qubit),
+            ExpandedOperation::SDag(qubit) => symbolic.apply_s_dag(*qubit),
+            ExpandedOperation::Cx(control, target) => symbolic.apply_cx(*control, *target),
+            ExpandedOperation::Cz(left, right) => symbolic.apply_cz(*left, *right),
+            ExpandedOperation::Swap(left, right) => symbolic.apply_swap(*left, *right),
+            ExpandedOperation::Pauli { qubits, pauli } => {
                 symbolic.apply_sparse_pauli_string(qubits, pauli)?;
             }
-            Operation::Measure { qubit, basis, .. } => {
-                let ideal = symbolic.measure_sparse_pauli_expr(&[*qubit], basis)?;
-                if measurement_reused[operation_index] {
-                    cached_measurement_ideals[operation_index] = Some(ideal.clone());
-                }
-                ideals[operation_index] = Some(ideal);
+            ExpandedOperation::MeasureSingle { qubit, basis, .. } => {
+                ideals.push(symbolic.measure_single_pauli_expr(*qubit, basis.as_str())?);
             }
-            Operation::MeasurePauli { qubits, pauli, .. } => {
-                ideals[operation_index] = Some(symbolic.measure_sparse_pauli_expr(qubits, pauli)?);
+            ExpandedOperation::MeasurePauli { qubits, pauli, .. } => {
+                ideals.push(symbolic.measure_sparse_pauli_expr(qubits, pauli)?);
             }
-            Operation::Reset { qubit, basis, .. } => {
-                let reused_ideal = reset_reuse[operation_index].and_then(|measurement_index| {
-                    cached_measurement_ideals[measurement_index].clone()
-                });
-                let ideal = match reused_ideal {
-                    Some(ideal) => ideal,
-                    None => symbolic.measure_sparse_pauli_expr(&[*qubit], basis)?,
-                };
-                symbolic.apply_sparse_pauli_string_expr(
-                    &[*qubit],
+            ExpandedOperation::Reset { qubit, basis, .. } => {
+                let basis = basis.as_str();
+                let ideal = symbolic.measure_single_pauli_expr(*qubit, basis)?;
+                symbolic.apply_single_pauli_string_expr(
+                    *qubit,
                     reset_correction(basis)?,
                     &ideal,
                 )?;
-                ideals[operation_index] = Some(if reset_reuse[operation_index].is_some() {
-                    Expr::constant(false)
-                } else {
-                    ideal
-                });
+                ideals.push(ideal);
             }
-            Operation::Noise(_)
-            | Operation::Detector { .. }
-            | Operation::ObservableInclude { .. } => {}
-            Operation::Tick
-            | Operation::ShiftCoords(_)
-            | Operation::Repeat { .. }
-            | Operation::MeasureReset { .. }
-            | Operation::DetectorRec { .. }
-            | Operation::ObservableIncludeRec { .. } => {
-                return Err(NpError::new(
-                    "internal error: structured operation survived expansion",
-                ));
-            }
+            ExpandedOperation::Noise(_)
+            | ExpandedOperation::Detector { .. }
+            | ExpandedOperation::ObservableInclude { .. } => {}
         }
+        operation_index += 1;
     }
-    Ok(ideals)
+    Ok(())
 }
 
-fn emit_runtime_segment(
-    operations: &[Operation],
-    ideals: &[Option<Expr>],
-    runtime_operations: &mut Vec<RunOperation>,
-) -> NpResult<()> {
-    for (operation_index, operation) in operations.iter().enumerate() {
+fn emit_sampler_program(
+    n_qubits: usize,
+    compiled: SymbolicCompilation,
+    observables: Vec<LogicalObservable>,
+) -> NpResult<SamplerProgram> {
+    let mut sampler_operations = Vec::with_capacity(compiled.operations.len());
+    let mut ideals = compiled.ideals.into_iter();
+    let mut capacities = RuntimeCapacities {
+        random_sources: compiled.random_source_count,
+        ..RuntimeCapacities::default()
+    };
+    for operation in compiled.operations {
         match operation {
-            Operation::H(qubit) => runtime_operations.push(RunOperation::H(*qubit)),
-            Operation::S(qubit) => runtime_operations.push(RunOperation::S(*qubit)),
-            Operation::SDag(qubit) => runtime_operations.push(RunOperation::SDag(*qubit)),
-            Operation::Cx(control, target) => {
-                runtime_operations.push(RunOperation::Cx(*control, *target));
+            ExpandedOperation::H(qubit) => {
+                sampler_operations.push(SamplerOperation::H(qubit));
             }
-            Operation::Cz(left, right) => {
-                runtime_operations.push(RunOperation::Cz(*left, *right));
+            ExpandedOperation::S(qubit) => {
+                sampler_operations.push(SamplerOperation::S(qubit));
             }
-            Operation::Swap(left, right) => {
-                runtime_operations.push(RunOperation::Swap(*left, *right));
+            ExpandedOperation::SDag(qubit) => {
+                sampler_operations.push(SamplerOperation::SDag(qubit));
             }
-            Operation::Pauli { .. } => {}
-            Operation::Noise(location) => {
-                runtime_operations.push(RunOperation::Noise(location.clone()));
+            ExpandedOperation::Cx(control, target) => {
+                sampler_operations.push(SamplerOperation::Cx(control, target));
             }
-            Operation::Measure {
+            ExpandedOperation::Cz(left, right) => {
+                sampler_operations.push(SamplerOperation::Cz(left, right));
+            }
+            ExpandedOperation::Swap(left, right) => {
+                sampler_operations.push(SamplerOperation::Swap(left, right));
+            }
+            ExpandedOperation::Pauli { .. } => {}
+            ExpandedOperation::Noise(noise_id) => {
+                sampler_operations.push(SamplerOperation::Noise(noise_id));
+            }
+            ExpandedOperation::MeasureSingle {
                 qubit,
-                key,
                 basis,
+                measurement_id,
                 noise,
-            } => runtime_operations.push(RunOperation::Measure {
-                qubits: vec![*qubit],
-                pauli: basis.clone(),
-                key: key.clone(),
-                ideal: ideals[operation_index]
-                    .clone()
-                    .ok_or_else(|| NpError::new("missing compiled measurement expression"))?,
-                noise: noise.clone(),
-            }),
-            Operation::MeasurePauli {
+            } => {
+                sampler_operations.push(SamplerOperation::MeasureSingle {
+                    qubit,
+                    basis,
+                    measurement_id,
+                    ideal: ideals
+                        .next()
+                        .ok_or_else(|| NpError::new("missing compiled measurement expression"))?,
+                    noise,
+                });
+                capacities.measurements += 1;
+            }
+            ExpandedOperation::MeasurePauli {
                 qubits,
                 pauli,
-                key,
+                measurement_id,
                 noise,
-            } => runtime_operations.push(RunOperation::Measure {
-                qubits: qubits.clone(),
-                pauli: pauli.clone(),
-                key: key.clone(),
-                ideal: ideals[operation_index]
-                    .clone()
-                    .ok_or_else(|| NpError::new("missing compiled measurement expression"))?,
-                noise: noise.clone(),
-            }),
-            Operation::Reset { qubit, key, basis } => {
-                runtime_operations.push(RunOperation::Reset {
-                    qubit: *qubit,
-                    key: key.clone(),
-                    basis: basis.clone(),
-                    ideal: ideals[operation_index]
-                        .clone()
+            } => {
+                sampler_operations.push(SamplerOperation::MeasurePauli {
+                    qubits,
+                    pauli,
+                    measurement_id,
+                    ideal: ideals
+                        .next()
+                        .ok_or_else(|| NpError::new("missing compiled measurement expression"))?,
+                    noise,
+                });
+                capacities.measurements += 1;
+            }
+            ExpandedOperation::Reset {
+                qubit,
+                measurement_id,
+                basis,
+            } => {
+                capacities.measurements += usize::from(measurement_id.is_some());
+                sampler_operations.push(SamplerOperation::Reset {
+                    qubit,
+                    measurement_id,
+                    basis,
+                    ideal: ideals
+                        .next()
                         .ok_or_else(|| NpError::new("missing compiled reset expression"))?,
                 });
             }
-            Operation::Detector {
+            ExpandedOperation::Detector {
                 detector_id,
-                measurement_keys,
+                measurement_ids,
                 ..
-            } => runtime_operations.push(RunOperation::Detector {
-                detector_id: detector_id.unwrap_or(-1),
-                measurement_keys: measurement_keys.clone(),
-            }),
-            Operation::ObservableInclude {
+            } => {
+                sampler_operations.push(SamplerOperation::Detector {
+                    detector_id,
+                    measurement_ids,
+                });
+                capacities.detectors += 1;
+            }
+            ExpandedOperation::ObservableInclude {
                 observable_id,
-                measurement_keys,
-            } => runtime_operations.push(RunOperation::ObservableInclude {
-                observable_id: *observable_id,
-                measurement_keys: measurement_keys.clone(),
-            }),
-            Operation::Tick
-            | Operation::ShiftCoords(_)
-            | Operation::Repeat { .. }
-            | Operation::MeasureReset { .. }
-            | Operation::DetectorRec { .. }
-            | Operation::ObservableIncludeRec { .. } => {
-                return Err(NpError::new(
-                    "internal error: structured operation survived expansion",
-                ));
+                measurement_ids,
+            } => {
+                sampler_operations.push(SamplerOperation::ObservableInclude {
+                    observable_id,
+                    measurement_ids,
+                });
+                capacities.observables += 1;
             }
         }
     }
-    Ok(())
+    if ideals.next().is_some() {
+        return Err(NpError::new(
+            "internal error: unused compiled measurement expression",
+        ));
+    }
+
+    let mut measurement_keys = compiled.measurement_keys;
+    let compiled_observables = observables
+        .iter()
+        .map(|observable| SamplerObservable {
+            id: observable.id,
+            measurement_ids: observable
+                .measurement_keys
+                .iter()
+                .map(|key| resolve_declared_measurement_key(key, &mut measurement_keys))
+                .collect(),
+            pauli_qubits: observable.pauli_qubits.clone(),
+            pauli: observable.pauli.clone(),
+        })
+        .collect();
+    Ok(SamplerProgram {
+        n_qubits,
+        operations: sampler_operations,
+        observables,
+        compiled_observables,
+        measurement_keys,
+        noise_locations: compiled.noise_locations,
+        location_catalog: compiled.location_catalog,
+        capacities,
+        stored_operation_count: compiled.stored_operation_count,
+        logical_operation_count: compiled.logical_operation_count,
+        loop_kernel_count: compiled.loop_kernel_count,
+    })
 }
 
-fn register_noise_locations(
-    operations: &[Operation],
-    seen_noise_ids: &mut HashSet<String>,
-    noise_location_ids: &mut Vec<String>,
-    noise_locations: &mut Vec<NoiseLocation>,
-) -> NpResult<()> {
-    for operation in operations {
-        for location in operation.noise_locations() {
-            if !seen_noise_ids.insert(location.id.clone()) {
-                return Err(NpError::new(format!(
-                    "native sampler requires unique noise location ids; duplicate {:?}",
-                    location.id
-                )));
-            }
-            noise_location_ids.push(location.id.clone());
-            noise_locations.push(location.clone());
+fn resolve_declared_measurement_key(key: &str, measurement_keys: &mut Vec<String>) -> usize {
+    if let Some(measurement_id) = crate::program::automatic_key_ordinal(key) {
+        if measurement_keys.get(measurement_id).map(String::as_str) == Some(key) {
+            return measurement_id;
         }
     }
-    Ok(())
+    if let Some(measurement_id) = measurement_keys
+        .iter()
+        .position(|defined_key| defined_key == key)
+    {
+        return measurement_id;
+    }
+    let measurement_id = measurement_keys.len();
+    measurement_keys.push(key.to_string());
+    measurement_id
 }
 
-fn find_measure_reset_reuse(operations: &[Operation]) -> Vec<Option<usize>> {
-    let mut reuse = vec![None; operations.len()];
+struct MeasureResetReuse {
+    measurement_start: usize,
+    count: usize,
+}
+
+fn find_measure_reset_reuse(operations: &[ExpandedOperation]) -> Vec<MeasureResetReuse> {
+    let mut reuse = Vec::new();
     let mut index = 0;
     while index < operations.len() {
         let measurement_start = index;
-        while matches!(operations.get(index), Some(Operation::Measure { .. })) {
+        while matches!(
+            operations.get(index),
+            Some(ExpandedOperation::MeasureSingle { .. })
+        ) {
             index += 1;
         }
         if index == measurement_start {
@@ -407,7 +524,10 @@ fn find_measure_reset_reuse(operations: &[Operation]) -> Vec<Option<usize>> {
         let reset_start = index;
         while matches!(
             operations.get(index),
-            Some(Operation::Reset { key: None, .. })
+            Some(ExpandedOperation::Reset {
+                measurement_id: None,
+                ..
+            })
         ) {
             index += 1;
         }
@@ -419,25 +539,29 @@ fn find_measure_reset_reuse(operations: &[Operation]) -> Vec<Option<usize>> {
 
         let matching = (0..measurement_count).all(|offset| {
             matches!(
-                (&operations[measurement_start + offset], &operations[reset_start + offset]),
                 (
-                    Operation::Measure {
+                    &operations[measurement_start + offset],
+                    &operations[reset_start + offset]
+                ),
+                (
+                    ExpandedOperation::MeasureSingle {
                         qubit: measurement_qubit,
                         basis: measurement_basis,
                         ..
                     },
-                    Operation::Reset {
+                    ExpandedOperation::Reset {
                         qubit: reset_qubit,
                         basis: reset_basis,
-                        key: None,
+                        measurement_id: None,
                     }
                 ) if measurement_qubit == reset_qubit && measurement_basis == reset_basis
             )
         });
         if matching {
-            for offset in 0..measurement_count {
-                reuse[reset_start + offset] = Some(measurement_start + offset);
-            }
+            reuse.push(MeasureResetReuse {
+                measurement_start,
+                count: measurement_count,
+            });
         }
     }
     reuse
@@ -458,9 +582,13 @@ mod tests {
     use crate::{NoiseLocation, NoiseModel};
     use std::collections::HashMap;
 
+    fn compile_sampler(n_qubits: usize, operations: Vec<Operation>) -> NpResult<SamplerProgram> {
+        compile_sampler_program_ref(n_qubits, &operations, Vec::new())
+    }
+
     #[test]
-    fn compiles_random_measurement_to_runtime_op() {
-        let compiled = compile_runtime_operations(
+    fn compiles_random_measurement_to_sampler_operation() {
+        let compiled = compile_sampler(
             1,
             vec![Operation::Measure {
                 qubit: 0,
@@ -471,11 +599,90 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(compiled.random_source_count, 1);
+        assert_eq!(compiled.capacities.random_sources, 1);
         assert!(matches!(
-            compiled.runtime_operations.as_slice(),
-            [RunOperation::Measure { .. }]
+            compiled.operations.as_slice(),
+            [SamplerOperation::MeasureSingle { .. }]
         ));
+    }
+
+    #[test]
+    fn public_compile_errors_remain_stable_on_the_canonical_path() {
+        let assert_error = |operations, expected: &str| {
+            let error = compile_sampler(1, operations).unwrap_err();
+            assert_eq!(error.message(), expected);
+        };
+
+        assert_error(
+            vec![Operation::Repeat {
+                count: 0,
+                body: Vec::new(),
+            }],
+            "repeat count must be positive",
+        );
+        assert_error(
+            vec![
+                Operation::Measure {
+                    qubit: 0,
+                    key: None,
+                    basis: "Z".to_string(),
+                    noise: None,
+                },
+                Operation::Measure {
+                    qubit: 0,
+                    key: Some("m0".to_string()),
+                    basis: "Z".to_string(),
+                    noise: None,
+                },
+            ],
+            "duplicate measurement key \"m0\"",
+        );
+        assert_error(
+            vec![Operation::DetectorRec {
+                detector_id: Some(0),
+                lookbacks: vec![1],
+                coords: Vec::new(),
+            }],
+            "measurement record lookback 1 is out of range",
+        );
+        assert_error(
+            vec![
+                Operation::Detector {
+                    detector_id: Some(3),
+                    measurement_keys: Vec::new(),
+                    coords: Vec::new(),
+                },
+                Operation::Detector {
+                    detector_id: Some(3),
+                    measurement_keys: Vec::new(),
+                    coords: Vec::new(),
+                },
+            ],
+            "duplicate detector id 3",
+        );
+        let duplicate_noise = NoiseLocation {
+            id: "duplicate".to_string(),
+            model: NoiseModel::BernoulliPauli("X".to_string()),
+            rate: 0.1,
+            qubits: vec![0],
+            tags: HashMap::new(),
+        };
+        assert_error(
+            vec![
+                Operation::Noise(duplicate_noise.clone()),
+                Operation::Noise(duplicate_noise),
+            ],
+            "native sampler requires unique noise location ids; duplicate \"duplicate\"",
+        );
+        assert_error(
+            vec![Operation::Measure {
+                qubit: 0,
+                key: None,
+                basis: "Q".to_string(),
+                noise: None,
+            }],
+            "unsupported measurement basis \"Q\"",
+        );
     }
 
     #[test]
@@ -509,31 +716,207 @@ mod tests {
                 coords: Vec::new(),
             });
         }
-        let repeated = compile_runtime_operations(1, repeated).unwrap();
-        let expanded = compile_runtime_operations(1, expanded).unwrap();
-        assert_eq!(repeated.random_source_count, expanded.random_source_count);
-        let repeated_batch = crate::run_packed_sample(
-            1,
-            &repeated.runtime_operations,
-            &[],
-            &[],
-            129,
-            Some(123),
-            false,
-        )
-        .unwrap();
-        let expanded_batch = crate::run_packed_sample(
-            1,
-            &expanded.runtime_operations,
-            &[],
-            &[],
-            129,
-            Some(123),
-            false,
-        )
-        .unwrap();
+        let repeated = compile_sampler(1, repeated).unwrap();
+        let expanded = compile_sampler(1, expanded).unwrap();
+        assert_eq!(
+            repeated.capacities.random_sources,
+            expanded.capacities.random_sources
+        );
+        let repeated_batch = crate::run_sampler_program(&repeated, 129, Some(123), false).unwrap();
+        let expanded_batch = crate::run_sampler_program(&expanded, 129, Some(123), false).unwrap();
         assert_eq!(repeated_batch.measurements, expanded_batch.measurements);
         assert_eq!(repeated_batch.detectors, expanded_batch.detectors);
+    }
+
+    #[test]
+    fn affine_measure_reset_loop_matches_expansion_and_counts_kernel() {
+        let repeated = compile_sampler(
+            1,
+            vec![Operation::Repeat {
+                count: 4,
+                body: vec![
+                    Operation::MeasureReset {
+                        qubit: 0,
+                        basis: "Z".to_string(),
+                    },
+                    Operation::MeasureReset {
+                        qubit: 0,
+                        basis: "Z".to_string(),
+                    },
+                ],
+            }],
+        )
+        .unwrap();
+        let expanded = compile_sampler(
+            1,
+            (0..8)
+                .map(|index| Operation::Reset {
+                    qubit: 0,
+                    key: Some(format!("m{index}")),
+                    basis: "Z".to_string(),
+                })
+                .collect(),
+        )
+        .unwrap();
+
+        assert_eq!(repeated.loop_kernel_count, 1);
+        assert_eq!(repeated.operations, expanded.operations);
+    }
+
+    #[test]
+    fn affine_mismatch_commits_first_iteration_without_changing_results() {
+        let body = vec![
+            Operation::Measure {
+                qubit: 0,
+                key: None,
+                basis: "X".to_string(),
+                noise: None,
+            },
+            Operation::Reset {
+                qubit: 0,
+                key: None,
+                basis: "X".to_string(),
+            },
+        ];
+        let repeated = compile_sampler(
+            1,
+            vec![Operation::Repeat {
+                count: 4,
+                body: body.clone(),
+            }],
+        )
+        .unwrap();
+        let expanded = compile_sampler(
+            1,
+            (0..4)
+                .flat_map(|_| body.clone())
+                .collect::<Vec<Operation>>(),
+        )
+        .unwrap();
+        let repeated_batch = crate::run_sampler_program(&repeated, 129, Some(19), false).unwrap();
+        let expanded_batch = crate::run_sampler_program(&expanded, 129, Some(19), false).unwrap();
+
+        assert_eq!(repeated.loop_kernel_count, 0);
+        assert_eq!(repeated_batch.measurements, expanded_batch.measurements);
+    }
+
+    #[test]
+    fn short_clifford_repeats_skip_affine_probe() {
+        let repeated_h = compile_sampler(
+            1,
+            vec![Operation::Repeat {
+                count: 500,
+                body: vec![Operation::H(0)],
+            }],
+        )
+        .unwrap();
+        let repeated_cx = compile_sampler(
+            2,
+            vec![Operation::Repeat {
+                count: 500,
+                body: vec![Operation::Cx(0, 1)],
+            }],
+        )
+        .unwrap();
+
+        assert_eq!(repeated_h.loop_kernel_count, 0);
+        assert_eq!(repeated_cx.loop_kernel_count, 0);
+        assert_eq!(repeated_h.operations.len(), 500);
+        assert_eq!(repeated_cx.operations.len(), 500);
+    }
+
+    #[test]
+    fn clifford_period_one_kernel_uses_one_real_iteration() {
+        SYMBOLIC_OPERATION_COUNT.with(|count| count.set(0));
+        let body = vec![Operation::H(0), Operation::H(0)];
+        let repeated = compile_sampler(
+            1,
+            vec![Operation::Repeat {
+                count: 8,
+                body: body.clone(),
+            }],
+        )
+        .unwrap();
+        let simulated = SYMBOLIC_OPERATION_COUNT.with(std::cell::Cell::get);
+        let expanded = compile_sampler(
+            1,
+            (0..8)
+                .flat_map(|_| body.clone())
+                .collect::<Vec<Operation>>(),
+        )
+        .unwrap();
+
+        assert_eq!(repeated.loop_kernel_count, 1);
+        assert_eq!(simulated, body.len());
+        assert_eq!(repeated.operations, expanded.operations);
+    }
+
+    #[test]
+    fn clifford_period_two_kernel_uses_two_real_iterations() {
+        SYMBOLIC_OPERATION_COUNT.with(|count| count.set(0));
+        let body = vec![
+            Operation::H(0),
+            Operation::Pauli {
+                qubits: vec![0],
+                pauli: "Z".to_string(),
+            },
+        ];
+        let repeated = compile_sampler(
+            1,
+            vec![Operation::Repeat {
+                count: 8,
+                body: body.clone(),
+            }],
+        )
+        .unwrap();
+        let simulated = SYMBOLIC_OPERATION_COUNT.with(std::cell::Cell::get);
+        let expanded = compile_sampler(
+            1,
+            (0..8)
+                .flat_map(|_| body.clone())
+                .collect::<Vec<Operation>>(),
+        )
+        .unwrap();
+
+        assert_eq!(repeated.loop_kernel_count, 1);
+        assert_eq!(simulated, body.len() * 2);
+        assert_eq!(repeated.operations, expanded.operations);
+    }
+
+    #[test]
+    fn failed_clifford_probe_continues_from_third_iteration() {
+        SYMBOLIC_OPERATION_COUNT.with(|count| count.set(0));
+        let body = vec![Operation::H(0), Operation::S(0)];
+        let repeated = compile_sampler(
+            1,
+            vec![Operation::Repeat {
+                count: 8,
+                body: body.clone(),
+            }],
+        )
+        .unwrap();
+        let simulated = SYMBOLIC_OPERATION_COUNT.with(std::cell::Cell::get);
+        let expanded = compile_sampler(
+            1,
+            (0..8)
+                .flat_map(|_| body.clone())
+                .collect::<Vec<Operation>>(),
+        )
+        .unwrap();
+
+        assert_eq!(repeated.loop_kernel_count, 0);
+        assert_eq!(simulated, body.len() * 8);
+        assert_eq!(repeated.operations, expanded.operations);
+    }
+
+    #[test]
+    fn rejects_dense_affine_templates() {
+        let mut dense = Expr::constant(false);
+        for source in 0..17 {
+            dense.xor_assign(&Expr::random(source));
+        }
+
+        assert!(!affine_template_is_compact(&[dense], &[]));
     }
 
     #[test]
@@ -546,7 +929,7 @@ mod tests {
             tags: HashMap::new(),
         };
 
-        let err = compile_runtime_operations(
+        let err = compile_sampler(
             1,
             vec![
                 Operation::Noise(location.clone()),
@@ -560,7 +943,7 @@ mod tests {
 
     #[test]
     fn fuses_adjacent_measure_then_reset_without_changing_runtime_shape() {
-        let compiled = compile_runtime_operations(
+        let compiled = compile_sampler(
             1,
             vec![
                 Operation::H(0),
@@ -579,14 +962,14 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(compiled.runtime_operations.len(), 3);
-        assert_eq!(compiled.random_source_count, 1);
+        assert_eq!(compiled.operations.len(), 3);
+        assert_eq!(compiled.capacities.random_sources, 1);
         assert!(matches!(
-            compiled.runtime_operations.as_slice(),
+            compiled.operations.as_slice(),
             [
-                RunOperation::H(0),
-                RunOperation::Measure { ideal, .. },
-                RunOperation::Reset {
+                SamplerOperation::H(0),
+                SamplerOperation::MeasureSingle { ideal, .. },
+                SamplerOperation::Reset {
                     ideal: reset_ideal,
                     ..
                 }
@@ -596,7 +979,7 @@ mod tests {
 
     #[test]
     fn reuses_measurement_expressions_for_batched_measure_then_reset() {
-        let compiled = compile_runtime_operations(
+        let compiled = compile_sampler(
             2,
             vec![
                 Operation::H(0),
@@ -627,10 +1010,10 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(compiled.runtime_operations.len(), 6);
-        assert_eq!(compiled.random_source_count, 2);
-        assert!(compiled.runtime_operations[4..].iter().all(|operation| {
-            matches!(operation, RunOperation::Reset { ideal, .. } if ideal.terms().is_empty())
+        assert_eq!(compiled.operations.len(), 6);
+        assert_eq!(compiled.capacities.random_sources, 2);
+        assert!(compiled.operations[4..].iter().all(|operation| {
+            matches!(operation, SamplerOperation::Reset { ideal, .. } if ideal.terms().is_empty())
         }));
     }
 
@@ -670,35 +1053,22 @@ mod tests {
         ];
         combined.extend(suffix);
 
-        let expanded = compile_runtime_operations(1, expanded).unwrap();
-        let combined = compile_runtime_operations(1, combined).unwrap();
-        assert_eq!(expanded.random_source_count, combined.random_source_count);
-        let expanded_state = crate::run_packed_sample(
-            1,
-            &expanded.runtime_operations,
-            &[],
-            &expanded.noise_location_ids,
-            130,
-            Some(12345),
-            false,
-        )
-        .unwrap();
-        let combined_state = crate::run_packed_sample(
-            1,
-            &combined.runtime_operations,
-            &[],
-            &combined.noise_location_ids,
-            130,
-            Some(12345),
-            false,
-        )
-        .unwrap();
+        let expanded = compile_sampler(1, expanded).unwrap();
+        let combined = compile_sampler(1, combined).unwrap();
+        assert_eq!(
+            expanded.capacities.random_sources,
+            combined.capacities.random_sources
+        );
+        let expanded_state =
+            crate::run_sampler_program(&expanded, 130, Some(12345), false).unwrap();
+        let combined_state =
+            crate::run_sampler_program(&combined, 130, Some(12345), false).unwrap();
         assert_eq!(expanded_state.measurements, combined_state.measurements);
     }
 
     #[test]
     fn does_not_fuse_measure_reset_across_a_gate_or_basis_change() {
-        let compiled = compile_runtime_operations(
+        let compiled = compile_sampler(
             1,
             vec![
                 Operation::H(0),
@@ -718,10 +1088,10 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(compiled.runtime_operations.len(), 4);
+        assert_eq!(compiled.operations.len(), 4);
         assert!(matches!(
-            compiled.runtime_operations.last(),
-            Some(RunOperation::Reset { ideal, .. }) if !ideal.terms().is_empty()
+            compiled.operations.last(),
+            Some(SamplerOperation::Reset { ideal, .. }) if !ideal.terms().is_empty()
         ));
     }
 
@@ -734,7 +1104,7 @@ mod tests {
             qubits: vec![0],
             tags: HashMap::new(),
         };
-        let compiled = compile_runtime_operations(
+        let compiled = compile_sampler(
             1,
             vec![
                 Operation::H(0),
@@ -755,8 +1125,8 @@ mod tests {
         .unwrap();
 
         assert!(matches!(
-            compiled.runtime_operations.last(),
-            Some(RunOperation::Reset { ideal, .. }) if !ideal.terms().is_empty()
+            compiled.operations.last(),
+            Some(SamplerOperation::Reset { ideal, .. }) if !ideal.terms().is_empty()
         ));
     }
 }
