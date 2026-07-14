@@ -3,7 +3,7 @@ use std::sync::mpsc;
 use std::sync::Arc;
 use std::time::Instant;
 
-use faultscope_core::{compute_dem_estimate, NativeDecoderWorker, NpError, NpResult, SmallRng};
+use faultscope_core::{NativeDecoderWorker, NpError, NpResult, SmallRng};
 
 use crate::api::{
     stop_error_count, validate_task, DemLogicalCollectionRunOptions, DemLogicalCollectionStats,
@@ -155,7 +155,7 @@ pub fn collect_dem_hotspot_tasks(
         .map(|task| HotspotCommitState {
             stats: DemLogicalCollectionStats::empty_for_task(task),
             batch_stats: Vec::new(),
-            sensitivity_sums: vec![0.0; task.sampler.edges.len()],
+            sensitivity_sums: vec![0.0; task.sampler.edge_count()],
             pending: HashMap::new(),
             next_ordinal: 0,
             max_shots: task.options.max_shots,
@@ -261,14 +261,10 @@ fn run_hotspot_batch(
         count_detection_events: work.run_options.count_detection_events,
     };
     let detailed = count_detailed_batch(&work.task.sampler, &batch, decoder, &count_options)?;
-    let estimate = compute_dem_estimate(
-        &work.task.sampler.edges,
-        &work.task.sampler.location_groups,
-        &batch,
-        &detailed.loss_mask,
-        None,
-        0,
-    );
+    let estimate = work
+        .task
+        .sampler
+        .estimate_from_loss(&batch, &detailed.loss_mask, None, 0);
     let stats = DemLogicalCollectionStats {
         task_id: work.task.task_id.clone(),
         strong_id: work.task.strong_id.clone(),

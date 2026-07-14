@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::error::Error;
 use std::fmt;
 
-use crate::{Expr, Mask};
+use crate::Mask;
 
 pub type NpResult<T> = Result<T, NpError>;
 
@@ -97,6 +97,15 @@ impl NoiseLocation {
 /// Typed circuit operation understood by the Rust core.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Operation {
+    /// A semantic no-op used to preserve Stim scheduling boundaries.
+    Tick,
+    /// Add an offset to subsequent detector coordinates.
+    ShiftCoords(Vec<f64>),
+    /// Repeat a nested operation body `count` times.
+    Repeat {
+        count: usize,
+        body: Vec<Operation>,
+    },
     H(usize),
     S(usize),
     SDag(usize),
@@ -120,6 +129,11 @@ pub enum Operation {
         key: Option<String>,
         noise: Option<NoiseLocation>,
     },
+    /// Combined measurement and reset with an automatically assigned record key.
+    MeasureReset {
+        qubit: usize,
+        basis: String,
+    },
     Reset {
         qubit: usize,
         key: Option<String>,
@@ -130,41 +144,20 @@ pub enum Operation {
         measurement_keys: Vec<String>,
         coords: Vec<f64>,
     },
-    ObservableInclude {
-        observable_id: i64,
-        measurement_keys: Vec<String>,
-    },
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum RunOperation {
-    H(usize),
-    S(usize),
-    SDag(usize),
-    Cx(usize, usize),
-    Cz(usize, usize),
-    Swap(usize, usize),
-    Noise(NoiseLocation),
-    Measure {
-        qubits: Vec<usize>,
-        pauli: String,
-        key: Option<String>,
-        ideal: Expr,
-        noise: Option<NoiseLocation>,
-    },
-    Reset {
-        qubit: usize,
-        key: Option<String>,
-        basis: String,
-        ideal: Expr,
-    },
-    Detector {
-        detector_id: i64,
-        measurement_keys: Vec<String>,
+    /// Detector declaration using positive measurement-record lookbacks.
+    DetectorRec {
+        detector_id: Option<i64>,
+        lookbacks: Vec<usize>,
+        coords: Vec<f64>,
     },
     ObservableInclude {
         observable_id: i64,
         measurement_keys: Vec<String>,
+    },
+    /// Observable declaration using positive measurement-record lookbacks.
+    ObservableIncludeRec {
+        observable_id: i64,
+        lookbacks: Vec<usize>,
     },
 }
 
@@ -180,6 +173,7 @@ impl Operation {
                 noise: Some(location),
                 ..
             } => vec![location],
+            Self::Repeat { body, .. } => body.iter().flat_map(Operation::noise_locations).collect(),
             _ => Vec::new(),
         }
     }
@@ -285,44 +279,10 @@ pub struct DetectorErrorModel {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct DemSamplerEdge {
-    pub probability: f64,
-    pub detectors: Vec<i64>,
-    pub observables: Vec<i64>,
-    pub location_id: String,
-    pub event: DemEvent,
-    pub tags: HashMap<String, TagValue>,
-}
-
-impl DemSamplerEdge {
-    pub fn validate(&self) -> NpResult<()> {
-        if !(0.0..=1.0).contains(&self.probability) {
-            return Err(NpError::new(format!(
-                "DEM edge probability must be in [0, 1], got {}",
-                self.probability
-            )));
-        }
-        Ok(())
-    }
-}
-
-#[derive(Debug, Clone, PartialEq)]
 pub struct DemLocationGroup {
     pub location_id: String,
     pub edge_indices: Vec<usize>,
     pub total_probability: f64,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct PackedBatch {
-    pub shots: usize,
-    pub all_mask_words: Vec<u64>,
-    pub x_frame: Vec<Vec<u64>>,
-    pub z_frame: Vec<Vec<u64>>,
-    pub measurements: HashMap<String, Vec<u64>>,
-    pub detectors: HashMap<i64, Vec<u64>>,
-    pub observables: HashMap<i64, Vec<u64>>,
-    pub noise_event_masks: HashMap<String, Vec<u64>>,
 }
 
 #[derive(Debug, Clone, PartialEq)]

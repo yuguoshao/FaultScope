@@ -124,6 +124,25 @@ Python decoders are ideal for correctness prototypes and small experiments.
 They are not the final high-performance path, because detector syndrome masks and
 correction masks cross the Python boundary.
 
+Forward-circuit decoders that need only selected measurement records should
+request them once with `batch.measurement_masks(keys)`. This performs one
+Python/Rust boundary call and materializes only those packed integer masks:
+
+```python
+def decode_batch_masks(self, batch):
+    measurements = batch.measurement_masks(self.measurement_keys)
+    masks = tuple(measurements[key] for key in self.measurement_keys)
+    # Reuse masks and prefer whole-mask bitwise operations. Do not read
+    # batch.measurements or shift a growing Python integer in a shot loop.
+    ...
+```
+
+The existing `batch.measurements` mapping and `batch.measurement_mask(key)`
+accessor remain available. The bulk selector is preferred when a decoder knows
+its required keys in advance; ordinary Python batch-like objects without this
+method remain supported by decoders that fall back to reading `measurements`
+once.
+
 ## Getting Circuit And DEM Information
 
 When starting from a circuit, first generate a detector error model:

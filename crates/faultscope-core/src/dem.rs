@@ -9,21 +9,23 @@ mod indexed_parity;
 mod measurement_plan;
 mod product_path;
 
-use assembly::generated_edges_to_sampler_edges;
+use assembly::{assemble_dem_edge_refs, materialize_generated_dem_edges, DemFlipMasks};
+use event_plan::collect_dem_event_plan_from_program;
 pub use event_plan::{collect_dem_event_plan, DemEventPlan};
-use fallback_path::{
-    generate_fallback_dem_edge_refs_from_plan, generate_fallback_dem_edges_from_plan,
-    generate_fallback_sampling_edges_from_plan,
+use fallback_path::generate_fallback_dem_flip_masks_from_plan;
+use measurement_plan::{
+    compile_dem_measurement_plan, compile_dem_measurement_plan_with_optional_declarations,
+    DemMeasurementPlan,
 };
-use measurement_plan::{compile_dem_measurement_plan, DemMeasurementPlan};
 use product_path::{
-    generate_indexed_product_dem_edge_refs_from_plan, generate_indexed_product_dem_edges_from_plan,
-    generate_indexed_product_sampling_edges_from_plan, supports_product_reference_fast_path,
+    generate_indexed_product_dem_flip_masks_from_plan, supports_product_reference_fast_path,
 };
 
+use crate::dem_sampling::{DemHotspotEstimator, DemProgramEdge, DemProgramEdgeMetadata};
+use crate::program::{ExpandedOperation, ExpandedProgram, ExpansionMode};
 use crate::{
-    Circuit, DemEvent, DemSamplerEdge, Detector, DetectorErrorEdge, DetectorErrorModel,
-    LogicalObservable, NpError, NpResult, Operation,
+    Circuit, Detector, DetectorErrorEdge, DetectorErrorModel, LogicalObservable, NpError, NpResult,
+    Operation,
 };
 
 /// Detector error model generator based on single-error propagation.
@@ -40,6 +42,20 @@ pub struct DetectorErrorModelGenerator {
     measurement_plan: DemMeasurementPlan,
 }
 
+impl DemEventPlan {
+    /// Materialize public detector declarations from the indexed IR.
+    #[doc(hidden)]
+    pub fn inferred_detectors(&self) -> Vec<Detector> {
+        detectors_from_program(&self.program)
+    }
+
+    /// Materialize public observable declarations from the indexed IR.
+    #[doc(hidden)]
+    pub fn inferred_observables(&self) -> Vec<LogicalObservable> {
+        observables_from_program(&self.program)
+    }
+}
+
 impl DetectorErrorModelGenerator {
     /// Create a generator for `circuit`.
     ///
@@ -51,10 +67,27 @@ impl DetectorErrorModelGenerator {
         detectors: Option<Vec<Detector>>,
         observables: Option<Vec<LogicalObservable>>,
     ) -> NpResult<Self> {
-        let detectors = detectors.unwrap_or_else(|| detectors_from_circuit(&circuit));
-        let observables = observables.unwrap_or_else(|| observables_from_circuit(&circuit));
-        let event_plan = collect_dem_event_plan(&circuit.operations)?;
-        Self::new_with_event_plan(circuit, detectors, observables, event_plan)
+        let (circuit, program) = crate::program::expand_circuit(&circuit)?;
+        let measurement_plan = compile_dem_measurement_plan_with_optional_declarations(
+            &program,
+            detectors.as_deref(),
+            observables.as_deref(),
+        )?;
+        let detectors = detectors.unwrap_or_else(|| detectors_from_program(&program));
+        let observables = observables.unwrap_or_else(|| observables_from_program(&program));
+        validate_detector_ids(&detectors)?;
+        validate_observable_ids(&observables)?;
+        for observable in &observables {
+            observable.validate()?;
+        }
+        let event_plan = collect_dem_event_plan_from_program(program)?;
+        Ok(Self {
+            circuit: Arc::new(circuit),
+            detectors,
+            observables,
+            event_plan: Arc::new(event_plan),
+            measurement_plan,
+        })
     }
 
     /// Create a generator using a precompiled event plan for this circuit.
@@ -79,13 +112,36 @@ impl DetectorErrorModelGenerator {
         observables: Vec<LogicalObservable>,
         event_plan: Arc<DemEventPlan>,
     ) -> NpResult<Self> {
+        Self::new_with_shared_event_plan_options(
+            circuit,
+            Some(detectors),
+            Some(observables),
+            event_plan,
+        )
+    }
+
+    /// Create a generator from a shared integer event plan, inferring omitted
+    /// declarations directly from that plan without a string round trip.
+    #[doc(hidden)]
+    pub fn new_with_shared_event_plan_options(
+        circuit: Arc<Circuit>,
+        detectors: Option<Vec<Detector>>,
+        observables: Option<Vec<LogicalObservable>>,
+        event_plan: Arc<DemEventPlan>,
+    ) -> NpResult<Self> {
+        let measurement_plan = compile_dem_measurement_plan_with_optional_declarations(
+            &event_plan.program,
+            detectors.as_deref(),
+            observables.as_deref(),
+        )?;
+        let detectors = detectors.unwrap_or_else(|| detectors_from_program(&event_plan.program));
+        let observables =
+            observables.unwrap_or_else(|| observables_from_program(&event_plan.program));
         validate_detector_ids(&detectors)?;
         validate_observable_ids(&observables)?;
         for observable in &observables {
             observable.validate()?;
         }
-        let measurement_plan =
-            compile_dem_measurement_plan(&circuit.operations, &detectors, &observables)?;
         Ok(Self {
             circuit,
             detectors,
@@ -111,35 +167,10 @@ impl DetectorErrorModelGenerator {
         })
     }
 
-    fn generate_edges(&self) -> NpResult<Vec<GeneratedDemEdge>> {
-        generate_dem_edges_from_compiled_plan(
-            self.circuit.n_qubits,
-            &self.circuit.operations,
-            &self.measurement_plan,
-            &self.event_plan,
-        )
-    }
-
     fn generate_edge_refs(&self) -> NpResult<Vec<GeneratedDemEdgeRef>> {
         generate_dem_edge_refs_from_compiled_plan(
             self.circuit.n_qubits,
-            &self.circuit.operations,
-            &self.measurement_plan,
-            &self.event_plan,
-        )
-    }
-
-    /// Generate only the edge metadata required by the native DEM sampler.
-    pub fn generate_sampler_edges(&self) -> NpResult<Vec<DemSamplerEdge>> {
-        let generated_edges = self.generate_edges()?;
-        Ok(generated_edges_to_sampler_edges(generated_edges))
-    }
-
-    /// Generate sampling-only edges without location/event/tag metadata.
-    pub fn generate_sampling_edges(&self) -> NpResult<Vec<DemSamplerEdge>> {
-        generate_sampling_edges_from_compiled_plan(
-            self.circuit.n_qubits,
-            &self.circuit.operations,
+            &self.event_plan.program,
             &self.measurement_plan,
             &self.event_plan,
         )
@@ -151,89 +182,114 @@ pub fn generate_dem_edges(
     operations: &[Operation],
     detectors: &[Detector],
     observables: &[LogicalObservable],
-) -> NpResult<Vec<GeneratedDemEdge>> {
-    let event_plan = collect_dem_event_plan(operations)?;
-    generate_dem_edges_from_plan(n_qubits, operations, detectors, observables, &event_plan)
+) -> NpResult<Vec<DetectorErrorEdge>> {
+    let program = crate::program::expand_operations(operations, ExpansionMode::Dem)?;
+    let event_plan = collect_dem_event_plan_from_program(program)?;
+    let measurement_plan =
+        compile_dem_measurement_plan(&event_plan.program, detectors, observables)?;
+    generate_dem_edges_from_compiled_plan(
+        n_qubits,
+        &event_plan.program,
+        &measurement_plan,
+        &event_plan,
+    )
 }
 
-pub fn generate_dem_edges_from_plan(
+/// Generate DEM edges from a precompiled integer event plan.
+pub fn generate_dem_edges_from_event_plan(
     n_qubits: usize,
-    operations: &[Operation],
     detectors: &[Detector],
     observables: &[LogicalObservable],
     event_plan: &DemEventPlan,
-) -> NpResult<Vec<GeneratedDemEdge>> {
-    let measurement_plan = compile_dem_measurement_plan(operations, detectors, observables)?;
-    generate_dem_edges_from_compiled_plan(n_qubits, operations, &measurement_plan, event_plan)
+) -> NpResult<Vec<DetectorErrorEdge>> {
+    let measurement_plan =
+        compile_dem_measurement_plan(&event_plan.program, detectors, observables)?;
+    generate_dem_edges_from_compiled_plan(
+        n_qubits,
+        &event_plan.program,
+        &measurement_plan,
+        event_plan,
+    )
 }
 
 fn generate_dem_edges_from_compiled_plan(
     n_qubits: usize,
-    operations: &[Operation],
+    program: &ExpandedProgram,
     measurement_plan: &DemMeasurementPlan,
     event_plan: &DemEventPlan,
-) -> NpResult<Vec<GeneratedDemEdge>> {
-    if supports_product_reference_fast_path(n_qubits, operations) {
-        return generate_indexed_product_dem_edges_from_plan(
-            n_qubits,
-            operations,
-            measurement_plan,
-            event_plan,
-        );
-    }
-    generate_fallback_dem_edges_from_plan(n_qubits, operations, measurement_plan, event_plan)
+) -> NpResult<Vec<DetectorErrorEdge>> {
+    let edges =
+        generate_dem_edge_refs_from_compiled_plan(n_qubits, program, measurement_plan, event_plan)?;
+    Ok(materialize_generated_dem_edges(event_plan, edges))
 }
 
 fn generate_dem_edge_refs_from_compiled_plan(
     n_qubits: usize,
-    operations: &[Operation],
+    program: &ExpandedProgram,
     measurement_plan: &DemMeasurementPlan,
     event_plan: &DemEventPlan,
 ) -> NpResult<Vec<GeneratedDemEdgeRef>> {
-    if supports_product_reference_fast_path(n_qubits, operations) {
-        return generate_indexed_product_dem_edge_refs_from_plan(
-            n_qubits,
-            operations,
-            measurement_plan,
-            event_plan,
-        );
-    }
-    generate_fallback_dem_edge_refs_from_plan(n_qubits, operations, measurement_plan, event_plan)
+    let flip_masks = generate_dem_flip_masks_from_compiled_plan(
+        n_qubits,
+        program,
+        measurement_plan,
+        event_plan,
+    )?;
+    Ok(assemble_dem_edge_refs(
+        event_plan.fault_events.len(),
+        flip_masks,
+    ))
 }
 
-fn generate_sampling_edges_from_compiled_plan(
+fn generate_dem_flip_masks_from_compiled_plan(
     n_qubits: usize,
-    operations: &[Operation],
+    program: &ExpandedProgram,
     measurement_plan: &DemMeasurementPlan,
     event_plan: &DemEventPlan,
-) -> NpResult<Vec<DemSamplerEdge>> {
-    if supports_product_reference_fast_path(n_qubits, operations) {
-        return generate_indexed_product_sampling_edges_from_plan(
+) -> NpResult<DemFlipMasks> {
+    if supports_product_reference_fast_path(n_qubits, &program.operations) {
+        return generate_indexed_product_dem_flip_masks_from_plan(
             n_qubits,
-            operations,
+            &program.operations,
             measurement_plan,
             event_plan,
         );
     }
-    generate_fallback_sampling_edges_from_plan(n_qubits, operations, measurement_plan, event_plan)
+    generate_fallback_dem_flip_masks_from_plan(
+        n_qubits,
+        &program.operations,
+        measurement_plan,
+        event_plan,
+    )
 }
 
 /// Infer detector declarations from detector operations in a circuit.
 pub fn detectors_from_circuit(circuit: &Circuit) -> Vec<Detector> {
+    let program = match crate::program::expand_operations(&circuit.operations, ExpansionMode::Dem) {
+        Ok(program) => program,
+        Err(_) => return Vec::new(),
+    };
+    detectors_from_program(&program)
+}
+
+fn detectors_from_program(program: &ExpandedProgram) -> Vec<Detector> {
     let mut detectors = Vec::new();
-    for operation in &circuit.operations {
-        let Operation::Detector {
+    let mut detector_coords = program.detector_coords.iter();
+    for operation in &program.operations {
+        let ExpandedOperation::Detector {
             detector_id,
-            measurement_keys,
-            coords,
+            measurement_ids,
         } = operation
         else {
             continue;
         };
         detectors.push(Detector {
-            id: detector_id.unwrap_or(detectors.len() as i64),
-            measurement_keys: measurement_keys.clone(),
-            coords: coords.clone(),
+            id: *detector_id,
+            measurement_keys: measurement_ids
+                .iter()
+                .map(|measurement_id| program.measurement_keys[*measurement_id].clone())
+                .collect(),
+            coords: detector_coords.next().cloned().unwrap_or_default(),
         });
     }
     detectors
@@ -241,27 +297,43 @@ pub fn detectors_from_circuit(circuit: &Circuit) -> Vec<Detector> {
 
 /// Infer logical observable declarations from observable include operations.
 pub fn observables_from_circuit(circuit: &Circuit) -> Vec<LogicalObservable> {
-    let mut keys_by_id = HashMap::<i64, Vec<String>>::new();
-    for operation in &circuit.operations {
-        let Operation::ObservableInclude {
+    let program = match crate::program::expand_operations(&circuit.operations, ExpansionMode::Dem) {
+        Ok(program) => program,
+        Err(_) => return Vec::new(),
+    };
+    observables_from_program(&program)
+}
+
+fn observables_from_program(program: &ExpandedProgram) -> Vec<LogicalObservable> {
+    let mut measurement_ids_by_observable = HashMap::<i64, Vec<usize>>::new();
+    for operation in &program.operations {
+        let ExpandedOperation::ObservableInclude {
             observable_id,
-            measurement_keys,
+            measurement_ids,
         } = operation
         else {
             continue;
         };
-        keys_by_id
+        measurement_ids_by_observable
             .entry(*observable_id)
             .or_default()
-            .extend(measurement_keys.clone());
+            .extend(measurement_ids);
     }
-    let mut observable_ids = keys_by_id.keys().copied().collect::<Vec<_>>();
+    let mut observable_ids = measurement_ids_by_observable
+        .keys()
+        .copied()
+        .collect::<Vec<_>>();
     observable_ids.sort_unstable();
     observable_ids
         .into_iter()
         .map(|observable_id| LogicalObservable {
             id: observable_id,
-            measurement_keys: keys_by_id.remove(&observable_id).unwrap_or_default(),
+            measurement_keys: measurement_ids_by_observable
+                .remove(&observable_id)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|measurement_id| program.measurement_keys[measurement_id].clone())
+                .collect(),
             pauli_qubits: Vec::new(),
             pauli: String::new(),
         })
@@ -289,20 +361,10 @@ fn validate_observable_ids(observables: &[LogicalObservable]) -> NpResult<()> {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct GeneratedDemEdge {
-    pub probability: f64,
-    pub detectors: Vec<i64>,
-    pub observables: Vec<i64>,
-    pub location_id: String,
-    pub event: DemEvent,
-    pub tags: HashMap<String, crate::TagValue>,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct GeneratedDemEdgeRef {
-    pub event_index: usize,
-    pub detectors: Vec<i64>,
-    pub observables: Vec<i64>,
+struct GeneratedDemEdgeRef {
+    event_index: usize,
+    detectors: Vec<i64>,
+    observables: Vec<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -310,10 +372,67 @@ pub struct LazyDetectorErrorModel {
     pub detectors: Vec<Detector>,
     pub observables: Vec<LogicalObservable>,
     pub event_plan: Arc<DemEventPlan>,
-    pub edges: Vec<GeneratedDemEdgeRef>,
+    edges: Vec<GeneratedDemEdgeRef>,
 }
 
 impl LazyDetectorErrorModel {
+    /// Consume a lazy DEM into the metadata-free sampling representation.
+    #[doc(hidden)]
+    pub fn into_sampling_estimator(self) -> DemHotspotEstimator {
+        let Self {
+            detectors,
+            observables,
+            event_plan,
+            edges,
+        } = self;
+        let program_edges = edges
+            .into_iter()
+            .map(|edge| DemProgramEdge {
+                probability: event_plan.fault_events[edge.event_index].probability,
+                detectors: edge.detectors,
+                observables: edge.observables,
+            })
+            .collect();
+        DemHotspotEstimator::from_compact_sampling_parts(
+            detectors.into_iter().map(|detector| detector.id).collect(),
+            observables
+                .into_iter()
+                .map(|observable| observable.id)
+                .collect(),
+            program_edges,
+        )
+    }
+
+    /// Compile the lazy integer DEM directly into a sampler without
+    /// materializing location labels or tag dictionaries.
+    pub fn compile_hotspot_estimator(&self) -> DemHotspotEstimator {
+        let mut edges = Vec::with_capacity(self.edges.len());
+        let mut edge_metadata = Vec::with_capacity(self.edges.len());
+        for edge in &self.edges {
+            let event = &self.event_plan.fault_events[edge.event_index];
+            let location = &self.event_plan.program.noise_locations[event.noise_id];
+            edges.push(DemProgramEdge {
+                probability: event.probability,
+                detectors: edge.detectors.clone(),
+                observables: edge.observables.clone(),
+            });
+            edge_metadata.push(DemProgramEdgeMetadata {
+                location_id: location.location_id,
+                event: event.event.clone(),
+            });
+        }
+        DemHotspotEstimator::from_program_parts(
+            self.detectors.iter().map(|detector| detector.id).collect(),
+            self.observables
+                .iter()
+                .map(|observable| observable.id)
+                .collect(),
+            edges,
+            edge_metadata,
+            self.event_plan.program.location_catalog.clone(),
+        )
+    }
+
     pub fn materialize(&self) -> DetectorErrorModel {
         DetectorErrorModel {
             detectors: self.detectors.clone(),
@@ -323,13 +442,15 @@ impl LazyDetectorErrorModel {
                 .iter()
                 .map(|edge| {
                     let event = &self.event_plan.fault_events[edge.event_index];
+                    let location = &self.event_plan.program.noise_locations[event.noise_id];
+                    let catalog = &self.event_plan.program.location_catalog;
                     DetectorErrorEdge {
                         probability: event.probability,
                         detectors: edge.detectors.clone(),
                         observables: edge.observables.clone(),
-                        location_id: event.location_id.clone(),
+                        location_id: catalog.label(location.location_id).to_string(),
                         event: event.event.clone(),
-                        tags: event.tags.clone(),
+                        tags: catalog.tags(location.location_id).clone(),
                     }
                 })
                 .collect(),

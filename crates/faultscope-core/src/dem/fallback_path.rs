@@ -1,17 +1,12 @@
-use super::assembly::{
-    assemble_dem_edge_refs_from_flat_flip_masks, assemble_generated_dem_edges_from_flat_flip_masks,
-    assemble_sampling_edges_from_flat_flip_masks,
-};
+use super::assembly::DemFlipMasks;
 use super::bitset::{flat_range, xor_word_slices};
-use super::event_plan::{DemEventPlan, DemFaultEvent};
+use super::event_plan::DemEventPlan;
 use super::indexed_parity::{evaluate_indexed_detector_flip_masks, measurement_index_flip_parity};
 use super::measurement_plan::{
-    optional_indexed_measurement_op, DemMeasurementPlan, IndexedDemObservable,
+    optional_indexed_measurement, DemMeasurementPlan, IndexedDemObservable,
 };
-use super::{GeneratedDemEdge, GeneratedDemEdgeRef};
-use crate::{
-    word_count, ConcreteStabilizer, DemEvent, DemSamplerEdge, Mask, NpError, NpResult, Operation,
-};
+use crate::program::ExpandedOperation;
+use crate::{word_count, ConcreteStabilizer, DemEvent, Mask, NpError, NpResult};
 
 struct DemFaultPropagationState {
     reference: ConcreteStabilizer,
@@ -36,12 +31,12 @@ impl DemFaultPropagationState {
     }
 }
 
-pub(super) fn generate_fallback_dem_edges_from_plan(
+pub(super) fn generate_fallback_dem_flip_masks_from_plan(
     n_qubits: usize,
-    operations: &[Operation],
+    operations: &[ExpandedOperation],
     measurement_plan: &DemMeasurementPlan,
     event_plan: &DemEventPlan,
-) -> NpResult<Vec<GeneratedDemEdge>> {
+) -> NpResult<DemFlipMasks> {
     let state = propagate_fallback_state(n_qubits, operations, measurement_plan, event_plan)?;
     let detector_flip_masks = evaluate_indexed_detector_flip_masks(
         &state.measurement_flip_words,
@@ -55,87 +50,25 @@ pub(super) fn generate_fallback_dem_edges_from_plan(
         &measurement_plan.observables,
         state.event_words,
     )?;
-    Ok(assemble_generated_dem_edges_from_flat_flip_masks(
-        &event_plan.fault_events,
+    Ok(DemFlipMasks {
         detector_flip_masks,
         observable_flip_masks,
-    ))
-}
-
-pub(super) fn generate_fallback_dem_edge_refs_from_plan(
-    n_qubits: usize,
-    operations: &[Operation],
-    measurement_plan: &DemMeasurementPlan,
-    event_plan: &DemEventPlan,
-) -> NpResult<Vec<GeneratedDemEdgeRef>> {
-    let state = propagate_fallback_state(n_qubits, operations, measurement_plan, event_plan)?;
-    let detector_flip_masks = evaluate_indexed_detector_flip_masks(
-        &state.measurement_flip_words,
-        &measurement_plan.detectors,
-        state.event_words,
-    )?;
-    let observable_flip_masks = evaluate_indexed_observable_flip_masks_from_masks(
-        &state.measurement_flip_words,
-        &state.x_frame,
-        &state.z_frame,
-        &measurement_plan.observables,
-        state.event_words,
-    )?;
-    Ok(assemble_dem_edge_refs_from_flat_flip_masks(
-        event_plan.fault_events.len(),
-        detector_flip_masks,
-        observable_flip_masks,
-    ))
-}
-
-pub(super) fn generate_fallback_sampling_edges_from_plan(
-    n_qubits: usize,
-    operations: &[Operation],
-    measurement_plan: &DemMeasurementPlan,
-    event_plan: &DemEventPlan,
-) -> NpResult<Vec<DemSamplerEdge>> {
-    let state = propagate_fallback_state(n_qubits, operations, measurement_plan, event_plan)?;
-    let detector_flip_masks = evaluate_indexed_detector_flip_masks(
-        &state.measurement_flip_words,
-        &measurement_plan.detectors,
-        state.event_words,
-    )?;
-    let observable_flip_masks = evaluate_indexed_observable_flip_masks_from_masks(
-        &state.measurement_flip_words,
-        &state.x_frame,
-        &state.z_frame,
-        &measurement_plan.observables,
-        state.event_words,
-    )?;
-    Ok(assemble_sampling_edges_from_flat_flip_masks(
-        &event_plan.fault_events,
-        detector_flip_masks,
-        observable_flip_masks,
-    ))
+    })
 }
 
 fn propagate_fallback_state(
     n_qubits: usize,
-    operations: &[Operation],
+    operations: &[ExpandedOperation],
     measurement_plan: &DemMeasurementPlan,
     event_plan: &DemEventPlan,
 ) -> NpResult<DemFaultPropagationState> {
-    let fault_events = &event_plan.fault_events;
-    let fault_events_by_op = &event_plan.fault_events_by_op;
     let mut state = DemFaultPropagationState::new(
         n_qubits,
-        fault_events.len(),
+        event_plan.fault_events.len(),
         measurement_plan.measurement_count,
     );
-    for (op_index, operation) in operations.iter().enumerate() {
-        apply_fault_propagation_operation(
-            operation,
-            op_index,
-            fault_events,
-            fault_events_by_op,
-            measurement_plan,
-            &mut state,
-        )?;
+    for operation in operations {
+        apply_fault_propagation_operation(operation, event_plan, measurement_plan, &mut state)?;
     }
     Ok(state)
 }
@@ -145,9 +78,8 @@ fn record_mask_measurement_flip(
     measurement_index: usize,
     qubits: &[usize],
     pauli: &str,
-    fault_events: &[DemFaultEvent],
-    fault_events_by_op: &[Vec<usize>],
-    op_index: usize,
+    event_plan: &DemEventPlan,
+    noise_id: Option<usize>,
 ) -> NpResult<()> {
     if measurement_index >= state.measurement_recorded.len() {
         return Err(NpError::new(format!(
@@ -166,7 +98,7 @@ fn record_mask_measurement_flip(
         pauli,
         state.event_words,
     )?;
-    xor_measurement_noise_events(&mut value, fault_events, fault_events_by_op, op_index)?;
+    xor_measurement_noise_events(&mut value, event_plan, noise_id);
     let range = flat_range(measurement_index, state.event_words);
     state.measurement_flip_words[range].copy_from_slice(&value.words);
     state.measurement_recorded[measurement_index] = true;
@@ -174,142 +106,146 @@ fn record_mask_measurement_flip(
 }
 
 fn apply_fault_propagation_operation(
-    operation: &Operation,
-    op_index: usize,
-    fault_events: &[DemFaultEvent],
-    fault_events_by_op: &[Vec<usize>],
+    operation: &ExpandedOperation,
+    event_plan: &DemEventPlan,
     measurement_plan: &DemMeasurementPlan,
     state: &mut DemFaultPropagationState,
 ) -> NpResult<()> {
     match operation {
-        Operation::H(q) => {
+        ExpandedOperation::H(q) => {
             state.reference.apply_h(*q);
             std::mem::swap(&mut state.x_frame[*q], &mut state.z_frame[*q]);
         }
-        Operation::S(q) => {
+        ExpandedOperation::S(q) => {
             state.reference.apply_s(*q);
             xor_between_frames(&state.x_frame, &mut state.z_frame, *q, *q);
         }
-        Operation::SDag(q) => {
+        ExpandedOperation::SDag(q) => {
             state.reference.apply_s_dag(*q);
             xor_between_frames(&state.x_frame, &mut state.z_frame, *q, *q);
         }
-        Operation::Cx(control, target) => {
+        ExpandedOperation::Cx(control, target) => {
             state.reference.apply_cx(*control, *target);
             xor_within_frame(&mut state.x_frame, *target, *control);
             xor_within_frame(&mut state.z_frame, *control, *target);
         }
-        Operation::Cz(left, right) => {
+        ExpandedOperation::Cz(left, right) => {
             state.reference.apply_cz(*left, *right);
             xor_between_frames(&state.x_frame, &mut state.z_frame, *left, *right);
             xor_between_frames(&state.x_frame, &mut state.z_frame, *right, *left);
         }
-        Operation::Swap(left, right) => {
+        ExpandedOperation::Swap(left, right) => {
             state.reference.apply_swap(*left, *right);
             state.x_frame.swap(*left, *right);
             state.z_frame.swap(*left, *right);
         }
-        Operation::Pauli { qubits, pauli } => {
+        ExpandedOperation::Pauli { qubits, pauli } => {
             state.reference.apply_sparse_pauli_string(qubits, pauli)?;
         }
-        Operation::Noise(_) => {
-            apply_fault_events(fault_events, fault_events_by_op, op_index, state)?;
+        ExpandedOperation::Noise(noise_id) => {
+            apply_fault_events(event_plan, *noise_id, state)?;
         }
-        Operation::Measure {
-            qubit, key, basis, ..
+        ExpandedOperation::MeasureSingle {
+            qubit,
+            measurement_id,
+            basis,
+            noise,
         } => {
-            let qubits = vec![*qubit];
-            ensure_deterministic_dem_measurement(&state.reference, &qubits, basis, key.as_deref())?;
+            let qubits = [*qubit];
+            let pauli = basis.as_str();
+            ensure_deterministic_dem_measurement(
+                &state.reference,
+                &qubits,
+                pauli,
+                *measurement_id,
+            )?;
             if let Some(measurement_index) =
-                optional_indexed_measurement_op(measurement_plan, op_index)
+                optional_indexed_measurement(measurement_plan, *measurement_id)
             {
                 record_mask_measurement_flip(
                     state,
                     measurement_index,
                     &qubits,
-                    basis,
-                    fault_events,
-                    fault_events_by_op,
-                    op_index,
+                    pauli,
+                    event_plan,
+                    *noise,
                 )?;
             }
         }
-        Operation::MeasurePauli {
-            qubits, pauli, key, ..
+        ExpandedOperation::MeasurePauli {
+            qubits,
+            pauli,
+            measurement_id,
+            noise,
         } => {
-            ensure_deterministic_dem_measurement(&state.reference, qubits, pauli, key.as_deref())?;
+            ensure_deterministic_dem_measurement(&state.reference, qubits, pauli, *measurement_id)?;
             if let Some(measurement_index) =
-                optional_indexed_measurement_op(measurement_plan, op_index)
+                optional_indexed_measurement(measurement_plan, *measurement_id)
             {
                 record_mask_measurement_flip(
                     state,
                     measurement_index,
                     qubits,
                     pauli,
-                    fault_events,
-                    fault_events_by_op,
-                    op_index,
+                    event_plan,
+                    *noise,
                 )?;
             }
         }
-        Operation::Reset { qubit, key, basis } => {
-            let qubits = vec![*qubit];
-            if let Some(key) = key {
-                ensure_deterministic_dem_measurement(&state.reference, &qubits, basis, Some(key))?;
+        ExpandedOperation::Reset {
+            qubit,
+            measurement_id,
+            basis,
+        } => {
+            let qubits = [*qubit];
+            let pauli = basis.as_str();
+            if let Some(measurement_id) = measurement_id {
+                ensure_deterministic_dem_measurement(
+                    &state.reference,
+                    &qubits,
+                    pauli,
+                    *measurement_id,
+                )?;
                 if let Some(measurement_index) =
-                    optional_indexed_measurement_op(measurement_plan, op_index)
+                    optional_indexed_measurement(measurement_plan, *measurement_id)
                 {
                     record_mask_measurement_flip(
                         state,
                         measurement_index,
                         &qubits,
-                        basis,
-                        fault_events,
-                        fault_events_by_op,
-                        op_index,
+                        pauli,
+                        event_plan,
+                        None,
                     )?;
                 }
             }
-            state.reference.reset_prepare(*qubit, basis)?;
+            state.reference.reset_prepare(*qubit, pauli)?;
             state.x_frame[*qubit] = Mask::zero(state.event_words);
             state.z_frame[*qubit] = Mask::zero(state.event_words);
         }
-        Operation::Detector { .. } | Operation::ObservableInclude { .. } => {}
+        ExpandedOperation::Detector { .. } | ExpandedOperation::ObservableInclude { .. } => {}
     }
     Ok(())
 }
 
 fn apply_fault_events(
-    fault_events: &[DemFaultEvent],
-    fault_events_by_op: &[Vec<usize>],
-    op_index: usize,
+    event_plan: &DemEventPlan,
+    noise_id: usize,
     state: &mut DemFaultPropagationState,
 ) -> NpResult<()> {
-    apply_fault_events_to_frames(
-        fault_events,
-        fault_events_by_op,
-        op_index,
-        &mut state.x_frame,
-        &mut state.z_frame,
-    )
+    apply_fault_events_to_frames(event_plan, noise_id, &mut state.x_frame, &mut state.z_frame)
 }
 
 fn apply_fault_events_to_frames(
-    fault_events: &[DemFaultEvent],
-    fault_events_by_op: &[Vec<usize>],
-    op_index: usize,
+    event_plan: &DemEventPlan,
+    noise_id: usize,
     x_frame: &mut [Mask],
     z_frame: &mut [Mask],
 ) -> NpResult<()> {
-    for event_index in &fault_events_by_op[op_index] {
-        if let DemEvent::Pauli(pauli) = &fault_events[*event_index].event {
-            apply_fault_event_pauli_string(
-                x_frame,
-                z_frame,
-                &fault_events[*event_index].qubits,
-                pauli,
-                *event_index,
-            )?;
+    let qubits = &event_plan.program.noise_locations[noise_id].qubits;
+    for event_index in event_plan.fault_event_range_by_noise[noise_id].clone() {
+        if let DemEvent::Pauli(pauli) = &event_plan.fault_events[event_index].event {
+            apply_fault_event_pauli_string(x_frame, z_frame, qubits, pauli, event_index)?;
         }
     }
     Ok(())
@@ -347,20 +283,12 @@ fn apply_fault_event_pauli_string(
 
 fn xor_measurement_noise_events(
     value: &mut Mask,
-    fault_events: &[DemFaultEvent],
-    fault_events_by_op: &[Vec<usize>],
-    op_index: usize,
-) -> NpResult<()> {
-    for event_index in &fault_events_by_op[op_index] {
-        match &fault_events[*event_index].event {
-            DemEvent::Bool(true) => set_event_bit(value, *event_index),
-            DemEvent::Bool(false) => {}
-            DemEvent::Pauli(_) => {
-                return Err(NpError::new("measurement noise event must be boolean"));
-            }
-        }
+    event_plan: &DemEventPlan,
+    noise_id: Option<usize>,
+) {
+    for event_index in event_plan.measurement_noise_event_range(noise_id) {
+        set_event_bit(value, event_index);
     }
-    Ok(())
 }
 
 fn frame_measurement_flip_mask(
@@ -418,12 +346,11 @@ fn ensure_deterministic_dem_measurement(
     state: &ConcreteStabilizer,
     qubits: &[usize],
     pauli: &str,
-    key: Option<&str>,
+    measurement_id: usize,
 ) -> NpResult<()> {
     if !state.is_deterministic_sparse_pauli(qubits, pauli)? {
         return Err(NpError::new(format!(
-            "measurement {:?} is random in the ideal/single-error circuit",
-            key.unwrap_or("measure")
+            "measurement id {measurement_id} is random in the ideal/single-error circuit"
         )));
     }
     Ok(())

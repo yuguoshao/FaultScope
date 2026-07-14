@@ -72,13 +72,6 @@ impl PyDetectorErrorModelGenerator {
     }
 }
 
-pub(crate) fn detector_error_model_to_py(
-    _py: Python<'_>,
-    dem: faultscope_core::DetectorErrorModel,
-) -> PyResult<PyDetectorErrorModel> {
-    Ok(PyDetectorErrorModel::from_core_dem(dem))
-}
-
 pub(crate) fn detector_error_model_lazy_to_py(
     _py: Python<'_>,
     dem: faultscope_core::LazyDetectorErrorModel,

@@ -1,3 +1,4 @@
+use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
 use std::ffi::c_void;
 use std::os::raw::c_char;
@@ -384,6 +385,141 @@ impl PackedObservableShotBatch {
         }
         Ok(())
     }
+}
+
+/// Count shots whose packed observable bits disagree with packed corrections.
+///
+/// Observable IDs may be ordered differently or be present on only one side.
+/// The mismatched-layout path builds one linear-time alignment table and then
+/// reuses it for every shot.
+pub fn packed_residual_failure_count(
+    observable_ids: &[i64],
+    observable_data: &[u8],
+    observable_byte_count: usize,
+    corrections: &PackedObservableShotBatch,
+    shots: usize,
+) -> NpResult<usize> {
+    let expected_observable_byte_count = observable_ids.len().div_ceil(8);
+    if observable_byte_count != expected_observable_byte_count {
+        return Err(NpError::new(format!(
+            "packed observable byte count is {observable_byte_count}; expected {expected_observable_byte_count}"
+        )));
+    }
+    let expected_observable_data_len = shots
+        .checked_mul(observable_byte_count)
+        .ok_or_else(|| NpError::new("packed observable byte length overflowed usize"))?;
+    if observable_data.len() != expected_observable_data_len {
+        return Err(NpError::new(format!(
+            "packed observable batch has {} bytes; expected {expected_observable_data_len} for {shots} shots and {} observables",
+            observable_data.len(),
+            observable_ids.len()
+        )));
+    }
+    if corrections.shots != shots {
+        return Err(NpError::new(format!(
+            "packed correction batch has {} shots; expected {shots}",
+            corrections.shots
+        )));
+    }
+    let expected_correction_byte_count = corrections.observable_ids.len().div_ceil(8);
+    if corrections.observable_byte_count != expected_correction_byte_count {
+        return Err(NpError::new(format!(
+            "packed correction observable byte count is {}; expected {expected_correction_byte_count}",
+            corrections.observable_byte_count
+        )));
+    }
+    let expected_correction_data_len = shots
+        .checked_mul(corrections.observable_byte_count)
+        .ok_or_else(|| NpError::new("packed correction byte length overflowed usize"))?;
+    if corrections.data.len() != expected_correction_data_len {
+        return Err(NpError::new(format!(
+            "packed correction batch has {} bytes; expected {expected_correction_data_len} for {shots} shots and {} observables",
+            corrections.data.len(),
+            corrections.observable_ids.len()
+        )));
+    }
+
+    if corrections.observable_ids.as_slice() == observable_ids
+        && corrections.observable_byte_count == observable_byte_count
+    {
+        return Ok((0..shots)
+            .filter(|shot| {
+                let begin = shot * observable_byte_count;
+                let end = begin + observable_byte_count;
+                observable_data[begin..end]
+                    .iter()
+                    .zip(&corrections.data[begin..end])
+                    .any(|(actual, correction)| (actual ^ correction) != 0)
+            })
+            .count());
+    }
+
+    #[derive(Clone, Copy)]
+    struct BitPosition {
+        byte_index: usize,
+        mask: u8,
+    }
+
+    #[derive(Clone, Copy, Default)]
+    struct Alignment {
+        actual: Option<BitPosition>,
+        correction: Option<BitPosition>,
+    }
+
+    let mut alignment =
+        Vec::<Alignment>::with_capacity(observable_ids.len() + corrections.observable_ids.len());
+    let mut alignment_index = HashMap::<i64, usize>::with_capacity(alignment.capacity());
+    for (index, observable_id) in observable_ids.iter().enumerate() {
+        let position = BitPosition {
+            byte_index: index >> 3,
+            mask: 1u8 << (index & 7),
+        };
+        match alignment_index.entry(*observable_id) {
+            Entry::Occupied(entry) => alignment[*entry.get()].actual = Some(position),
+            Entry::Vacant(entry) => {
+                entry.insert(alignment.len());
+                alignment.push(Alignment {
+                    actual: Some(position),
+                    correction: None,
+                });
+            }
+        }
+    }
+    for (index, observable_id) in corrections.observable_ids.iter().enumerate() {
+        let position = BitPosition {
+            byte_index: index >> 3,
+            mask: 1u8 << (index & 7),
+        };
+        match alignment_index.entry(*observable_id) {
+            Entry::Occupied(entry) => alignment[*entry.get()].correction = Some(position),
+            Entry::Vacant(entry) => {
+                entry.insert(alignment.len());
+                alignment.push(Alignment {
+                    actual: None,
+                    correction: Some(position),
+                });
+            }
+        }
+    }
+
+    Ok((0..shots)
+        .filter(|shot| {
+            let actual_begin = shot * observable_byte_count;
+            let actual_row = &observable_data[actual_begin..actual_begin + observable_byte_count];
+            let correction_begin = shot * corrections.observable_byte_count;
+            let correction_row = &corrections.data
+                [correction_begin..correction_begin + corrections.observable_byte_count];
+            alignment.iter().any(|entry| {
+                let actual = entry
+                    .actual
+                    .is_some_and(|position| actual_row[position.byte_index] & position.mask != 0);
+                let correction = entry.correction.is_some_and(|position| {
+                    correction_row[position.byte_index] & position.mask != 0
+                });
+                actual ^ correction
+            })
+        })
+        .count())
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1298,6 +1434,46 @@ mod tests {
                 },
             ],
         }
+    }
+
+    #[test]
+    fn packed_residual_count_uses_the_identical_layout_fast_path() {
+        let corrections =
+            PackedObservableShotBatch::new(vec![10, 20], vec![0b00, 0b01, 0b00, 0b01], 4).unwrap();
+
+        let failures =
+            packed_residual_failure_count(&[10, 20], &[0b00, 0b01, 0b10, 0b11], 1, &corrections, 4)
+                .unwrap();
+
+        assert_eq!(failures, 2);
+    }
+
+    #[test]
+    fn packed_residual_count_aligns_reordered_and_disjoint_ids() {
+        let reordered =
+            PackedObservableShotBatch::new(vec![20, 10], vec![0b10, 0b01, 0b11], 3).unwrap();
+        assert_eq!(
+            packed_residual_failure_count(&[10, 20], &[0b01, 0b10, 0b11], 1, &reordered, 3,)
+                .unwrap(),
+            0
+        );
+
+        let disjoint =
+            PackedObservableShotBatch::new(vec![20, 30], vec![0b00, 0b01, 0b11, 0b10], 4).unwrap();
+        assert_eq!(
+            packed_residual_failure_count(&[10, 20], &[0b01, 0b10, 0b11, 0b00], 1, &disjoint, 4,)
+                .unwrap(),
+            3
+        );
+    }
+
+    #[test]
+    fn packed_residual_count_rejects_malformed_rows() {
+        let corrections = PackedObservableShotBatch::zero(vec![10], 1);
+
+        let err = packed_residual_failure_count(&[10], &[], 0, &corrections, 1).unwrap_err();
+
+        assert!(err.to_string().contains("observable byte count"));
     }
 
     impl NativeDecoderFactory for FixedCorrectionDecoder {

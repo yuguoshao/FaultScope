@@ -856,8 +856,8 @@ corrections = decoder.decode_batch_masks(batch)
 核心实现位置：
 
 - Forward estimator: `compute_packed_estimate` in `crates/faultscope-core/src/hotspot.rs`
-- DEM estimator: `compute_dem_estimate` in `crates/faultscope-core/src/hotspot.rs`
-- DEM sampler: `run_dem_batch` in `crates/faultscope-core/src/dem_sampling.rs`
+- DEM estimator: `DemHotspotEstimator::estimate_from_loss` (integer `LocationId` aggregation in `crates/faultscope-core/src/hotspot.rs`)
+- DEM sampler: `DemHotspotEstimator::run_batch_with_rng` (integer edge program in `crates/faultscope-core/src/dem_sampling.rs`)
 - Noise event masks: sampling functions in `crates/faultscope-core/src/packed.rs`
 
 理论页中的 `event_count`、`loss_event_count`、`sum_loss_score`、`sum_score`、`baseline`

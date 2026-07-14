@@ -92,6 +92,9 @@ pub(crate) struct PyOperation {
     pub(crate) observable_id: Option<i64>,
     pub(crate) noise_location: Option<Py<PyAny>>,
     pub(crate) metadata: Py<PyAny>,
+    pub(crate) repeat_count: Option<usize>,
+    pub(crate) body: Vec<Py<PyAny>>,
+    pub(crate) record_lookbacks: Vec<usize>,
     pub(crate) core_op: Option<faultscope_core::Operation>,
 }
 
@@ -132,6 +135,9 @@ impl PyOperation {
             observable_id,
             noise_location,
             metadata: mapping_to_dict(py, metadata)?,
+            repeat_count: None,
+            body: Vec::new(),
+            record_lookbacks: Vec::new(),
             core_op: None,
         })
     }
@@ -247,6 +253,9 @@ impl PyOperation {
             observable_id: None,
             noise_location: None,
             metadata: kwargs_to_dict(py, metadata)?.into(),
+            repeat_count: None,
+            body: Vec::new(),
+            record_lookbacks: Vec::new(),
             core_op: Some(faultscope_core::Operation::Pauli { qubits, pauli }),
         })
     }
@@ -276,6 +285,9 @@ impl PyOperation {
             observable_id: None,
             noise_location: Some(location),
             metadata: kwargs_to_dict(py, metadata)?.into(),
+            repeat_count: None,
+            body: Vec::new(),
+            record_lookbacks: Vec::new(),
             core_op: core_location.map(faultscope_core::Operation::Noise),
         })
     }
@@ -308,6 +320,9 @@ impl PyOperation {
             observable_id: None,
             noise_location: noise,
             metadata: kwargs_to_dict(py, metadata)?.into(),
+            repeat_count: None,
+            body: Vec::new(),
+            record_lookbacks: Vec::new(),
             core_op,
         })
     }
@@ -340,6 +355,9 @@ impl PyOperation {
             observable_id: None,
             noise_location: noise,
             metadata: kwargs_to_dict(py, metadata)?.into(),
+            repeat_count: None,
+            body: Vec::new(),
+            record_lookbacks: Vec::new(),
             core_op,
         })
     }
@@ -363,9 +381,40 @@ impl PyOperation {
             observable_id: None,
             noise_location: None,
             metadata: kwargs_to_dict(py, metadata)?.into(),
+            repeat_count: None,
+            body: Vec::new(),
+            record_lookbacks: Vec::new(),
             core_op: Some(faultscope_core::Operation::Reset {
                 qubit,
                 key,
+                basis: basis.to_uppercase(),
+            }),
+        })
+    }
+
+    #[staticmethod]
+    #[pyo3(signature = (qubit, *, basis="Z", **metadata))]
+    pub(crate) fn measure_reset(
+        py: Python<'_>,
+        qubit: usize,
+        basis: &str,
+        metadata: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Self> {
+        Ok(Self {
+            kind: "measure_reset".to_string(),
+            qubits: vec![qubit],
+            key: None,
+            basis: basis.to_string(),
+            pauli: None,
+            measurement_keys: Vec::new(),
+            observable_id: None,
+            noise_location: None,
+            metadata: kwargs_to_dict(py, metadata)?.into(),
+            repeat_count: None,
+            body: Vec::new(),
+            record_lookbacks: Vec::new(),
+            core_op: Some(faultscope_core::Operation::MeasureReset {
+                qubit,
                 basis: basis.to_uppercase(),
             }),
         })
@@ -397,6 +446,9 @@ impl PyOperation {
             observable_id: None,
             noise_location: None,
             metadata: metadata.into(),
+            repeat_count: None,
+            body: Vec::new(),
+            record_lookbacks: Vec::new(),
             core_op: Some(faultscope_core::Operation::Detector {
                 detector_id,
                 measurement_keys,
@@ -423,9 +475,155 @@ impl PyOperation {
             observable_id: Some(observable_id),
             noise_location: None,
             metadata: kwargs_to_dict(py, metadata)?.into(),
+            repeat_count: None,
+            body: Vec::new(),
+            record_lookbacks: Vec::new(),
             core_op: Some(faultscope_core::Operation::ObservableInclude {
                 observable_id,
                 measurement_keys,
+            }),
+        })
+    }
+
+    #[staticmethod]
+    #[pyo3(signature = (**metadata))]
+    pub(crate) fn tick(py: Python<'_>, metadata: Option<&Bound<'_, PyDict>>) -> PyResult<Self> {
+        Self::structured(
+            py,
+            "tick",
+            None,
+            Vec::new(),
+            Vec::new(),
+            metadata,
+            faultscope_core::Operation::Tick,
+        )
+    }
+
+    #[staticmethod]
+    #[pyo3(signature = (offsets, **metadata))]
+    pub(crate) fn shift_coords(
+        py: Python<'_>,
+        offsets: Vec<f64>,
+        metadata: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Self> {
+        let metadata_dict = kwargs_to_dict(py, metadata)?;
+        metadata_dict.set_item("offsets", PyTuple::new(py, &offsets)?)?;
+        Ok(Self {
+            kind: "shift_coords".to_string(),
+            qubits: Vec::new(),
+            key: None,
+            basis: "Z".to_string(),
+            pauli: None,
+            measurement_keys: Vec::new(),
+            observable_id: None,
+            noise_location: None,
+            metadata: metadata_dict.into(),
+            repeat_count: None,
+            body: Vec::new(),
+            record_lookbacks: Vec::new(),
+            core_op: Some(faultscope_core::Operation::ShiftCoords(offsets)),
+        })
+    }
+
+    #[staticmethod]
+    #[pyo3(signature = (count, operations, **metadata))]
+    pub(crate) fn repeat(
+        py: Python<'_>,
+        count: usize,
+        operations: Vec<Py<PyAny>>,
+        metadata: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Self> {
+        if count == 0 {
+            return Err(PyValueError::new_err("repeat count must be positive"));
+        }
+        let core_body = operations
+            .iter()
+            .map(|operation| {
+                operation
+                    .bind(py)
+                    .extract::<PyRef<'_, PyOperation>>()
+                    .ok()?
+                    .core_op
+                    .clone()
+            })
+            .collect::<Option<Vec<_>>>();
+        Ok(Self {
+            kind: "repeat".to_string(),
+            qubits: Vec::new(),
+            key: None,
+            basis: "Z".to_string(),
+            pauli: None,
+            measurement_keys: Vec::new(),
+            observable_id: None,
+            noise_location: None,
+            metadata: kwargs_to_dict(py, metadata)?.into(),
+            repeat_count: Some(count),
+            body: operations,
+            record_lookbacks: Vec::new(),
+            core_op: core_body.map(|body| faultscope_core::Operation::Repeat { count, body }),
+        })
+    }
+
+    #[staticmethod]
+    #[pyo3(signature = (lookbacks, *, detector_id=None, coords=None, **metadata))]
+    pub(crate) fn detector_rec(
+        py: Python<'_>,
+        lookbacks: Vec<usize>,
+        detector_id: Option<i64>,
+        coords: Option<Vec<f64>>,
+        metadata: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Self> {
+        validate_lookbacks(&lookbacks)?;
+        let metadata_dict = kwargs_to_dict(py, metadata)?;
+        metadata_dict.set_item("detector_id", detector_id)?;
+        let coords = coords.unwrap_or_default();
+        metadata_dict.set_item("coords", PyTuple::new(py, &coords)?)?;
+        Ok(Self {
+            kind: "detector_rec".to_string(),
+            qubits: Vec::new(),
+            key: None,
+            basis: "Z".to_string(),
+            pauli: None,
+            measurement_keys: Vec::new(),
+            observable_id: None,
+            noise_location: None,
+            metadata: metadata_dict.into(),
+            repeat_count: None,
+            body: Vec::new(),
+            record_lookbacks: lookbacks.clone(),
+            core_op: Some(faultscope_core::Operation::DetectorRec {
+                detector_id,
+                lookbacks,
+                coords,
+            }),
+        })
+    }
+
+    #[staticmethod]
+    #[pyo3(signature = (observable_id, lookbacks, **metadata))]
+    pub(crate) fn observable_include_rec(
+        py: Python<'_>,
+        observable_id: i64,
+        lookbacks: Vec<usize>,
+        metadata: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Self> {
+        validate_lookbacks(&lookbacks)?;
+        Ok(Self {
+            kind: "observable_include_rec".to_string(),
+            qubits: Vec::new(),
+            key: None,
+            basis: "Z".to_string(),
+            pauli: None,
+            measurement_keys: Vec::new(),
+            observable_id: Some(observable_id),
+            noise_location: None,
+            metadata: kwargs_to_dict(py, metadata)?.into(),
+            repeat_count: None,
+            body: Vec::new(),
+            record_lookbacks: lookbacks.clone(),
+            core_op: Some(faultscope_core::Operation::ObservableIncludeRec {
+                observable_id,
+                lookbacks,
             }),
         })
     }
@@ -477,6 +675,21 @@ impl PyOperation {
         self.metadata.clone_ref(py)
     }
 
+    #[getter]
+    pub(crate) fn repeat_count(&self) -> Option<usize> {
+        self.repeat_count
+    }
+
+    #[getter]
+    pub(crate) fn body(&self, py: Python<'_>) -> PyResult<PyObject> {
+        Ok(PyTuple::new(py, self.body.iter().map(|item| item.clone_ref(py)))?.into())
+    }
+
+    #[getter]
+    pub(crate) fn record_lookbacks(&self, py: Python<'_>) -> PyResult<PyObject> {
+        tuple_usize(py, &self.record_lookbacks)
+    }
+
     pub(crate) fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
         let qubits_repr = tuple_usize(py, &self.qubits)?
             .bind(py)
@@ -516,6 +729,33 @@ impl PyOperation {
 }
 
 impl PyOperation {
+    #[allow(clippy::too_many_arguments)]
+    fn structured(
+        py: Python<'_>,
+        kind: &str,
+        repeat_count: Option<usize>,
+        body: Vec<Py<PyAny>>,
+        record_lookbacks: Vec<usize>,
+        metadata: Option<&Bound<'_, PyDict>>,
+        core_op: faultscope_core::Operation,
+    ) -> PyResult<Self> {
+        Ok(Self {
+            kind: kind.to_string(),
+            qubits: Vec::new(),
+            key: None,
+            basis: "Z".to_string(),
+            pauli: None,
+            measurement_keys: Vec::new(),
+            observable_id: None,
+            noise_location: None,
+            metadata: kwargs_to_dict(py, metadata)?.into(),
+            repeat_count,
+            body,
+            record_lookbacks,
+            core_op: Some(core_op),
+        })
+    }
+
     fn simple_gate(
         py: Python<'_>,
         kind: &str,
@@ -541,9 +781,21 @@ impl PyOperation {
             observable_id: None,
             noise_location: None,
             metadata: kwargs_to_dict(py, metadata)?.into(),
+            repeat_count: None,
+            body: Vec::new(),
+            record_lookbacks: Vec::new(),
             core_op,
         })
     }
+}
+
+fn validate_lookbacks(lookbacks: &[usize]) -> PyResult<()> {
+    if lookbacks.contains(&0) {
+        return Err(PyValueError::new_err(
+            "measurement record lookbacks must be positive",
+        ));
+    }
+    Ok(())
 }
 
 /// Ordered stabilizer circuit consumed by FaultScope runtimes.
@@ -552,7 +804,7 @@ pub(crate) struct PyCircuit {
     pub(crate) n_qubits: usize,
     pub(crate) operations: Vec<Py<PyAny>>,
     pub(crate) core_circuit: Option<std::sync::Arc<faultscope_core::Circuit>>,
-    pub(crate) core_event_plan: Option<std::sync::Arc<faultscope_core::DemEventPlan>>,
+    pub(crate) core_event_plan: std::sync::OnceLock<std::sync::Arc<faultscope_core::DemEventPlan>>,
 }
 
 #[pymethods]
@@ -576,11 +828,30 @@ impl PyCircuit {
                 operations,
             })
         });
-        let core_event_plan = core_circuit.as_ref().and_then(|circuit| {
-            faultscope_core::collect_dem_event_plan(&circuit.operations)
-                .ok()
-                .map(std::sync::Arc::new)
+        let initial_event_plan = core_circuit.as_ref().and_then(|circuit| {
+            let structured = circuit.operations.iter().any(|operation| {
+                matches!(
+                    operation,
+                    faultscope_core::Operation::Tick
+                        | faultscope_core::Operation::ShiftCoords(_)
+                        | faultscope_core::Operation::Repeat { .. }
+                        | faultscope_core::Operation::DetectorRec { .. }
+                        | faultscope_core::Operation::ObservableIncludeRec { .. }
+                        | faultscope_core::Operation::MeasureReset { .. }
+                )
+            });
+            if structured {
+                None
+            } else {
+                faultscope_core::collect_dem_event_plan(&circuit.operations)
+                    .ok()
+                    .map(std::sync::Arc::new)
+            }
         });
+        let core_event_plan = std::sync::OnceLock::new();
+        if let Some(event_plan) = initial_event_plan {
+            let _ = core_event_plan.set(event_plan);
+        }
         Self {
             n_qubits,
             operations,
@@ -605,19 +876,7 @@ impl PyCircuit {
 
     pub(crate) fn noise_locations(&self, py: Python<'_>) -> PyResult<PyObject> {
         let out = PyDict::new(py);
-        for operation in &self.operations {
-            let operation = operation.bind(py);
-            let kind = operation.getattr("kind")?.extract::<String>()?;
-            if kind != "noise" && kind != "measure" && kind != "measure_pauli" {
-                continue;
-            }
-            let location = operation.getattr("noise_location")?;
-            if location.is_none() {
-                continue;
-            }
-            let location_id = location.getattr("id")?.extract::<String>()?;
-            out.set_item(location_id, location)?;
-        }
+        collect_py_noise_locations(py, &self.operations, &mut Vec::new(), &out)?;
         Ok(out.into())
     }
 
@@ -628,6 +887,69 @@ impl PyCircuit {
             self.operations(py)?.bind(py).repr()?,
         ))
     }
+}
+
+fn collect_py_noise_locations(
+    py: Python<'_>,
+    operations: &[Py<PyAny>],
+    repeat_path: &mut Vec<usize>,
+    out: &Bound<'_, PyDict>,
+) -> PyResult<()> {
+    for operation in operations {
+        let operation_bound = operation.bind(py);
+        let kind = operation_bound.getattr("kind")?.extract::<String>()?;
+        if kind == "repeat" {
+            let operation_ref = operation_bound.extract::<PyRef<'_, PyOperation>>()?;
+            let count = operation_ref
+                .repeat_count
+                .ok_or_else(|| PyValueError::new_err("repeat requires repeat_count"))?;
+            for iteration in 0..count {
+                repeat_path.push(iteration);
+                collect_py_noise_locations(py, &operation_ref.body, repeat_path, out)?;
+                repeat_path.pop();
+            }
+            continue;
+        }
+        if kind != "noise" && kind != "measure" && kind != "measure_pauli" {
+            continue;
+        }
+        let location = operation_bound.getattr("noise_location")?;
+        if location.is_none() {
+            continue;
+        }
+        let base_id = location.getattr("id")?.extract::<String>()?;
+        let location_id = if repeat_path.is_empty() {
+            base_id
+        } else {
+            format!(
+                "{}@r{}",
+                base_id,
+                repeat_path
+                    .iter()
+                    .map(|index| format!("[{index}]"))
+                    .collect::<String>()
+            )
+        };
+        if repeat_path.is_empty() {
+            out.set_item(location_id, location)?;
+        } else if let Ok(native) = location.extract::<PyRef<'_, PyNoiseLocation>>() {
+            let cloned = Py::new(
+                py,
+                PyNoiseLocation {
+                    id: location_id.clone(),
+                    model: native.model.clone_ref(py),
+                    rate: native.rate,
+                    qubits: native.qubits.clone(),
+                    tags: native.tags.clone_ref(py),
+                    core_tags: native.core_tags.clone(),
+                },
+            )?;
+            out.set_item(location_id, cloned)?;
+        } else {
+            out.set_item(location_id, location)?;
+        }
+    }
+    Ok(())
 }
 
 /// Detector parity declaration over measurement keys.
@@ -891,7 +1213,6 @@ impl PyDetectorErrorEdge {
 /// Typed detector error model with detector and observable declarations.
 #[pyclass(name = "DetectorErrorModel", module = "faultscope._native", frozen)]
 pub(crate) struct PyDetectorErrorModel {
-    core_dem: Option<faultscope_core::DetectorErrorModel>,
     core_lazy_dem: Option<faultscope_core::LazyDetectorErrorModel>,
     detectors: Vec<Py<PyAny>>,
     observables: Vec<Py<PyAny>>,
@@ -916,7 +1237,6 @@ impl PyDetectorErrorModel {
         edges: Vec<Py<PyAny>>,
     ) -> Self {
         Self {
-            core_dem: None,
             core_lazy_dem: None,
             detectors,
             observables,
@@ -926,12 +1246,6 @@ impl PyDetectorErrorModel {
 
     #[getter]
     pub(crate) fn detectors(&self, py: Python<'_>) -> PyResult<PyObject> {
-        if let Some(dem) = &self.core_dem {
-            let detectors = detectors_to_py_objects(py, &dem.detectors)?;
-            return Ok(
-                PyTuple::new(py, detectors.iter().map(|detector| detector.clone_ref(py)))?.into(),
-            );
-        }
         if let Some(dem) = &self.core_lazy_dem {
             let detectors = detectors_to_py_objects(py, &dem.detectors)?;
             return Ok(
@@ -947,16 +1261,6 @@ impl PyDetectorErrorModel {
 
     #[getter]
     pub(crate) fn observables(&self, py: Python<'_>) -> PyResult<PyObject> {
-        if let Some(dem) = &self.core_dem {
-            let observables = observables_to_py_objects(py, &dem.observables)?;
-            return Ok(PyTuple::new(
-                py,
-                observables
-                    .iter()
-                    .map(|observable| observable.clone_ref(py)),
-            )?
-            .into());
-        }
         if let Some(dem) = &self.core_lazy_dem {
             let observables = observables_to_py_objects(py, &dem.observables)?;
             return Ok(PyTuple::new(
@@ -978,10 +1282,6 @@ impl PyDetectorErrorModel {
 
     #[getter]
     pub(crate) fn edges(&self, py: Python<'_>) -> PyResult<PyObject> {
-        if let Some(dem) = &self.core_dem {
-            let edges = edges_to_py_objects(py, &dem.edges)?;
-            return Ok(PyTuple::new(py, edges.iter().map(|edge| edge.clone_ref(py)))?.into());
-        }
         if let Some(dem) = &self.core_lazy_dem {
             let dem = dem.materialize();
             let edges = edges_to_py_objects(py, &dem.edges)?;
@@ -998,11 +1298,7 @@ impl PyDetectorErrorModel {
     ) -> PyResult<String> {
         let mut lines = Vec::<String>::new();
         if include_detector_coords {
-            if let Some(dem) = &self.core_dem {
-                for detector in &dem.detectors {
-                    lines.push(detector_dem_line(py, detector.id, &detector.coords)?);
-                }
-            } else if let Some(dem) = &self.core_lazy_dem {
+            if let Some(dem) = &self.core_lazy_dem {
                 for detector in &dem.detectors {
                     lines.push(detector_dem_line(py, detector.id, &detector.coords)?);
                 }
@@ -1015,11 +1311,7 @@ impl PyDetectorErrorModel {
                 }
             }
         }
-        if let Some(dem) = &self.core_dem {
-            for edge in &dem.edges {
-                lines.push(core_edge_dem_line(py, edge)?);
-            }
-        } else if let Some(dem) = &self.core_lazy_dem {
+        if let Some(dem) = &self.core_lazy_dem {
             let dem = dem.materialize();
             for edge in &dem.edges {
                 lines.push(core_edge_dem_line(py, edge)?);
@@ -1038,21 +1330,6 @@ impl PyDetectorErrorModel {
 
     pub(crate) fn edges_by_location(&self, py: Python<'_>) -> PyResult<PyObject> {
         let out = PyDict::new(py);
-        if let Some(dem) = &self.core_dem {
-            let edges = edges_to_py_objects(py, &dem.edges)?;
-            for (core_edge, edge) in dem.edges.iter().zip(edges.iter()) {
-                let list = match out.get_item(core_edge.location_id.as_str())? {
-                    Some(list) => list.downcast::<PyList>()?.clone(),
-                    None => {
-                        let list = PyList::empty(py);
-                        out.set_item(core_edge.location_id.as_str(), &list)?;
-                        list
-                    }
-                };
-                list.append(edge.clone_ref(py))?;
-            }
-            return Ok(out.into());
-        }
         if let Some(dem) = &self.core_lazy_dem {
             let dem = dem.materialize();
             let edges = edges_to_py_objects(py, &dem.edges)?;
@@ -1277,19 +1554,8 @@ impl PyDetectorErrorModel {
 }
 
 impl PyDetectorErrorModel {
-    pub(crate) fn from_core_dem(dem: faultscope_core::DetectorErrorModel) -> Self {
-        Self {
-            core_dem: Some(dem),
-            core_lazy_dem: None,
-            detectors: Vec::new(),
-            observables: Vec::new(),
-            edges: Vec::new(),
-        }
-    }
-
     pub(crate) fn from_core_lazy_dem(dem: faultscope_core::LazyDetectorErrorModel) -> Self {
         Self {
-            core_dem: None,
             core_lazy_dem: Some(dem),
             detectors: Vec::new(),
             observables: Vec::new(),
@@ -1301,9 +1567,6 @@ impl PyDetectorErrorModel {
         &self,
         py: Python<'_>,
     ) -> PyResult<faultscope_core::DetectorErrorModel> {
-        if let Some(dem) = &self.core_dem {
-            return Ok(dem.clone());
-        }
         if let Some(dem) = &self.core_lazy_dem {
             return Ok(dem.materialize());
         }
@@ -1328,21 +1591,6 @@ impl PyDetectorErrorModel {
     }
 
     fn edge_views(&self, py: Python<'_>) -> PyResult<Vec<PyDemEdgeView>> {
-        if let Some(dem) = &self.core_dem {
-            return dem
-                .edges
-                .iter()
-                .map(|edge| {
-                    Ok(PyDemEdgeView {
-                        location_id: edge.location_id.clone(),
-                        event: dem_event_to_py(py, &edge.event)?,
-                        probability: edge.probability,
-                        detectors: edge.detectors.clone(),
-                        observables: edge.observables.clone(),
-                    })
-                })
-                .collect::<PyResult<Vec<_>>>();
-        }
         if let Some(dem) = &self.core_lazy_dem {
             let dem = dem.materialize();
             return dem

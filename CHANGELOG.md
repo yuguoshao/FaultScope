@@ -3,7 +3,7 @@
 All notable changes to FaultScope are documented here. The project follows
 Semantic Versioning within each `0.x` minor line.
 
-## [0.2.0] - Unreleased
+## [0.2.1] - Unreleased
 
 ### Added
 
@@ -14,4 +14,35 @@ Semantic Versioning within each `0.x` minor line.
 - Pure factory/worker native decoder plugin ABI v2 and optional PyMatching and
   fusion-blossom backends.
 
-[0.2.0]: https://github.com/yuguoshao/FaultScope/releases/tag/v0.2.0
+### Changed
+
+- The Rust forward API now compiles and executes `SamplerProgram` directly.
+  The redundant `CompiledCircuit`, `compile_runtime_operations*`, `RunOperation`,
+  and legacy string-keyed packed executor have been removed.
+- Forward and detector-error-model compilation now share one integer-indexed
+  expanded program; DEM event and measurement plans no longer rebuild or clone
+  string-key maps internally.
+- Noise-location labels and hotspot tags are interned once into dense IDs;
+  forward/DEM sampling and hotspot aggregation materialize strings only in
+  public result objects.
+- `DemHotspotEstimator` is now the single compiled DEM sampling path; obsolete
+  standalone string-edge grouping/sampling helpers and `PackedBatch` were
+  removed from the pre-1.0 Rust API.
+- DEM propagation now indexes fault-event ranges by noise ID and measurements
+  by measurement ID, shares one flip-mask assembly layer across product and
+  fallback kernels, and keeps sampling-only edges free of location metadata.
+- DEM sampling and materialized detector-error models now use only
+  `DetectorErrorEdge`; the redundant generated/sampler edge aliases and public
+  lazy edge-reference type were removed.
+- Packed logical residual counting now has one core implementation with a
+  reusable linear-time observable-ID alignment table for reordered decoders.
+- Forward/DEM compilation share the same integer-indexed observable type.
+- Stim text is always imported through the compact structured IR; the legacy
+  line-by-line importer and its eager string-key operations were removed.
+- Added `generate_dem_edges_from_event_plan`; the obsolete compatibility
+  overload with an unused operations argument was removed.
+- Python forward decoders can bulk-select only their required packed
+  measurement masks; the repetition-code decoder now reuses that selection and
+  evaluates all shots with bit-parallel integer operations.
+
+[0.2.1]: https://github.com/yuguoshao/FaultScope/releases/tag/v0.2.1
