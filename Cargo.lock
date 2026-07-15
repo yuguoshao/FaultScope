@@ -221,21 +221,22 @@ checksum = "877a4ace8713b0bcf2a4e7eec82529c029f1d0619886d18145fea96c3ffe5c0f"
 
 [[package]]
 name = "faultscope-collection"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "faultscope-core",
 ]
 
 [[package]]
 name = "faultscope-core"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "rand 0.9.4",
+ "smallvec",
 ]
 
 [[package]]
 name = "faultscope-fusion-blossom-python"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "faultscope-core",
  "fusion-blossom",
@@ -244,7 +245,7 @@ dependencies = [
 
 [[package]]
 name = "faultscope-pymatching-python"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "cc",
  "faultscope-core",
@@ -253,7 +254,7 @@ dependencies = [
 
 [[package]]
 name = "faultscope-python"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "faultscope-collection",
  "faultscope-core",

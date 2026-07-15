@@ -60,6 +60,7 @@ from faultscope.decoders import (
     NativeNoCorrectionDecoder,
     NativePyMatchingDecoder,
     PyMatchingDecoder,
+    RepetitionCodeDecoder,
     UnsupportedPyMatchingDemError,
     available_native_decoders,
     create_native_decoder,
@@ -905,6 +906,84 @@ class NoiseAwareSimulatorTests(unittest.TestCase):
 
 
 class BatchNoiseAwareSimulatorTests(unittest.TestCase):
+    def test_repetition_decoder_packed_masks_match_scalar_decode(self) -> None:
+        rng = random.Random(90210)
+        shots = 129
+        for distance in range(1, 10):
+            keys = tuple(f"m{index}" for index in range(distance - 1))
+            masks = {key: rng.getrandbits(shots) for key in keys}
+            decoder = RepetitionCodeDecoder(
+                distance=distance,
+                measurement_keys=keys,
+                observable_id=distance,
+            )
+
+            class Batch:
+                def __init__(self) -> None:
+                    self.shots = shots
+
+                def measurement_masks(self, selected: tuple[str, ...]) -> dict[str, int]:
+                    return {key: masks[key] for key in selected}
+
+            batch = Batch()
+            packed = decoder.decode_batch_masks(batch)[distance]
+            scalar = 0
+            for shot in range(shots):
+                syndrome = [(masks[key] >> shot) & 1 for key in keys]
+                if decoder.decode(syndrome, {}, batch)[0]:
+                    scalar |= 1 << shot
+            with self.subTest(distance=distance):
+                self.assertEqual(packed, scalar)
+
+    def test_repetition_decoder_reads_selected_measurement_masks_once(self) -> None:
+        decoder = RepetitionCodeDecoder(
+            distance=3,
+            measurement_keys=("m0", "m1"),
+            observable_id=7,
+        )
+        masks = {"m0": 0b10101, "m1": 0b01110}
+
+        class SelectedBatch:
+            shots = 5
+
+            def __init__(self) -> None:
+                self.selections: list[tuple[str, ...]] = []
+
+            @property
+            def measurements(self) -> dict[str, int]:
+                raise AssertionError("bulk measurements should not be materialized")
+
+            def measurement_masks(self, keys: tuple[str, ...]) -> dict[str, int]:
+                selected = tuple(keys)
+                self.selections.append(selected)
+                return {key: masks[key] for key in selected}
+
+        selected_batch = SelectedBatch()
+        selected_correction = decoder.decode_batch_masks(selected_batch)
+        self.assertEqual(selected_batch.selections, [("m0", "m1")])
+
+        expected = 0
+        for shot in range(selected_batch.shots):
+            syndrome = [(masks[key] >> shot) & 1 for key in decoder.measurement_keys]
+            if decoder.decode(syndrome, {}, selected_batch)[0]:
+                expected |= 1 << shot
+        self.assertEqual(selected_correction, {7: expected})
+
+        class LegacyBatch:
+            shots = 5
+
+            def __init__(self) -> None:
+                self.measurement_reads = 0
+
+            @property
+            def measurements(self) -> dict[str, int]:
+                self.measurement_reads += 1
+                return masks
+
+        legacy_batch = LegacyBatch()
+        self.assertEqual(decoder.decode_batch_masks(legacy_batch), {7: expected})
+        self.assertEqual(legacy_batch.measurement_reads, 1)
+
     def test_batch_score_function_estimates_single_x_noise_gradient(self) -> None:
         location = NoiseLocation(
             id="x0",
@@ -1270,6 +1349,28 @@ class NativePackedSamplerTests(unittest.TestCase):
             sampler = compile_native_sampler(circuit)
             self.assertEqual(sampler.sample(shots=4, seed=1).shots, 4)
 
+    def test_native_circuit_repeated_compilation_preserves_observables(self) -> None:
+        circuit = Circuit(
+            n_qubits=1,
+            operations=[
+                Operation.h(0),
+                Operation.measure(0, key="m", basis="Z"),
+            ],
+        )
+        first = self._native_sampler_or_skip(circuit)
+        second = self._native_sampler_or_skip(circuit)
+
+        self.assertEqual(
+            first.sample(shots=129, seed=7).measurements,
+            second.sample(shots=129, seed=7).measurements,
+        )
+
+        observable_sampler = self._native_sampler_or_skip(
+            circuit,
+            observables=(LogicalObservable(id=7, measurement_keys=("m",)),),
+        )
+        self.assertIn(7, observable_sampler.sample(shots=129, seed=7).observables)
+
     def test_native_backend_matches_deterministic_stim_masks(self) -> None:
         x_location = NoiseLocation(
             id="x0",
@@ -1321,6 +1422,7 @@ class NativePackedSamplerTests(unittest.TestCase):
             operations=[
                 Operation.noise(x_location),
                 Operation.measure(0, key="m", basis="Z"),
+                Operation.measure(0, key="unused", basis="Z"),
             ],
         )
         sampler = self._native_sampler_or_skip(circuit)
@@ -1332,6 +1434,16 @@ class NativePackedSamplerTests(unittest.TestCase):
             int(native_batch.measurement_mask("m")),
             native_batch.measurements["m"],
         )
+        self.assertEqual(
+            native_batch.measurement_masks(("m",)),
+            {"m": native_batch.measurements["m"]},
+        )
+        with self.assertRaisesRegex(TypeError, "iterable of strings, not a string"):
+            native_batch.measurement_masks("m")
+        with self.assertRaisesRegex(TypeError, "iterable of strings"):
+            native_batch.measurement_masks((1,))
+        with self.assertRaisesRegex(ValueError, "unknown measurement key.*missing"):
+            native_batch.measurement_masks(("missing",))
 
     def test_batch_forward_simulator_is_native_and_exposes_metadata(self) -> None:
         location = NoiseLocation(
@@ -3242,11 +3354,16 @@ class StimImportTests(unittest.TestCase):
         self.assertIn("detector(0.5, 0) D0", dem_text)
         self.assertIn("D0 L0", dem_text)
         self.assertEqual(dem.to_dem_text(), dem_from_circuit.to_dem_text())
-        self.assertIn("detector", [operation.kind for operation in imported.circuit.operations])
+        operation_kinds = [operation.kind for operation in imported.circuit.operations]
+        self.assertIn("detector_rec", operation_kinds)
         self.assertIn(
-            "observable_include",
-            [operation.kind for operation in imported.circuit.operations],
+            "observable_include_rec",
+            operation_kinds,
         )
+        measurement = next(
+            operation for operation in imported.circuit.operations if operation.kind == "measure"
+        )
+        self.assertIsNone(measurement.key)
 
     def test_imports_pauli_channels_and_mpp(self) -> None:
         imported = parse_stim_circuit(
@@ -3297,15 +3414,150 @@ class StimImportTests(unittest.TestCase):
         self.assertEqual(len(imported.observables), stim_circuit.num_observables)
         self.assertIn("reset", [operation.kind for operation in imported.circuit.operations])
 
-    def test_rejects_repeat_blocks(self) -> None:
-        with self.assertRaises(StimImportError):
-            parse_stim_circuit(
-                """
-                REPEAT 3 {
+    def test_imports_repeat_blocks(self) -> None:
+        imported = parse_stim_circuit(
+            """
+            REPEAT 3 {
+                M 0
+                DETECTOR rec[-1]
+            }
+            """
+        )
+        self.assertEqual(imported.measurement_keys, ("m0", "m1", "m2"))
+        self.assertEqual(len(imported.detectors), 3)
+        self.assertEqual(imported.circuit.operations[0].kind, "repeat")
+
+    def test_nested_repeat_rec_and_shift_coords(self) -> None:
+        imported = parse_stim_circuit(
+            """
+            M 0
+            REPEAT 2 {
+                REPEAT 2 {
                     M 0
+                    SHIFT_COORDS(0, 0, 0.5)
+                    DETECTOR(1, 2, 0) rec[-1] rec[-2]
                 }
-                """
+            }
+            """
+        )
+        self.assertEqual(imported.measurement_keys, ("m0", "m1", "m2", "m3", "m4"))
+        self.assertEqual(len(imported.detectors), 4)
+        self.assertEqual(
+            tuple(detector.coords for detector in imported.detectors),
+            (
+                (1.0, 2.0, 0.5),
+                (1.0, 2.0, 1.0),
+                (1.0, 2.0, 1.5),
+                (1.0, 2.0, 2.0),
+            ),
+        )
+        self.assertEqual(imported.detectors[-1].measurement_keys, ("m4", "m3"))
+
+    def test_compact_and_flattened_surface_code_compile_identically(self) -> None:
+        try:
+            import stim
+        except ImportError as exc:
+            self.skipTest(f"Stim is not installed: {exc}")
+        circuit = stim.Circuit.generated(
+            "surface_code:rotated_memory_z",
+            distance=3,
+            rounds=3,
+        )
+        compact = parse_stim_circuit(str(circuit))
+        flattened = parse_stim_circuit(str(circuit.flattened()))
+        compact_sampler = compile_native_sampler(compact.circuit)
+        flattened_sampler = compile_native_sampler(flattened.circuit)
+        self.assertLess(compact_sampler.stored_operation_count, compact_sampler.operation_count)
+        self.assertLess(flattened_sampler.stored_operation_count, flattened_sampler.operation_count)
+        self.assertEqual(compact_sampler.operation_count, flattened_sampler.operation_count)
+        self.assertEqual(
+            compact_sampler.sample_measurements(shots=257, seed=9123),
+            flattened_sampler.sample_measurements(shots=257, seed=9123),
+        )
+
+    def test_long_flattened_surface_code_keeps_warmup_outside_periodic_loop(self) -> None:
+        try:
+            import stim
+        except ImportError as exc:
+            self.skipTest(f"Stim is not installed: {exc}")
+        circuit = stim.Circuit.generated(
+            "surface_code:rotated_memory_z",
+            distance=10,
+            rounds=10,
+        )
+        compact = parse_stim_circuit(str(circuit))
+        flattened = parse_stim_circuit(str(circuit.flattened()))
+        recovered_repeats = [
+            operation for operation in flattened.circuit.operations if operation.kind == "repeat"
+        ]
+
+        self.assertEqual(len(recovered_repeats), 1)
+        self.assertEqual(recovered_repeats[0].repeat_count, 9)
+        compact_sampler = compile_native_sampler(compact.circuit)
+        flattened_sampler = compile_native_sampler(flattened.circuit)
+        self.assertEqual(compact_sampler.loop_kernel_count, 1)
+        self.assertEqual(flattened_sampler.loop_kernel_count, 1)
+        self.assertEqual(
+            compact_sampler.sample_measurements(shots=65, seed=441),
+            flattened_sampler.sample_measurements(shots=65, seed=441),
+        )
+
+    def test_repeat_noise_ids_and_dem_match_flattened_reference(self) -> None:
+        compact = parse_stim_circuit(
+            """
+            R 0
+            REPEAT 3 {
+                X_ERROR(0.125) 0
+                M 0
+                DETECTOR rec[-1]
+                R 0
+            }
+            """
+        )
+        flattened = parse_stim_circuit(
+            """
+            R 0
+            X_ERROR(0.125) 0
+            M 0
+            DETECTOR rec[-1]
+            R 0
+            X_ERROR(0.125) 0
+            M 0
+            DETECTOR rec[-1]
+            R 0
+            X_ERROR(0.125) 0
+            M 0
+            DETECTOR rec[-1]
+            R 0
+            """
+        )
+        self.assertEqual(len(compact.circuit.noise_locations()), 3)
+        compact_dem = DetectorErrorModelGenerator(compact.circuit).generate()
+        flattened_dem = DetectorErrorModelGenerator(flattened.circuit).generate()
+
+        def canonical(dem):
+            return sorted(
+                (
+                    edge.probability,
+                    tuple(edge.detectors),
+                    tuple(edge.observables),
+                    edge.event,
+                )
+                for edge in dem.edges
             )
+
+        self.assertEqual(canonical(compact_dem), canonical(flattened_dem))
+
+    def test_repeat_parser_validation(self) -> None:
+        for source in (
+            "REPEAT 0 {\nM 0\n}",
+            "REPEAT 2 {\nM 0",
+            "}",
+            "REPEAT 2 {\nDETECTOR rec[-1]\n}",
+        ):
+            with self.subTest(source=source):
+                with self.assertRaises(StimImportError):
+                    parse_stim_circuit(source)
 
 
 if __name__ == "__main__":

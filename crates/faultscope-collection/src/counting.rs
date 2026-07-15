@@ -2,10 +2,10 @@ use std::collections::HashMap;
 use std::time::Instant;
 
 use faultscope_core::{
-    logical_residual_loss_mask_native, word_count, CompiledDemLogicalCountPlan,
-    CompiledDemSamplingPlan, CorrectionMaskBatch, DemBatch, DemHotspotEstimator,
-    DetectorEventShotBatchView, DetectorMaskBatchView, Mask, NativeDecoderWorker, NpError,
-    NpResult, PackedDetectorShotBatchView, PackedObservableShotBatch, SmallRng,
+    logical_residual_loss_mask_native, packed_residual_failure_count, word_count,
+    CompiledDemLogicalCountPlan, CompiledDemSamplingPlan, CorrectionMaskBatch, DemBatch,
+    DemHotspotEstimator, DetectorEventShotBatchView, DetectorMaskBatchView, Mask,
+    NativeDecoderWorker, NpError, NpResult, PackedDetectorShotBatchView, SmallRng,
 };
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -266,7 +266,7 @@ fn sample_dem_logical_error_count_with_decoder(
             event_batch.shots,
         )?;
         let corrections = decoder.decode_detector_event_batch_checked(detector_view)?;
-        return collection_packed_residual_failure_count_from_rows(
+        return packed_residual_failure_count(
             &event_batch.observable_ids,
             &event_batch.observable_data,
             event_batch.observable_byte_count,
@@ -299,7 +299,7 @@ fn sample_dem_logical_error_count_with_decoder(
             packed_batch.shots,
         )?;
         let corrections = decoder.decode_packed_batch_checked(detector_view)?;
-        return collection_packed_residual_failure_count_from_rows(
+        return packed_residual_failure_count(
             &packed_batch.observable_ids,
             &packed_batch.observable_data,
             packed_batch.observable_byte_count,
@@ -380,75 +380,6 @@ fn detector_postselection_loss_mask(
     Ok(Some(discard))
 }
 
-fn collection_packed_residual_failure_count_from_rows(
-    observable_ids: &[i64],
-    observable_data: &[u8],
-    observable_byte_count: usize,
-    corrections: &PackedObservableShotBatch,
-    shots: usize,
-) -> NpResult<usize> {
-    if corrections.observable_ids.as_slice() == observable_ids
-        && corrections.observable_byte_count == observable_byte_count
-    {
-        let failures = (0..shots)
-            .filter(|shot| {
-                let begin = shot * observable_byte_count;
-                let end = begin + observable_byte_count;
-                observable_data[begin..end]
-                    .iter()
-                    .zip(&corrections.data[begin..end])
-                    .any(|(actual, correction)| (actual ^ correction) != 0)
-            })
-            .count();
-        return Ok(failures);
-    }
-
-    let mut ids = observable_ids.to_vec();
-    for observable_id in &corrections.observable_ids {
-        if !ids.contains(observable_id) {
-            ids.push(*observable_id);
-        }
-    }
-    let actual_index = observable_ids
-        .iter()
-        .enumerate()
-        .map(|(index, id)| (*id, index))
-        .collect::<HashMap<_, _>>();
-    let correction_index = corrections
-        .observable_ids
-        .iter()
-        .enumerate()
-        .map(|(index, id)| (*id, index))
-        .collect::<HashMap<_, _>>();
-
-    let mut failures = 0usize;
-    for shot in 0..shots {
-        let mut failed = false;
-        for observable_id in &ids {
-            let actual = actual_index
-                .get(observable_id)
-                .map(|index| {
-                    let offset = shot * observable_byte_count + (index >> 3);
-                    ((observable_data[offset] >> (index & 7)) & 1) != 0
-                })
-                .unwrap_or(false);
-            let correction = correction_index
-                .get(observable_id)
-                .map(|index| {
-                    let offset = shot * corrections.observable_byte_count + (index >> 3);
-                    ((corrections.data[offset] >> (index & 7)) & 1) != 0
-                })
-                .unwrap_or(false);
-            if actual ^ correction {
-                failed = true;
-                break;
-            }
-        }
-        failures += usize::from(failed);
-    }
-    Ok(failures)
-}
-
 pub(crate) fn validate_mask_shape(
     mask: Option<&[u8]>,
     bit_count: usize,
@@ -481,28 +412,4 @@ fn set_mask_bit(mask: &mut Mask, shot: usize) {
 fn packed_mask_bit(mask: Option<&[u8]>, index: usize) -> bool {
     mask.and_then(|mask| mask.get(index >> 3))
         .is_some_and(|byte| ((byte >> (index & 7)) & 1) != 0)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use faultscope_core::PackedObservableShotBatch;
-
-    #[test]
-    fn collection_counts_packed_residual_failures_locally() {
-        let corrections =
-            PackedObservableShotBatch::new(vec![1], vec![0b0000_0000, 0b0000_0001, 0b0000_0000], 3)
-                .unwrap();
-
-        let failures = collection_packed_residual_failure_count_from_rows(
-            &[0],
-            &[0b0000_0000, 0b0000_0001, 0b0000_0001],
-            1,
-            &corrections,
-            3,
-        )
-        .unwrap();
-
-        assert_eq!(failures, 2);
-    }
 }

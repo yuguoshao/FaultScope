@@ -1,12 +1,19 @@
 use std::collections::HashMap;
 
+use crate::dem_sampling::{DemProgramEdge, DemProgramEdgeMetadata, DemProgramLocationGroup};
+use crate::labels::HotspotTagKind;
 use crate::{
-    DemBatch, DemHotspotEstimate, DemLocationGroup, DemSamplerEdge, DetectorGraphEstimate,
-    DetectorGraphKey, HotspotEstimate, Mask, NoiseLocation, RuntimeState, TagValue,
+    DemBatch, DemHotspotEstimate, DetectorGraphEstimate, DetectorGraphKey, HotspotEstimate,
+    IndexedNoiseLocation, LocationCatalog, LocationId, Mask, RuntimeState, TagValue,
 };
 
+/// Compute forward-sampler hotspots using dense location ids throughout.
+///
+/// User-facing strings are materialized from `catalog` only when constructing
+/// the returned boundary object.
 pub fn compute_packed_estimate(
-    locations: &[NoiseLocation],
+    locations: &[IndexedNoiseLocation],
+    catalog: &LocationCatalog,
     state: &RuntimeState,
     loss_mask: &Mask,
     baseline: Option<f64>,
@@ -17,18 +24,13 @@ pub fn compute_packed_estimate(
     let loss_count = clipped_loss.bit_count();
     let mean_loss = loss_count as f64 / state.shots as f64;
     let baseline_value = baseline.unwrap_or(mean_loss);
-    let mut sensitivities = HashMap::new();
-    let mut hotspots = HashMap::new();
+    let mut sensitivities = vec![0.0; catalog.len()];
+    let mut hotspots = vec![0.0; catalog.len()];
     let mut by_qubit = HashMap::new();
+    let zero_mask = Mask::zero(state.all_mask.words.len());
 
-    for location in locations {
-        let zero_mask;
-        let event_mask = if let Some(mask) = state.event_masks.get(&location.id) {
-            mask
-        } else {
-            zero_mask = Mask::zero(state.all_mask.words.len());
-            &zero_mask
-        };
+    for (noise_id, location) in locations.iter().enumerate() {
+        let event_mask = state.event_masks.get(noise_id).unwrap_or(&zero_mask);
         let event_count = event_mask.bit_count();
         let no_event_count = state.shots - event_count;
         let loss_event_count = clipped_loss.and_count(event_mask);
@@ -39,24 +41,25 @@ pub fn compute_packed_estimate(
         let sum_score = event_count as f64 * event_score + no_event_count as f64 * no_event_score;
         let sensitivity = (sum_loss_score - baseline_value * sum_score) / state.shots as f64;
         let hotspot = sensitivity.abs();
-        sensitivities.insert(location.id.clone(), sensitivity);
-        hotspots.insert(location.id.clone(), hotspot);
+        sensitivities[location.location_id.index()] = sensitivity;
+        hotspots[location.location_id.index()] = hotspot;
         for qubit in &location.qubits {
             add_f64(&mut by_qubit, *qubit, hotspot);
         }
     }
 
-    let by_round = aggregate_location_tag_hotspots(locations, &hotspots, "round");
-    let by_gate = aggregate_location_tag_hotspots(locations, &hotspots, "gate");
-    let by_operation = aggregate_location_tag_hotspots(locations, &hotspots, "operation");
-    let top_locations = top_location_ids(&hotspots, top_k);
+    let by_round = aggregate_location_tag_hotspots(catalog, &hotspots, HotspotTagKind::Round);
+    let by_gate = aggregate_location_tag_hotspots(catalog, &hotspots, HotspotTagKind::Gate);
+    let by_operation =
+        aggregate_location_tag_hotspots(catalog, &hotspots, HotspotTagKind::Operation);
+    let top_locations = top_location_ids(catalog, &hotspots, top_k);
 
     HotspotEstimate {
         shots: state.shots,
         mean_loss,
         baseline: baseline_value,
-        sensitivities,
-        hotspots,
+        sensitivities: materialize_location_values(catalog, &sensitivities),
+        hotspots: materialize_location_values(catalog, &hotspots),
         by_qubit,
         by_round,
         by_gate,
@@ -65,14 +68,26 @@ pub fn compute_packed_estimate(
     }
 }
 
-pub fn compute_dem_estimate(
-    edges: &[DemSamplerEdge],
-    location_groups: &[DemLocationGroup],
+pub(crate) struct DemEstimateProgram<'a> {
+    pub(crate) edges: &'a [DemProgramEdge],
+    pub(crate) edge_metadata: &'a [DemProgramEdgeMetadata],
+    pub(crate) location_groups: &'a [DemProgramLocationGroup],
+    pub(crate) catalog: &'a LocationCatalog,
+}
+
+pub(crate) fn compute_dem_estimate(
+    program: DemEstimateProgram<'_>,
     batch: &DemBatch,
     loss_mask: &Mask,
     baseline: Option<f64>,
     top_k: usize,
 ) -> DemHotspotEstimate {
+    let DemEstimateProgram {
+        edges,
+        edge_metadata,
+        location_groups,
+        catalog,
+    } = program;
     let mut clipped_loss = loss_mask.clone();
     clipped_loss.and_assign(&batch.all_mask);
     let loss_count = clipped_loss.bit_count();
@@ -93,22 +108,26 @@ pub fn compute_dem_estimate(
     }
 
     let location_sensitivities =
-        aggregate_dem_location_sensitivities(edges, location_groups, &edge_sensitivities);
+        aggregate_dem_location_sensitivities(edges, location_groups, &edge_sensitivities, catalog);
     let edge_hotspots = edge_sensitivities
         .iter()
         .map(|sensitivity| sensitivity.abs())
         .collect::<Vec<_>>();
     let location_hotspots = location_sensitivities
         .iter()
-        .map(|(location_id, sensitivity)| (location_id.clone(), sensitivity.abs()))
-        .collect::<HashMap<_, _>>();
+        .map(|value| value.map(f64::abs))
+        .collect::<Vec<_>>();
     let by_detector = aggregate_dem_detector_hotspots(edges, &edge_hotspots);
-    let by_round = aggregate_dem_tag_hotspots(edges, &location_hotspots, "round");
-    let by_gate = aggregate_dem_tag_hotspots(edges, &location_hotspots, "gate");
-    let by_operation = aggregate_dem_tag_hotspots(edges, &location_hotspots, "operation");
-    let detector_graph = compute_detector_graph_estimate(edges, &edge_sensitivities);
+    let by_round =
+        aggregate_optional_tag_hotspots(catalog, &location_hotspots, HotspotTagKind::Round);
+    let by_gate =
+        aggregate_optional_tag_hotspots(catalog, &location_hotspots, HotspotTagKind::Gate);
+    let by_operation =
+        aggregate_optional_tag_hotspots(catalog, &location_hotspots, HotspotTagKind::Operation);
+    let detector_graph =
+        compute_detector_graph_estimate(edges, edge_metadata, catalog, &edge_sensitivities);
     let top_edges = top_edge_indices(&edge_hotspots, top_k);
-    let top_locations = top_location_ids(&location_hotspots, top_k);
+    let top_locations = top_optional_location_ids(catalog, &location_hotspots, top_k);
 
     DemHotspotEstimate {
         shots: batch.shots,
@@ -116,8 +135,11 @@ pub fn compute_dem_estimate(
         baseline: baseline_value,
         edge_sensitivities,
         edge_hotspots,
-        location_sensitivities,
-        location_hotspots,
+        location_sensitivities: materialize_optional_location_values(
+            catalog,
+            &location_sensitivities,
+        ),
+        location_hotspots: materialize_optional_location_values(catalog, &location_hotspots),
         by_detector,
         by_round,
         by_gate,
@@ -129,11 +151,12 @@ pub fn compute_dem_estimate(
 }
 
 fn aggregate_dem_location_sensitivities(
-    edges: &[DemSamplerEdge],
-    location_groups: &[DemLocationGroup],
+    edges: &[DemProgramEdge],
+    location_groups: &[DemProgramLocationGroup],
     edge_sensitivities: &[f64],
-) -> HashMap<String, f64> {
-    let mut out = HashMap::new();
+    catalog: &LocationCatalog,
+) -> Vec<Option<f64>> {
+    let mut out = vec![None; catalog.len()];
     for group in location_groups {
         let mut value = 0.0;
         for edge_index in &group.edge_indices {
@@ -144,51 +167,56 @@ fn aggregate_dem_location_sensitivities(
             };
             value += edge_sensitivities[*edge_index] * weight;
         }
-        out.insert(group.location_id.clone(), value);
+        out[group.location_id.index()] = Some(value);
     }
     out
 }
 
 fn aggregate_location_tag_hotspots(
-    locations: &[NoiseLocation],
-    hotspots: &HashMap<String, f64>,
-    tag: &str,
+    catalog: &LocationCatalog,
+    hotspots: &[f64],
+    kind: HotspotTagKind,
 ) -> HashMap<TagValue, f64> {
-    let mut out = HashMap::new();
-    for location in locations {
-        let Some(tag_value) = location.tags.get(tag) else {
-            continue;
-        };
-        let hotspot = *hotspots.get(&location.id).unwrap_or(&0.0);
-        add_f64(&mut out, tag_value.clone(), hotspot);
-    }
-    out
+    let values = hotspots.iter().copied().map(Some).collect::<Vec<_>>();
+    aggregate_optional_tag_hotspots(catalog, &values, kind)
 }
 
-fn aggregate_dem_tag_hotspots(
-    edges: &[DemSamplerEdge],
-    hotspots: &HashMap<String, f64>,
-    tag: &str,
+fn aggregate_optional_tag_hotspots(
+    catalog: &LocationCatalog,
+    hotspots: &[Option<f64>],
+    kind: HotspotTagKind,
 ) -> HashMap<TagValue, f64> {
-    let mut by_location: HashMap<String, &HashMap<String, TagValue>> = HashMap::new();
-    for edge in edges {
-        by_location
-            .entry(edge.location_id.clone())
-            .or_insert(&edge.tags);
-    }
-    let mut out = HashMap::new();
-    for (location_id, tags) in by_location {
-        let Some(tag_value) = tags.get(tag) else {
+    let mut totals = vec![0.0; catalog.tag_value_count()];
+    let mut seen = vec![false; catalog.tag_value_count()];
+    for (location_index, hotspot) in hotspots.iter().enumerate() {
+        let Some(hotspot) = hotspot else {
             continue;
         };
-        let hotspot = *hotspots.get(&location_id).unwrap_or(&0.0);
-        add_f64(&mut out, tag_value.clone(), hotspot);
+        let location_id = LocationId::new(location_index);
+        let Some(tag_value_id) = catalog.hotspot_tag(location_id, kind) else {
+            continue;
+        };
+        totals[tag_value_id.index()] += *hotspot;
+        seen[tag_value_id.index()] = true;
     }
-    out
+    totals
+        .into_iter()
+        .zip(seen)
+        .enumerate()
+        .filter(|(_, (_, seen))| *seen)
+        .map(|(tag_value_index, (value, _))| {
+            (
+                catalog
+                    .tag_value(crate::labels::TagValueId(tag_value_index))
+                    .clone(),
+                value,
+            )
+        })
+        .collect()
 }
 
 fn aggregate_dem_detector_hotspots(
-    edges: &[DemSamplerEdge],
+    edges: &[DemProgramEdge],
     edge_hotspots: &[f64],
 ) -> HashMap<i64, f64> {
     let mut out = HashMap::new();
@@ -206,19 +234,21 @@ fn aggregate_dem_detector_hotspots(
 }
 
 fn compute_detector_graph_estimate(
-    edges: &[DemSamplerEdge],
+    edges: &[DemProgramEdge],
+    edge_metadata: &[DemProgramEdgeMetadata],
+    catalog: &LocationCatalog,
     edge_sensitivities: &[f64],
 ) -> DetectorGraphEstimate {
-    let mut graph = DetectorGraphEstimate {
-        by_detector_edge: HashMap::new(),
-        signed_by_detector_edge: HashMap::new(),
-        by_detector: HashMap::new(),
-        signed_by_detector: HashMap::new(),
-        by_observable: HashMap::new(),
-        signed_by_observable: HashMap::new(),
-        by_location: HashMap::new(),
-        signed_by_location: HashMap::new(),
-    };
+    let mut by_detector_edge = HashMap::new();
+    let mut signed_by_detector_edge = HashMap::new();
+    let mut by_detector = HashMap::new();
+    let mut signed_by_detector = HashMap::new();
+    let mut by_observable = HashMap::new();
+    let mut signed_by_observable = HashMap::new();
+    let mut by_location = vec![0.0; catalog.len()];
+    let mut signed_by_location = vec![0.0; catalog.len()];
+    let mut location_seen = vec![false; catalog.len()];
+
     for (edge_index, edge) in edges.iter().enumerate() {
         let sensitivity = edge_sensitivities.get(edge_index).copied().unwrap_or(0.0);
         let hotspot = sensitivity.abs();
@@ -229,49 +259,107 @@ fn compute_detector_graph_estimate(
             detectors: edge.detectors.clone(),
             observables: edge.observables.clone(),
         };
-        add_f64(&mut graph.by_detector_edge, key.clone(), hotspot);
-        add_f64(&mut graph.signed_by_detector_edge, key, sensitivity);
-        add_f64(&mut graph.by_location, edge.location_id.clone(), hotspot);
-        add_f64(
-            &mut graph.signed_by_location,
-            edge.location_id.clone(),
-            sensitivity,
-        );
+        add_f64(&mut by_detector_edge, key.clone(), hotspot);
+        add_f64(&mut signed_by_detector_edge, key, sensitivity);
+        if let Some(metadata) = edge_metadata.get(edge_index) {
+            by_location[metadata.location_id.index()] += hotspot;
+            signed_by_location[metadata.location_id.index()] += sensitivity;
+            location_seen[metadata.location_id.index()] = true;
+        }
         if !edge.detectors.is_empty() {
             let share = hotspot / edge.detectors.len() as f64;
             let signed_share = sensitivity / edge.detectors.len() as f64;
             for detector_id in &edge.detectors {
-                add_f64(&mut graph.by_detector, *detector_id, share);
-                add_f64(&mut graph.signed_by_detector, *detector_id, signed_share);
+                add_f64(&mut by_detector, *detector_id, share);
+                add_f64(&mut signed_by_detector, *detector_id, signed_share);
             }
         }
         if !edge.observables.is_empty() {
             let share = hotspot / edge.observables.len() as f64;
             let signed_share = sensitivity / edge.observables.len() as f64;
             for observable_id in &edge.observables {
-                add_f64(&mut graph.by_observable, *observable_id, share);
-                add_f64(
-                    &mut graph.signed_by_observable,
-                    *observable_id,
-                    signed_share,
-                );
+                add_f64(&mut by_observable, *observable_id, share);
+                add_f64(&mut signed_by_observable, *observable_id, signed_share);
             }
         }
     }
-    graph
+
+    DetectorGraphEstimate {
+        by_detector_edge,
+        signed_by_detector_edge,
+        by_detector,
+        signed_by_detector,
+        by_observable,
+        signed_by_observable,
+        by_location: materialize_seen_location_values(catalog, &by_location, &location_seen),
+        signed_by_location: materialize_seen_location_values(
+            catalog,
+            &signed_by_location,
+            &location_seen,
+        ),
+    }
 }
 
-fn top_location_ids(hotspots: &HashMap<String, f64>, top_k: usize) -> Vec<String> {
-    if top_k == 0 || hotspots.is_empty() {
+fn materialize_location_values(catalog: &LocationCatalog, values: &[f64]) -> HashMap<String, f64> {
+    values
+        .iter()
+        .enumerate()
+        .map(|(index, value)| (catalog.label(LocationId::new(index)).to_string(), *value))
+        .collect()
+}
+
+fn materialize_optional_location_values(
+    catalog: &LocationCatalog,
+    values: &[Option<f64>],
+) -> HashMap<String, f64> {
+    values
+        .iter()
+        .enumerate()
+        .filter_map(|(index, value)| {
+            value.map(|value| (catalog.label(LocationId::new(index)).to_string(), value))
+        })
+        .collect()
+}
+
+fn materialize_seen_location_values(
+    catalog: &LocationCatalog,
+    values: &[f64],
+    seen: &[bool],
+) -> HashMap<String, f64> {
+    values
+        .iter()
+        .zip(seen)
+        .enumerate()
+        .filter(|(_, (_, seen))| **seen)
+        .map(|(index, (value, _))| (catalog.label(LocationId::new(index)).to_string(), *value))
+        .collect()
+}
+
+fn top_location_ids(catalog: &LocationCatalog, hotspots: &[f64], top_k: usize) -> Vec<String> {
+    let values = hotspots.iter().copied().map(Some).collect::<Vec<_>>();
+    top_optional_location_ids(catalog, &values, top_k)
+}
+
+fn top_optional_location_ids(
+    catalog: &LocationCatalog,
+    hotspots: &[Option<f64>],
+    top_k: usize,
+) -> Vec<String> {
+    if top_k == 0 {
         return Vec::new();
     }
-    let limit = top_k.min(hotspots.len());
     let mut rows = hotspots
         .iter()
-        .map(|(location_id, hotspot)| (location_id, *hotspot))
+        .enumerate()
+        .filter_map(|(index, hotspot)| hotspot.map(|hotspot| (LocationId::new(index), hotspot)))
         .collect::<Vec<_>>();
-    let compare = |left: &(&String, f64), right: &(&String, f64)| {
-        right.1.total_cmp(&left.1).then_with(|| left.0.cmp(right.0))
+    let limit = top_k.min(rows.len());
+    let compare = |left: &(LocationId, f64), right: &(LocationId, f64)| {
+        right.1.total_cmp(&left.1).then_with(|| {
+            catalog
+                .lexical_rank(left.0)
+                .cmp(&catalog.lexical_rank(right.0))
+        })
     };
     if limit < rows.len() {
         rows.select_nth_unstable_by(limit, compare);
@@ -279,7 +367,7 @@ fn top_location_ids(hotspots: &HashMap<String, f64>, top_k: usize) -> Vec<String
     rows.truncate(limit);
     rows.sort_by(compare);
     rows.into_iter()
-        .map(|(location_id, _)| location_id.clone())
+        .map(|(location_id, _)| catalog.label(location_id).to_string())
         .collect()
 }
 
@@ -321,26 +409,54 @@ fn score_pair(probability: f64) -> (f64, f64) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::NoiseModel;
+    use crate::labels::LocationCatalogBuilder;
+    use crate::{NoiseLocation, NoiseModel};
 
     #[test]
     fn packed_estimate_reports_location_hotspot() {
-        let location = NoiseLocation {
+        let input = NoiseLocation {
             id: "n".to_string(),
             model: NoiseModel::BernoulliPauli("X".to_string()),
             rate: 0.5,
             qubits: vec![0],
             tags: HashMap::new(),
         };
-        let mut state = RuntimeState::new(1, 2, &["n".to_string()], true);
-        state
-            .event_masks
-            .insert("n".to_string(), Mask { words: vec![0b01] });
+        let mut builder = LocationCatalogBuilder::with_capacity(1);
+        let location_id = builder.intern(input.id.clone(), input.tags.clone());
+        let locations = vec![IndexedNoiseLocation::from_input(location_id, input)];
+        let catalog = builder.finish();
+        let mut state = RuntimeState::new(1, 2, 0, 1, true);
+        state.event_masks[0] = Mask { words: vec![0b01] };
         let loss = Mask { words: vec![0b01] };
 
-        let estimate = compute_packed_estimate(&[location], &state, &loss, None, 1);
+        let estimate = compute_packed_estimate(&locations, &catalog, &state, &loss, None, 1);
 
         assert_eq!(estimate.top_locations, vec!["n"]);
         assert!(estimate.hotspots["n"] > 0.0);
+    }
+
+    #[test]
+    fn integer_location_ranking_preserves_lexical_tie_breaks() {
+        let mut builder = LocationCatalogBuilder::with_capacity(2);
+        let mut locations = Vec::new();
+        for label in ["z", "a"] {
+            let input = NoiseLocation {
+                id: label.to_string(),
+                model: NoiseModel::BernoulliPauli("X".to_string()),
+                rate: 0.5,
+                qubits: vec![0],
+                tags: HashMap::new(),
+            };
+            let location_id = builder.intern(input.id.clone(), input.tags.clone());
+            locations.push(IndexedNoiseLocation::from_input(location_id, input));
+        }
+        let catalog = builder.finish();
+        let mut state = RuntimeState::new(1, 2, 0, 2, true);
+        state.event_masks.fill(Mask { words: vec![0b01] });
+        let loss = Mask { words: vec![0b01] };
+
+        let estimate = compute_packed_estimate(&locations, &catalog, &state, &loss, None, 2);
+
+        assert_eq!(estimate.top_locations, vec!["a", "z"]);
     }
 }

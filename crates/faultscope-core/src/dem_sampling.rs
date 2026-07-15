@@ -1,9 +1,38 @@
 use std::collections::{hash_map::Entry, HashMap};
 
+use crate::labels::LocationCatalogBuilder;
 use crate::{
-    bernoulli_mask, for_each_bernoulli_event, word_count, DemBatch, DemHotspotEstimate,
-    DemLocationGroup, DemSamplerEdge, DetectorErrorModel, Mask, NpError, NpResult, SmallRng,
+    bernoulli_mask, for_each_bernoulli_event, word_count, DemBatch, DemEvent, DemHotspotEstimate,
+    DemLocationGroup, DetectorErrorEdge, DetectorErrorModel, LocationCatalog, LocationId, Mask,
+    NpError, NpResult, SmallRng,
 };
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct DemProgramEdge {
+    pub(crate) probability: f64,
+    pub(crate) detectors: Vec<i64>,
+    pub(crate) observables: Vec<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct DemProgramEdgeMetadata {
+    pub(crate) location_id: LocationId,
+    pub(crate) event: DemEvent,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct DemProgramLocationGroup {
+    pub(crate) location_id: LocationId,
+    pub(crate) edge_indices: Vec<usize>,
+    pub(crate) total_probability: f64,
+}
+
+struct CompiledDemEdges {
+    edges: Vec<DemProgramEdge>,
+    metadata: Option<Vec<DemProgramEdgeMetadata>>,
+    catalog: LocationCatalog,
+    location_groups: Vec<DemProgramLocationGroup>,
+}
 
 /// Bit-packed detector-error-model sampler and hotspot estimator.
 ///
@@ -14,8 +43,10 @@ use crate::{
 pub struct DemHotspotEstimator {
     pub detector_ids: Vec<i64>,
     pub observable_ids: Vec<i64>,
-    pub edges: Vec<DemSamplerEdge>,
-    pub location_groups: Vec<DemLocationGroup>,
+    edges: Vec<DemProgramEdge>,
+    edge_metadata: Option<Vec<DemProgramEdgeMetadata>>,
+    location_catalog: LocationCatalog,
+    location_groups: Vec<DemProgramLocationGroup>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -75,6 +106,41 @@ struct CompiledLogicalCountEdge {
 }
 
 impl DemHotspotEstimator {
+    pub(crate) fn from_compact_sampling_parts(
+        detector_ids: Vec<i64>,
+        observable_ids: Vec<i64>,
+        edges: Vec<DemProgramEdge>,
+    ) -> Self {
+        Self {
+            detector_ids,
+            observable_ids,
+            edges,
+            edge_metadata: None,
+            location_catalog: LocationCatalog::default(),
+            location_groups: Vec::new(),
+        }
+    }
+
+    pub(crate) fn from_program_parts(
+        detector_ids: Vec<i64>,
+        observable_ids: Vec<i64>,
+        edges: Vec<DemProgramEdge>,
+        edge_metadata: Vec<DemProgramEdgeMetadata>,
+        location_catalog: LocationCatalog,
+    ) -> Self {
+        debug_assert_eq!(edges.len(), edge_metadata.len());
+        let location_groups =
+            build_dem_program_location_groups(&edges, &edge_metadata, location_catalog.len());
+        Self {
+            detector_ids,
+            observable_ids,
+            edges,
+            edge_metadata: Some(edge_metadata),
+            location_catalog,
+            location_groups,
+        }
+    }
+
     /// Build a simulator from a typed detector error model.
     pub fn new(dem: DetectorErrorModel) -> NpResult<Self> {
         let detector_ids = dem.detectors.iter().map(|detector| detector.id).collect();
@@ -83,36 +149,23 @@ impl DemHotspotEstimator {
             .iter()
             .map(|observable| observable.id)
             .collect();
-        let edges = dem
-            .edges
-            .into_iter()
-            .map(|edge| DemSamplerEdge {
-                probability: edge.probability,
-                detectors: edge.detectors,
-                observables: edge.observables,
-                location_id: edge.location_id,
-                event: edge.event,
-                tags: edge.tags,
-            })
-            .collect();
-        Self::from_parts(detector_ids, observable_ids, edges)
+        Self::from_parts(detector_ids, observable_ids, dem.edges)
     }
 
     /// Build a simulator from pre-extracted ids and sampler edges.
     pub fn from_parts(
         detector_ids: Vec<i64>,
         observable_ids: Vec<i64>,
-        edges: Vec<DemSamplerEdge>,
+        edges: Vec<DetectorErrorEdge>,
     ) -> NpResult<Self> {
-        for edge in &edges {
-            edge.validate()?;
-        }
-        let location_groups = build_dem_location_groups(&edges);
+        let compiled = compile_dem_edges(edges, true)?;
         Ok(Self {
             detector_ids,
             observable_ids,
-            edges,
-            location_groups,
+            edges: compiled.edges,
+            edge_metadata: compiled.metadata,
+            location_catalog: compiled.catalog,
+            location_groups: compiled.location_groups,
         })
     }
 
@@ -120,17 +173,63 @@ impl DemHotspotEstimator {
     pub fn from_sampling_parts(
         detector_ids: Vec<i64>,
         observable_ids: Vec<i64>,
-        edges: Vec<DemSamplerEdge>,
+        edges: Vec<DetectorErrorEdge>,
     ) -> NpResult<Self> {
-        for edge in &edges {
-            edge.validate()?;
-        }
-        Ok(Self {
+        let compiled = compile_dem_edges(edges, false)?;
+        debug_assert!(compiled.metadata.is_none());
+        debug_assert!(compiled.catalog.is_empty());
+        Ok(Self::from_compact_sampling_parts(
             detector_ids,
             observable_ids,
-            edges,
-            location_groups: Vec::new(),
+            compiled.edges,
+        ))
+    }
+
+    /// Number of compiled DEM edges.
+    pub fn edge_count(&self) -> usize {
+        self.edges.len()
+    }
+
+    /// Materialize one user-facing DEM edge at the output boundary.
+    pub fn edge(&self, edge_index: usize) -> Option<DetectorErrorEdge> {
+        self.edges.get(edge_index).map(|edge| {
+            materialize_dem_edge(
+                edge,
+                self.edge_metadata
+                    .as_ref()
+                    .and_then(|metadata| metadata.get(edge_index)),
+                &self.location_catalog,
+            )
         })
+    }
+
+    /// Materialize all user-facing DEM edges at the output boundary.
+    pub fn edges(&self) -> Vec<DetectorErrorEdge> {
+        self.edges
+            .iter()
+            .enumerate()
+            .map(|(edge_index, edge)| {
+                materialize_dem_edge(
+                    edge,
+                    self.edge_metadata
+                        .as_ref()
+                        .and_then(|metadata| metadata.get(edge_index)),
+                    &self.location_catalog,
+                )
+            })
+            .collect()
+    }
+
+    /// Materialize grouped location metadata at the output boundary.
+    pub fn location_groups(&self) -> Vec<DemLocationGroup> {
+        self.location_groups
+            .iter()
+            .map(|group| DemLocationGroup {
+                location_id: self.location_catalog.label(group.location_id).to_string(),
+                edge_indices: group.edge_indices.clone(),
+                total_probability: group.total_probability,
+            })
+            .collect()
     }
 
     /// Run DEM sampling for `shots`.
@@ -154,7 +253,7 @@ impl DemHotspotEstimator {
         rng: &mut SmallRng,
         return_edge_events: bool,
     ) -> DemBatch {
-        run_dem_batch(
+        run_dem_program_batch(
             &self.detector_ids,
             &self.observable_ids,
             &self.edges,
@@ -235,9 +334,13 @@ impl DemHotspotEstimator {
         baseline: Option<f64>,
         top_k: usize,
     ) -> DemHotspotEstimate {
-        crate::compute_dem_estimate(
-            &self.edges,
-            &self.location_groups,
+        crate::hotspot::compute_dem_estimate(
+            crate::hotspot::DemEstimateProgram {
+                edges: &self.edges,
+                edge_metadata: self.edge_metadata.as_deref().unwrap_or(&[]),
+                location_groups: &self.location_groups,
+                catalog: &self.location_catalog,
+            },
             batch,
             loss_mask,
             baseline,
@@ -246,50 +349,10 @@ impl DemHotspotEstimator {
     }
 }
 
-pub fn run_dem_detector_event_shot_batch(
-    sampling_detector_ids: &[i64],
-    sampling_observable_ids: &[i64],
-    edges: &[DemSamplerEdge],
-    detector_ids: &[i64],
-    observable_ids: &[i64],
-    shots: usize,
-    rng: &mut SmallRng,
-) -> NpResult<DetectorEventDemShotBatch> {
-    Ok(compile_dem_sampling_plan(
-        sampling_detector_ids,
-        sampling_observable_ids,
-        edges,
-        detector_ids,
-        observable_ids,
-        "detector-event DEM sampler",
-    )?
-    .run_detector_event_shot_batch_with_rng(shots, rng))
-}
-
-pub fn run_dem_packed_shot_batch(
-    sampling_detector_ids: &[i64],
-    sampling_observable_ids: &[i64],
-    edges: &[DemSamplerEdge],
-    detector_ids: &[i64],
-    observable_ids: &[i64],
-    shots: usize,
-    rng: &mut SmallRng,
-) -> NpResult<PackedDemShotBatch> {
-    Ok(compile_dem_sampling_plan(
-        sampling_detector_ids,
-        sampling_observable_ids,
-        edges,
-        detector_ids,
-        observable_ids,
-        "packed DEM sampler",
-    )?
-    .run_packed_shot_batch_with_rng(shots, rng))
-}
-
 fn compile_dem_sampling_plan(
     sampling_detector_ids: &[i64],
     sampling_observable_ids: &[i64],
-    edges: &[DemSamplerEdge],
+    edges: &[DemProgramEdge],
     detector_ids: &[i64],
     observable_ids: &[i64],
     sampler_name: &str,
@@ -471,7 +534,7 @@ impl CompiledDemSamplingPlan {
 }
 
 impl CompiledDemLogicalCountPlan {
-    fn new(observable_ids: &[i64], edges: &[DemSamplerEdge]) -> Self {
+    fn new(observable_ids: &[i64], edges: &[DemProgramEdge]) -> Self {
         let mut compiled_observable_ids = Vec::new();
         let mut observable_index = HashMap::new();
         for observable_id in observable_ids
@@ -656,10 +719,10 @@ fn packed_column_for_id(id: i64, index: &HashMap<i64, usize>) -> NpResult<usize>
     })
 }
 
-pub fn run_dem_batch(
+fn run_dem_program_batch(
     detector_ids: &[i64],
     observable_ids: &[i64],
-    edges: &[DemSamplerEdge],
+    edges: &[DemProgramEdge],
     shots: usize,
     rng: &mut SmallRng,
     return_edge_events: bool,
@@ -717,35 +780,108 @@ pub fn run_dem_batch(
     }
 }
 
-pub fn build_dem_location_groups(edges: &[DemSamplerEdge]) -> Vec<DemLocationGroup> {
-    let mut group_indices = HashMap::<String, usize>::new();
-    let mut groups = Vec::<DemLocationGroup>::new();
-    for (edge_index, edge) in edges.iter().enumerate() {
-        let group_index = if let Some(group_index) = group_indices.get(&edge.location_id) {
-            *group_index
-        } else {
-            let group_index = groups.len();
-            group_indices.insert(edge.location_id.clone(), group_index);
-            groups.push(DemLocationGroup {
-                location_id: edge.location_id.clone(),
-                edge_indices: Vec::new(),
-                total_probability: 0.0,
+fn compile_dem_edges(
+    edges: Vec<DetectorErrorEdge>,
+    preserve_metadata: bool,
+) -> NpResult<CompiledDemEdges> {
+    let mut catalog = preserve_metadata.then(|| LocationCatalogBuilder::with_capacity(edges.len()));
+    let mut compiled = Vec::with_capacity(edges.len());
+    let mut metadata = preserve_metadata.then(|| Vec::with_capacity(edges.len()));
+    for edge in edges {
+        edge.validate()?;
+        let DetectorErrorEdge {
+            probability,
+            detectors,
+            observables,
+            location_id,
+            event,
+            tags,
+        } = edge;
+        if let (Some(catalog), Some(metadata)) = (&mut catalog, &mut metadata) {
+            metadata.push(DemProgramEdgeMetadata {
+                location_id: catalog.intern(location_id, tags),
+                event,
             });
-            group_index
+        }
+        compiled.push(DemProgramEdge {
+            probability,
+            detectors,
+            observables,
+        });
+    }
+    let catalog = catalog
+        .map(LocationCatalogBuilder::finish)
+        .unwrap_or_default();
+    let groups = metadata
+        .as_deref()
+        .map(|metadata| build_dem_program_location_groups(&compiled, metadata, catalog.len()))
+        .unwrap_or_default();
+    Ok(CompiledDemEdges {
+        edges: compiled,
+        metadata,
+        catalog,
+        location_groups: groups,
+    })
+}
+
+fn build_dem_program_location_groups(
+    edges: &[DemProgramEdge],
+    edge_metadata: &[DemProgramEdgeMetadata],
+    location_count: usize,
+) -> Vec<DemProgramLocationGroup> {
+    let mut group_indices = vec![None; location_count];
+    let mut groups = Vec::with_capacity(location_count);
+    for (edge_index, metadata) in edge_metadata.iter().enumerate() {
+        let location_index = metadata.location_id.index();
+        let group_index = match group_indices[location_index] {
+            Some(group_index) => group_index,
+            None => {
+                let group_index = groups.len();
+                group_indices[location_index] = Some(group_index);
+                groups.push(DemProgramLocationGroup {
+                    location_id: metadata.location_id,
+                    edge_indices: Vec::new(),
+                    total_probability: 0.0,
+                });
+                group_index
+            }
         };
         let group = &mut groups[group_index];
         group.edge_indices.push(edge_index);
-        group.total_probability += edge.probability;
+        group.total_probability += edges[edge_index].probability;
     }
     groups
+}
+
+fn materialize_dem_edge(
+    edge: &DemProgramEdge,
+    metadata: Option<&DemProgramEdgeMetadata>,
+    catalog: &LocationCatalog,
+) -> DetectorErrorEdge {
+    let (location_id, event, tags) = match metadata {
+        Some(metadata) => (
+            catalog.label(metadata.location_id).to_string(),
+            metadata.event.clone(),
+            catalog.tags(metadata.location_id).clone(),
+        ),
+        None => (String::new(), DemEvent::Bool(false), HashMap::new()),
+    };
+    DetectorErrorEdge {
+        probability: edge.probability,
+        detectors: edge.detectors.clone(),
+        observables: edge.observables.clone(),
+        location_id,
+        event,
+        tags,
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn edge(probability: f64, detectors: Vec<i64>, observables: Vec<i64>) -> DemSamplerEdge {
-        DemSamplerEdge {
+    fn edge(probability: f64, detectors: Vec<i64>, observables: Vec<i64>) -> DetectorErrorEdge {
+        DetectorErrorEdge {
             probability,
             detectors,
             observables,
@@ -753,6 +889,26 @@ mod tests {
             event: crate::DemEvent::Pauli("X".to_string()),
             tags: HashMap::new(),
         }
+    }
+
+    #[test]
+    fn sampling_only_edges_keep_metadata_out_of_the_hot_representation() {
+        let simulator = DemHotspotEstimator::from_sampling_parts(
+            vec![1],
+            vec![2],
+            vec![edge(0.25, vec![1], vec![2])],
+        )
+        .unwrap();
+
+        assert!(simulator.edge_metadata.is_none());
+        assert!(simulator.location_catalog.is_empty());
+        let materialized = simulator.edge(0).unwrap();
+        assert_eq!(materialized.probability, 0.25);
+        assert_eq!(materialized.detectors, vec![1]);
+        assert_eq!(materialized.observables, vec![2]);
+        assert!(materialized.location_id.is_empty());
+        assert_eq!(materialized.event, DemEvent::Bool(false));
+        assert!(materialized.tags.is_empty());
     }
 
     fn packed_reference(
@@ -911,7 +1067,7 @@ mod tests {
     #[test]
     fn groups_edges_by_location() {
         let edges = vec![
-            DemSamplerEdge {
+            DetectorErrorEdge {
                 probability: 0.1,
                 detectors: vec![0],
                 observables: Vec::new(),
@@ -919,7 +1075,7 @@ mod tests {
                 event: crate::DemEvent::Pauli("X".to_string()),
                 tags: HashMap::new(),
             },
-            DemSamplerEdge {
+            DetectorErrorEdge {
                 probability: 0.2,
                 detectors: vec![1],
                 observables: Vec::new(),
@@ -929,7 +1085,9 @@ mod tests {
             },
         ];
 
-        let groups = build_dem_location_groups(&edges);
+        let groups = DemHotspotEstimator::from_parts(Vec::new(), Vec::new(), edges)
+            .unwrap()
+            .location_groups();
 
         assert_eq!(groups.len(), 1);
         assert_eq!(groups[0].edge_indices, vec![0, 1]);
@@ -941,7 +1099,7 @@ mod tests {
         let simulator = DemHotspotEstimator::from_parts(
             Vec::new(),
             vec![0],
-            vec![DemSamplerEdge {
+            vec![DetectorErrorEdge {
                 probability: 1.0,
                 detectors: Vec::new(),
                 observables: vec![0],
@@ -965,7 +1123,7 @@ mod tests {
         let err = DemHotspotEstimator::from_parts(
             Vec::new(),
             Vec::new(),
-            vec![DemSamplerEdge {
+            vec![DetectorErrorEdge {
                 probability: 1.5,
                 detectors: Vec::new(),
                 observables: Vec::new(),

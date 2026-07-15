@@ -236,16 +236,17 @@ impl PyDemSampleBatch {
 pub(crate) fn batch_trajectory_from_state(
     py: Python<'_>,
     state: &RuntimeState,
+    program: &faultscope_core::SamplerProgram,
 ) -> PyResult<PySampleBatch> {
     Ok(PySampleBatch {
         shots: state.shots,
         all_mask: mask_to_py(py, &state.all_mask)?,
         x_frame: mask_vec_to_tuple_py(py, &state.x_frame)?,
         z_frame: mask_vec_to_tuple_py(py, &state.z_frame)?,
-        measurements: map_to_py(py, &state.measurements)?,
+        measurements: measurement_masks_to_py(py, program, &state.measurements)?,
         detectors: int_map_to_py(py, &state.detectors)?,
         observables: int_map_to_py(py, &state.observables)?,
-        noise_event_masks: map_to_py(py, &state.event_masks)?,
+        noise_event_masks: noise_event_masks_to_py(py, program, &state.event_masks)?,
     })
 }
 
@@ -1375,11 +1376,20 @@ impl PyDemHotspotEstimate {
 pub(crate) fn simulation_result_from_estimate(
     py: Python<'_>,
     estimate: &PackedEstimate,
-    locations: &HashMap<String, Py<PyAny>>,
+    program: &faultscope_core::SamplerProgram,
+    locations: &[Py<PyAny>],
 ) -> PyResult<PyFailureEstimate> {
     let top_rows = PyList::empty(py);
     for location_id in &estimate.top_locations {
-        let location = locations.get(location_id).ok_or_else(|| {
+        let compiled_location_id = program
+            .location_catalog
+            .find_label(location_id)
+            .ok_or_else(|| {
+                PyValueError::new_err(format!(
+                    "native estimate references unknown noise location {location_id:?}"
+                ))
+            })?;
+        let location = locations.get(compiled_location_id.index()).ok_or_else(|| {
             PyValueError::new_err(format!(
                 "native estimate references unknown noise location {location_id:?}"
             ))
@@ -1396,8 +1406,12 @@ pub(crate) fn simulation_result_from_estimate(
         )?)?;
     }
     let locations_dict = PyDict::new(py);
-    for (location_id, location) in locations {
-        locations_dict.set_item(location_id, location.clone_ref(py))?;
+    for (noise_id, location) in locations.iter().enumerate() {
+        let compiled = &program.noise_locations[noise_id];
+        locations_dict.set_item(
+            program.location_catalog.label(compiled.location_id),
+            location.clone_ref(py),
+        )?;
     }
     Ok(PyFailureEstimate {
         shots: estimate.shots,
@@ -1422,7 +1436,7 @@ pub(crate) fn dem_hotspot_result_from_estimate(
 ) -> PyResult<PyDemHotspotEstimate> {
     let locations = PyDict::new(py);
     let mut location_ids = HashSet::<String>::new();
-    for edge in &sampler.simulator.edges {
+    for edge in sampler.simulator.edges() {
         if !location_ids.insert(edge.location_id.clone()) {
             continue;
         }
@@ -1509,8 +1523,7 @@ fn dem_edge_hotspot_row(
 ) -> PyResult<PyDemEdgeHotspot> {
     let edge = sampler
         .simulator
-        .edges
-        .get(edge_index)
+        .edge(edge_index)
         .ok_or_else(|| PyValueError::new_err(format!("unknown DEM edge index {edge_index}")))?;
     Ok(PyDemEdgeHotspot {
         edge_index,

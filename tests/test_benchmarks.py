@@ -23,6 +23,46 @@ def _has_module(name: str) -> bool:
 
 
 class BenchmarkSmokeTests(unittest.TestCase):
+    def test_compiler_throughput_writes_phase_timings(self) -> None:
+        if not _has_module("stim"):
+            self.skipTest("stim is required for this benchmark")
+
+        script = ROOT / "benchmarks" / "compiler_throughput.py"
+        with tempfile.TemporaryDirectory() as temp:
+            output = Path(temp) / "compiler.json"
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    str(script),
+                    "--distances",
+                    "2",
+                    "--shots",
+                    "8",
+                    "--compile-repeats",
+                    "1",
+                    "--sample-repeats",
+                    "1",
+                    "--representation",
+                    "m-plus-r",
+                    "--json-out",
+                    str(output),
+                ],
+                cwd=ROOT,
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            records = json.loads(output.read_text())
+            self.assertEqual(len(records), 1)
+            self.assertEqual(records[0]["distance"], 2)
+            self.assertEqual(records[0]["representation"], "m-plus-r")
+            self.assertGreater(records[0]["parse_median_seconds"], 0)
+            self.assertGreater(records[0]["compile_median_seconds"], 0)
+            self.assertGreater(records[0]["sample_median_seconds"], 0)
+            self.assertGreater(records[0]["peak_rss_kib"], 0)
+
     def test_collection_throughput_writes_machine_readable_json(self) -> None:
         script = ROOT / "benchmarks" / "collection_throughput.py"
         with tempfile.TemporaryDirectory() as temp:
