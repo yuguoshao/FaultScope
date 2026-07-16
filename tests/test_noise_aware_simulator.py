@@ -192,6 +192,57 @@ class StabilizerStateTests(unittest.TestCase):
         self.assertEqual(state.measure_z(0, rng), 0)
         self.assertEqual(state.measure_z(1, rng), 1)
 
+    def test_pauli_frame_rejects_invalid_targets_without_mutation(self) -> None:
+        frame = PauliFrame([1], [1])
+        invalid_calls = (
+            ("apply_h", lambda: frame.apply_h(1)),
+            ("apply_s", lambda: frame.apply_s(1)),
+            ("apply_s_dag", lambda: frame.apply_s_dag(1)),
+            ("apply_cx_range", lambda: frame.apply_cx(0, 1)),
+            ("apply_cx_duplicate", lambda: frame.apply_cx(0, 0)),
+            ("apply_cz_duplicate", lambda: frame.apply_cz(0, 0)),
+            ("apply_swap_duplicate", lambda: frame.apply_swap(0, 0)),
+            ("apply_pauli", lambda: frame.apply_pauli(1, "X")),
+            ("apply_pauli_string", lambda: frame.apply_pauli_string((0, 0), "XZ")),
+            ("reset", lambda: frame.reset(1)),
+            ("measurement_flip", lambda: frame.measurement_flip((0, 0), "ZZ")),
+            ("pauli_on", lambda: frame.pauli_on((1,))),
+        )
+
+        for name, call in invalid_calls:
+            with self.subTest(name=name):
+                before = (frame.x, frame.z)
+                with self.assertRaises(ValueError):
+                    call()
+                self.assertEqual((frame.x, frame.z), before)
+
+    def test_stabilizer_state_rejects_invalid_targets_without_mutation(self) -> None:
+        state = StabilizerState.zero(1)
+        rng = random.Random(7)
+        invalid_calls = (
+            ("apply_h", lambda: state.apply_h(1)),
+            ("apply_s", lambda: state.apply_s(1)),
+            ("apply_s_dag", lambda: state.apply_s_dag(1)),
+            ("apply_cx_range", lambda: state.apply_cx(0, 1)),
+            ("apply_cx_duplicate", lambda: state.apply_cx(0, 0)),
+            ("apply_cz_duplicate", lambda: state.apply_cz(0, 0)),
+            ("apply_swap_duplicate", lambda: state.apply_swap(0, 0)),
+            ("apply_pauli", lambda: state.apply_pauli(1, "X")),
+            ("measure_z", lambda: state.measure_z(1, rng)),
+            ("measure_x", lambda: state.measure_x(1, rng)),
+            ("measure_y", lambda: state.measure_y(1, rng)),
+            ("reset_z", lambda: state.reset_z(1, rng)),
+            ("reset_x", lambda: state.reset_x(1, rng)),
+            ("reset_y", lambda: state.reset_y(1, rng)),
+        )
+
+        for name, call in invalid_calls:
+            with self.subTest(name=name):
+                before = (state.x, state.z, state.sign)
+                with self.assertRaises(ValueError):
+                    call()
+                self.assertEqual((state.x, state.z, state.sign), before)
+
 
 class NoiseAwareSimulatorTests(unittest.TestCase):
     def test_core_circuit_objects_are_extension_classes(self) -> None:
@@ -1309,6 +1360,49 @@ class NativePackedSamplerTests(unittest.TestCase):
             return example.make_decoder()
         except ImportError as exc:
             self.skipTest(str(exc))
+
+    def test_circuit_constructor_rejects_invalid_targets(self) -> None:
+        out_of_range_noise = NoiseLocation(
+            id="bad",
+            model=BernoulliPauliNoise("X"),
+            rate=0.1,
+            qubits=(1,),
+        )
+        invalid_cases = (
+            ("range", Operation.h(1), "targets qubit 1"),
+            ("nested", Operation.repeat(2, (Operation.h(1),)), "operation path 0.0"),
+            ("cx", Operation.cx(0, 0), "duplicate qubit 0"),
+            ("cz", Operation.cz(0, 0), "duplicate qubit 0"),
+            ("swap", Operation.swap(0, 0), "duplicate qubit 0"),
+            (
+                "pauli",
+                Operation.pauli_gate((0, 0), "XZ"),
+                "duplicate qubit 0",
+            ),
+            ("noise", Operation.noise(out_of_range_noise), "targets qubit 1"),
+        )
+
+        for name, operation, message in invalid_cases:
+            with self.subTest(name=name):
+                with self.assertRaisesRegex(ValueError, message):
+                    Circuit(n_qubits=1, operations=(operation,))
+
+    def test_compile_boundaries_revalidate_duck_typed_circuit_and_observables(self) -> None:
+        invalid_circuit = SimpleNamespace(
+            n_qubits=1,
+            operations=(SimpleNamespace(kind="h", qubits=(1,)),),
+        )
+        with self.assertRaisesRegex(UnsupportedNativeCircuitError, "targets qubit 1"):
+            compile_native_sampler(invalid_circuit)
+        with self.assertRaisesRegex(UnsupportedNativeCircuitError, "targets qubit 1"):
+            compile_native_dem_generator(invalid_circuit)
+        with self.assertRaisesRegex(ValueError, "targets qubit 1"):
+            DetectorErrorModelGenerator(invalid_circuit)
+
+        circuit = Circuit(n_qubits=1, operations=())
+        observable = LogicalObservable(id=9, pauli_qubits=(1,), pauli="Z")
+        with self.assertRaisesRegex(UnsupportedNativeCircuitError, "logical observable 9"):
+            compile_native_sampler(circuit, observables=(observable,))
 
     def test_native_backend_matches_stim_batch_sampler_masks(self) -> None:
         location = NoiseLocation(

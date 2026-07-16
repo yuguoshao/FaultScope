@@ -67,6 +67,7 @@ impl DetectorErrorModelGenerator {
         detectors: Option<Vec<Detector>>,
         observables: Option<Vec<LogicalObservable>>,
     ) -> NpResult<Self> {
+        circuit.validate()?;
         let (circuit, program) = crate::program::expand_circuit(&circuit)?;
         let measurement_plan = compile_dem_measurement_plan_with_optional_declarations(
             &program,
@@ -77,9 +78,7 @@ impl DetectorErrorModelGenerator {
         let observables = observables.unwrap_or_else(|| observables_from_program(&program));
         validate_detector_ids(&detectors)?;
         validate_observable_ids(&observables)?;
-        for observable in &observables {
-            observable.validate()?;
-        }
+        validate_observables_for_n_qubits(circuit.n_qubits, &observables)?;
         let event_plan = collect_dem_event_plan_from_program(program)?;
         Ok(Self {
             circuit: Arc::new(circuit),
@@ -129,6 +128,8 @@ impl DetectorErrorModelGenerator {
         observables: Option<Vec<LogicalObservable>>,
         event_plan: Arc<DemEventPlan>,
     ) -> NpResult<Self> {
+        circuit.validate()?;
+        crate::program::validate_expanded_program_targets(circuit.n_qubits, &event_plan.program)?;
         let measurement_plan = compile_dem_measurement_plan_with_optional_declarations(
             &event_plan.program,
             detectors.as_deref(),
@@ -139,9 +140,7 @@ impl DetectorErrorModelGenerator {
             observables.unwrap_or_else(|| observables_from_program(&event_plan.program));
         validate_detector_ids(&detectors)?;
         validate_observable_ids(&observables)?;
-        for observable in &observables {
-            observable.validate()?;
-        }
+        validate_observables_for_n_qubits(circuit.n_qubits, &observables)?;
         Ok(Self {
             circuit,
             detectors,
@@ -168,6 +167,9 @@ impl DetectorErrorModelGenerator {
     }
 
     fn generate_edge_refs(&self) -> NpResult<Vec<GeneratedDemEdgeRef>> {
+        // Constructors validate the circuit, compiled plan, and observables.
+        // Keep repeated generation scan-free so validation remains a boundary
+        // cost instead of scaling with every generated model.
         generate_dem_edge_refs_from_compiled_plan(
             self.circuit.n_qubits,
             &self.event_plan.program,
@@ -183,6 +185,8 @@ pub fn generate_dem_edges(
     detectors: &[Detector],
     observables: &[LogicalObservable],
 ) -> NpResult<Vec<DetectorErrorEdge>> {
+    crate::model::validate_operations(n_qubits, operations)?;
+    validate_observables_for_n_qubits(n_qubits, observables)?;
     let program = crate::program::expand_operations(operations, ExpansionMode::Dem)?;
     let event_plan = collect_dem_event_plan_from_program(program)?;
     let measurement_plan =
@@ -202,6 +206,8 @@ pub fn generate_dem_edges_from_event_plan(
     observables: &[LogicalObservable],
     event_plan: &DemEventPlan,
 ) -> NpResult<Vec<DetectorErrorEdge>> {
+    crate::program::validate_expanded_program_targets(n_qubits, &event_plan.program)?;
+    validate_observables_for_n_qubits(n_qubits, observables)?;
     let measurement_plan =
         compile_dem_measurement_plan(&event_plan.program, detectors, observables)?;
     generate_dem_edges_from_compiled_plan(
@@ -356,6 +362,16 @@ fn validate_observable_ids(observables: &[LogicalObservable]) -> NpResult<()> {
         if !seen.insert(observable.id) {
             return Err(NpError::new("logical observable ids must be unique"));
         }
+    }
+    Ok(())
+}
+
+fn validate_observables_for_n_qubits(
+    n_qubits: usize,
+    observables: &[LogicalObservable],
+) -> NpResult<()> {
+    for observable in observables {
+        observable.validate_for_n_qubits(n_qubits)?;
     }
     Ok(())
 }

@@ -822,20 +822,6 @@ mod tests {
             assert_eq!(state.x_frame, vec![b.clone(), a.clone()]);
             assert_eq!(state.z_frame, vec![d.clone(), c.clone()]);
 
-            let mut state = RuntimeState::new(1, shots, 0, 0, false);
-            state.x_frame[0] = a.clone();
-            state.z_frame[0] = b.clone();
-            apply_test_operation(SamplerOperation::Cx(0, 0), &program, &mut state, &mut rng);
-            assert_eq!(state.x_frame[0], Mask::zero(word_count(shots)));
-            assert_eq!(state.z_frame[0], Mask::zero(word_count(shots)));
-
-            let mut state = RuntimeState::new(1, shots, 0, 0, false);
-            state.x_frame[0] = a.clone();
-            state.z_frame[0] = b.clone();
-            apply_test_operation(SamplerOperation::Cz(0, 0), &program, &mut state, &mut rng);
-            assert_eq!(state.x_frame[0], a.clone());
-            assert_eq!(state.z_frame[0], b.clone());
-
             let mut state = RuntimeState::new(1, shots, 1, 0, false);
             state.x_frame[0] = a.clone();
             state.z_frame[0] = b;

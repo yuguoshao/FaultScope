@@ -128,6 +128,7 @@ impl ConcreteStabilizer {
         qubits: &[usize],
         pauli: &str,
     ) -> NpResult<()> {
+        crate::model::validate_pauli_targets(self.n_qubits(), qubits, pauli, "stabilizer Pauli")?;
         for row in 0..self.n_qubits() {
             if sparse_symplectic_product(&self.x[row], &self.z[row], qubits, pauli)? != 0 {
                 self.sign[row] ^= true;
@@ -142,9 +143,7 @@ impl ConcreteStabilizer {
 
     pub fn is_deterministic_sparse_pauli(&self, qubits: &[usize], pauli: &str) -> NpResult<bool> {
         let pauli_bytes = pauli.as_bytes();
-        if qubits.len() != pauli_bytes.len() {
-            return Err(NpError::new("qubits and paulis must have the same length"));
-        }
+        crate::model::validate_pauli_targets(self.n_qubits(), qubits, pauli, "stabilizer Pauli")?;
         if pauli_bytes.iter().all(|local| *local == b'Z') {
             for row in 0..self.n_qubits() {
                 let mut acc = 0;
@@ -334,9 +333,7 @@ pub fn frame_apply_pauli_string(
     qubits: &[usize],
     pauli: &str,
 ) -> NpResult<()> {
-    if qubits.len() != pauli.len() {
-        return Err(NpError::new("event Pauli length does not match qubits"));
-    }
+    crate::model::validate_pauli_targets(x_frame.len(), qubits, pauli, "Pauli frame event")?;
     for (qubit, local) in qubits.iter().zip(pauli.chars()) {
         let (x, z) = crate::pauli_to_xz(local)?;
         x_frame[*qubit] ^= x;
@@ -351,9 +348,7 @@ pub fn frame_measurement_flip_bits(
     qubits: &[usize],
     pauli: &str,
 ) -> NpResult<bool> {
-    if qubits.len() != pauli.len() {
-        return Err(NpError::new("qubits and paulis must have the same length"));
-    }
+    crate::model::validate_pauli_targets(x_frame.len(), qubits, pauli, "Pauli frame measurement")?;
     let mut x = vec![0; x_frame.len()];
     let mut z = vec![0; z_frame.len()];
     for (qubit, local) in qubits.iter().zip(pauli.chars()) {
@@ -1024,17 +1019,12 @@ fn first_set_bit_from(words: &[u64], start: usize) -> Option<usize> {
 
 impl SparsePackedPauli {
     fn new(n_qubits: usize, qubits: &[usize], pauli: &str) -> NpResult<Self> {
-        if qubits.len() != pauli.len() {
-            return Err(NpError::new("qubits and paulis must have the same length"));
-        }
+        crate::model::validate_pauli_targets(n_qubits, qubits, pauli, "stabilizer Pauli")?;
         let words = n_qubits.div_ceil(64);
         let mut entries = Vec::with_capacity(qubits.len());
         let mut x = vec![0; words];
         let mut z = vec![0; words];
         for (qubit, local) in qubits.iter().zip(pauli.chars()) {
-            if *qubit >= n_qubits {
-                return Err(NpError::new(format!("qubit {qubit} is out of range")));
-            }
             let (local_x, local_z) = crate::pauli_to_xz(local)?;
             let local_x = local_x != 0;
             let local_z = local_z != 0;

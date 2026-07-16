@@ -99,6 +99,49 @@ fn event_and_measurement_plans_share_integer_program_ids() {
 }
 
 #[test]
+fn dem_entrypoints_reject_invalid_circuit_event_plan_and_observable_targets() {
+    let invalid_operations = vec![Operation::H(1)];
+    let err = generate_dem_edges(1, &invalid_operations, &[], &[]).unwrap_err();
+    assert!(err.message().contains("targets qubit 1"));
+
+    let err = DetectorErrorModelGenerator::new(
+        Circuit {
+            n_qubits: 1,
+            operations: invalid_operations.clone(),
+        },
+        None,
+        None,
+    )
+    .unwrap_err();
+    assert!(err.message().contains("targets qubit 1"));
+
+    let event_plan = collect_dem_event_plan(&invalid_operations).unwrap();
+    let err = generate_dem_edges_from_event_plan(1, &[], &[], &event_plan).unwrap_err();
+    assert!(err.message().contains("targets qubit 1"));
+
+    let err = DetectorErrorModelGenerator::new_with_event_plan(
+        Circuit {
+            n_qubits: 1,
+            operations: Vec::new(),
+        },
+        Vec::new(),
+        Vec::new(),
+        event_plan,
+    )
+    .unwrap_err();
+    assert!(err.message().contains("targets qubit 1"));
+
+    let observable = LogicalObservable {
+        id: 3,
+        measurement_keys: Vec::new(),
+        pauli_qubits: vec![1],
+        pauli: "Z".to_string(),
+    };
+    let err = generate_dem_edges(1, &[], &[], &[observable]).unwrap_err();
+    assert!(err.message().contains("logical observable 3"));
+}
+
+#[test]
 fn generator_defaults_declarations_from_circuit_and_carries_tags() {
     let mut tags = HashMap::new();
     tags.insert(

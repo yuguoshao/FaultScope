@@ -7,9 +7,7 @@ pub fn sparse_pauli_to_xz(
     qubits: &[usize],
     pauli: &str,
 ) -> NpResult<(Vec<u8>, Vec<u8>)> {
-    if qubits.len() != pauli.len() {
-        return Err(NpError::new("qubits and paulis must have the same length"));
-    }
+    crate::model::validate_pauli_targets(n_qubits, qubits, pauli, "sparse Pauli")?;
     let mut x = vec![0; n_qubits];
     let mut z = vec![0; n_qubits];
     for (qubit, local) in qubits.iter().zip(pauli.chars()) {

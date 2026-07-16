@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::fmt;
 
@@ -91,6 +91,13 @@ impl NoiseLocation {
             )));
         }
         Ok(())
+    }
+
+    pub(crate) fn validate_for_n_qubits<C>(&self, n_qubits: usize, context: &C) -> NpResult<()>
+    where
+        C: fmt::Display + ?Sized,
+    {
+        validate_noise_parts(n_qubits, &self.model, self.rate, &self.qubits, context)
     }
 }
 
@@ -190,6 +197,11 @@ pub struct Circuit {
 }
 
 impl Circuit {
+    /// Validate all qubit-bearing operations without expanding repeat blocks.
+    pub fn validate(&self) -> NpResult<()> {
+        validate_operations(self.n_qubits, &self.operations)
+    }
+
     pub fn noise_locations(&self) -> HashMap<String, NoiseLocation> {
         let mut locations = HashMap::new();
         for operation in &self.operations {
@@ -228,12 +240,360 @@ impl LogicalObservable {
                 "pauli_qubits and pauli must be supplied together",
             ));
         }
-        if !self.pauli.is_empty() && self.pauli_qubits.len() != self.pauli.len() {
+        if !self.pauli.is_empty() && self.pauli_qubits.len() != pauli_len(&self.pauli) {
             return Err(NpError::new(
                 "pauli_qubits and pauli must have the same length",
             ));
         }
+        let context = ObservableContext { id: self.id };
+        validate_pauli_string(&self.pauli, &context)?;
+        validate_unique_qubits(&self.pauli_qubits, &context)?;
         Ok(())
+    }
+
+    pub fn validate_for_n_qubits(&self, n_qubits: usize) -> NpResult<()> {
+        self.validate()?;
+        let context = ObservableContext { id: self.id };
+        for qubit in &self.pauli_qubits {
+            validate_qubit_index(n_qubits, *qubit, &context)?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Copy)]
+struct ObservableContext {
+    id: i64,
+}
+
+impl fmt::Display for ObservableContext {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "logical observable {}", self.id)
+    }
+}
+
+#[derive(Clone, Copy)]
+struct OperationContext<'a> {
+    kind: &'static str,
+    path: &'a [usize],
+}
+
+impl fmt::Display for OperationContext<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{} at operation path ", self.kind)?;
+        for (index, component) in self.path.iter().enumerate() {
+            if index != 0 {
+                f.write_str(".")?;
+            }
+            component.fmt(f)?;
+        }
+        Ok(())
+    }
+}
+
+struct OperationNoiseContext<'a> {
+    operation: OperationContext<'a>,
+    location_id: &'a str,
+}
+
+impl fmt::Display for OperationNoiseContext<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{} noise location {:?}",
+            self.operation, self.location_id
+        )
+    }
+}
+
+pub(crate) fn validate_operations(n_qubits: usize, operations: &[Operation]) -> NpResult<()> {
+    validate_operation_sequence(n_qubits, operations, &mut Vec::new())
+}
+
+fn validate_operation_sequence(
+    n_qubits: usize,
+    operations: &[Operation],
+    path: &mut Vec<usize>,
+) -> NpResult<()> {
+    for (index, operation) in operations.iter().enumerate() {
+        path.push(index);
+        validate_operation(n_qubits, operation, path)?;
+        path.pop();
+    }
+    Ok(())
+}
+
+fn validate_operation(
+    n_qubits: usize,
+    operation: &Operation,
+    path: &mut Vec<usize>,
+) -> NpResult<()> {
+    match operation {
+        Operation::Tick
+        | Operation::ShiftCoords(_)
+        | Operation::Detector { .. }
+        | Operation::DetectorRec { .. }
+        | Operation::ObservableInclude { .. }
+        | Operation::ObservableIncludeRec { .. } => return Ok(()),
+        Operation::Repeat { count, body } => {
+            if *count == 0 {
+                return Err(NpError::new("repeat count must be positive"));
+            }
+            return validate_operation_sequence(n_qubits, body, path);
+        }
+        _ => {}
+    }
+
+    let context = OperationContext {
+        kind: operation_kind(operation),
+        path,
+    };
+    match operation {
+        Operation::H(qubit) | Operation::S(qubit) | Operation::SDag(qubit) => {
+            validate_qubit_index(n_qubits, *qubit, &context)?;
+        }
+        Operation::Cx(control, target)
+        | Operation::Cz(control, target)
+        | Operation::Swap(control, target) => {
+            validate_qubit_pair(n_qubits, *control, *target, &context)?;
+        }
+        Operation::Pauli { qubits, pauli } | Operation::MeasurePauli { qubits, pauli, .. } => {
+            validate_pauli_targets(n_qubits, qubits, pauli, &context)?;
+            if let Operation::MeasurePauli {
+                noise: Some(location),
+                ..
+            } = operation
+            {
+                let noise_context = OperationNoiseContext {
+                    operation: context,
+                    location_id: &location.id,
+                };
+                location.validate_for_n_qubits(n_qubits, &noise_context)?;
+            }
+        }
+        Operation::Noise(location) => {
+            let noise_context = OperationNoiseContext {
+                operation: context,
+                location_id: &location.id,
+            };
+            location.validate_for_n_qubits(n_qubits, &noise_context)?;
+        }
+        Operation::Measure { qubit, noise, .. } => {
+            validate_qubit_index(n_qubits, *qubit, &context)?;
+            if let Some(location) = noise {
+                let noise_context = OperationNoiseContext {
+                    operation: context,
+                    location_id: &location.id,
+                };
+                location.validate_for_n_qubits(n_qubits, &noise_context)?;
+            }
+        }
+        Operation::MeasureReset { qubit, .. } | Operation::Reset { qubit, .. } => {
+            validate_qubit_index(n_qubits, *qubit, &context)?;
+        }
+        Operation::Tick
+        | Operation::ShiftCoords(_)
+        | Operation::Repeat { .. }
+        | Operation::Detector { .. }
+        | Operation::DetectorRec { .. }
+        | Operation::ObservableInclude { .. }
+        | Operation::ObservableIncludeRec { .. } => unreachable!("handled above"),
+    }
+    Ok(())
+}
+
+fn operation_kind(operation: &Operation) -> &'static str {
+    match operation {
+        Operation::Tick => "Tick",
+        Operation::ShiftCoords(_) => "ShiftCoords",
+        Operation::Repeat { .. } => "Repeat",
+        Operation::H(_) => "H",
+        Operation::S(_) => "S",
+        Operation::SDag(_) => "SDag",
+        Operation::Cx(_, _) => "CX",
+        Operation::Cz(_, _) => "CZ",
+        Operation::Swap(_, _) => "SWAP",
+        Operation::Pauli { .. } => "Pauli",
+        Operation::Noise(_) => "Noise",
+        Operation::Measure { .. } => "Measure",
+        Operation::MeasurePauli { .. } => "MeasurePauli",
+        Operation::MeasureReset { .. } => "MeasureReset",
+        Operation::Reset { .. } => "Reset",
+        Operation::Detector { .. } => "Detector",
+        Operation::DetectorRec { .. } => "DetectorRec",
+        Operation::ObservableInclude { .. } => "ObservableInclude",
+        Operation::ObservableIncludeRec { .. } => "ObservableIncludeRec",
+    }
+}
+
+pub(crate) fn validate_qubit_index<C>(n_qubits: usize, qubit: usize, context: &C) -> NpResult<()>
+where
+    C: fmt::Display + ?Sized,
+{
+    if qubit >= n_qubits {
+        return Err(NpError::new(format!(
+            "{context} targets qubit {qubit}, but only {n_qubits} qubits are available"
+        )));
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_unique_qubits<C>(qubits: &[usize], context: &C) -> NpResult<()>
+where
+    C: fmt::Display + ?Sized,
+{
+    // Most gates and noise events touch very few qubits. A short linear scan
+    // avoids allocating a hash table in that overwhelmingly common case.
+    const LINEAR_SCAN_LIMIT: usize = 8;
+    if qubits.len() <= LINEAR_SCAN_LIMIT {
+        for (index, qubit) in qubits.iter().enumerate() {
+            if qubits[..index].contains(qubit) {
+                return Err(NpError::new(format!(
+                    "{context} requires unique qubit targets; duplicate qubit {qubit}"
+                )));
+            }
+        }
+        return Ok(());
+    }
+
+    let mut seen = HashSet::with_capacity(qubits.len());
+    for qubit in qubits {
+        if !seen.insert(*qubit) {
+            return Err(NpError::new(format!(
+                "{context} requires unique qubit targets; duplicate qubit {qubit}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_qubit_targets<C>(
+    n_qubits: usize,
+    qubits: &[usize],
+    context: &C,
+) -> NpResult<()>
+where
+    C: fmt::Display + ?Sized,
+{
+    for qubit in qubits {
+        validate_qubit_index(n_qubits, *qubit, context)?;
+    }
+    validate_unique_qubits(qubits, context)
+}
+
+pub(crate) fn validate_qubit_pair<C>(
+    n_qubits: usize,
+    left: usize,
+    right: usize,
+    context: &C,
+) -> NpResult<()>
+where
+    C: fmt::Display + ?Sized,
+{
+    validate_qubit_index(n_qubits, left, context)?;
+    validate_qubit_index(n_qubits, right, context)?;
+    if left == right {
+        return Err(NpError::new(format!(
+            "{context} requires distinct qubit targets; duplicate qubit {left}"
+        )));
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_pauli_string<C>(pauli: &str, context: &C) -> NpResult<()>
+where
+    C: fmt::Display + ?Sized,
+{
+    if let Some(local) = pauli
+        .chars()
+        .find(|local| !matches!(local, 'I' | 'X' | 'Y' | 'Z'))
+    {
+        return Err(NpError::new(format!(
+            "{context} contains unsupported Pauli {local:?}"
+        )));
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_pauli_targets<C>(
+    n_qubits: usize,
+    qubits: &[usize],
+    pauli: &str,
+    context: &C,
+) -> NpResult<()>
+where
+    C: fmt::Display + ?Sized,
+{
+    if qubits.len() != pauli_len(pauli) {
+        return Err(NpError::new(format!(
+            "{context} qubit targets and Pauli must have the same length"
+        )));
+    }
+    validate_pauli_string(pauli, context)?;
+    validate_qubit_targets(n_qubits, qubits, context)
+}
+
+pub(crate) fn validate_noise_parts<C>(
+    n_qubits: usize,
+    model: &NoiseModel,
+    rate: f64,
+    qubits: &[usize],
+    context: &C,
+) -> NpResult<()>
+where
+    C: fmt::Display + ?Sized,
+{
+    if !(0.0..=1.0).contains(&rate) {
+        return Err(NpError::new(format!(
+            "noise rate must be in [0, 1], got {rate}"
+        )));
+    }
+    validate_qubit_targets(n_qubits, qubits, context)?;
+    match model {
+        NoiseModel::MeasurementBitFlip | NoiseModel::SingleQubitDepolarizing => {
+            if qubits.len() != 1 {
+                return Err(NpError::new(format!(
+                    "{context} requires exactly one qubit target, got {}",
+                    qubits.len()
+                )));
+            }
+        }
+        NoiseModel::TwoQubitDepolarizing => {
+            if qubits.len() != 2 {
+                return Err(NpError::new(format!(
+                    "{context} requires exactly two qubit targets, got {}",
+                    qubits.len()
+                )));
+            }
+        }
+        NoiseModel::BernoulliPauli(pauli) => {
+            if qubits.len() != pauli_len(pauli) {
+                return Err(NpError::new(format!(
+                    "{context} qubit targets and Pauli event must have the same length"
+                )));
+            }
+            validate_pauli_string(pauli, context)?;
+        }
+        NoiseModel::PauliChannel(weights) => {
+            for (event, _) in weights {
+                if qubits.len() != pauli_len(event) {
+                    return Err(NpError::new(format!(
+                        "{context} qubit targets and PauliChannel event {event:?} must have the same length"
+                    )));
+                }
+                validate_pauli_string(event, context)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+#[inline]
+fn pauli_len(pauli: &str) -> usize {
+    if pauli.is_ascii() {
+        pauli.len()
+    } else {
+        pauli.chars().count()
     }
 }
 
@@ -385,6 +745,186 @@ mod tests {
     }
 
     #[test]
+    fn circuit_recursively_rejects_out_of_range_operation_targets() {
+        let mut invalid_noise = noise_location("bad_target", 0.1);
+        invalid_noise.qubits = vec![1];
+        let cases = vec![
+            Operation::H(1),
+            Operation::S(1),
+            Operation::SDag(1),
+            Operation::Cx(0, 1),
+            Operation::Cz(0, 1),
+            Operation::Swap(0, 1),
+            Operation::Pauli {
+                qubits: vec![1],
+                pauli: "X".to_string(),
+            },
+            Operation::Noise(invalid_noise.clone()),
+            Operation::Measure {
+                qubit: 1,
+                key: None,
+                basis: "Z".to_string(),
+                noise: None,
+            },
+            Operation::Measure {
+                qubit: 0,
+                key: None,
+                basis: "Z".to_string(),
+                noise: Some(invalid_noise.clone()),
+            },
+            Operation::MeasurePauli {
+                qubits: vec![1],
+                pauli: "Z".to_string(),
+                key: None,
+                noise: None,
+            },
+            Operation::MeasurePauli {
+                qubits: vec![0],
+                pauli: "Z".to_string(),
+                key: None,
+                noise: Some(invalid_noise),
+            },
+            Operation::MeasureReset {
+                qubit: 1,
+                basis: "Z".to_string(),
+            },
+            Operation::Reset {
+                qubit: 1,
+                key: None,
+                basis: "Z".to_string(),
+            },
+        ];
+
+        for operation in cases {
+            let circuit = Circuit {
+                n_qubits: 1,
+                operations: vec![Operation::Repeat {
+                    count: 2,
+                    body: vec![operation],
+                }],
+            };
+            let err = circuit.validate().unwrap_err();
+            assert!(err.message().contains("targets qubit 1"), "{err}");
+            assert!(err.message().contains("operation path 0.0"), "{err}");
+        }
+    }
+
+    #[test]
+    fn circuit_rejects_duplicate_targets_for_every_multi_target_shape() {
+        let duplicate_noise = NoiseLocation {
+            id: "two".to_string(),
+            model: NoiseModel::TwoQubitDepolarizing,
+            rate: 0.1,
+            qubits: vec![0, 0],
+            tags: HashMap::new(),
+        };
+        let cases = vec![
+            Operation::Cx(0, 0),
+            Operation::Cz(0, 0),
+            Operation::Swap(0, 0),
+            Operation::Pauli {
+                qubits: vec![0, 0],
+                pauli: "XZ".to_string(),
+            },
+            Operation::MeasurePauli {
+                qubits: vec![0, 0],
+                pauli: "ZZ".to_string(),
+                key: None,
+                noise: None,
+            },
+            Operation::Noise(duplicate_noise),
+        ];
+
+        for operation in cases {
+            let err = Circuit {
+                n_qubits: 1,
+                operations: vec![operation],
+            }
+            .validate()
+            .unwrap_err();
+            assert!(err.message().contains("duplicate qubit 0"), "{err}");
+        }
+    }
+
+    #[test]
+    fn circuit_validates_pauli_width_characters_and_noise_target_arity() {
+        let invalid_operations = vec![
+            Operation::Pauli {
+                qubits: vec![0],
+                pauli: "XX".to_string(),
+            },
+            Operation::MeasurePauli {
+                qubits: vec![0],
+                pauli: "Q".to_string(),
+                key: None,
+                noise: None,
+            },
+            Operation::Noise(NoiseLocation {
+                id: "single".to_string(),
+                model: NoiseModel::SingleQubitDepolarizing,
+                rate: 0.1,
+                qubits: vec![0, 1],
+                tags: HashMap::new(),
+            }),
+            Operation::Noise(NoiseLocation {
+                id: "two".to_string(),
+                model: NoiseModel::TwoQubitDepolarizing,
+                rate: 0.1,
+                qubits: vec![0],
+                tags: HashMap::new(),
+            }),
+            Operation::Noise(NoiseLocation {
+                id: "channel".to_string(),
+                model: NoiseModel::PauliChannel(vec![("XX".to_string(), 1.0)]),
+                rate: 0.1,
+                qubits: vec![0],
+                tags: HashMap::new(),
+            }),
+        ];
+
+        for operation in invalid_operations {
+            assert!(Circuit {
+                n_qubits: 2,
+                operations: vec![operation],
+            }
+            .validate()
+            .is_err());
+        }
+    }
+
+    #[test]
+    fn circuit_accepts_valid_targets_at_the_upper_boundary() {
+        let circuit = Circuit {
+            n_qubits: 2,
+            operations: vec![
+                Operation::H(1),
+                Operation::Cx(0, 1),
+                Operation::Cz(1, 0),
+                Operation::Swap(0, 1),
+                Operation::Pauli {
+                    qubits: vec![0, 1],
+                    pauli: "IY".to_string(),
+                },
+                Operation::Noise(NoiseLocation {
+                    id: "two".to_string(),
+                    model: NoiseModel::TwoQubitDepolarizing,
+                    rate: 0.1,
+                    qubits: vec![0, 1],
+                    tags: HashMap::new(),
+                }),
+            ],
+        };
+
+        circuit.validate().unwrap();
+        Circuit {
+            n_qubits: 0,
+            operations: Vec::new(),
+        }
+        .validate()
+        .unwrap();
+    }
+
+    #[test]
     fn noise_location_rejects_invalid_rates() {
         let invalid = noise_location("bad", 1.5);
 
@@ -425,5 +965,27 @@ mod tests {
         assert!(err
             .message()
             .contains("pauli_qubits and pauli must have the same length"));
+    }
+
+    #[test]
+    fn logical_observable_rejects_out_of_range_and_duplicate_targets() {
+        let out_of_range = LogicalObservable {
+            id: 4,
+            measurement_keys: Vec::new(),
+            pauli_qubits: vec![1],
+            pauli: "Z".to_string(),
+        };
+        let err = out_of_range.validate_for_n_qubits(1).unwrap_err();
+        assert!(err.message().contains("logical observable 4"));
+        assert!(err.message().contains("targets qubit 1"));
+
+        let duplicate = LogicalObservable {
+            id: 5,
+            measurement_keys: Vec::new(),
+            pauli_qubits: vec![0, 0],
+            pauli: "XZ".to_string(),
+        };
+        let err = duplicate.validate_for_n_qubits(1).unwrap_err();
+        assert!(err.message().contains("duplicate qubit 0"));
     }
 }

@@ -59,33 +59,47 @@ impl PyPauliFrame {
             .map_err(|err| PyValueError::new_err(err.to_string()))
     }
 
-    pub(crate) fn apply_h(&mut self, qubit: usize) {
+    pub(crate) fn apply_h(&mut self, qubit: usize) -> PyResult<()> {
+        validate_public_qubit(self.x.len(), qubit, "PauliFrame.apply_h")?;
         faultscope_core::frame_apply_h(&mut self.x, &mut self.z, qubit);
+        Ok(())
     }
 
-    pub(crate) fn apply_s(&mut self, qubit: usize) {
+    pub(crate) fn apply_s(&mut self, qubit: usize) -> PyResult<()> {
+        validate_public_qubit(self.x.len(), qubit, "PauliFrame.apply_s")?;
         faultscope_core::frame_apply_s(&mut self.x, &mut self.z, qubit);
+        Ok(())
     }
 
-    pub(crate) fn apply_s_dag(&mut self, qubit: usize) {
+    pub(crate) fn apply_s_dag(&mut self, qubit: usize) -> PyResult<()> {
+        validate_public_qubit(self.x.len(), qubit, "PauliFrame.apply_s_dag")?;
         faultscope_core::frame_apply_s(&mut self.x, &mut self.z, qubit);
+        Ok(())
     }
 
-    pub(crate) fn apply_cx(&mut self, control: usize, target: usize) {
+    pub(crate) fn apply_cx(&mut self, control: usize, target: usize) -> PyResult<()> {
+        validate_public_pair(self.x.len(), control, target, "PauliFrame.apply_cx")?;
         faultscope_core::frame_apply_cx(&mut self.x, &mut self.z, control, target);
+        Ok(())
     }
 
-    pub(crate) fn apply_cz(&mut self, left: usize, right: usize) {
+    pub(crate) fn apply_cz(&mut self, left: usize, right: usize) -> PyResult<()> {
+        validate_public_pair(self.x.len(), left, right, "PauliFrame.apply_cz")?;
         faultscope_core::frame_apply_cz(&mut self.x, &mut self.z, left, right);
+        Ok(())
     }
 
-    pub(crate) fn apply_swap(&mut self, left: usize, right: usize) {
+    pub(crate) fn apply_swap(&mut self, left: usize, right: usize) -> PyResult<()> {
+        validate_public_pair(self.x.len(), left, right, "PauliFrame.apply_swap")?;
         faultscope_core::frame_apply_swap(&mut self.x, &mut self.z, left, right);
+        Ok(())
     }
 
-    pub(crate) fn reset(&mut self, qubit: usize) {
+    pub(crate) fn reset(&mut self, qubit: usize) -> PyResult<()> {
+        validate_public_qubit(self.x.len(), qubit, "PauliFrame.reset")?;
         self.x[qubit] = 0;
         self.z[qubit] = 0;
+        Ok(())
     }
 
     pub(crate) fn measurement_flip(
@@ -99,11 +113,14 @@ impl PyPauliFrame {
             .map_err(|err| PyValueError::new_err(err.to_string()))
     }
 
-    pub(crate) fn pauli_on(&self, qubits: Vec<usize>) -> String {
-        qubits
+    pub(crate) fn pauli_on(&self, qubits: Vec<usize>) -> PyResult<String> {
+        for qubit in &qubits {
+            validate_public_qubit(self.x.len(), *qubit, "PauliFrame.pauli_on")?;
+        }
+        Ok(qubits
             .iter()
             .map(|qubit| faultscope_core::xz_to_pauli(self.x[*qubit], self.z[*qubit]))
-            .collect()
+            .collect())
     }
 }
 
@@ -167,28 +184,55 @@ impl PyStabilizerState {
         self.clone()
     }
 
-    pub(crate) fn apply_h(&mut self, qubit: usize) {
+    pub(crate) fn apply_h(&mut self, qubit: usize) -> PyResult<()> {
+        validate_public_qubit(self.state.n_qubits(), qubit, "StabilizerState.apply_h")?;
         self.state.apply_h(qubit);
+        Ok(())
     }
 
-    pub(crate) fn apply_s(&mut self, qubit: usize) {
+    pub(crate) fn apply_s(&mut self, qubit: usize) -> PyResult<()> {
+        validate_public_qubit(self.state.n_qubits(), qubit, "StabilizerState.apply_s")?;
         self.state.apply_s(qubit);
+        Ok(())
     }
 
-    pub(crate) fn apply_s_dag(&mut self, qubit: usize) {
+    pub(crate) fn apply_s_dag(&mut self, qubit: usize) -> PyResult<()> {
+        validate_public_qubit(self.state.n_qubits(), qubit, "StabilizerState.apply_s_dag")?;
         self.state.apply_s_dag(qubit);
+        Ok(())
     }
 
-    pub(crate) fn apply_cx(&mut self, control: usize, target: usize) {
+    pub(crate) fn apply_cx(&mut self, control: usize, target: usize) -> PyResult<()> {
+        validate_public_pair(
+            self.state.n_qubits(),
+            control,
+            target,
+            "StabilizerState.apply_cx",
+        )?;
         self.state.apply_cx(control, target);
+        Ok(())
     }
 
-    pub(crate) fn apply_cz(&mut self, left: usize, right: usize) {
+    pub(crate) fn apply_cz(&mut self, left: usize, right: usize) -> PyResult<()> {
+        validate_public_pair(
+            self.state.n_qubits(),
+            left,
+            right,
+            "StabilizerState.apply_cz",
+        )?;
         self.state.apply_cz(left, right);
+        Ok(())
     }
 
-    pub(crate) fn apply_swap(&mut self, left: usize, right: usize) {
+    pub(crate) fn apply_swap(&mut self, left: usize, right: usize) -> PyResult<()> {
+        validate_public_pair(
+            self.state.n_qubits(),
+            left,
+            right,
+            "StabilizerState.apply_swap",
+        )?;
         self.state.apply_swap(left, right);
+        Ok(())
     }
 
     pub(crate) fn apply_pauli(&mut self, qubit: usize, pauli: &str) -> PyResult<()> {
@@ -298,4 +342,24 @@ fn pauli_sequence_to_string(value: &Bound<'_, PyAny>) -> PyResult<String> {
         .extract::<Vec<String>>()
         .map_err(|_| PyValueError::new_err("paulis must be a string or sequence of strings"))?;
     Ok(values.join(""))
+}
+
+fn validate_public_qubit(n_qubits: usize, qubit: usize, context: &str) -> PyResult<()> {
+    if qubit >= n_qubits {
+        return Err(PyValueError::new_err(format!(
+            "{context} targets qubit {qubit}, but only {n_qubits} qubits are available"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_public_pair(n_qubits: usize, left: usize, right: usize, context: &str) -> PyResult<()> {
+    validate_public_qubit(n_qubits, left, context)?;
+    validate_public_qubit(n_qubits, right, context)?;
+    if left == right {
+        return Err(PyValueError::new_err(format!(
+            "{context} requires distinct qubit targets; duplicate qubit {left}"
+        )));
+    }
+    Ok(())
 }

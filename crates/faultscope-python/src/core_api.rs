@@ -811,7 +811,11 @@ pub(crate) struct PyCircuit {
 impl PyCircuit {
     #[new]
     #[pyo3(signature = (n_qubits, operations))]
-    pub(crate) fn new(py: Python<'_>, n_qubits: usize, operations: Vec<Py<PyAny>>) -> Self {
+    pub(crate) fn new(
+        py: Python<'_>,
+        n_qubits: usize,
+        operations: Vec<Py<PyAny>>,
+    ) -> PyResult<Self> {
         let core_operations = operations
             .iter()
             .map(|operation| {
@@ -822,12 +826,35 @@ impl PyCircuit {
                 operation.core_op.clone()
             })
             .collect::<Option<Vec<_>>>();
-        let core_circuit = core_operations.map(|operations| {
-            std::sync::Arc::new(faultscope_core::Circuit {
+
+        // Cache-safe native operations are cloned and validated exactly once.
+        // Preserve lazy handling for non-cache-safe Python objects while still
+        // rejecting any fully parseable invalid target at construction time;
+        // execution entry points parse and validate those objects again.
+        let core_circuit = if let Some(core_operations) = core_operations {
+            let circuit = std::sync::Arc::new(faultscope_core::Circuit {
                 n_qubits,
-                operations,
-            })
-        });
+                operations: core_operations,
+            });
+            circuit
+                .validate()
+                .map_err(|err| PyValueError::new_err(err.to_string()))?;
+            Some(circuit)
+        } else {
+            let parsed_operations = operations
+                .iter()
+                .map(|operation| parse_operation_object(operation.bind(py)))
+                .collect::<PyResult<Vec<_>>>();
+            if let Ok(parsed_operations) = parsed_operations {
+                faultscope_core::Circuit {
+                    n_qubits,
+                    operations: parsed_operations,
+                }
+                .validate()
+                .map_err(|err| PyValueError::new_err(err.to_string()))?;
+            }
+            None
+        };
         let initial_event_plan = core_circuit.as_ref().and_then(|circuit| {
             let structured = circuit.operations.iter().any(|operation| {
                 matches!(
@@ -852,12 +879,12 @@ impl PyCircuit {
         if let Some(event_plan) = initial_event_plan {
             let _ = core_event_plan.set(event_plan);
         }
-        Self {
+        Ok(Self {
             n_qubits,
             operations,
             core_circuit,
             core_event_plan,
-        }
+        })
     }
 
     #[getter]
