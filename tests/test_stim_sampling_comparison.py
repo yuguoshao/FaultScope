@@ -9,7 +9,7 @@ from faultscope.decoders import (
     UnsupportedPyMatchingDemError,
 )
 from faultscope.dem import Detector, LogicalObservable
-from faultscope.io import parse_stim_circuit
+from faultscope.io import StimImportError, parse_stim_circuit
 from faultscope.runtime import UnsupportedNativeCircuitError, compile_native_sampler
 from faultscope.runtime import compile_native_dem_sampler, generate_native_dem
 from faultscope.runtime.loss import logical_residual_loss_mask
@@ -57,6 +57,41 @@ class StimSamplingComparisonTests(unittest.TestCase):
             self.fail("Stim is required for core sampling comparison tests")
         if np is None:
             self.fail("NumPy is required for core sampling comparison tests")
+
+    def test_supported_stim_parser_acceptance_matches_stim(self) -> None:
+        cases = (
+            "X_ERROR() 0",
+            "PAULI_CHANNEL_1(0.1,,0.2) 0",
+            "PAULI_CHANNEL_1(,0.1,0.2) 0",
+            "MPP X0 * Y1",
+            "MPP X0* Y1",
+            "PAULI_CHANNEL_1(-0.1,0.2,0) 0",
+            "PAULI_CHANNEL_1(0.7,0.4,0) 0",
+            "X_ERROR(0.1,) 0",
+            "X_ERROR(nan) 0",
+            "X_ERROR(inf) 0",
+            "M(-0.1) 0",
+            "M(1.1) 0",
+            "MPP X0**Y1",
+            "MPP X0*",
+        )
+        for source in cases:
+            with self.subTest(source=source):
+                try:
+                    stim.Circuit(source)
+                    stim_accepts = True
+                except ValueError:
+                    stim_accepts = False
+                try:
+                    parse_stim_circuit(source)
+                    faultscope_accepts = True
+                    faultscope_error = None
+                except ValueError as exc:
+                    faultscope_accepts = False
+                    faultscope_error = exc
+                self.assertEqual(faultscope_accepts, stim_accepts)
+                if not faultscope_accepts:
+                    self.assertIsInstance(faultscope_error, StimImportError)
 
     def test_basic_clifford_noise_and_reset_sampling_matches_stim(self) -> None:
         mflip = NoiseLocation(

@@ -1038,6 +1038,51 @@ class BatchNoiseAwareSimulatorTests(unittest.TestCase):
         self.assertEqual(baseline.strong_id_payload(), equivalent.strong_id_payload())
         self.assertNotEqual(baseline.strong_id_payload(), changed.strong_id_payload())
 
+    def test_repetition_decoder_mapping_uses_declared_measurement_order(self) -> None:
+        decoder = RepetitionCodeDecoder(
+            distance=5,
+            measurement_keys=("b", "a", "c", "d"),
+        )
+        sequence = [1, 0, 0, 0]
+        mapping = {"a": 0, "b": 1, "c": 0, "d": 0}
+
+        self.assertEqual(decoder.decode(mapping, {}, None), decoder.decode(sequence, {}, None))
+
+    def test_repetition_decoder_rejects_invalid_mapping_keys_and_bits(self) -> None:
+        decoder = RepetitionCodeDecoder(
+            distance=3,
+            measurement_keys=("left", "right"),
+        )
+        invalid_records = (
+            {"left": 0},
+            {"left": 0, "right": 1, "extra": 0},
+            {"left": 0, "right": 2},
+            [0, 0.0],
+        )
+        for detector_record in invalid_records:
+            with self.subTest(detector_record=detector_record):
+                with self.assertRaisesRegex(ValueError, "keys|0 or 1"):
+                    decoder.decode(detector_record, {}, None)
+
+        with self.assertRaisesRegex(ValueError, "explicit measurement_keys"):
+            RepetitionCodeDecoder(distance=3).decode({"left": 0, "right": 1}, {}, None)
+
+    def test_repetition_decoder_rejects_invalid_configuration(self) -> None:
+        invalid_constructors = (
+            lambda: RepetitionCodeDecoder(distance=0),
+            lambda: RepetitionCodeDecoder(distance=-1),
+            lambda: RepetitionCodeDecoder(distance=True),
+            lambda: RepetitionCodeDecoder(distance=1.5),
+            lambda: RepetitionCodeDecoder(distance=3, measurement_keys=("a", "a")),
+            lambda: RepetitionCodeDecoder(distance=5, measurement_keys=("a", "b")),
+            lambda: RepetitionCodeDecoder(distance=3, observable_id=-1),
+            lambda: RepetitionCodeDecoder(distance=3, observable_id=True),
+        )
+        for constructor in invalid_constructors:
+            with self.subTest(constructor=constructor):
+                with self.assertRaises(ValueError):
+                    constructor()
+
     def test_repetition_decoder_packed_masks_match_scalar_decode(self) -> None:
         rng = random.Random(90210)
         shots = 129
@@ -3312,6 +3357,88 @@ class PyMatchingDecoderTests(unittest.TestCase):
 
 
 class HotspotVisualizationTests(unittest.TestCase):
+    def test_empty_heatmap_draws_no_checks_placeholder(self) -> None:
+        from faultscope.viz.drawing import _draw_heatmap
+
+        draw = mock.Mock()
+        fonts = {"bold": object(), "regular": object(), "small": object(), "tiny": object()}
+        with mock.patch("faultscope.viz.drawing._draw_centered_text") as centered_text:
+            _draw_heatmap(
+                draw,
+                [[]],
+                x0=10,
+                y0=20,
+                cell=30,
+                label_width=40,
+                title="Checks",
+                x_label="check",
+                palette=((0, 0, 0), (1, 1, 1), (2, 2, 2)),
+                fonts=fonts,
+                highlighted=None,
+                highlight_color="#ffffff",
+            )
+
+        self.assertIn("No checks", [call.args[1] for call in centered_text.call_args_list])
+
+    def test_repetition_visualizations_scale_for_minimum_and_large_layouts(self) -> None:
+        try:
+            from PIL import Image
+        except ImportError as exc:
+            self.skipTest(f"Pillow is not installed: {exc}")
+
+        result = SimpleNamespace(
+            hotspots={},
+            locations={},
+            shots=1,
+            logical_failure_rate=0.0,
+            top_hotspots=lambda top_k=8: [],
+        )
+        cases = ((1, 1), (3, 1), (9, 8))
+        with tempfile.TemporaryDirectory() as temp_dir:
+            for distance, rounds in cases:
+                with self.subTest(kind="heatmap", distance=distance, rounds=rounds):
+                    path = os.path.join(temp_dir, f"heatmap_d{distance}_r{rounds}.png")
+                    write_repetition_hotspot_heatmap(
+                        result,
+                        path,
+                        distance=distance,
+                        rounds=rounds,
+                        highlighted_data=(rounds - 1, distance - 1),
+                        highlighted_measurement=(rounds - 1, distance - 2)
+                        if distance > 1
+                        else None,
+                    )
+                    with Image.open(path) as image:
+                        width, height = image.size
+                    self.assertGreaterEqual(width, 1500)
+                    self.assertGreaterEqual(height, 860)
+                    if (distance, rounds) == (9, 8):
+                        self.assertGreaterEqual(width, 2202)
+                        self.assertGreaterEqual(height, 988)
+
+                with self.subTest(kind="gate", distance=distance, rounds=rounds):
+                    path = os.path.join(temp_dir, f"gate_d{distance}_r{rounds}.png")
+                    write_repetition_gate_structure_hotspot_map(
+                        result,
+                        path,
+                        distance=distance,
+                        rounds=rounds,
+                        highlighted_data=(rounds - 1, distance - 1),
+                        highlighted_measurement=(rounds - 1, distance - 2)
+                        if distance > 1
+                        else None,
+                        highlighted_cx=(rounds - 1, distance - 2, "right")
+                        if distance > 1
+                        else None,
+                    )
+                    with Image.open(path) as image:
+                        width, height = image.size
+                    self.assertGreaterEqual(width, 2100)
+                    self.assertGreaterEqual(height, 1160)
+                    if (distance, rounds) == (9, 8):
+                        self.assertGreaterEqual(width, 2832)
+                        self.assertGreaterEqual(height, 1914)
+
     def test_generates_repetition_hotspot_heatmap_png(self) -> None:
         distance = 3
         rounds = 3
@@ -3799,6 +3926,38 @@ class StimImportTests(unittest.TestCase):
         self.assertEqual(imported.measurement_keys, ("m0",))
         self.assertEqual(len(imported.circuit.noise_locations()), 2)
         self.assertEqual(imported.detectors[0].measurement_keys, ("m0",))
+
+    def test_imports_stim_empty_probability_slots_and_spaced_mpp_combiner(self) -> None:
+        imported = parse_stim_circuit(
+            """
+            PAULI_CHANNEL_1(0.1,,0.2) 0
+            MPP X0 * Y1
+            """
+        )
+
+        (location,) = imported.circuit.noise_locations().values()
+        self.assertAlmostEqual(location.rate, 0.3)
+        self.assertEqual(location.model.weights, {"X": 0.1, "Z": 0.2})
+        measurement = next(
+            operation
+            for operation in imported.circuit.operations
+            if operation.kind == "measure_pauli"
+        )
+        self.assertEqual(measurement.qubits, (0, 1))
+        self.assertEqual(measurement.pauli, "XY")
+
+    def test_invalid_stim_probabilities_and_mpp_combiners_raise_import_error(self) -> None:
+        for source in (
+            "PAULI_CHANNEL_1(-0.1,0.2,0) 0",
+            "PAULI_CHANNEL_1(0.7,0.4,0) 0",
+            "X_ERROR(nan) 0",
+            "M(1.1) 0",
+            "MPP X0**Y1",
+            "MPP X0*",
+        ):
+            with self.subTest(source=source):
+                with self.assertRaisesRegex(StimImportError, "line 1"):
+                    parse_stim_circuit(source)
 
     def test_imports_relative_measurement_record_references(self) -> None:
         imported = parse_stim_circuit(

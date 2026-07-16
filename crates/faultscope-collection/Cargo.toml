@@ -16,7 +16,7 @@ categories = ["science", "simulation"]
 name = "faultscope_collection"
 
 [dependencies]
-faultscope-core = { version = "0.2.3", path = "../faultscope-core" }
+faultscope-core = { version = "0.2.4", path = "../faultscope-core" }
 
 [package.metadata.docs.rs]
 all-features = true

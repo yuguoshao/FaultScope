@@ -17,6 +17,13 @@ from faultscope.viz.drawing import (
 )
 
 
+def _validate_repetition_dimensions(distance: int, rounds: int) -> None:
+    if isinstance(distance, bool) or not isinstance(distance, int) or distance < 1:
+        raise ValueError("distance must be a positive integer")
+    if isinstance(rounds, bool) or not isinstance(rounds, int) or rounds < 1:
+        raise ValueError("rounds must be a positive integer")
+
+
 def write_repetition_hotspot_heatmap(
     result: Any,
     output_path: str | Path,
@@ -28,17 +35,32 @@ def write_repetition_hotspot_heatmap(
 ) -> Path:
     """Write data-qubit and measurement spatiotemporal hotspot heatmaps."""
 
+    _validate_repetition_dimensions(distance, rounds)
     Image, ImageDraw, ImageFont = _load_pillow()
     fonts = _fonts(ImageFont)
-    data_heat, measurement_heat, max_hotspot = _collect_repetition_hotspots(
+    data_heat, measurement_heat, _ = _collect_repetition_hotspots(
         result,
         distance=distance,
         rounds=rounds,
     )
 
+    data_x = 70
+    y0 = 145
+    cell = 86
+    label_width = 70
+    panel_gap = 50
+    side_panel_gap = 80
+    data_panel_width = label_width + max(distance * cell, 180)
+    measurement_panel_width = label_width + max((distance - 1) * cell, 180)
+    measurement_x = data_x + data_panel_width + panel_gap
+    top_hotspots_x = measurement_x + measurement_panel_width + side_panel_gap
+    image_width = max(1500, top_hotspots_x + 300 + 100)
+    footer_y = max(805, y0 + rounds * cell + 100, 150 + 8 * 44 + 45)
+    image_height = max(860, footer_y + 55)
+
     output = Path(output_path)
     output.parent.mkdir(parents=True, exist_ok=True)
-    image = Image.new("RGB", (1500, 860), "#f7f8fa")
+    image = Image.new("RGB", (image_width, image_height), "#f7f8fa")
     draw = ImageDraw.Draw(image)
 
     draw.text(
@@ -61,10 +83,10 @@ def write_repetition_hotspot_heatmap(
     _draw_heatmap(
         draw,
         data_heat,
-        x0=70,
-        y0=145,
-        cell=86,
-        label_width=70,
+        x0=data_x,
+        y0=y0,
+        cell=cell,
+        label_width=label_width,
         title="Data-qubit noise hotspots",
         x_label="data qubit index",
         palette=((250, 250, 190), (203, 71, 119), (35, 10, 70)),
@@ -75,10 +97,10 @@ def write_repetition_hotspot_heatmap(
     _draw_heatmap(
         draw,
         measurement_heat,
-        x0=690,
-        y0=145,
-        cell=86,
-        label_width=70,
+        x0=measurement_x,
+        y0=y0,
+        cell=cell,
+        label_width=label_width,
         title="Measurement noise hotspots",
         x_label="check index",
         palette=((235, 245, 120), (34, 144, 140), (42, 50, 120)),
@@ -86,10 +108,10 @@ def write_repetition_hotspot_heatmap(
         highlighted=highlighted_measurement,
         highlight_color="#ff3b30",
     )
-    _draw_top_hotspots(draw, result, x0=1090, y0=150, width=300, fonts=fonts)
+    _draw_top_hotspots(draw, result, x0=top_hotspots_x, y0=150, width=300, fonts=fonts)
 
     draw.text(
-        (42, 805),
+        (42, footer_y),
         "Hotspot score H_l = |partial J / partial lambda_l|.",
         fill="#34495e",
         font=fonts["regular"],
@@ -110,15 +132,37 @@ def write_repetition_gate_structure_hotspot_map(
 ) -> Path:
     """Write a gate-schedule view with hotspot markers on gate locations."""
 
+    _validate_repetition_dimensions(distance, rounds)
     Image, ImageDraw, ImageFont = _load_pillow()
     fonts = _fonts(ImageFont)
     data_hot, measurement_hot, cx_hot = _collect_gate_hotspots(result)
     max_hotspot = max([0.0, *data_hot.values(), *measurement_hot.values(), *cx_hot.values()])
     max_hotspot = max_hotspot or 1.0
 
+    left = 112
+    top = 190
+    lane_gap = 72
+    block_width = 330
+    phase = {"idle": 34, "reset": 88, "cx_left": 145, "cx_right": 214, "measure": 286}
+    lanes = []
+    for index in range(distance):
+        lanes.append(("data", index, f"D{index}"))
+        if index < distance - 1:
+            lanes.append(("ancilla", index, f"A{index}"))
+    y_by_lane = {lane: top + lane_index * lane_gap for lane_index, lane in enumerate(lanes)}
+    y_data = {index: y_by_lane[("data", index, f"D{index}")] for index in range(distance)}
+    y_ancilla = {index: y_by_lane[("ancilla", index, f"A{index}")] for index in range(distance - 1)}
+    right_edge = left + rounds * block_width
+    lane_bottom = top + (len(lanes) - 1) * lane_gap
+    lower_panel_y = max(915, lane_bottom + 120)
+    scale_y = lower_panel_y + 25
+    footer_y = max(lower_panel_y + 8 * 44 + 55, scale_y + 80)
+    image_width = max(2100, right_edge + 80)
+    image_height = max(1160, footer_y + 45)
+
     output = Path(output_path)
     output.parent.mkdir(parents=True, exist_ok=True)
-    image = Image.new("RGB", (2100, 1160), "#f7f8fa")
+    image = Image.new("RGB", (image_width, image_height), "#f7f8fa")
     draw = ImageDraw.Draw(image)
 
     draw.text(
@@ -143,21 +187,6 @@ def write_repetition_gate_structure_hotspot_map(
         fill="#34495e",
         font=fonts["small"],
     )
-
-    left = 112
-    top = 190
-    lane_gap = 72
-    block_width = 330
-    phase = {"idle": 34, "reset": 88, "cx_left": 145, "cx_right": 214, "measure": 286}
-    lanes = []
-    for index in range(distance):
-        lanes.append(("data", index, f"D{index}"))
-        if index < distance - 1:
-            lanes.append(("ancilla", index, f"A{index}"))
-    y_by_lane = {lane: top + lane_index * lane_gap for lane_index, lane in enumerate(lanes)}
-    y_data = {index: y_by_lane[("data", index, f"D{index}")] for index in range(distance)}
-    y_ancilla = {index: y_by_lane[("ancilla", index, f"A{index}")] for index in range(distance - 1)}
-    right_edge = left + rounds * block_width
 
     for lane in lanes:
         kind, _, label = lane
@@ -319,14 +348,14 @@ def write_repetition_gate_structure_hotspot_map(
     _draw_score_scale(
         draw,
         x0=42,
-        y0=940,
+        y0=scale_y,
         width=520,
         max_value=max_hotspot,
         fonts=fonts,
     )
-    _draw_top_hotspots(draw, result, x0=670, y0=915, width=270, fonts=fonts)
+    _draw_top_hotspots(draw, result, x0=670, y0=lower_panel_y, width=270, fonts=fonts)
     draw.text(
-        (42, 1115),
+        (42, footer_y),
         "Gate-schedule hotspot view from the same forward score-function estimator.",
         fill="#34495e",
         font=fonts["small"],

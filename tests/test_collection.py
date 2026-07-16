@@ -455,6 +455,39 @@ class CollectionTests(unittest.TestCase):
             math.sqrt(0.125 * 0.875 / 80),
         )
 
+    def test_task_stats_rejects_invalid_counts_and_elapsed_time(self) -> None:
+        base = {
+            "task_id": "case",
+            "shots": 10,
+            "errors": 2,
+            "discards": 1,
+            "seconds": 0.5,
+            "decoder": None,
+            "metadata": {},
+            "strong_id": "strong",
+            "custom_counts": {},
+        }
+        invalid_edits = (
+            {"shots": -1},
+            {"errors": -1},
+            {"discards": -1},
+            {"discards": 11},
+            {"errors": 10},
+            {"seconds": -0.1},
+            {"seconds": math.nan},
+            {"seconds": math.inf},
+            {"custom_counts": {"bad": -1}},
+            {"custom_counts": {"bad": True}},
+        )
+        for edits in invalid_edits:
+            with self.subTest(edits=edits):
+                with self.assertRaises(ValueError):
+                    TaskStats(**(base | edits))
+
+        valid = TaskStats(**base)
+        with self.assertRaisesRegex(ValueError, "accepted shots"):
+            valid.with_edits(errors=10)
+
     def test_task_stats_csv_utilities_round_trip_and_merge(self) -> None:
         stats = TaskStats(
             task_id="case",
@@ -554,6 +587,45 @@ class CollectionTests(unittest.TestCase):
                         "errors": "0",
                         "discards": "0",
                         "seconds": "-0.5",
+                        "decoder": "native",
+                        "strong_id": "strong",
+                        "json_metadata": "{}",
+                        "custom_counts": "{}",
+                    },
+                ),
+                (
+                    "non_finite_seconds",
+                    {
+                        "shots": "1",
+                        "errors": "0",
+                        "discards": "0",
+                        "seconds": "nan",
+                        "decoder": "native",
+                        "strong_id": "strong",
+                        "json_metadata": "{}",
+                        "custom_counts": "{}",
+                    },
+                ),
+                (
+                    "discards_exceed_shots",
+                    {
+                        "shots": "1",
+                        "errors": "0",
+                        "discards": "2",
+                        "seconds": "0.5",
+                        "decoder": "native",
+                        "strong_id": "strong",
+                        "json_metadata": "{}",
+                        "custom_counts": "{}",
+                    },
+                ),
+                (
+                    "errors_exceed_accepted_shots",
+                    {
+                        "shots": "2",
+                        "errors": "2",
+                        "discards": "1",
+                        "seconds": "0.5",
                         "decoder": "native",
                         "strong_id": "strong",
                         "json_metadata": "{}",
@@ -1700,6 +1772,29 @@ class CollectionTests(unittest.TestCase):
         self.assertEqual({point["group"] for point in points}, {3, 5})
         self.assertEqual(set(fits), {3, 5})
         self.assertGreater(predict_error_rate(fits[3], 0.15), 0.0)
+
+    def test_error_rate_points_custom_count_is_strict_and_binomial(self) -> None:
+        stats = TaskStats(
+            "a",
+            100,
+            20,
+            10,
+            0.1,
+            "native",
+            {"p": 0.1},
+            "a",
+            {"logical_x": 18, "detection_events": 120},
+        )
+
+        (point,) = error_rate_points([stats], x_key="p", count_key="logical_x")
+        self.assertEqual(point["shots"], 90)
+        self.assertEqual(point["errors"], 18)
+        self.assertEqual(point["rate"], 0.2)
+
+        with self.assertRaisesRegex(ValueError, "missing custom count"):
+            error_rate_points([stats], x_key="p", count_key="typo")
+        with self.assertRaisesRegex(ValueError, "accepted shots"):
+            error_rate_points([stats], x_key="p", count_key="detection_events")
 
     def test_collection_cli_commands_smoke(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
