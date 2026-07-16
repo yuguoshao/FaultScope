@@ -45,4 +45,10 @@ Semantic Versioning within each `0.x` minor line.
   measurement masks; the repetition-code decoder now reuses that selection and
   evaluates all shots with bit-parallel integer operations.
 
+### Fixed
+
+- Collection strong ids now use a versioned canonical source encoding and
+  configuration-aware decoder fingerprints, preventing resume and aggregation
+  from merging statistics produced by different same-named decoders.
+
 [0.2.1]: https://github.com/yuguoshao/FaultScope/releases/tag/v0.2.1

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import importlib
+import json
 import math
 from dataclasses import dataclass
 from typing import Any, Mapping, Sequence
@@ -25,6 +27,29 @@ class PyMatchingDecoder:
     detector_ids: tuple[int, ...]
     observable_ids: tuple[int, ...]
     edge_count: int
+
+    def strong_id_payload(self) -> Mapping[str, object]:
+        """Return the effective PyMatching graph used by this decoder."""
+
+        module_name = type(self.matching).__module__.split(".", 1)[0]
+        try:
+            backend_module = importlib.import_module(module_name)
+        except ImportError:
+            backend_version = None
+        else:
+            backend_version = getattr(backend_module, "__version__", None)
+        return {
+            "backend": "pymatching-python",
+            "backend_module": module_name,
+            "backend_version": (None if backend_version is None else str(backend_version)),
+            "decoder": "pymatching",
+            "implementation_version": 1,
+            "detector_ids": list(self.detector_ids),
+            "observable_ids": list(self.observable_ids),
+            "parameters": {},
+            "source_edge_count": self.edge_count,
+            "matching_graph": _matching_graph_identity_payload(self.matching),
+        }
 
     @classmethod
     def from_dem(
@@ -207,6 +232,43 @@ def _matching_from_check_matrix(
     except TypeError:
         kwargs.pop("error_probabilities")
         return pymatching.Matching.from_check_matrix(h, **kwargs)
+
+
+def _matching_graph_identity_payload(matching: Any) -> dict[str, object]:
+    edges_method = getattr(matching, "edges", None)
+    if not callable(edges_method):
+        raise TypeError("PyMatchingDecoder matching object does not expose stable edges()")
+
+    edges: list[dict[str, object]] = []
+    for raw_edge in edges_method():
+        if len(raw_edge) != 3:
+            raise TypeError("PyMatchingDecoder matching edge must contain two endpoints and data")
+        left, right, raw_data = raw_edge
+        if not isinstance(raw_data, Mapping):
+            raise TypeError("PyMatchingDecoder matching edge data must be a mapping")
+        left = int(left)
+        right = None if right is None else int(right)
+        if right is not None and right < left:
+            left, right = right, left
+        fault_ids = raw_data.get("fault_ids", ())
+        edges.append(
+            {
+                "left": left,
+                "right": right,
+                "fault_ids": sorted(int(value) for value in fault_ids),
+                "weight": float(raw_data.get("weight", 1.0)),
+                "error_probability": float(raw_data.get("error_probability", -1.0)),
+            }
+        )
+    edges.sort(key=lambda edge: json.dumps(edge, sort_keys=True, separators=(",", ":")))
+    boundary = getattr(matching, "boundary", ())
+    return {
+        "num_detectors": int(getattr(matching, "num_detectors")),
+        "num_nodes": int(getattr(matching, "num_nodes")),
+        "num_fault_ids": int(getattr(matching, "num_fault_ids")),
+        "boundary": sorted(int(value) for value in boundary),
+        "edges": edges,
+    }
 
 
 def _load_optional_modules(

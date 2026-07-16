@@ -51,8 +51,9 @@ class NativeFusionBlossomDecoder:
 
     backend_name = BACKEND_NAME
 
-    def __init__(self, inner):
+    def __init__(self, inner, *, options=None):
         self._inner = inner
+        self._options = dict(options or {})
         self._python_decode_call_count = 0
 
     @staticmethod
@@ -64,7 +65,7 @@ class NativeFusionBlossomDecoder:
             problem,
             weight_scale=parsed["weight_scale"],
         )
-        return NativeFusionBlossomDecoder(inner)
+        return NativeFusionBlossomDecoder(inner, options=parsed)
 
     @staticmethod
     def from_circuit(circuit, *, detectors=None, observables=None, options=None):
@@ -131,6 +132,22 @@ class NativeFusionBlossomDecoder:
         )
         return {
             observable_id: _words_to_int(words) for observable_id, words in correction_words.items()
+        }
+
+    def strong_id_payload(self):
+        """Return the effective native backend configuration."""
+
+        return {
+            "backend": BACKEND_NAME,
+            "backend_package": "faultscope-fusion-blossom",
+            "backend_version": __version__,
+            "native_decoder_abi": NATIVE_DECODER_PLUGIN_ABI,
+            "decoder": self.name,
+            "implementation_version": 1,
+            "detector_ids": list(self.detector_ids),
+            "observable_ids": list(self.observable_ids),
+            "parameters": dict(self._options),
+            "solver": self.build_summary,
         }
 
     def __repr__(self):

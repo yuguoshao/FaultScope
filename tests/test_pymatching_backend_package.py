@@ -94,6 +94,12 @@ class PyMatchingBackendPackageTests(unittest.TestCase):
         self.assertEqual(decoder.build_summary["solver_edge_count"], 1)
         self.assertEqual(decoder.python_decode_call_count, 0)
         self.assertIsNotNone(decoder.__faultscope_native_decoder_capsule__())
+        payload = decoder.strong_id_payload()
+        self.assertEqual(payload["backend"], "pymatching")
+        self.assertEqual(payload["backend_version"], faultscope_pymatching.__version__)
+        self.assertEqual(payload["native_decoder_abi"], NATIVE_DECODER_PLUGIN_ABI)
+        self.assertEqual(payload["parameters"], {})
+        self.assertEqual(payload["solver"], decoder.build_summary)
 
     @requires_native_backend
     def test_exact_v2_factory_creates_distinct_workers_and_fast_paths(self) -> None:

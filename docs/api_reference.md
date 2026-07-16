@@ -693,6 +693,22 @@ materialized native DEM sampler, using embedded declarations unless explicit
 `detectors` or `observables` are supplied. String decoders are resolved with
 `create_native_decoder(name, dem=dem, options=decoder_options)`. Object decoders
 must be native decoder handles; Python decoders are rejected by collection.
+Every decoder object must also implement
+`strong_id_payload() -> Mapping[str, object]` and return JSON-serializable stable
+identity data. Missing or invalid payloads fail before resume lookup or native
+scheduling.
+
+Collection strong ids use schema version 2. The canonical payload contains all
+behavioral circuit/DEM fields, the resolved decoder payload, metadata, and
+postselection masks. It preserves sequence order, sorts mapping keys, and does
+not use `repr(...)`. Decoder payloads include effective normalized options and
+solver structure, so constructing the same decoder by registered name or as an
+equivalent object produces the same id. Runtime limits and display task ids are
+not included.
+
+Schema-v1 resume rows are intentionally not reused: the old id did not contain
+enough decoder state for a safe migration. Archive the old CSV and use a new
+resume file after upgrading. The CSV header itself is unchanged.
 
 `TaskStats` is a frozen dataclass:
 

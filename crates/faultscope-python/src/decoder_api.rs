@@ -49,6 +49,7 @@ pub(crate) struct PyNativeBatchDecoder {
 pub(crate) struct PyNativeCompositeDecoder {
     pub(crate) inner: Arc<dyn CoreNativeDecoderFactory>,
     python_decode_calls: Arc<AtomicUsize>,
+    children: Vec<Py<PyAny>>,
 }
 
 /// Native decoder that always returns an empty correction.
@@ -66,6 +67,7 @@ pub(crate) struct PyNativeNoCorrectionDecoder {
 pub(crate) struct PyNativeGraphlikeDetectorCopyDecoder {
     pub(crate) inner: Arc<dyn CoreNativeDecoderFactory>,
     python_decode_calls: Arc<AtomicUsize>,
+    observable_detector_indices: Vec<Option<usize>>,
 }
 
 #[cfg(feature = "decoder-fusion-blossom")]
@@ -73,6 +75,7 @@ pub(crate) struct PyNativeGraphlikeDetectorCopyDecoder {
 pub(crate) struct PyNativeFusionBlossomDecoder {
     pub(crate) inner: Arc<dyn CoreNativeDecoderFactory>,
     python_decode_calls: Arc<AtomicUsize>,
+    edge_count: usize,
 }
 
 #[pymethods]
@@ -121,6 +124,17 @@ impl PyNativeBatchDecoder {
         self.python_decode_calls.load(Ordering::Relaxed)
     }
 
+    pub(crate) fn strong_id_payload(&self, py: Python<'_>) -> PyResult<PyObject> {
+        let parameters = PyDict::new(py);
+        native_decoder_identity_payload(
+            py,
+            self.inner.name(),
+            self.inner.detector_ids(),
+            self.inner.observable_ids(),
+            &parameters,
+        )
+    }
+
     pub(crate) fn __repr__(&self) -> String {
         format!(
             "NativeBatchDecoder(name={:?}, detector_ids={:?}, observable_ids={:?})",
@@ -136,6 +150,7 @@ impl PyNativeCompositeDecoder {
     #[new]
     pub(crate) fn new(decoders: &Bound<'_, PyAny>) -> PyResult<Self> {
         let mut children = Vec::new();
+        let mut child_objects = Vec::new();
         for (index, decoder) in PyIterator::from_object(decoders)?.enumerate() {
             let decoder = decoder?;
             let child = native_decoder_from_py(&decoder)?.ok_or_else(|| {
@@ -144,12 +159,14 @@ impl PyNativeCompositeDecoder {
                 ))
             })?;
             children.push(child);
+            child_objects.push(decoder.unbind());
         }
         let inner = CoreNativeCompositeDecoder::new(children)
             .map_err(|err| PyValueError::new_err(err.to_string()))?;
         Ok(Self {
             inner: Arc::new(inner),
             python_decode_calls: Arc::new(AtomicUsize::new(0)),
+            children: child_objects,
         })
     }
 
@@ -180,6 +197,28 @@ impl PyNativeCompositeDecoder {
     #[getter]
     pub(crate) fn python_decode_call_count(&self) -> usize {
         self.python_decode_calls.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn strong_id_payload(&self, py: Python<'_>) -> PyResult<PyObject> {
+        let child_payloads = PyList::empty(py);
+        for (index, child) in self.children.iter().enumerate() {
+            let child = child.bind(py);
+            let provider = child.getattr("strong_id_payload").map_err(|_| {
+                PyTypeError::new_err(format!(
+                    "NativeCompositeDecoder child {index} does not provide strong_id_payload()"
+                ))
+            })?;
+            child_payloads.append(provider.call0()?)?;
+        }
+        let parameters = PyDict::new(py);
+        parameters.set_item("children", child_payloads)?;
+        native_decoder_identity_payload(
+            py,
+            self.inner.name(),
+            self.inner.detector_ids(),
+            self.inner.observable_ids(),
+            &parameters,
+        )
     }
 
     pub(crate) fn __repr__(&self) -> String {
@@ -232,6 +271,17 @@ impl PyNativeNoCorrectionDecoder {
     #[getter]
     pub(crate) fn python_decode_call_count(&self) -> usize {
         self.python_decode_calls.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn strong_id_payload(&self, py: Python<'_>) -> PyResult<PyObject> {
+        let parameters = PyDict::new(py);
+        native_decoder_identity_payload(
+            py,
+            self.inner.name(),
+            self.inner.detector_ids(),
+            self.inner.observable_ids(),
+            &parameters,
+        )
     }
 
     pub(crate) fn __repr__(&self) -> String {
@@ -296,6 +346,21 @@ impl PyNativeGraphlikeDetectorCopyDecoder {
         self.python_decode_calls.load(Ordering::Relaxed)
     }
 
+    pub(crate) fn strong_id_payload(&self, py: Python<'_>) -> PyResult<PyObject> {
+        let parameters = PyDict::new(py);
+        parameters.set_item(
+            "observable_detector_indices",
+            &self.observable_detector_indices,
+        )?;
+        native_decoder_identity_payload(
+            py,
+            self.inner.name(),
+            self.inner.detector_ids(),
+            self.inner.observable_ids(),
+            &parameters,
+        )
+    }
+
     pub(crate) fn __repr__(&self) -> String {
         format!(
             "NativeGraphlikeDetectorCopyDecoder(name={:?}, detector_ids={:?}, observable_ids={:?})",
@@ -313,9 +378,11 @@ impl PyNativeGraphlikeDetectorCopyDecoder {
             .map_err(|err| PyValueError::new_err(err.to_string()))?;
         let backend = CoreNativeGraphlikeDetectorCopyDecoder::from_graphlike_problem(problem)
             .map_err(|err| PyValueError::new_err(err.to_string()))?;
+        let observable_detector_indices = backend.observable_detector_indices().to_vec();
         Ok(Self {
             inner: Arc::new(backend),
             python_decode_calls: Arc::new(AtomicUsize::new(0)),
+            observable_detector_indices,
         })
     }
 }
@@ -381,6 +448,18 @@ impl PyNativeFusionBlossomDecoder {
         self.python_decode_calls.load(Ordering::Relaxed)
     }
 
+    pub(crate) fn strong_id_payload(&self, py: Python<'_>) -> PyResult<PyObject> {
+        let parameters = PyDict::new(py);
+        parameters.set_item("edge_count", self.edge_count)?;
+        native_decoder_identity_payload(
+            py,
+            self.inner.name(),
+            self.inner.detector_ids(),
+            self.inner.observable_ids(),
+            &parameters,
+        )
+    }
+
     pub(crate) fn __repr__(&self) -> String {
         format!(
             "NativeFusionBlossomDecoder(name={:?}, detector_ids={:?}, observable_ids={:?})",
@@ -399,11 +478,30 @@ impl PyNativeFusionBlossomDecoder {
             .map_err(|err| PyValueError::new_err(err.to_string()))?;
         let backend = CoreNativeFusionBlossomDecoder::from_graphlike_problem(problem)
             .map_err(|err| PyValueError::new_err(err.to_string()))?;
+        let edge_count = backend.edge_count();
         Ok(Self {
             inner: Arc::new(backend),
             python_decode_calls: Arc::new(AtomicUsize::new(0)),
+            edge_count,
         })
     }
+}
+
+fn native_decoder_identity_payload(
+    py: Python<'_>,
+    decoder: &str,
+    detector_ids: &[i64],
+    observable_ids: &[i64],
+    parameters: &Bound<'_, PyDict>,
+) -> PyResult<PyObject> {
+    let payload = PyDict::new(py);
+    payload.set_item("backend", "faultscope-native")?;
+    payload.set_item("decoder", decoder)?;
+    payload.set_item("implementation_version", 1)?;
+    payload.set_item("detector_ids", detector_ids)?;
+    payload.set_item("observable_ids", observable_ids)?;
+    payload.set_item("parameters", parameters)?;
+    Ok(payload.into())
 }
 
 #[cfg(feature = "decoder-fusion-blossom")]

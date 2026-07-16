@@ -41,16 +41,17 @@ class NativePyMatchingDecoder:
 
     backend_name = BACKEND_NAME
 
-    def __init__(self, inner):
+    def __init__(self, inner, *, options=None):
         self._inner = inner
+        self._options = dict(options or {})
         self._python_decode_call_count = 0
 
     @staticmethod
     def from_dem(dem, *, options=None):
         _require_native_extension()
-        _parse_options(options)
+        parsed = _parse_options(options)
         inner = _native.NativePyMatchingNativeDecoder.from_dem(dem)
-        return NativePyMatchingDecoder(inner)
+        return NativePyMatchingDecoder(inner, options=parsed)
 
     @staticmethod
     def from_circuit(circuit, *, detectors=None, observables=None, options=None):
@@ -107,6 +108,22 @@ class NativePyMatchingDecoder:
             observable_id: _words_to_int(words) for observable_id, words in correction_words.items()
         }
 
+    def strong_id_payload(self):
+        """Return the effective native backend configuration."""
+
+        return {
+            "backend": BACKEND_NAME,
+            "backend_package": "faultscope-pymatching",
+            "backend_version": __version__,
+            "native_decoder_abi": NATIVE_DECODER_PLUGIN_ABI,
+            "decoder": self.name,
+            "implementation_version": 1,
+            "detector_ids": list(self.detector_ids),
+            "observable_ids": list(self.observable_ids),
+            "parameters": dict(self._options),
+            "solver": self.build_summary,
+        }
+
     def __repr__(self):
         return (
             "NativePyMatchingDecoder("
@@ -131,12 +148,13 @@ def backend_manifest():
 
 def _parse_options(options):
     if options is None:
-        return
+        return {}
     if not isinstance(options, dict):
         raise ValueError("pymatching options must be a dict or None")
     if options:
         names = ", ".join(sorted(options))
         raise ValueError(f"unknown pymatching option(s): {names}")
+    return {}
 
 
 def _require_native_extension():

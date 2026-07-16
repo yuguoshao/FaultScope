@@ -143,6 +143,38 @@ its required keys in advance; ordinary Python batch-like objects without this
 method remain supported by decoders that fall back to reading `measurements`
 once.
 
+### Stable collection identity
+
+Native decoder objects passed to `CollectionTask.decoder` must implement a
+stable identity protocol:
+
+```python
+def strong_id_payload(self):
+    return {
+        "backend": "my-decoder",
+        "backend_version": "1.2.3",
+        "implementation_version": 1,
+        "detector_ids": list(self.detector_ids),
+        "observable_ids": list(self.observable_ids),
+        "parameters": dict(self.normalized_options),
+        "solver": self.canonical_solver_problem,
+    }
+```
+
+The return value must be a JSON-serializable mapping derived from effective
+decoder state, not `repr(...)` or object identity. Include every parameter that
+can alter corrections, the detector and observable layouts, the effective
+graph or matrix, backend/ABI version information, and ordered payloads for all
+children of a composite decoder. Equivalent mapping insertion orders must
+produce equivalent payloads. Increment `implementation_version` when bundled
+decoder behavior changes without an otherwise visible configuration change.
+
+Collection rejects native decoder objects without this method before reading
+resume data or starting workers. There is intentionally no caller-supplied
+identity override, because it could recreate silent cross-decoder merges.
+Python prototype decoders remain usable with simulator `estimate(...)`, but are
+not accepted by native collection.
+
 ## Getting Circuit And DEM Information
 
 When starting from a circuit, first generate a detector error model:

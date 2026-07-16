@@ -27,6 +27,7 @@ from faultscope import (
     DetectorErrorEdge,
     DetectorErrorModel,
     LogicalObservable,
+    NativeCompositeDecoder,
     NativeGraphlikeDetectorCopyDecoder,
     NativeNoCorrectionDecoder,
     Operation,
@@ -665,6 +666,183 @@ class CollectionTests(unittest.TestCase):
         self.assertEqual(stats.shots, 32)
         self.assertEqual(stats.errors, 0)
 
+    def test_strong_id_distinguishes_composite_decoder_behavior(self) -> None:
+        dem = _graphlike_dem()
+        no_correction = NativeCompositeDecoder(
+            (
+                NativeNoCorrectionDecoder(
+                    observable_ids=(0,),
+                    detector_ids=(0,),
+                ),
+            )
+        )
+        correcting = NativeCompositeDecoder((NativeGraphlikeDetectorCopyDecoder.from_dem(dem),))
+
+        stats = _collect(
+            [
+                CollectionTask(dem=dem, decoder=no_correction, task_id="uncorrected"),
+                CollectionTask(dem=dem, decoder=correcting, task_id="corrected"),
+            ],
+            max_shots=4,
+            batch_size=4,
+            seed=22,
+        )
+
+        self.assertEqual([stat.errors for stat in stats], [4, 0])
+        self.assertNotEqual(stats[0].strong_id, stats[1].strong_id)
+        self.assertEqual(len(CollectionData(stats)), 2)
+
+    def test_native_decoder_payload_tracks_id_layout(self) -> None:
+        first = NativeNoCorrectionDecoder(observable_ids=(0,), detector_ids=(1,))
+        second = NativeNoCorrectionDecoder(observable_ids=(2,), detector_ids=(1,))
+
+        self.assertNotEqual(first.strong_id_payload(), second.strong_id_payload())
+
+    def test_native_graphlike_payload_tracks_effective_mapping(self) -> None:
+        def mapped_dem(detector_id: int) -> DetectorErrorModel:
+            return DetectorErrorModel(
+                detectors=(
+                    Detector(id=0, measurement_keys=()),
+                    Detector(id=1, measurement_keys=()),
+                ),
+                observables=(LogicalObservable(id=0),),
+                edges=(
+                    DetectorErrorEdge(
+                        probability=0.25,
+                        detectors=(detector_id,),
+                        observables=(0,),
+                        location_id="mapped",
+                        event="X",
+                    ),
+                ),
+            )
+
+        first = NativeGraphlikeDetectorCopyDecoder.from_dem(mapped_dem(0))
+        second = NativeGraphlikeDetectorCopyDecoder.from_dem(mapped_dem(1))
+
+        self.assertEqual(first.detector_ids, second.detector_ids)
+        self.assertEqual(first.observable_ids, second.observable_ids)
+        self.assertNotEqual(first.strong_id_payload(), second.strong_id_payload())
+
+    def test_string_and_equivalent_object_decoder_share_strong_id(self) -> None:
+        dem = _graphlike_dem()
+        by_name = _collect(
+            [CollectionTask(dem=dem, decoder="graphlike-detector-copy")],
+            max_shots=1,
+            seed=26,
+        )[0]
+        by_object = _collect(
+            [
+                CollectionTask(
+                    dem=dem,
+                    decoder=NativeGraphlikeDetectorCopyDecoder.from_dem(dem),
+                )
+            ],
+            max_shots=1,
+            seed=26,
+        )[0]
+
+        self.assertEqual(by_name.strong_id, by_object.strong_id)
+
+    def test_strong_id_canonicalizes_dem_mapping_order(self) -> None:
+        def tagged_dem(tags: dict[str, int]) -> DetectorErrorModel:
+            return DetectorErrorModel(
+                detectors=(),
+                observables=(LogicalObservable(id=0),),
+                edges=(
+                    DetectorErrorEdge(
+                        probability=1.0,
+                        detectors=(),
+                        observables=(0,),
+                        location_id="logical",
+                        event="L",
+                        tags=tags,
+                    ),
+                ),
+            )
+
+        first = _collect(
+            [CollectionTask(dem=tagged_dem({"round": 1, "gate": 2}))],
+            max_shots=1,
+            seed=23,
+        )[0]
+        second = _collect(
+            [CollectionTask(dem=tagged_dem({"gate": 2, "round": 1}))],
+            max_shots=1,
+            seed=23,
+        )[0]
+
+        self.assertEqual(first.strong_id, second.strong_id)
+
+    def test_strong_id_canonicalizes_circuit_mapping_order(self) -> None:
+        def tagged_circuit(tags: dict[str, int], metadata: dict[str, int]) -> Circuit:
+            noise = NoiseLocation(
+                "x0",
+                BernoulliPauliNoise("X"),
+                1.0,
+                (0,),
+                tags=tags,
+            )
+            return Circuit(
+                1,
+                (
+                    Operation.noise(noise, **metadata),
+                    Operation.measure(0, key="m0"),
+                    Operation.observable_include(0, ("m0",)),
+                ),
+            )
+
+        first = _collect(
+            [
+                CollectionTask(
+                    circuit=tagged_circuit(
+                        {"round": 1, "gate": 2},
+                        {"layer": 3, "moment": 4},
+                    )
+                )
+            ],
+            max_shots=1,
+            seed=24,
+        )[0]
+        second = _collect(
+            [
+                CollectionTask(
+                    circuit=tagged_circuit(
+                        {"gate": 2, "round": 1},
+                        {"moment": 4, "layer": 3},
+                    )
+                )
+            ],
+            max_shots=1,
+            seed=24,
+        )[0]
+
+        self.assertEqual(first.strong_id, second.strong_id)
+
+    def test_strong_id_requires_valid_decoder_payload(self) -> None:
+        class MissingPayload:
+            pass
+
+        class InvalidPayload:
+            def strong_id_payload(self):
+                return {"unstable": object()}
+
+        class IncompletePayload:
+            def strong_id_payload(self):
+                return {}
+
+        for decoder, message in (
+            (MissingPayload(), "provide strong_id_payload"),
+            (InvalidPayload(), "JSON-serializable mapping"),
+            (IncompletePayload(), "missing required field"),
+        ):
+            with self.subTest(decoder=type(decoder).__name__):
+                with self.assertRaisesRegex(TypeError, message):
+                    _collect(
+                        [CollectionTask(dem=_graphlike_dem(), decoder=decoder)],
+                        max_shots=1,
+                    )
+
     def test_max_errors_stops_after_completed_batch(self) -> None:
         stats = _collect(
             [CollectionTask(dem=_logical_edge_dem())],
@@ -757,6 +935,14 @@ class CollectionTests(unittest.TestCase):
         class CopyDecoder:
             def __init__(self) -> None:
                 self.calls = 0
+
+            def strong_id_payload(self):
+                return {
+                    "backend": "test-python",
+                    "decoder": "copy",
+                    "implementation_version": 1,
+                    "parameters": {},
+                }
 
             def decode_batch_masks(self, batch):
                 self.calls += 1
@@ -1024,6 +1210,47 @@ class CollectionTests(unittest.TestCase):
 
         self.assertEqual(stats.shots, 5)
         self.assertEqual(stats.errors, 5)
+
+    def test_v1_strong_id_rows_are_not_resumed(self) -> None:
+        dem = DetectorErrorModel(
+            detectors=(),
+            observables=(LogicalObservable(id=0),),
+            edges=(
+                DetectorErrorEdge(
+                    probability=1.0,
+                    detectors=(),
+                    observables=(0,),
+                    location_id="logical",
+                    event="L",
+                ),
+            ),
+        )
+        metadata = {"d": 3, "p": 0.01}
+        legacy_id = "4875ec4d3a1fbc3fc3bbc4a769d7b56c14ea84583af5cab01860c6d4b8793bd4"
+        legacy = TaskStats(
+            task_id=legacy_id,
+            strong_id=legacy_id,
+            shots=100,
+            errors=100,
+            discards=0,
+            seconds=1.0,
+            decoder=None,
+            metadata=metadata,
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "v1.csv"
+            write_stats_to_csv_file(path, [legacy])
+            stats = _collect(
+                [CollectionTask(dem=dem, metadata=metadata)],
+                max_shots=3,
+                batch_size=3,
+                seed=25,
+                existing_data_filepaths=(path,),
+            )[0]
+
+        self.assertEqual(stats.shots, 3)
+        self.assertEqual(stats.errors, 3)
+        self.assertNotEqual(stats.strong_id, legacy_id)
 
     def test_resume_file_does_not_duplicate_parallel_collection(self) -> None:
         task = CollectionTask(dem=_logical_edge_dem(), task_id="parallel-resume")

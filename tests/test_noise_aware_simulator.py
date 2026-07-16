@@ -906,6 +906,26 @@ class NoiseAwareSimulatorTests(unittest.TestCase):
 
 
 class BatchNoiseAwareSimulatorTests(unittest.TestCase):
+    def test_repetition_decoder_strong_id_payload_tracks_parameters(self) -> None:
+        baseline = RepetitionCodeDecoder(
+            distance=3,
+            measurement_keys=("m0", "m1"),
+            observable_id=0,
+        )
+        equivalent = RepetitionCodeDecoder(
+            distance=3,
+            measurement_keys=("m0", "m1"),
+            observable_id=0,
+        )
+        changed = RepetitionCodeDecoder(
+            distance=5,
+            measurement_keys=("m0", "m1", "m2", "m3"),
+            observable_id=1,
+        )
+
+        self.assertEqual(baseline.strong_id_payload(), equivalent.strong_id_payload())
+        self.assertNotEqual(baseline.strong_id_payload(), changed.strong_id_payload())
+
     def test_repetition_decoder_packed_masks_match_scalar_decode(self) -> None:
         rng = random.Random(90210)
         shots = 129
@@ -1328,9 +1348,7 @@ class NativePackedSamplerTests(unittest.TestCase):
         )
         sampler = self._native_sampler_or_skip(
             Circuit(n_qubits=1, operations=[Operation.noise(location)]),
-            observables=(
-                LogicalObservable(id=0, pauli_qubits=(0,), pauli="Z"),
-            ),
+            observables=(LogicalObservable(id=0, pauli_qubits=(0,), pauli="Z"),),
         )
 
         for shots in (1, 63, 64, 65, 129, 513):
@@ -2736,6 +2754,36 @@ class PyMatchingDecoderTests(unittest.TestCase):
                 ),
             ),
         )
+
+    def test_strong_id_payload_tracks_effective_matching_graph(self) -> None:
+        class MatchingGraph:
+            num_detectors = 2
+            num_nodes = 2
+            num_fault_ids = 1
+            boundary = set()
+
+            def __init__(self, weight: float) -> None:
+                self.weight = weight
+
+            def edges(self):
+                return [
+                    (
+                        1,
+                        0,
+                        {
+                            "fault_ids": {0},
+                            "weight": self.weight,
+                            "error_probability": 0.1,
+                        },
+                    )
+                ]
+
+        first = PyMatchingDecoder(MatchingGraph(1.0), (0, 1), (0,), 1)
+        equivalent = PyMatchingDecoder(MatchingGraph(1.0), (0, 1), (0,), 1)
+        changed = PyMatchingDecoder(MatchingGraph(2.0), (0, 1), (0,), 1)
+
+        self.assertEqual(first.strong_id_payload(), equivalent.strong_id_payload())
+        self.assertNotEqual(first.strong_id_payload(), changed.strong_id_payload())
 
     def test_builds_pymatching_decoder_from_graphlike_dem(self) -> None:
         decoder = PyMatchingDecoder.from_dem(

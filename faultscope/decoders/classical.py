@@ -45,6 +45,16 @@ def _packed_count_greater_than(
 class NoCorrectionDecoder:
     """Decoder that returns no correction."""
 
+    def strong_id_payload(self) -> Mapping[str, object]:
+        """Return the stable collection identity for this decoder."""
+
+        return {
+            "backend": "faultscope-python",
+            "decoder": "no-correction",
+            "implementation_version": 1,
+            "parameters": {},
+        }
+
     def decode(
         self,
         detector_record: Any,
@@ -62,6 +72,20 @@ class RepetitionCodeDecoder:
     distance: int
     measurement_keys: tuple[str, ...] = ()
     observable_id: int = 0
+
+    def strong_id_payload(self) -> Mapping[str, object]:
+        """Return the stable collection identity for this decoder."""
+
+        return {
+            "backend": "faultscope-python",
+            "decoder": "repetition-code",
+            "implementation_version": 1,
+            "parameters": {
+                "distance": self.distance,
+                "measurement_keys": list(self.measurement_keys),
+                "observable_id": self.observable_id,
+            },
+        }
 
     def decode(
         self,

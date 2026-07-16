@@ -80,6 +80,29 @@ class FusionBlossomBackendPackageTests(unittest.TestCase):
             faultscope_fusion_blossom.NativeFusionBlossomDecoder,
         )
 
+    def test_strong_id_payload_tracks_normalized_backend_options(self) -> None:
+        class Inner:
+            name = "fusion-blossom"
+            detector_ids = (0,)
+            observable_ids = (0,)
+            build_summary = {"solver_edge_count": 1}
+
+        first = faultscope_fusion_blossom.NativeFusionBlossomDecoder(
+            Inner(),
+            options={"weight_scale": 10_000.0},
+        )
+        equivalent = faultscope_fusion_blossom.NativeFusionBlossomDecoder(
+            Inner(),
+            options={"weight_scale": 10_000.0},
+        )
+        changed = faultscope_fusion_blossom.NativeFusionBlossomDecoder(
+            Inner(),
+            options={"weight_scale": 20_000.0},
+        )
+
+        self.assertEqual(first.strong_id_payload(), equivalent.strong_id_payload())
+        self.assertNotEqual(first.strong_id_payload(), changed.strong_id_payload())
+
     @requires_native_backend
     def test_backend_from_dem_returns_external_native_solver_decoder(self) -> None:
         dem = DetectorErrorModel(

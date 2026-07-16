@@ -28,6 +28,12 @@ from faultscope.collection._types import (
     read_stats_from_csv_files,
     write_stats_to_csv_file,
 )
+from faultscope.collection._identity import (
+    STRONG_ID_SCHEMA_VERSION,
+    canonical_json as _identity_canonical_json,
+    decoder_identity_payload,
+    source_identity_payload,
+)
 
 
 # Python owns task parsing, strong-id construction, and CSV resume orchestration.
@@ -365,9 +371,9 @@ def _native_task(
     strong_id = _strong_id(
         task=task,
         dem=dem,
+        decoder=decoder,
         decoder_name=decoder_name,
         metadata=metadata,
-        metadata_json=metadata_json,
         postselection_mask=postselection_mask,
         postselected_observables_mask=postselected_observables_mask,
     )
@@ -432,31 +438,24 @@ def _strong_id(
     *,
     task: CollectionTask,
     dem: Any,
+    decoder: object | None,
     decoder_name: str | None,
     metadata: Mapping[str, object],
-    metadata_json: str,
     postselection_mask: bytes | None,
     postselected_observables_mask: bytes | None,
 ) -> str:
     payload = {
-        "source_kind": "circuit" if task.circuit is not None else "dem",
-        "circuit": repr(task.circuit) if task.circuit is not None else None,
-        "dem": repr(dem),
-        "decoder": decoder_name,
-        "decoder_options": _jsonable(task.decoder_options or {}),
-        "metadata": metadata,
-        "metadata_json": metadata_json,
+        "schema": "faultscope.collection.strong_id",
+        "schema_version": STRONG_ID_SCHEMA_VERSION,
+        "source": source_identity_payload(circuit=task.circuit, dem=dem),
+        "decoder": decoder_identity_payload(decoder, decoder_name=decoder_name),
+        "metadata": dict(metadata),
         "postselection_mask": (None if postselection_mask is None else postselection_mask.hex()),
         "postselected_observables_mask": (
             None if postselected_observables_mask is None else postselected_observables_mask.hex()
         ),
     }
-    return hashlib.sha256(_canonical_json(payload).encode("utf-8")).hexdigest()
-
-
-def _jsonable(value: object) -> object:
-    json.loads(_canonical_json(value))
-    return value
+    return hashlib.sha256(_identity_canonical_json(payload).encode("utf-8")).hexdigest()
 
 
 def _canonical_json(value: object) -> str:

@@ -622,10 +622,24 @@ data = CollectionData(stats)
 write_stats_to_csv_file("merged.csv", data.values())
 ```
 
-`strong_id` is stable for the sampled problem identity. It includes the source
-DEM/circuit identity, decoder identity, metadata, and postselection masks, but
-not runtime limits such as `max_shots`, `batch_size`, seed, or worker count.
+`strong_id` uses the version-2 collection identity schema. It hashes canonical
+structured circuit and effective DEM data, the resolved decoder fingerprint,
+metadata, and postselection masks. Mapping keys are sorted, so insertion order
+in tags, metadata, and decoder parameters does not affect identity. Runtime
+limits such as `max_shots`, `batch_size`, seed, and worker count remain excluded.
 Task metadata must be JSON serializable when using strong-id and CSV paths.
+
+Decoder objects must provide `strong_id_payload()` returning a JSON-serializable
+mapping. Bundled native decoders and official backend packages implement this
+protocol. The payload covers the effective backend, implementation fingerprint
+version, normalized parameters, detector/observable layout, solver problem, and
+all composite children. Collection rejects opaque decoder objects before
+sampling because their results cannot be resumed, merged, or seeded safely.
+
+Version-1 strong ids cannot be migrated safely because they omitted decoder
+state. After upgrading, archive an old resume CSV and start a new file. Old rows
+will not match version-2 tasks; appending new rows to the old file would leave
+both identity generations visible to later summarize or merge commands.
 
 Postselection masks are bytes-like bit-packed masks over the sampler detector or
 observable order. A fired postselected detector discards the shot before logical
