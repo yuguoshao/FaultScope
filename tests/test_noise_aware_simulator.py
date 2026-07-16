@@ -1319,6 +1319,30 @@ class NativePackedSamplerTests(unittest.TestCase):
         self.assertEqual(native_batch.observables, stim_batch.observables)
         self.assertEqual(native_batch.noise_event_masks["x0"], native_batch.all_mask)
 
+    def test_measurement_free_frame_observable_preserves_batch_width(self) -> None:
+        location = NoiseLocation(
+            id="x0",
+            model=BernoulliPauliNoise("X"),
+            rate=1.0,
+            qubits=(0,),
+        )
+        sampler = self._native_sampler_or_skip(
+            Circuit(n_qubits=1, operations=[Operation.noise(location)]),
+            observables=(
+                LogicalObservable(id=0, pauli_qubits=(0,), pauli="Z"),
+            ),
+        )
+
+        for shots in (1, 63, 64, 65, 129, 513):
+            with self.subTest(shots=shots):
+                batch = sampler.sample(shots=shots, seed=1)
+                self.assertEqual(batch.observables[0], batch.all_mask)
+                self.assertEqual(batch.observables[0].bit_count(), shots)
+                self.assertEqual(
+                    sampler.estimate(shots=shots, seed=1).mean_loss,
+                    1.0,
+                )
+
     def test_backend_keyword_is_not_accepted(self) -> None:
         circuit = Circuit(
             n_qubits=1,
