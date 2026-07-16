@@ -29,10 +29,10 @@ pub use decoder::NativeFusionBlossomDecoder;
 pub use decoder::{
     logical_residual_loss_mask_native, packed_residual_failure_count, CorrectionMaskBatch,
     DetectorEventShotBatchView, DetectorMaskBatchView,
-    FaultScopeNativeCorrectionMaskBatchMutViewV1, FaultScopeNativeDecoderFactoryV2,
+    FaultScopeNativeCorrectionMaskBatchMutViewV1, FaultScopeNativeDecoderFactoryV3,
     FaultScopeNativeDecoderI64SliceV1, FaultScopeNativeDecoderMaskMutViewV1,
     FaultScopeNativeDecoderMaskViewV1, FaultScopeNativeDecoderStatusV1,
-    FaultScopeNativeDecoderStringViewV1, FaultScopeNativeDecoderWorkerV2,
+    FaultScopeNativeDecoderStringViewV1, FaultScopeNativeDecoderWorkerV3,
     FaultScopeNativeDetectorEventShotBatchViewV1, FaultScopeNativeDetectorMaskBatchViewV1,
     FaultScopeNativePackedDetectorShotBatchViewV1,
     FaultScopeNativePackedObservableShotBatchMutViewV1, NativeCompositeDecoder,

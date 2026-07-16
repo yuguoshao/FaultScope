@@ -1,4 +1,3 @@
-use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
 use std::ffi::c_void;
 use std::os::raw::c_char;
@@ -6,9 +5,9 @@ use std::sync::Arc;
 
 use crate::{GraphlikeDecodingProblem, Mask, NpError, NpResult};
 
-pub const NATIVE_DECODER_PLUGIN_ABI_VERSION: u32 = 2;
-pub const NATIVE_DECODER_PLUGIN_ABI_NAME: &str = "faultscope.native_decoder_plugin.v2";
-pub const NATIVE_DECODER_PLUGIN_CAPSULE_NAME: &str = "faultscope.native_decoder_plugin.v2";
+pub const NATIVE_DECODER_PLUGIN_ABI_VERSION: u32 = 3;
+pub const NATIVE_DECODER_PLUGIN_ABI_NAME: &str = "faultscope.native_decoder_plugin.v3";
+pub const NATIVE_DECODER_PLUGIN_CAPSULE_NAME: &str = "faultscope.native_decoder_plugin.v3";
 pub const NATIVE_DECODER_PLUGIN_CAPSULE_METHOD: &str = "__faultscope_native_decoder_capsule__";
 pub const NATIVE_DECODER_PLUGIN_ENTRY_POINT_GROUP: &str = "faultscope.native_decoders";
 pub const NATIVE_DECODER_FACTORY_FLAG_THREAD_SAFE: u64 = 1 << 0;
@@ -131,7 +130,7 @@ impl FaultScopeNativeDecoderStatusV1 {
 
 #[repr(C)]
 #[derive(Clone, Copy)]
-pub struct FaultScopeNativeDecoderFactoryV2 {
+pub struct FaultScopeNativeDecoderFactoryV3 {
     pub abi_version: u32,
     pub struct_size: usize,
     pub flags: u64,
@@ -158,7 +157,7 @@ pub struct FaultScopeNativeDecoderFactoryV2 {
     pub create_worker: Option<
         unsafe extern "C" fn(
             *const c_void,
-            *mut FaultScopeNativeDecoderWorkerV2,
+            *mut FaultScopeNativeDecoderWorkerV3,
             usize,
         ) -> FaultScopeNativeDecoderStatusV1,
     >,
@@ -166,7 +165,7 @@ pub struct FaultScopeNativeDecoderFactoryV2 {
 
 #[repr(C)]
 #[derive(Clone, Copy)]
-pub struct FaultScopeNativeDecoderWorkerV2 {
+pub struct FaultScopeNativeDecoderWorkerV3 {
     pub struct_size: usize,
     pub worker_state: *mut c_void,
     pub drop_worker_state: Option<unsafe extern "C" fn(*mut c_void)>,
@@ -346,12 +345,11 @@ impl PackedObservableShotBatch {
             )));
         }
         self.validate_shape()?;
-        for observable_id in &self.observable_ids {
-            if !declared_observable_ids.contains(observable_id) {
-                return Err(NpError::new(format!(
-                    "packed correction for undeclared observable id {observable_id}"
-                )));
-            }
+        if self.observable_ids != declared_observable_ids {
+            return Err(NpError::new(format!(
+                "packed correction observable layout mismatch: expected {:?}, got {:?}",
+                declared_observable_ids, self.observable_ids
+            )));
         }
         Ok(())
     }
@@ -383,15 +381,44 @@ impl PackedObservableShotBatch {
                 )));
             }
         }
+        validate_zero_packed_padding(
+            &self.data,
+            self.shots,
+            self.observable_byte_count,
+            self.observable_ids.len(),
+            "packed correction batch",
+        )?;
         Ok(())
     }
 }
 
+fn validate_zero_packed_padding(
+    data: &[u8],
+    shots: usize,
+    byte_count: usize,
+    bit_count: usize,
+    batch_name: &str,
+) -> NpResult<()> {
+    let used_bits = bit_count & 7;
+    if used_bits == 0 {
+        return Ok(());
+    }
+    let padding_mask = !((1u8 << used_bits) - 1);
+    for shot in 0..shots {
+        let final_byte = data[(shot + 1) * byte_count - 1];
+        if final_byte & padding_mask != 0 {
+            return Err(NpError::new(format!(
+                "{batch_name} shot {shot} has non-zero padding bits"
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// Count shots whose packed observable bits disagree with packed corrections.
 ///
-/// Observable IDs may be ordered differently or be present on only one side.
-/// The mismatched-layout path builds one linear-time alignment table and then
-/// reuses it for every shot.
+/// Both inputs must use the same canonical observable layout and zero their
+/// unused padding bits.
 pub fn packed_residual_failure_count(
     observable_ids: &[i64],
     observable_data: &[u8],
@@ -415,109 +442,23 @@ pub fn packed_residual_failure_count(
             observable_ids.len()
         )));
     }
-    if corrections.shots != shots {
-        return Err(NpError::new(format!(
-            "packed correction batch has {} shots; expected {shots}",
-            corrections.shots
-        )));
-    }
-    let expected_correction_byte_count = corrections.observable_ids.len().div_ceil(8);
-    if corrections.observable_byte_count != expected_correction_byte_count {
-        return Err(NpError::new(format!(
-            "packed correction observable byte count is {}; expected {expected_correction_byte_count}",
-            corrections.observable_byte_count
-        )));
-    }
-    let expected_correction_data_len = shots
-        .checked_mul(corrections.observable_byte_count)
-        .ok_or_else(|| NpError::new("packed correction byte length overflowed usize"))?;
-    if corrections.data.len() != expected_correction_data_len {
-        return Err(NpError::new(format!(
-            "packed correction batch has {} bytes; expected {expected_correction_data_len} for {shots} shots and {} observables",
-            corrections.data.len(),
-            corrections.observable_ids.len()
-        )));
-    }
-
-    if corrections.observable_ids.as_slice() == observable_ids
-        && corrections.observable_byte_count == observable_byte_count
-    {
-        return Ok((0..shots)
-            .filter(|shot| {
-                let begin = shot * observable_byte_count;
-                let end = begin + observable_byte_count;
-                observable_data[begin..end]
-                    .iter()
-                    .zip(&corrections.data[begin..end])
-                    .any(|(actual, correction)| (actual ^ correction) != 0)
-            })
-            .count());
-    }
-
-    #[derive(Clone, Copy)]
-    struct BitPosition {
-        byte_index: usize,
-        mask: u8,
-    }
-
-    #[derive(Clone, Copy, Default)]
-    struct Alignment {
-        actual: Option<BitPosition>,
-        correction: Option<BitPosition>,
-    }
-
-    let mut alignment =
-        Vec::<Alignment>::with_capacity(observable_ids.len() + corrections.observable_ids.len());
-    let mut alignment_index = HashMap::<i64, usize>::with_capacity(alignment.capacity());
-    for (index, observable_id) in observable_ids.iter().enumerate() {
-        let position = BitPosition {
-            byte_index: index >> 3,
-            mask: 1u8 << (index & 7),
-        };
-        match alignment_index.entry(*observable_id) {
-            Entry::Occupied(entry) => alignment[*entry.get()].actual = Some(position),
-            Entry::Vacant(entry) => {
-                entry.insert(alignment.len());
-                alignment.push(Alignment {
-                    actual: Some(position),
-                    correction: None,
-                });
-            }
-        }
-    }
-    for (index, observable_id) in corrections.observable_ids.iter().enumerate() {
-        let position = BitPosition {
-            byte_index: index >> 3,
-            mask: 1u8 << (index & 7),
-        };
-        match alignment_index.entry(*observable_id) {
-            Entry::Occupied(entry) => alignment[*entry.get()].correction = Some(position),
-            Entry::Vacant(entry) => {
-                entry.insert(alignment.len());
-                alignment.push(Alignment {
-                    actual: None,
-                    correction: Some(position),
-                });
-            }
-        }
-    }
+    validate_zero_packed_padding(
+        observable_data,
+        shots,
+        observable_byte_count,
+        observable_ids.len(),
+        "packed observable batch",
+    )?;
+    corrections.validate_against(observable_ids, shots)?;
 
     Ok((0..shots)
         .filter(|shot| {
-            let actual_begin = shot * observable_byte_count;
-            let actual_row = &observable_data[actual_begin..actual_begin + observable_byte_count];
-            let correction_begin = shot * corrections.observable_byte_count;
-            let correction_row = &corrections.data
-                [correction_begin..correction_begin + corrections.observable_byte_count];
-            alignment.iter().any(|entry| {
-                let actual = entry
-                    .actual
-                    .is_some_and(|position| actual_row[position.byte_index] & position.mask != 0);
-                let correction = entry.correction.is_some_and(|position| {
-                    correction_row[position.byte_index] & position.mask != 0
-                });
-                actual ^ correction
-            })
+            let begin = shot * observable_byte_count;
+            let end = begin + observable_byte_count;
+            observable_data[begin..end]
+                .iter()
+                .zip(&corrections.data[begin..end])
+                .any(|(actual, correction)| (actual ^ correction) != 0)
         })
         .count())
 }
@@ -568,12 +509,11 @@ impl CorrectionMaskBatch {
             )));
         }
         self.validate_shape()?;
-        for observable_id in &self.observable_ids {
-            if !declared_observable_ids.contains(observable_id) {
-                return Err(NpError::new(format!(
-                    "correction mask for undeclared observable id {observable_id}"
-                )));
-            }
+        if self.observable_ids != declared_observable_ids {
+            return Err(NpError::new(format!(
+                "correction observable layout mismatch: expected {:?}, got {:?}",
+                declared_observable_ids, self.observable_ids
+            )));
         }
         Ok(())
     }
@@ -1437,7 +1377,13 @@ mod tests {
     }
 
     #[test]
-    fn packed_residual_count_uses_the_identical_layout_fast_path() {
+    fn packed_residual_count_uses_the_canonical_layout_path() {
+        let empty_corrections = PackedObservableShotBatch::zero(vec![], 3);
+        assert_eq!(
+            packed_residual_failure_count(&[], &[], 0, &empty_corrections, 3).unwrap(),
+            0
+        );
+
         let corrections =
             PackedObservableShotBatch::new(vec![10, 20], vec![0b00, 0b01, 0b00, 0b01], 4).unwrap();
 
@@ -1449,22 +1395,43 @@ mod tests {
     }
 
     #[test]
-    fn packed_residual_count_aligns_reordered_and_disjoint_ids() {
+    fn packed_residual_count_rejects_noncanonical_layouts() {
         let reordered =
             PackedObservableShotBatch::new(vec![20, 10], vec![0b10, 0b01, 0b11], 3).unwrap();
-        assert_eq!(
-            packed_residual_failure_count(&[10, 20], &[0b01, 0b10, 0b11], 1, &reordered, 3,)
-                .unwrap(),
-            0
+        let err = packed_residual_failure_count(&[10, 20], &[0b01, 0b10, 0b11], 1, &reordered, 3)
+            .unwrap_err();
+        assert!(err.to_string().contains("observable layout mismatch"));
+
+        for ids in [vec![10], vec![10, 20, 30], vec![20, 30]] {
+            let corrections = PackedObservableShotBatch::zero(ids, 1);
+            let err =
+                packed_residual_failure_count(&[10, 20], &[0], 1, &corrections, 1).unwrap_err();
+            assert!(err.to_string().contains("observable layout mismatch"));
+        }
+    }
+
+    #[test]
+    fn packed_observable_batches_require_zero_padding() {
+        for (ids, data) in [
+            (vec![0], vec![0b1000_0000]),
+            ((0..7).collect(), vec![0b1000_0000]),
+            ((0..9).collect(), vec![0, 0b0000_0010]),
+        ] {
+            let err = PackedObservableShotBatch::new(ids, data, 1).unwrap_err();
+            assert!(err.to_string().contains("non-zero padding bits"));
+        }
+
+        assert!(PackedObservableShotBatch::new((0..8).collect(), vec![0xff], 1).is_ok());
+        assert!(
+            PackedObservableShotBatch::new((0..9).collect(), vec![0xff, 0b0000_0001], 1,).is_ok()
         );
 
-        let disjoint =
-            PackedObservableShotBatch::new(vec![20, 30], vec![0b00, 0b01, 0b11, 0b10], 4).unwrap();
-        assert_eq!(
-            packed_residual_failure_count(&[10, 20], &[0b01, 0b10, 0b11, 0b00], 1, &disjoint, 4,)
-                .unwrap(),
-            3
-        );
+        let corrections = PackedObservableShotBatch::zero(vec![0], 1);
+        let err =
+            packed_residual_failure_count(&[0], &[0b1000_0000], 1, &corrections, 1).unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("packed observable batch shot 0 has non-zero padding bits"));
     }
 
     #[test]
@@ -1783,6 +1750,103 @@ mod tests {
     }
 
     #[test]
+    fn correction_batches_require_the_complete_declared_layout() {
+        for observable_ids in [vec![10], vec![20, 10], vec![10, 20, 30]] {
+            let masks = vec![Mask::zero(1); observable_ids.len()];
+            let corrections = CorrectionMaskBatch::new(observable_ids, masks, 1).unwrap();
+            let err = corrections.validate_against(&[10, 20], 1).unwrap_err();
+            assert!(err.to_string().contains("observable layout mismatch"));
+        }
+    }
+
+    #[test]
+    fn all_checked_decode_paths_require_the_complete_declared_layout() {
+        struct LayoutOutputWorker {
+            declared: Vec<i64>,
+            actual: Vec<i64>,
+        }
+
+        impl NativeDecoderWorker for LayoutOutputWorker {
+            fn name(&self) -> &str {
+                "layout-output"
+            }
+
+            fn detector_ids(&self) -> &[i64] {
+                &[]
+            }
+
+            fn observable_ids(&self) -> &[i64] {
+                &self.declared
+            }
+
+            fn decode_batch(
+                &mut self,
+                detectors: DetectorMaskBatchView<'_>,
+            ) -> NpResult<CorrectionMaskBatch> {
+                CorrectionMaskBatch::new(
+                    self.actual.clone(),
+                    vec![Mask::zero(crate::word_count(detectors.shots)); self.actual.len()],
+                    detectors.shots,
+                )
+            }
+
+            fn supports_packed_batch(&self) -> bool {
+                true
+            }
+
+            fn decode_packed_batch(
+                &mut self,
+                detectors: PackedDetectorShotBatchView<'_>,
+            ) -> NpResult<PackedObservableShotBatch> {
+                Ok(PackedObservableShotBatch::zero(
+                    self.actual.clone(),
+                    detectors.shots,
+                ))
+            }
+
+            fn supports_detector_event_batch(&self) -> bool {
+                true
+            }
+
+            fn decode_detector_event_batch(
+                &mut self,
+                detectors: DetectorEventShotBatchView<'_>,
+            ) -> NpResult<PackedObservableShotBatch> {
+                Ok(PackedObservableShotBatch::zero(
+                    self.actual.clone(),
+                    detectors.shots,
+                ))
+            }
+        }
+
+        for actual in [vec![10, 20], vec![10], vec![20, 10], vec![10, 20, 30]] {
+            let succeeds = actual == [10, 20];
+            let mut worker = LayoutOutputWorker {
+                declared: vec![10, 20],
+                actual,
+            };
+
+            let mask_view = DetectorMaskBatchView::new(&[], &[], 1).unwrap();
+            assert_eq!(worker.decode_batch_checked(mask_view).is_ok(), succeeds);
+
+            let packed_view = PackedDetectorShotBatchView::new(&[], &[], 1).unwrap();
+            assert_eq!(
+                worker.decode_packed_batch_checked(packed_view).is_ok(),
+                succeeds
+            );
+
+            let offsets = [0, 0];
+            let event_view = DetectorEventShotBatchView::new(&[], &offsets, &[], 1).unwrap();
+            assert_eq!(
+                worker
+                    .decode_detector_event_batch_checked(event_view)
+                    .is_ok(),
+                succeeds
+            );
+        }
+    }
+
+    #[test]
     fn checked_decode_rejects_unknown_observable_id() {
         struct UnknownObservableFactory;
         struct UnknownObservableWorker;
@@ -1837,7 +1901,7 @@ mod tests {
 
         assert!(err
             .to_string()
-            .contains("correction mask for undeclared observable id 1"));
+            .contains("correction observable layout mismatch: expected [0], got [1]"));
     }
 
     #[test]

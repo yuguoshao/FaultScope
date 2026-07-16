@@ -132,7 +132,14 @@ mod tests {
             &mut self,
             detectors: DetectorMaskBatchView<'_>,
         ) -> NpResult<CorrectionMaskBatch> {
-            Ok(CorrectionMaskBatch::empty(detectors.shots))
+            CorrectionMaskBatch::new(
+                self.observable_ids.clone(),
+                vec![
+                    faultscope_core::Mask::zero(faultscope_core::word_count(detectors.shots));
+                    self.observable_ids.len()
+                ],
+                detectors.shots,
+            )
         }
     }
 

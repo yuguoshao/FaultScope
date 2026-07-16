@@ -162,6 +162,19 @@ impl NativePackedSampler {
             ));
         }
         let baseline = native_baseline_value(baseline)?;
+        let native_decoder = match decoder {
+            Some(decoder) => native_decoder_from_py(decoder)?,
+            None => None,
+        };
+        if let Some(native_decoder) = native_decoder.as_deref() {
+            let canonical_observable_ids = self
+                .program
+                .observables
+                .iter()
+                .map(|observable| observable.id)
+                .collect::<Vec<_>>();
+            validate_native_decoder_observable_layout(native_decoder, &canonical_observable_ids)?;
+        }
         let state = py.allow_threads(|| run_packed_sample(self, shots, seed, true))?;
         if loss_mask_fn.is_none() && correction_mask_fn.is_none() {
             if decoder.is_none() {
@@ -187,8 +200,8 @@ impl NativePackedSampler {
                     &self.py_noise_locations,
                 );
             }
-            if let Some(decoder) = decoder {
-                if let Some(native_decoder) = native_decoder_from_py(decoder)? {
+            if decoder.is_some() {
+                if let Some(native_decoder) = native_decoder {
                     let detector_ids = native_decoder.detector_ids().to_vec();
                     let mut worker = native_decoder
                         .create_worker()
@@ -802,9 +815,19 @@ impl NativeDemSampler {
             ));
         }
         let baseline = native_baseline_value(baseline)?;
+        let native_decoder = match decoder {
+            Some(decoder) => native_decoder_from_py(decoder)?,
+            None => None,
+        };
+        if let Some(native_decoder) = native_decoder.as_deref() {
+            validate_native_decoder_observable_layout(
+                native_decoder,
+                self.simulator.observable_ids(),
+            )?;
+        }
         if correction_mask_fn.is_none() && loss_mask_fn.is_none() {
-            if let Some(decoder) = decoder {
-                if let Some(native_decoder) = native_decoder_from_py(decoder)? {
+            if decoder.is_some() {
+                if let Some(native_decoder) = native_decoder {
                     let detector_ids = native_decoder.detector_ids().to_vec();
                     let mut worker = native_decoder
                         .create_worker()

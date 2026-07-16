@@ -808,7 +808,7 @@ result = sampler.estimate(shots=1024, seed=1, decoder=decoder)
 
 The `mwpm` proxy is currently unavailable. Its external `faultscope-mwpm`
 package still implements ABI v1 and is not yet migrated to the strict
-FaultScope native decoder ABI v2, so it remains non-installable. `bposd` is a
+FaultScope native decoder ABI v3, so it remains non-installable. `bposd` is a
 reserved, unimplemented, non-installable catalog/status entry. The generic
 install subcommand accepts these names but only reports their unavailability;
 it returns no install plan or steps and installs nothing.

@@ -4,10 +4,10 @@ use faultscope_core::NativeFusionBlossomDecoder as CoreNativeFusionBlossomDecode
 use faultscope_core::{
     BinaryLinearDecodingProblem, CorrectionMaskBatch, DetectorEventShotBatchView,
     DetectorMaskBatchView, FaultScopeNativeCorrectionMaskBatchMutViewV1,
-    FaultScopeNativeDecoderFactoryV2, FaultScopeNativeDecoderI64SliceV1,
+    FaultScopeNativeDecoderFactoryV3, FaultScopeNativeDecoderI64SliceV1,
     FaultScopeNativeDecoderMaskMutViewV1, FaultScopeNativeDecoderMaskViewV1,
     FaultScopeNativeDecoderStatusV1, FaultScopeNativeDecoderStringViewV1,
-    FaultScopeNativeDecoderWorkerV2, FaultScopeNativeDetectorEventShotBatchViewV1,
+    FaultScopeNativeDecoderWorkerV3, FaultScopeNativeDetectorEventShotBatchViewV1,
     FaultScopeNativeDetectorMaskBatchViewV1, FaultScopeNativePackedDetectorShotBatchViewV1,
     FaultScopeNativePackedObservableShotBatchMutViewV1, GraphlikeDecodingProblem, IndexedDem,
     NativeCompositeDecoder as CoreNativeCompositeDecoder,
@@ -542,7 +542,7 @@ unsafe impl Send for OwnedPyObjectPtr {}
 unsafe impl Sync for OwnedPyObjectPtr {}
 
 struct ExternalDecoderOwner {
-    descriptor: NonNull<FaultScopeNativeDecoderFactoryV2>,
+    descriptor: NonNull<FaultScopeNativeDecoderFactoryV3>,
     // Retained solely to keep the descriptor and factory state alive.
     #[allow(dead_code)]
     capsule: OwnedPyObjectPtr,
@@ -594,7 +594,7 @@ impl ExternalDecoderOwner {
     ) -> Option<
         unsafe extern "C" fn(
             *const std::ffi::c_void,
-            *mut FaultScopeNativeDecoderWorkerV2,
+            *mut FaultScopeNativeDecoderWorkerV3,
             usize,
         ) -> FaultScopeNativeDecoderStatusV1,
     > {
@@ -625,7 +625,7 @@ impl ExternalNativeDecoderFactory {
         }
         let pointer =
             unsafe { pyo3::ffi::PyCapsule_GetPointer(capsule.as_ptr(), capsule_name.as_ptr()) };
-        let descriptor = NonNull::new(pointer.cast::<FaultScopeNativeDecoderFactoryV2>())
+        let descriptor = NonNull::new(pointer.cast::<FaultScopeNativeDecoderFactoryV3>())
             .ok_or_else(|| {
                 PyValueError::new_err("native decoder capsule contained a null descriptor pointer")
             })?;
@@ -633,7 +633,7 @@ impl ExternalNativeDecoderFactory {
     }
 
     fn from_descriptor(
-        descriptor: NonNull<FaultScopeNativeDecoderFactoryV2>,
+        descriptor: NonNull<FaultScopeNativeDecoderFactoryV3>,
         capsule: OwnedPyObjectPtr,
     ) -> PyResult<Self> {
         validate_external_factory_descriptor(descriptor)?;
@@ -662,7 +662,7 @@ impl ExternalNativeDecoderFactory {
 
     fn clean_failed_worker(
         &self,
-        worker: &mut FaultScopeNativeDecoderWorkerV2,
+        worker: &mut FaultScopeNativeDecoderWorkerV3,
         error: faultscope_core::NpError,
     ) -> faultscope_core::NpError {
         let Some(worker_state) = NonNull::new(worker.worker_state) else {
@@ -670,7 +670,7 @@ impl ExternalNativeDecoderFactory {
         };
         let Some(drop_worker_state) = worker.drop_worker_state else {
             return faultscope_core::NpError::new(format!(
-                "{}; ABI v2 factory {} returned unsafe non-null partial worker state without a drop callback",
+                "{}; ABI v3 factory {} returned unsafe non-null partial worker state without a drop callback",
                 error, self.name
             ));
         };
@@ -701,7 +701,7 @@ impl ExternalNativeDecoderFactory {
             || observable_ids != self.observable_ids
         {
             return Err(faultscope_core::NpError::new(format!(
-                "ABI v2 factory {} returned inconsistent decoder metadata while creating a worker",
+                "ABI v3 factory {} returned inconsistent decoder metadata while creating a worker",
                 self.name
             )));
         }
@@ -723,8 +723,8 @@ impl CoreNativeDecoderFactory for ExternalNativeDecoderFactory {
     }
 
     fn create_worker(&self) -> faultscope_core::NpResult<Box<dyn CoreNativeDecoderWorker>> {
-        let mut worker = FaultScopeNativeDecoderWorkerV2 {
-            struct_size: mem::size_of::<FaultScopeNativeDecoderWorkerV2>(),
+        let mut worker = FaultScopeNativeDecoderWorkerV3 {
+            struct_size: mem::size_of::<FaultScopeNativeDecoderWorkerV3>(),
             worker_state: std::ptr::null_mut(),
             drop_worker_state: None,
             decode_batch: None,
@@ -735,7 +735,7 @@ impl CoreNativeDecoderFactory for ExternalNativeDecoderFactory {
             .owner
             .create_worker_callback()
             .expect("external factory descriptor was validated");
-        let capacity = mem::size_of::<FaultScopeNativeDecoderWorkerV2>();
+        let capacity = mem::size_of::<FaultScopeNativeDecoderWorkerV3>();
         let status =
             unsafe { create_worker(self.owner.state().cast_const(), &mut worker, capacity) };
         if let Err(error) = status_to_np_result(status) {
@@ -759,7 +759,7 @@ impl CoreNativeDecoderFactory for ExternalNativeDecoderFactory {
 
 struct ExternalNativeDecoderWorker {
     _owner: Arc<ExternalDecoderOwner>,
-    worker: FaultScopeNativeDecoderWorkerV2,
+    worker: FaultScopeNativeDecoderWorkerV3,
     name: String,
     detector_ids: Vec<i64>,
     observable_ids: Vec<i64>,
@@ -884,7 +884,7 @@ impl CoreNativeDecoderWorker for ExternalNativeDecoderWorker {
             })
         {
             return Err(faultscope_core::NpError::new(format!(
-                "ABI v2 worker {} returned an invalid mask output shape",
+                "ABI v3 worker {} returned an invalid mask output shape",
                 self.name
             )));
         }
@@ -937,7 +937,7 @@ impl CoreNativeDecoderWorker for ExternalNativeDecoderWorker {
             || output.observable_byte_count != observable_byte_count
         {
             return Err(faultscope_core::NpError::new(format!(
-                "ABI v2 worker {} returned an invalid packed-row output shape",
+                "ABI v3 worker {} returned an invalid packed-row output shape",
                 self.name
             )));
         }
@@ -994,7 +994,7 @@ impl CoreNativeDecoderWorker for ExternalNativeDecoderWorker {
             || output.observable_byte_count != observable_byte_count
         {
             return Err(faultscope_core::NpError::new(format!(
-                "ABI v2 worker {} returned an invalid detector-event output shape",
+                "ABI v3 worker {} returned an invalid detector-event output shape",
                 self.name
             )));
         }
@@ -1034,8 +1034,23 @@ pub(crate) fn native_decoder_from_py(
     }
 }
 
+pub(crate) fn validate_native_decoder_observable_layout(
+    decoder: &dyn CoreNativeDecoderFactory,
+    canonical_observable_ids: &[i64],
+) -> PyResult<()> {
+    if decoder.observable_ids() != canonical_observable_ids {
+        return Err(PyValueError::new_err(format!(
+            "native decoder `{}` observable layout mismatch: expected sampler canonical ids {:?}, got {:?}",
+            decoder.name(),
+            canonical_observable_ids,
+            decoder.observable_ids()
+        )));
+    }
+    Ok(())
+}
+
 fn validate_external_factory_descriptor(
-    descriptor: NonNull<FaultScopeNativeDecoderFactoryV2>,
+    descriptor: NonNull<FaultScopeNativeDecoderFactoryV3>,
 ) -> PyResult<()> {
     let abi_version = unsafe { std::ptr::addr_of!((*descriptor.as_ptr()).abi_version).read() };
     if abi_version != NATIVE_DECODER_PLUGIN_ABI_VERSION {
@@ -1045,23 +1060,23 @@ fn validate_external_factory_descriptor(
         )));
     }
     let struct_size = unsafe { std::ptr::addr_of!((*descriptor.as_ptr()).struct_size).read() };
-    let minimum_descriptor_size = mem::size_of::<FaultScopeNativeDecoderFactoryV2>();
+    let minimum_descriptor_size = mem::size_of::<FaultScopeNativeDecoderFactoryV3>();
     if struct_size < minimum_descriptor_size {
         return Err(PyValueError::new_err(format!(
-            "ABI v2 native decoder factory descriptor has size {}; expected at least {}",
+            "ABI v3 native decoder factory descriptor has size {}; expected at least {}",
             struct_size, minimum_descriptor_size
         )));
     }
     let flags = unsafe { std::ptr::addr_of!((*descriptor.as_ptr()).flags).read() };
     if flags & NATIVE_DECODER_FACTORY_FLAG_THREAD_SAFE == 0 {
         return Err(PyValueError::new_err(
-            "ABI v2 native decoder factory must declare the thread-safe factory flag",
+            "ABI v3 native decoder factory must declare the thread-safe factory flag",
         ));
     }
     let state = unsafe { std::ptr::addr_of!((*descriptor.as_ptr()).factory_state).read() };
     if state.is_null() {
         return Err(PyValueError::new_err(
-            "ABI v2 native decoder factory has a null factory state pointer",
+            "ABI v3 native decoder factory has a null factory state pointer",
         ));
     }
     let drop_factory_state =
@@ -1078,44 +1093,44 @@ fn validate_external_factory_descriptor(
         || create_worker.is_none()
     {
         return Err(PyValueError::new_err(
-            "ABI v2 native decoder factory is missing required callbacks",
+            "ABI v3 native decoder factory is missing required callbacks",
         ));
     }
     Ok(())
 }
 
 fn external_worker_required_field_end() -> usize {
-    mem::offset_of!(FaultScopeNativeDecoderWorkerV2, decode_packed_batch)
+    mem::offset_of!(FaultScopeNativeDecoderWorkerV3, decode_packed_batch)
 }
 
 fn external_worker_packed_field_end() -> usize {
-    mem::offset_of!(FaultScopeNativeDecoderWorkerV2, decode_detector_event_batch)
+    mem::offset_of!(FaultScopeNativeDecoderWorkerV3, decode_detector_event_batch)
 }
 
 fn external_worker_event_field_end() -> usize {
-    mem::size_of::<FaultScopeNativeDecoderWorkerV2>()
+    mem::size_of::<FaultScopeNativeDecoderWorkerV3>()
 }
 
 fn validate_external_worker_descriptor(
-    worker: &FaultScopeNativeDecoderWorkerV2,
+    worker: &FaultScopeNativeDecoderWorkerV3,
     factory_name: &str,
 ) -> faultscope_core::NpResult<()> {
-    let capacity = mem::size_of::<FaultScopeNativeDecoderWorkerV2>();
+    let capacity = mem::size_of::<FaultScopeNativeDecoderWorkerV3>();
     if worker.struct_size < external_worker_required_field_end() || worker.struct_size > capacity {
         return Err(faultscope_core::NpError::new(format!(
-            "ABI v2 factory {factory_name} returned worker descriptor size {}; expected {}..={capacity}",
+            "ABI v3 factory {factory_name} returned worker descriptor size {}; expected {}..={capacity}",
             worker.struct_size,
             external_worker_required_field_end(),
         )));
     }
     if worker.worker_state.is_null() {
         return Err(faultscope_core::NpError::new(format!(
-            "ABI v2 factory {factory_name} returned a null worker state pointer"
+            "ABI v3 factory {factory_name} returned a null worker state pointer"
         )));
     }
     if worker.drop_worker_state.is_none() || worker.decode_batch.is_none() {
         return Err(faultscope_core::NpError::new(format!(
-            "ABI v2 factory {factory_name} returned a worker missing required callbacks"
+            "ABI v3 factory {factory_name} returned a worker missing required callbacks"
         )));
     }
     Ok(())

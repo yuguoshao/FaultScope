@@ -32,7 +32,7 @@ FaultScope `0.2.x` 支持 CPython 3.10–3.14。预构建 wheels 的目标平台
 manylinux x86_64/aarch64、macOS 11+ x86_64/arm64 和 Windows x86_64；源码构建需要
 Rust 1.85 或更新版本。
 
-当前 workspace 版本为 `0.2.2`。项目仍处于 pre-1.0，补丁版本也可能收口或重命名 Python/Rust
+当前 workspace 版本为 `0.2.3`。项目仍处于 pre-1.0，补丁版本也可能收口或重命名 Python/Rust
 API；native decoder ABI 则使用独立版本号管理。
 
 从源码 checkout 直接安装：
@@ -142,7 +142,7 @@ print(result.hotspot_table(top_k=5))
   `python -m faultscope.backends install pymatching --dry-run` 查看安装步骤；FaultScope 不会在
   `import` 或 `estimate(...)` 时隐式联网、clone 或编译。
 - `mwpm` 仍可在 catalog/status 中发现，但外部 `faultscope-mwpm` 包还是 ABI v1，尚未迁移到
-  FaultScope native decoder ABI v2，因此目前不可安装；`bposd` 是 catalog/status 中不可安装、
+  FaultScope native decoder ABI v3，因此目前不可安装；`bposd` 是 catalog/status 中不可安装、
   未实现的预留项。通用 `install bposd --dry-run` 子命令会报告它不可用，但不会生成安装计划或
   步骤，也不会执行安装。
 - 开发中的 PyMatching 和 fusion-blossom backend 可在激活 venv 后通过
@@ -162,7 +162,7 @@ print(result.hotspot_table(top_k=5))
 | 查看原始 measurement/noise masks | Forward sampling |
 | 自定义 measurement-history loss | Forward estimate + `loss_mask_fn` |
 | detector-syndrome decoder | Forward 或 DEM estimate + decoder |
-| graphlike matching decoder | 原型用 `PyMatchingDecoder`；高性能路径安装 `faultscope-pymatching` 后使用 `NativePyMatchingDecoder`，或使用 `faultscope-fusion-blossom`；`mwpm` 等待 ABI v2 迁移 |
+| graphlike matching decoder | 原型用 `PyMatchingDecoder`；高性能路径安装 `faultscope-pymatching` 后使用 `NativePyMatchingDecoder`，或使用 `faultscope-fusion-blossom`；`mwpm` 等待 ABI v3 迁移 |
 | circuit 入口的 DEM 采样 | `DemFaultScopeSimulator(circuit)` |
 | DEM edge 级热点排序 | `DemFaultScopeSimulator` 或 `DemHotspotEstimator(dem)` |
 | 重复 detector syndrome sampling | `DemFaultScopeSimulator(circuit)` 或生成 DEM 后复用 DEM sampler |

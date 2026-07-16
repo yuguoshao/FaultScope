@@ -20,8 +20,8 @@ decoder-fusion-blossom = ["faultscope-core/decoder-fusion-blossom"]
 decoder-bposd = ["faultscope-core/decoder-bposd"]
 
 [dependencies]
-faultscope-collection = { version = "0.2.2", path = "../faultscope-collection" }
-faultscope-core = { version = "0.2.2", path = "../faultscope-core" }
+faultscope-collection = { version = "0.2.3", path = "../faultscope-collection" }
+faultscope-core = { version = "0.2.3", path = "../faultscope-core" }
 pyo3 = { version = "0.23", features = ["extension-module", "abi3-py310"] }
 
 [package.metadata.maturin]

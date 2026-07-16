@@ -432,7 +432,7 @@ as `"pymatching"`, `"fusion-blossom"`, and `"bpdecoder"` through the
 uniform API. Friendly proxies such as `NativePyMatchingDecoder`,
 `NativeFusionBlossomDecoder`, `NativeMwpmDecoder`, and `NativeBposdDecoder` remain importable;
 construction raises a precise availability error when no compatible backend is
-available. `mwpm` is discoverable but unavailable pending its ABI v2 migration.
+available. `mwpm` is discoverable but unavailable pending its ABI v3 migration.
 `bposd` is a reserved, unimplemented, non-installable catalog/status entry. The
 generic `python -m faultscope.backends install bposd --dry-run` subcommand only
 reports that unavailability; it creates no install plan or steps and installs

@@ -74,6 +74,13 @@ pub(crate) fn sample_dem_logical_error_stats_with_rng(
     count_options: &CountOptions<'_>,
     prepared_plan: &PreparedDemCountPlan,
 ) -> NpResult<BatchStats> {
+    if let Some(decoder) = decoder.as_deref() {
+        validate_decoder_observable_layout(
+            sampler.observable_ids(),
+            decoder.observable_ids(),
+            decoder.name(),
+        )?;
+    }
     let mut out = if count_options.uses_detailed_path() {
         sample_detailed_batch(sampler, shots, rng, decoder, count_options)?
     } else {
@@ -137,6 +144,13 @@ pub(crate) fn count_detailed_batch(
     count_options: &CountOptions<'_>,
 ) -> NpResult<DetailedBatchResult> {
     let shots = batch.shots;
+    if let Some(decoder) = decoder.as_deref() {
+        validate_decoder_observable_layout(
+            sampler.observable_ids(),
+            decoder.observable_ids(),
+            decoder.name(),
+        )?;
+    }
     validate_mask_shape(
         count_options.postselection_mask,
         sampler.detector_ids().len(),
@@ -232,6 +246,20 @@ pub(crate) fn count_detailed_batch(
         },
         loss_mask,
     })
+}
+
+pub(crate) fn validate_decoder_observable_layout(
+    canonical_observable_ids: &[i64],
+    decoder_observable_ids: &[i64],
+    decoder_name: &str,
+) -> NpResult<()> {
+    if decoder_observable_ids != canonical_observable_ids {
+        return Err(NpError::new(format!(
+            "native decoder `{decoder_name}` observable layout mismatch: expected sampler canonical ids {:?}, got {:?}",
+            canonical_observable_ids, decoder_observable_ids
+        )));
+    }
+    Ok(())
 }
 
 fn sample_dem_logical_error_count_with_decoder(

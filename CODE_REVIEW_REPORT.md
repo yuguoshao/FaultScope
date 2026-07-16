@@ -487,7 +487,13 @@ let failures = packed_residual_failure_count(&[10], &[0x00], 1, &correction, 1)?
 
 **建议修复**
 
-在构造/校验时拒绝非零 padding，或在 residual 计算中对最后一个 byte 应用有效位 mask。增加 1、7、8、9 个 observable 的 padding 回归测试，并验证 reordered-layout 与 fast path 一致。
+在构造/校验时拒绝非零 padding，并要求 decoder 使用 sampler 的 canonical observable 布局；reordered、缺失或额外 IDs 直接失败。增加 1、7、8、9 个 observable 的 padding 回归测试以及布局拒绝测试。
+
+**修复状态（ABI v3）**
+
+已修复。Native decoder 与 sampler 绑定时现在要求完整、同序匹配 sampler canonical observable IDs；缺失、额外或 reordered 布局在采样和 worker callback 前直接报错。`CorrectionMaskBatch`、packed-row 和 detector-event 输出使用同一严格校验，packed 输出的非零 padding 也会被拒绝。`packed_residual_failure_count` 已删除 ID alignment `HashMap` 慢路径，仅保留校验后的逐行 bytewise XOR 路径。该语义通过 ABI v3 发布，不提供 ABI v2 兼容层。
+
+验证已覆盖 0/1/7/8/9 个 observables、完整/缺失/额外/重排布局、三种 decode callback、V2 capsule/numeric ABI/manifest 拒绝，以及 collection、forward estimate、DEM estimate 的采样前失败。Rust workspace、Python、PyMatching/Fusion Blossom backend 与 release-contract 测试均通过；collection 和 surface-code decoder benchmark smoke run 正常，热循环中不再构造 observable alignment table。
 
 ### FS-13 [P3] repetition 可视化对合法 `distance=1` 崩溃，较大参数被固定画布裁切
 
@@ -650,7 +656,7 @@ backend 为保证 callback 指针生命周期，会把每条动态错误保存�
 5. **Python/native noise 对照**：rate 0、1、中间值、自定义 channel、NaN/Inf 拒绝行为。
 6. **Strong-id 属性测试**：语义等价对象的 fingerprint 相同；任一影响行为的 decoder 参数变化都改变 fingerprint。
 7. **Stim differential**：对支持的子集使用 Stim parser 作为 oracle，比较接受/拒绝和解析后的参数。
-8. **第三方 decoder ABI**：非零 padding、reordered observable IDs、缺失/额外 IDs、错误消息压力测试。
+8. **第三方 decoder ABI**：非零 padding，以及 reordered、缺失或额外 observable IDs 的拒绝行为和错误消息压力测试。
 9. **可视化尺寸**：合法最小值、较大 distance/rounds、无 check 的布局。
 
 ## 6. 推荐修复顺序
@@ -671,7 +677,7 @@ backend 为保证 callback 指针生命周期，会把每条动态错误保存�
 
 7. 修复 Repetition decoder mapping 顺序和 `TaskStats`/analysis 校验。
 8. 收紧 Stim tokenizer/MPP parser，并加入 Stim differential tests。
-9. 校验 packed padding，补齐第三方 decoder ABI 测试。
+9. ~~校验 packed padding，补齐第三方 decoder ABI 测试。~~ 已由 ABI v3 canonical observable 布局完成。
 
 ### 第四阶段：性能和工程质量
 

@@ -462,7 +462,7 @@ class NoiseAwareSimulatorTests(unittest.TestCase):
         self.assertEqual(catalog["mwpm"].package_name, "faultscope-mwpm")
         self.assertEqual(catalog["mwpm"].repo_url, "https://github.com/Quon-team/mwpm.rs.git")
         self.assertIn("ABI v1", catalog["mwpm"].description)
-        self.assertIn("FaultScope native decoder ABI v2", catalog["mwpm"].description)
+        self.assertIn("FaultScope native decoder ABI v3", catalog["mwpm"].description)
         self.assertIn("bpdecoder", catalog)
         self.assertEqual(catalog["bpdecoder"].problem_kind, "binary-linear")
         self.assertTrue(catalog["bpdecoder"].installable)
@@ -549,7 +549,7 @@ class NoiseAwareSimulatorTests(unittest.TestCase):
                 NativeMwpmDecoder.from_dem(dem)
             message = str(raised.exception)
             self.assertIn("ABI v1", message)
-            self.assertIn("FaultScope native decoder ABI v2", message)
+            self.assertIn("FaultScope native decoder ABI v3", message)
             self.assertNotIn("python -m faultscope.backends install mwpm", message)
         clear_native_decoder_plugin_cache()
 
@@ -630,7 +630,7 @@ class NoiseAwareSimulatorTests(unittest.TestCase):
                 "name": "fusion-blossom",
                 "version": "test",
                 "source": "unit-test",
-                "abi_version": "faultscope.native_decoder_plugin.v2",
+                "abi_version": "faultscope.native_decoder_plugin.v3",
                 "decoders": {"fusion-blossom": MockFusionBlossomDecoder},
             }
 
@@ -747,7 +747,7 @@ class NoiseAwareSimulatorTests(unittest.TestCase):
                     )
                 self.assertFalse(os.listdir(tmpdir))
             self.assertIn("ABI v1", stdout.getvalue())
-            self.assertIn("FaultScope native decoder ABI v2", stdout.getvalue())
+            self.assertIn("FaultScope native decoder ABI v3", stdout.getvalue())
             self.assertNotIn("FaultScope will install", stdout.getvalue())
             self.assertNotIn("python -m faultscope.backends install mwpm", stdout.getvalue())
             self.assertNotIn("pip install", stdout.getvalue())
@@ -772,9 +772,14 @@ class NoiseAwareSimulatorTests(unittest.TestCase):
             self.assertIn("faultscope-bposd", stdout.getvalue())
         clear_native_decoder_plugin_cache()
 
-    def test_post_install_plugin_manifest_abi_is_strict_v2(self) -> None:
-        expected = "faultscope.native_decoder_plugin.v2"
-        for observed in ("faultscope.native_decoder_plugin.v1", "wrong", None):
+    def test_post_install_plugin_manifest_abi_is_strict_v3(self) -> None:
+        expected = "faultscope.native_decoder_plugin.v3"
+        for observed in (
+            "faultscope.native_decoder_plugin.v2",
+            "faultscope.native_decoder_plugin.v1",
+            "wrong",
+            None,
+        ):
             with self.subTest(observed=observed):
                 manifest_data = {
                     "name": "fusion-blossom",
@@ -822,7 +827,7 @@ class NoiseAwareSimulatorTests(unittest.TestCase):
             self.assertTrue(status.installed)
             self.assertFalse(status.loadable)
             self.assertIn("faultscope.native_decoder_plugin.v1", status.error)
-            self.assertIn("faultscope.native_decoder_plugin.v2", status.error)
+            self.assertIn("faultscope.native_decoder_plugin.v3", status.error)
             self.assertNotIn("python -m faultscope.backends install mwpm", status.error)
         clear_native_decoder_plugin_cache()
 
@@ -832,7 +837,7 @@ class NoiseAwareSimulatorTests(unittest.TestCase):
                 "name": "backend-a",
                 "version": "test",
                 "source": "unit-test",
-                "abi_version": "faultscope.native_decoder_plugin.v2",
+                "abi_version": "faultscope.native_decoder_plugin.v3",
                 "decoders": {"fusion-blossom": object},
             }
 
@@ -841,7 +846,7 @@ class NoiseAwareSimulatorTests(unittest.TestCase):
                 "name": "backend-b",
                 "version": "test",
                 "source": "unit-test",
-                "abi_version": "faultscope.native_decoder_plugin.v2",
+                "abi_version": "faultscope.native_decoder_plugin.v3",
                 "decoders": {"fusion-blossom": object},
             }
 
@@ -867,7 +872,7 @@ class NoiseAwareSimulatorTests(unittest.TestCase):
                 "name": "missing-decoders",
                 "version": "test",
                 "source": "unit-test",
-                "abi_version": "faultscope.native_decoder_plugin.v2",
+                "abi_version": "faultscope.native_decoder_plugin.v3",
             }
 
         with mock.patch(
@@ -885,7 +890,7 @@ class NoiseAwareSimulatorTests(unittest.TestCase):
             return {
                 "name": "missing-version",
                 "source": "unit-test",
-                "abi_version": "faultscope.native_decoder_plugin.v2",
+                "abi_version": "faultscope.native_decoder_plugin.v3",
                 "decoders": {"missing-version": object},
             }
 
@@ -1184,7 +1189,36 @@ class BatchNoiseAwareSimulatorTests(unittest.TestCase):
         self.assertEqual(native_result.mean_loss, default_result.mean_loss)
         self.assertEqual(native_result.hotspots, default_result.hotspots)
 
-    def test_native_decoder_invalid_correction_raises_value_error(self) -> None:
+    def test_native_decoder_forward_estimate_rejects_noncanonical_layout(self) -> None:
+        location = NoiseLocation(
+            id="x0",
+            model=BernoulliPauliNoise("X"),
+            rate=0.25,
+            qubits=(0,),
+        )
+        circuit = Circuit(
+            n_qubits=1,
+            operations=[
+                Operation.noise(location),
+                Operation.measure(0, key="m", basis="Z"),
+            ],
+        )
+        observables = (LogicalObservable(id=0, measurement_keys=("m",)),)
+        decoder = NativeNoCorrectionDecoder(observable_ids=(1,))
+
+        with self.assertRaisesRegex(
+            ValueError,
+            r"expected sampler canonical ids \[0\], got \[1\]",
+        ):
+            FaultScopeSimulator(circuit, observables=observables).estimate(
+                shots=128,
+                seed=114,
+                decoder=decoder,
+            )
+
+        self.assertEqual(decoder.python_decode_call_count, 0)
+
+    def test_native_decoder_duplicate_layout_raises_value_error_before_decode(self) -> None:
         location = NoiseLocation(
             id="x0",
             model=BernoulliPauliNoise("X"),
@@ -1201,7 +1235,10 @@ class BatchNoiseAwareSimulatorTests(unittest.TestCase):
         observables = (LogicalObservable(id=0, measurement_keys=("m",)),)
         decoder = NativeNoCorrectionDecoder(observable_ids=(0, 0))
 
-        with self.assertRaisesRegex(ValueError, "duplicate correction observable id 0"):
+        with self.assertRaisesRegex(
+            ValueError,
+            r"expected sampler canonical ids \[0\], got \[0, 0\]",
+        ):
             FaultScopeSimulator(
                 circuit,
                 observables=observables,

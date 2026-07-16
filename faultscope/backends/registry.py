@@ -97,7 +97,7 @@ OFFICIAL_BACKEND_CATALOG: dict[str, NativeDecoderBackendCatalogEntry] = {
         installable=False,
         description=(
             "The faultscope-mwpm package is still ABI v1 and is not yet migrated to "
-            "FaultScope native decoder ABI v2."
+            "FaultScope native decoder ABI v3."
         ),
     ),
     "bpdecoder": NativeDecoderBackendCatalogEntry(
@@ -218,7 +218,7 @@ def backend_unavailable_message(name: str) -> str:
         if entry.name == "mwpm":
             return (
                 f"{entry.decoder_class_name} is unavailable: `{entry.package_name}` is "
-                "still ABI v1 and is not yet migrated to FaultScope native decoder ABI v2"
+                "still ABI v1 and is not yet migrated to FaultScope native decoder ABI v3"
                 f"{details}."
             )
         return (

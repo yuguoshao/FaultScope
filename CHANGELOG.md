@@ -4,7 +4,7 @@ All notable changes to FaultScope are documented here. FaultScope is pre-1.0:
 unless a contract is explicitly versioned (such as the native decoder ABI),
 patch releases may make breaking API changes.
 
-## [0.2.2] - Unreleased
+## [0.2.3] - Unreleased
 
 ### Added
 
@@ -17,6 +17,9 @@ patch releases may make breaking API changes.
 
 ### Changed
 
+- Native decoder plugins now use ABI v3. Decoder observable outputs must match
+  the sampler's complete canonical layout, packed padding must be zero, and ABI
+  v2 capsules/manifests are rejected without an adapter.
 - Pauli and stabilizer validation now occurs once at Python and Rust public
   boundaries. Validated owning state and borrowed sparse-Pauli views are used
   by internal hot paths, avoiding repeated full-width scans and allocations for
@@ -73,4 +76,4 @@ patch releases may make breaking API changes.
 - Generated type stubs now mark factory-only native classes, including
   `StabilizerState`, as unavailable for direct construction.
 
-[0.2.2]: https://github.com/yuguoshao/FaultScope/releases/tag/v0.2.2
+[0.2.3]: https://github.com/yuguoshao/FaultScope/releases/tag/v0.2.3

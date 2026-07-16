@@ -21,9 +21,9 @@ from faultscope.runtime import (
     compile_native_dem_sampler,
     generate_native_dem,
 )
-from tests.native_backend_v2_helpers import (
+from tests.native_backend_v3_helpers import (
     assert_factory_failure_lifetimes,
-    assert_v2_worker_contract,
+    assert_v3_worker_contract,
 )
 
 BACKEND_SRC = Path(__file__).resolve().parents[1] / "backends" / "faultscope-fusion-blossom" / "src"
@@ -164,7 +164,7 @@ class FusionBlossomBackendPackageTests(unittest.TestCase):
         self.assertEqual(decoder.decode_batch_masks(Batch()), {8: 0, 9: 1})
 
     @requires_native_backend
-    def test_exact_v2_factory_creates_distinct_workers_and_fast_paths(self) -> None:
+    def test_exact_v3_factory_creates_distinct_workers_and_fast_paths(self) -> None:
         dem = DetectorErrorModel(
             detectors=(Detector(id=0, measurement_keys=()),),
             observables=(LogicalObservable(id=0),),
@@ -172,7 +172,7 @@ class FusionBlossomBackendPackageTests(unittest.TestCase):
         )
         decoder = faultscope_fusion_blossom.NativeFusionBlossomDecoder.from_dem(dem)
 
-        test_stats = assert_v2_worker_contract(self, decoder)
+        test_stats = assert_v3_worker_contract(self, decoder)
         self.assertEqual(test_stats.factory_drops, 0)
         del decoder
         gc.collect()
@@ -192,8 +192,8 @@ class FusionBlossomBackendPackageTests(unittest.TestCase):
         test_stats.enable_decode_overlap()
         tasks = (
             {
-                "task_id": "fusion-v2-workers",
-                "strong_id": "fusion-v2-workers-strong",
+                "task_id": "fusion-v3-workers",
+                "strong_id": "fusion-v3-workers-strong",
                 "sampler": compile_native_dem_sampler(dem),
                 "decoder": decoder,
                 "metadata_json": "{}",
@@ -736,7 +736,10 @@ class FusionBlossomBackendPackageTests(unittest.TestCase):
                 Operation.detector(("m",), detector_id=0),
             ],
         )
-        simulator = FaultScopeSimulator(circuit)
+        simulator = FaultScopeSimulator(
+            circuit,
+            observables=(LogicalObservable(id=0, measurement_keys=("m",)),),
+        )
         decoder = fusion_native.InvalidNativeDecoderCapsule("decode-error")
 
         with self.assertRaisesRegex(ValueError, "forced native decoder decode failure"):
