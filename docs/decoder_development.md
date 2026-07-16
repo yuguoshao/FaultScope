@@ -214,9 +214,13 @@ The problem views expose ids, detector coordinates, counts, `edge_summary`,
 probabilities, weights, and sparse binary matrix entries for construction-time
 inspection. `detector_coords` is ordered exactly like `detector_ids`; backend
 builders can use it for geometry-aware graph compilation or partition planning.
-They intentionally do not expose `to_numpy_*` hot-path helpers. A native
-decoder should consume the native problem representation instead of moving
-batch data through Python.
+They intentionally do not expose `to_numpy_*` hot-path helpers.
+
+A native problem view uses the same canonical ids as DEM sampling: declarations
+first, then ids first referenced by raw edges. Per-edge detector and observable
+supports are reduced over GF(2), so sparse matrices never encode duplicate
+coordinates with numeric values greater than one. Decoder builders should
+consume these views instead of rebuilding ids or matrices from raw DEM fields.
 
 ## Native Decoder Backends
 

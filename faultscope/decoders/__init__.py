@@ -46,9 +46,10 @@ def create_native_decoder(
         raise ValueError("supply either dem or circuit, not both")
     if name == "no-correction":
         if dem is not None:
+            indexed = dem.compile_indexed()
             return NativeNoCorrectionDecoder(
-                observable_ids=tuple(observable.id for observable in dem.observables),
-                detector_ids=tuple(detector.id for detector in dem.detectors),
+                observable_ids=indexed.observable_ids,
+                detector_ids=indexed.detector_ids,
             )
         if circuit is not None:
             return NativeNoCorrectionDecoder(

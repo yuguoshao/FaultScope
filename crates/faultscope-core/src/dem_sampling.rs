@@ -1,5 +1,7 @@
-use std::collections::{hash_map::Entry, HashMap};
+use std::collections::HashMap;
+use std::sync::Arc;
 
+use crate::dem_canonical::{canonical_id_order, parity_canonicalize};
 use crate::labels::LocationCatalogBuilder;
 use crate::{
     bernoulli_mask, for_each_bernoulli_event, word_count, DemBatch, DemEvent, DemHotspotEstimate,
@@ -41,8 +43,18 @@ struct CompiledDemEdges {
 /// edge and location hotspot estimates entirely in Rust.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DemHotspotEstimator {
+    /// Construction-time detector ID mirror retained for source compatibility.
+    ///
+    /// Operational methods use [`Self::detector_ids`] instead. Mutating this
+    /// field does not recompile or otherwise change the estimator.
     pub detector_ids: Vec<i64>,
+    /// Construction-time observable ID mirror retained for source compatibility.
+    ///
+    /// Operational methods use [`Self::observable_ids`] instead. Mutating this
+    /// field does not recompile or otherwise change the estimator.
     pub observable_ids: Vec<i64>,
+    canonical_detector_ids: Arc<[i64]>,
+    canonical_observable_ids: Arc<[i64]>,
     edges: Vec<DemProgramEdge>,
     edge_metadata: Option<Vec<DemProgramEdgeMetadata>>,
     location_catalog: LocationCatalog,
@@ -111,7 +123,12 @@ impl DemHotspotEstimator {
         observable_ids: Vec<i64>,
         edges: Vec<DemProgramEdge>,
     ) -> Self {
+        let (detector_ids, observable_ids, edges) =
+            canonicalize_program_parts(detector_ids, observable_ids, edges)
+                .expect("generated DEM declarations must have unique ids");
         Self {
+            canonical_detector_ids: Arc::from(detector_ids.as_slice()),
+            canonical_observable_ids: Arc::from(observable_ids.as_slice()),
             detector_ids,
             observable_ids,
             edges,
@@ -129,9 +146,14 @@ impl DemHotspotEstimator {
         location_catalog: LocationCatalog,
     ) -> Self {
         debug_assert_eq!(edges.len(), edge_metadata.len());
+        let (detector_ids, observable_ids, edges) =
+            canonicalize_program_parts(detector_ids, observable_ids, edges)
+                .expect("generated DEM declarations must have unique ids");
         let location_groups =
             build_dem_program_location_groups(&edges, &edge_metadata, location_catalog.len());
         Self {
+            canonical_detector_ids: Arc::from(detector_ids.as_slice()),
+            canonical_observable_ids: Arc::from(observable_ids.as_slice()),
             detector_ids,
             observable_ids,
             edges,
@@ -159,10 +181,14 @@ impl DemHotspotEstimator {
         edges: Vec<DetectorErrorEdge>,
     ) -> NpResult<Self> {
         let compiled = compile_dem_edges(edges, true)?;
+        let (detector_ids, observable_ids, edges) =
+            canonicalize_program_parts(detector_ids, observable_ids, compiled.edges)?;
         Ok(Self {
+            canonical_detector_ids: Arc::from(detector_ids.as_slice()),
+            canonical_observable_ids: Arc::from(observable_ids.as_slice()),
             detector_ids,
             observable_ids,
-            edges: compiled.edges,
+            edges,
             edge_metadata: compiled.metadata,
             location_catalog: compiled.catalog,
             location_groups: compiled.location_groups,
@@ -178,16 +204,33 @@ impl DemHotspotEstimator {
         let compiled = compile_dem_edges(edges, false)?;
         debug_assert!(compiled.metadata.is_none());
         debug_assert!(compiled.catalog.is_empty());
-        Ok(Self::from_compact_sampling_parts(
+        let (detector_ids, observable_ids, edges) =
+            canonicalize_program_parts(detector_ids, observable_ids, compiled.edges)?;
+        Ok(Self {
+            canonical_detector_ids: Arc::from(detector_ids.as_slice()),
+            canonical_observable_ids: Arc::from(observable_ids.as_slice()),
             detector_ids,
             observable_ids,
-            compiled.edges,
-        ))
+            edges,
+            edge_metadata: None,
+            location_catalog: LocationCatalog::default(),
+            location_groups: Vec::new(),
+        })
     }
 
     /// Number of compiled DEM edges.
     pub fn edge_count(&self) -> usize {
         self.edges.len()
+    }
+
+    /// Detector IDs in the immutable canonical sampling order.
+    pub fn detector_ids(&self) -> &[i64] {
+        self.canonical_detector_ids.as_ref()
+    }
+
+    /// Observable IDs in the immutable canonical sampling order.
+    pub fn observable_ids(&self) -> &[i64] {
+        self.canonical_observable_ids.as_ref()
     }
 
     /// Materialize one user-facing DEM edge at the output boundary.
@@ -254,8 +297,8 @@ impl DemHotspotEstimator {
         return_edge_events: bool,
     ) -> DemBatch {
         run_dem_program_batch(
-            &self.detector_ids,
-            &self.observable_ids,
+            self.detector_ids(),
+            self.observable_ids(),
             &self.edges,
             shots,
             rng,
@@ -283,8 +326,8 @@ impl DemHotspotEstimator {
         observable_ids: &[i64],
     ) -> NpResult<DetectorEventDemShotBatch> {
         Ok(compile_dem_sampling_plan(
-            &self.detector_ids,
-            &self.observable_ids,
+            self.detector_ids(),
+            self.observable_ids(),
             &self.edges,
             detector_ids,
             observable_ids,
@@ -300,8 +343,8 @@ impl DemHotspotEstimator {
         observable_ids: &[i64],
     ) -> NpResult<CompiledDemSamplingPlan> {
         compile_dem_sampling_plan(
-            &self.detector_ids,
-            &self.observable_ids,
+            self.detector_ids(),
+            self.observable_ids(),
             &self.edges,
             detector_ids,
             observable_ids,
@@ -311,7 +354,7 @@ impl DemHotspotEstimator {
 
     /// Compile the observable-only path used to count default logical failures.
     pub fn compile_logical_count_plan(&self) -> CompiledDemLogicalCountPlan {
-        CompiledDemLogicalCountPlan::new(&self.observable_ids, &self.edges)
+        CompiledDemLogicalCountPlan::new(self.observable_ids(), &self.edges)
     }
 
     /// Run a batch and estimate hotspots using the default logical loss mask.
@@ -453,9 +496,6 @@ impl CompiledDemSamplingPlan {
         let mut observable_data = vec![0; shots * self.observable_byte_count];
 
         for columns in &self.edges {
-            if columns.detector_columns.is_empty() && columns.observable_columns.is_empty() {
-                continue;
-            }
             for_each_bernoulli_event(rng, shots, columns.probability, |shot, _| {
                 let detector_row = shot * self.detector_byte_count;
                 for (byte_index, bit_mask) in &columns.packed_detector_columns {
@@ -489,9 +529,6 @@ impl CompiledDemSamplingPlan {
         let mut raw_events = Vec::<(usize, usize)>::new();
 
         for columns in &self.edges {
-            if columns.detector_columns.is_empty() && columns.observable_columns.is_empty() {
-                continue;
-            }
             for_each_bernoulli_event(rng, shots, columns.probability, |shot, _| {
                 event_counts[shot] += columns.detector_columns.len();
                 raw_events.extend(
@@ -535,25 +572,19 @@ impl CompiledDemSamplingPlan {
 
 impl CompiledDemLogicalCountPlan {
     fn new(observable_ids: &[i64], edges: &[DemProgramEdge]) -> Self {
-        let mut compiled_observable_ids = Vec::new();
-        let mut observable_index = HashMap::new();
-        for observable_id in observable_ids
-            .iter()
-            .chain(edges.iter().flat_map(|edge| edge.observables.iter()))
-        {
-            let next_index = compiled_observable_ids.len();
-            if let Entry::Vacant(entry) = observable_index.entry(*observable_id) {
-                entry.insert(next_index);
-                compiled_observable_ids.push(*observable_id);
-            }
-        }
+        let compiled_observable_ids = observable_ids.to_vec();
+        let observable_index = id_index(observable_ids);
         let compiled_edges = edges
             .iter()
             .map(|edge| {
                 let observable_columns = edge
                     .observables
                     .iter()
-                    .map(|observable_id| observable_index[observable_id])
+                    .map(|observable_id| {
+                        *observable_index
+                            .get(observable_id)
+                            .expect("canonical DEM layout must include every edge observable")
+                    })
                     .collect::<Vec<_>>();
                 let single_observable_flip = observable_columns
                     .iter()
@@ -748,14 +779,14 @@ fn run_dem_program_batch(
         if !event_mask.is_zero() {
             for detector_id in &edge.detectors {
                 detectors
-                    .entry(*detector_id)
-                    .or_insert_with(|| Mask::zero(words))
+                    .get_mut(detector_id)
+                    .expect("canonical DEM layout must include every edge detector")
                     .xor_assign(&event_mask);
             }
             for observable_id in &edge.observables {
                 observables
-                    .entry(*observable_id)
-                    .or_insert_with(|| Mask::zero(words))
+                    .get_mut(observable_id)
+                    .expect("canonical DEM layout must include every edge observable")
                     .xor_assign(&event_mask);
             }
         }
@@ -778,6 +809,36 @@ fn run_dem_program_batch(
         edge_event_masks,
         loss_mask,
     }
+}
+
+fn canonicalize_program_parts(
+    detector_ids: Vec<i64>,
+    observable_ids: Vec<i64>,
+    mut edges: Vec<DemProgramEdge>,
+) -> NpResult<(Vec<i64>, Vec<i64>, Vec<DemProgramEdge>)> {
+    let detector_ids = canonical_id_order(
+        &detector_ids,
+        edges.iter().map(|edge| edge.detectors.as_slice()),
+        "detector ids must be unique",
+    )?;
+    let observable_ids = canonical_id_order(
+        &observable_ids,
+        edges.iter().map(|edge| edge.observables.as_slice()),
+        "logical observable ids must be unique",
+    )?;
+    for edge in &mut edges {
+        parity_canonicalize(&mut edge.detectors);
+        parity_canonicalize(&mut edge.observables);
+    }
+    Ok((detector_ids, observable_ids, edges))
+}
+
+fn id_index(ids: &[i64]) -> HashMap<i64, usize> {
+    ids.iter()
+        .copied()
+        .enumerate()
+        .map(|(index, id)| (id, index))
+        .collect()
 }
 
 fn compile_dem_edges(
@@ -969,7 +1030,7 @@ mod tests {
     }
 
     #[test]
-    fn compiled_event_batch_preserves_event_order_and_duplicates() {
+    fn compiled_event_batch_emits_parity_canonical_events() {
         let simulator = DemHotspotEstimator::from_sampling_parts(
             vec![10, 20],
             vec![7, 9],
@@ -982,9 +1043,151 @@ mod tests {
         let plan = simulator.compile_sampling_plan(&[20, 10], &[9, 7]).unwrap();
         let batch = plan.run_detector_event_shot_batch_with_rng(2, &mut SmallRng::new(4));
 
-        assert_eq!(batch.offsets, vec![0, 4, 8]);
-        assert_eq!(batch.events, vec![0, 1, 0, 1, 0, 1, 0, 1]);
+        assert_eq!(batch.offsets, vec![0, 2, 4]);
+        assert_eq!(batch.events, vec![1, 1, 1, 1]);
         assert_eq!(batch.observable_data, vec![0b11, 0b11]);
+    }
+
+    #[test]
+    fn estimator_canonicalizes_implicit_ids_and_parity_once() {
+        let simulator = DemHotspotEstimator::from_sampling_parts(
+            Vec::new(),
+            Vec::new(),
+            vec![edge(1.0, vec![1, 1], vec![9, 9])],
+        )
+        .unwrap();
+
+        assert_eq!(simulator.detector_ids, vec![1]);
+        assert_eq!(simulator.observable_ids, vec![9]);
+        assert_eq!(simulator.edge_count(), 1);
+        assert!(simulator.edge(0).unwrap().detectors.is_empty());
+        assert!(simulator.edge(0).unwrap().observables.is_empty());
+
+        let mut generic_rng = SmallRng::new(13);
+        let generic = simulator.run_batch_with_rng(4, &mut generic_rng, true);
+        assert_eq!(generic.detectors[&1].bit_count(), 0);
+        assert_eq!(generic.observables[&9].bit_count(), 0);
+        assert_eq!(generic.edge_event_masks.len(), 1);
+        assert_eq!(generic.edge_event_masks[0].bit_count(), 4);
+
+        let plan = simulator.compile_sampling_plan(&[1], &[9]).unwrap();
+        let mut packed_rng = SmallRng::new(13);
+        let packed = plan.run_packed_shot_batch_with_rng(4, &mut packed_rng);
+        assert_eq!(packed.detector_data, vec![0; 4]);
+        assert_eq!(packed.observable_data, vec![0; 4]);
+        assert_eq!(generic_rng.next_u64(), packed_rng.next_u64());
+    }
+
+    #[test]
+    fn parity_cancelled_edges_preserve_rng_across_sampling_paths() {
+        for cancelled_probability in [0.0, 0.37, 1.0] {
+            let simulator = DemHotspotEstimator::from_sampling_parts(
+                Vec::new(),
+                Vec::new(),
+                vec![
+                    edge(cancelled_probability, vec![1, 1], vec![9, 9]),
+                    edge(0.43, vec![2], vec![10]),
+                ],
+            )
+            .unwrap();
+            let detector_ids = simulator.detector_ids();
+            let observable_ids = simulator.observable_ids();
+            let plan = simulator
+                .compile_sampling_plan(detector_ids, observable_ids)
+                .unwrap();
+
+            let mut generic_rng = SmallRng::new(123);
+            let generic = simulator.run_batch_with_rng(129, &mut generic_rng, true);
+            let expected = packed_reference(&generic, detector_ids, observable_ids);
+            let generic_next = generic_rng.next_u64();
+            assert_eq!(generic.edge_event_masks.len(), 2);
+            assert_eq!(generic.detectors[&1].bit_count(), 0);
+            assert_eq!(generic.observables[&9].bit_count(), 0);
+
+            let mut packed_rng = SmallRng::new(123);
+            let packed = plan.run_packed_shot_batch_with_rng(129, &mut packed_rng);
+            assert_eq!(packed.detector_data, expected.0);
+            assert_eq!(packed.observable_data, expected.1);
+            assert_eq!(packed_rng.next_u64(), generic_next);
+
+            let mut expected_offsets = Vec::with_capacity(130);
+            let mut expected_events = Vec::new();
+            expected_offsets.push(0);
+            for shot in 0..129 {
+                if generic.detectors[&2].words[shot / 64] & (1u64 << (shot % 64)) != 0 {
+                    expected_events.push(1);
+                }
+                expected_offsets.push(expected_events.len());
+            }
+            let mut event_rng = SmallRng::new(123);
+            let events = plan.run_detector_event_shot_batch_with_rng(129, &mut event_rng);
+            assert_eq!(events.offsets, expected_offsets);
+            assert_eq!(events.events, expected_events);
+            assert_eq!(events.observable_data, expected.1);
+            assert_eq!(event_rng.next_u64(), generic_next);
+        }
+    }
+
+    #[test]
+    fn public_id_mirrors_do_not_mutate_the_canonical_sampling_layout() {
+        let mut simulator = DemHotspotEstimator::from_sampling_parts(
+            Vec::new(),
+            Vec::new(),
+            vec![edge(0.43, vec![7], vec![9])],
+        )
+        .unwrap();
+        let mut expected_rng = SmallRng::new(17);
+        let expected = simulator.run_batch_with_rng(129, &mut expected_rng, false);
+        let expected_rng_next = expected_rng.next_u64();
+        let expected_packed = packed_reference(&expected, &[7], &[9]);
+
+        simulator.detector_ids.clear();
+        simulator.detector_ids.push(70);
+        simulator.observable_ids.clear();
+        simulator.observable_ids.push(90);
+
+        assert_eq!(simulator.detector_ids(), &[7]);
+        assert_eq!(simulator.observable_ids(), &[9]);
+        assert_eq!(simulator.run_batch(129, Some(17), false).unwrap(), expected);
+        assert_eq!(
+            simulator.compile_logical_count_plan().observable_ids(),
+            &[9]
+        );
+        let plan = simulator
+            .compile_sampling_plan(simulator.detector_ids(), simulator.observable_ids())
+            .unwrap();
+        assert_eq!(plan.detector_ids(), &[7]);
+        assert_eq!(plan.observable_ids(), &[9]);
+
+        let mut packed_rng = SmallRng::new(17);
+        let packed = plan.run_packed_shot_batch_with_rng(129, &mut packed_rng);
+        assert_eq!(packed.detector_data, expected_packed.0);
+        assert_eq!(packed.observable_data, expected_packed.1);
+        assert_eq!(packed_rng.next_u64(), expected_rng_next);
+
+        let mut expected_offsets = Vec::with_capacity(130);
+        let mut expected_events = Vec::new();
+        expected_offsets.push(0);
+        for shot in 0..129 {
+            if expected.detectors[&7].words[shot / 64] & (1u64 << (shot % 64)) != 0 {
+                expected_events.push(0);
+            }
+            expected_offsets.push(expected_events.len());
+        }
+        let mut event_rng = SmallRng::new(17);
+        let events = plan.run_detector_event_shot_batch_with_rng(129, &mut event_rng);
+        assert_eq!(events.offsets, expected_offsets);
+        assert_eq!(events.events, expected_events);
+        assert_eq!(events.observable_data, expected_packed.1);
+        assert_eq!(event_rng.next_u64(), expected_rng_next);
+    }
+
+    #[test]
+    fn estimator_rejects_duplicate_declared_ids() {
+        let err = DemHotspotEstimator::from_sampling_parts(vec![1, 1], Vec::new(), Vec::new())
+            .unwrap_err();
+
+        assert_eq!(err.message(), "detector ids must be unique");
     }
 
     #[test]

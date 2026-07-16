@@ -1640,11 +1640,6 @@ fn native_dem_sampler_from_core_generator(
     generator: &CoreDetectorErrorModelGenerator,
     materialize_dem: bool,
 ) -> PyResult<NativeDemSampler> {
-    let observable_ids: Vec<i64> = generator
-        .observables
-        .iter()
-        .map(|observable| observable.id)
-        .collect();
     let lazy_dem = generator
         .generate_lazy()
         .map_err(|err| PyValueError::new_err(err.to_string()))?;
@@ -1656,8 +1651,9 @@ fn native_dem_sampler_from_core_generator(
         (lazy_dem.into_sampling_estimator(), None)
     };
     let edge_count = simulator.edge_count();
+    let observables = simulator.observable_ids().to_vec();
     Ok(NativeDemSampler {
-        observables: observable_ids,
+        observables,
         edge_count,
         simulator,
         py_dem,
@@ -1717,11 +1713,12 @@ fn native_dem_sampler_from_parts(
 ) -> PyResult<NativeDemSampler> {
     let edge_count = edges.len();
     let simulator = if py_dem.is_some() {
-        CoreDemHotspotEstimator::from_parts(detectors, observables.clone(), edges)
+        CoreDemHotspotEstimator::from_parts(detectors, observables, edges)
     } else {
-        CoreDemHotspotEstimator::from_sampling_parts(detectors, observables.clone(), edges)
+        CoreDemHotspotEstimator::from_sampling_parts(detectors, observables, edges)
     }
     .map_err(|err| PyValueError::new_err(err.to_string()))?;
+    let observables = simulator.observable_ids().to_vec();
     Ok(NativeDemSampler {
         observables,
         edge_count,

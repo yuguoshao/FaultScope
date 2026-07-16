@@ -56,7 +56,7 @@ pub(crate) fn prepare_dem_count_plan(
     }
     match detector_ids {
         Some(detector_ids) => Ok(sampler
-            .compile_sampling_plan(detector_ids, &sampler.observable_ids)
+            .compile_sampling_plan(detector_ids, sampler.observable_ids())
             .map(PreparedDemCountPlan::Decoder)
             .unwrap_or(PreparedDemCountPlan::Generic)),
         None => Ok(PreparedDemCountPlan::Logical(
@@ -117,12 +117,12 @@ fn sample_detailed_batch(
 ) -> NpResult<BatchStats> {
     validate_mask_shape(
         count_options.postselection_mask,
-        sampler.detector_ids.len(),
+        sampler.detector_ids().len(),
         "postselection_mask",
     )?;
     validate_mask_shape(
         count_options.postselected_observables_mask,
-        sampler.observable_ids.len(),
+        sampler.observable_ids().len(),
         "postselected_observables_mask",
     )?;
 
@@ -139,12 +139,12 @@ pub(crate) fn count_detailed_batch(
     let shots = batch.shots;
     validate_mask_shape(
         count_options.postselection_mask,
-        sampler.detector_ids.len(),
+        sampler.detector_ids().len(),
         "postselection_mask",
     )?;
     validate_mask_shape(
         count_options.postselected_observables_mask,
-        sampler.observable_ids.len(),
+        sampler.observable_ids().len(),
         "postselected_observables_mask",
     )?;
     let corrections = match decoder {
@@ -160,13 +160,13 @@ pub(crate) fn count_detailed_batch(
     let residuals = residual_masks(
         &batch.observables,
         &corrections,
-        &sampler.observable_ids,
+        sampler.observable_ids(),
         shots,
     );
     let mut loss_mask = Mask::zero(word_count(shots));
     let detector_discard_mask = detector_postselection_loss_mask(
         &batch.detectors,
-        &sampler.detector_ids,
+        sampler.detector_ids(),
         shots,
         count_options.postselection_mask,
     )?;
@@ -176,7 +176,7 @@ pub(crate) fn count_detailed_batch(
         custom_counts.insert("detection_events".to_string(), events);
         custom_counts.insert(
             "detectors_checked".to_string(),
-            shots * sampler.detector_ids.len(),
+            shots * sampler.detector_ids().len(),
         );
     }
 
@@ -193,7 +193,7 @@ pub(crate) fn count_detailed_batch(
 
         let mut observable_discard = false;
         let mut logical_error = false;
-        let mut combo = String::with_capacity(sampler.observable_ids.len());
+        let mut combo = String::with_capacity(sampler.observable_ids().len());
         for (index, (_, residual)) in residuals.iter().enumerate() {
             let bit = mask_bit(residual, shot);
             let postselected = packed_mask_bit(count_options.postselected_observables_mask, index);
@@ -247,14 +247,15 @@ fn sample_dem_logical_error_count_with_decoder(
         let plan = match prepared_plan {
             PreparedDemCountPlan::Decoder(plan)
                 if plan.detector_ids() == detector_ids.as_slice()
-                    && plan.observable_ids() == sampler.observable_ids.as_slice() =>
+                    && plan.observable_ids() == sampler.observable_ids() =>
             {
                 plan
             }
             PreparedDemCountPlan::Generic
             | PreparedDemCountPlan::Logical(_)
             | PreparedDemCountPlan::Decoder(_) => {
-                fallback = sampler.compile_sampling_plan(&detector_ids, &sampler.observable_ids)?;
+                fallback =
+                    sampler.compile_sampling_plan(&detector_ids, sampler.observable_ids())?;
                 &fallback
             }
         };
@@ -281,14 +282,15 @@ fn sample_dem_logical_error_count_with_decoder(
         let plan = match prepared_plan {
             PreparedDemCountPlan::Decoder(plan)
                 if plan.detector_ids() == detector_ids.as_slice()
-                    && plan.observable_ids() == sampler.observable_ids.as_slice() =>
+                    && plan.observable_ids() == sampler.observable_ids() =>
             {
                 plan
             }
             PreparedDemCountPlan::Generic
             | PreparedDemCountPlan::Logical(_)
             | PreparedDemCountPlan::Decoder(_) => {
-                fallback = sampler.compile_sampling_plan(&detector_ids, &sampler.observable_ids)?;
+                fallback =
+                    sampler.compile_sampling_plan(&detector_ids, sampler.observable_ids())?;
                 &fallback
             }
         };
@@ -316,7 +318,7 @@ fn sample_dem_logical_error_count_with_decoder(
     let loss_mask = logical_residual_loss_mask_native(
         &batch.observables,
         &corrections,
-        &sampler.observable_ids,
+        sampler.observable_ids(),
         &batch.all_mask,
     );
     Ok(loss_mask.bit_count())

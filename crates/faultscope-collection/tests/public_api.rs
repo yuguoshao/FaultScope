@@ -3164,6 +3164,82 @@ fn postselection_and_custom_counts_are_reported() {
 }
 
 #[test]
+fn implicit_dem_ids_are_consistent_across_fast_and_detailed_counting() {
+    let mut simulator = DemHotspotEstimator::new(DetectorErrorModel {
+        detectors: Vec::new(),
+        observables: Vec::new(),
+        edges: vec![DetectorErrorEdge {
+            probability: 1.0,
+            detectors: vec![7],
+            observables: vec![9],
+            location_id: "implicit".to_string(),
+            event: DemEvent::Bool(true),
+            tags: HashMap::new(),
+        }],
+    })
+    .unwrap();
+    assert_eq!(simulator.detector_ids, vec![7]);
+    assert_eq!(simulator.observable_ids, vec![9]);
+    assert_eq!(simulator.detector_ids(), &[7]);
+    assert_eq!(simulator.observable_ids(), &[9]);
+    simulator.detector_ids.clear();
+    simulator.observable_ids.clear();
+
+    let options = DemLogicalCollectionOptions {
+        max_shots: 8,
+        min_shots: 0,
+        max_errors: None,
+        batch_size: 8,
+        seed: Some(17),
+        start_batch_size: None,
+        max_batch_size: None,
+        max_batch_seconds: None,
+    };
+    let fast = collect_dem_logical_error_stats(&simulator, options, None).unwrap();
+    assert_eq!(fast.errors, 8);
+
+    let task = |task_id: &str,
+                postselection_mask: Option<Vec<u8>>,
+                postselected_observables_mask: Option<Vec<u8>>| {
+        DemLogicalCollectionTask {
+            task_id: task_id.to_string(),
+            strong_id: format!("{task_id}-strong"),
+            sampler: Arc::new(simulator.clone()),
+            decoder: None,
+            decoder_name: None,
+            metadata_json: "{}".to_string(),
+            options,
+            postselection_mask,
+            postselected_observables_mask,
+        }
+    };
+    let detailed = collect_dem_logical_error_tasks(
+        vec![
+            task("implicit", None, None),
+            task("detector-postselection", Some(vec![1]), None),
+            task("observable-postselection", None, Some(vec![1])),
+        ],
+        DemLogicalCollectionRunOptions {
+            num_workers: 1,
+            seed: None,
+            count_observable_error_combos: true,
+            count_detection_events: true,
+            custom_error_count_key: None,
+        },
+        HashMap::new(),
+    )
+    .unwrap();
+
+    assert_eq!(detailed[0].errors, fast.errors);
+    assert_eq!(detailed[0].discards, 0);
+    assert_eq!(detailed[0].custom_counts["detection_events"], 8);
+    assert_eq!(detailed[0].custom_counts["detectors_checked"], 8);
+    assert_eq!(detailed[0].custom_counts["obs_mistake_mask=E"], 8);
+    assert_eq!((detailed[1].errors, detailed[1].discards), (0, 8));
+    assert_eq!((detailed[2].errors, detailed[2].discards), (0, 8));
+}
+
+#[test]
 fn existing_stats_resume_skips_completed_tasks() {
     let simulator = Arc::new(DemHotspotEstimator::new(logical_edge_dem(1.0)).unwrap());
     let task = DemLogicalCollectionTask {

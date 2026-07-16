@@ -641,10 +641,12 @@ state. After upgrading, archive an old resume CSV and start a new file. Old rows
 will not match version-2 tasks; appending new rows to the old file would leave
 both identity generations visible to later summarize or merge commands.
 
-Postselection masks are bytes-like bit-packed masks over the sampler detector or
-observable order. A fired postselected detector discards the shot before logical
-error counting. A nonzero residual on a postselected observable also discards
-the shot. Logical error rate uses accepted shots:
+Postselection masks are bytes-like bit-packed masks over the sampler's canonical
+detector or observable order: explicit declaration order followed by ids first
+encountered in DEM edges. Edge targets use GF(2) parity, so repeated ids cancel
+in pairs. A fired postselected detector discards the shot before logical error
+counting. A nonzero residual on a postselected observable also discards the
+shot. Logical error rate uses accepted shots:
 
 ```python
 task = CollectionTask(

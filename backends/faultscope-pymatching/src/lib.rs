@@ -103,7 +103,8 @@ struct PyNativePyMatchingNativeDecoder {
 impl PyNativePyMatchingNativeDecoder {
     #[staticmethod]
     fn from_dem(py: Python<'_>, dem: &Bound<'_, PyAny>) -> PyResult<Self> {
-        let builder = PyMatchingProblemBuilder::from_dem_object(dem)?;
+        let problem = dem.call_method0("compile_graphlike_problem")?;
+        let builder = PyMatchingProblemBuilder::from_graphlike_problem(&problem)?;
         build_py_native_decoder(py, builder)
     }
 
@@ -808,63 +809,6 @@ struct BuiltPyMatchingProblem {
 }
 
 impl PyMatchingProblemBuilder {
-    fn from_dem_object(dem: &Bound<'_, PyAny>) -> PyResult<Self> {
-        let detector_ids = extract_ids(dem.getattr("detectors")?, "detector")?;
-        let observable_ids = extract_ids(dem.getattr("observables")?, "observable")?;
-        let detector_index = detector_ids
-            .iter()
-            .copied()
-            .enumerate()
-            .map(|(index, id)| (id, index))
-            .collect::<HashMap<_, _>>();
-        let observable_index = observable_ids
-            .iter()
-            .copied()
-            .enumerate()
-            .map(|(index, id)| (id, index))
-            .collect::<HashMap<_, _>>();
-        let mut builder = Self {
-            detector_ids,
-            observable_ids,
-            dem_edge_count: 0,
-            groups: Vec::new(),
-            group_by_endpoint: HashMap::new(),
-        };
-        let edges = dem.getattr("edges")?;
-        for (fallback_index, edge) in PyIterator::from_object(&edges)?.enumerate() {
-            let edge = edge?;
-            let probability = edge.getattr("probability")?.extract::<f64>()?;
-            let detector_ids = edge.getattr("detectors")?.extract::<Vec<i64>>()?;
-            let observable_ids = edge.getattr("observables")?.extract::<Vec<i64>>()?;
-            let dem_edge_index = edge
-                .getattr("original_edge_index")
-                .and_then(|value| value.extract::<usize>())
-                .unwrap_or(fallback_index);
-            let detectors = detector_ids
-                .iter()
-                .map(|detector_id| {
-                    detector_index.get(detector_id).copied().ok_or_else(|| {
-                        PyValueError::new_err(format!(
-                            "pymatching edge {dem_edge_index} references unknown detector id {detector_id}"
-                        ))
-                    })
-                })
-                .collect::<PyResult<Vec<_>>>()?;
-            let fault_observables = observable_ids
-                .iter()
-                .map(|observable_id| {
-                    observable_index.get(observable_id).copied().ok_or_else(|| {
-                        PyValueError::new_err(format!(
-                            "pymatching edge {dem_edge_index} references unknown observable id {observable_id}"
-                        ))
-                    })
-                })
-                .collect::<PyResult<Vec<_>>>()?;
-            builder.push_edge(dem_edge_index, detectors, fault_observables, probability)?;
-        }
-        Ok(builder)
-    }
-
     fn from_graphlike_problem(problem: &Bound<'_, PyAny>) -> PyResult<Self> {
         let detector_ids = problem.getattr("detector_ids")?.extract::<Vec<i64>>()?;
         let observable_ids = problem.getattr("observable_ids")?.extract::<Vec<i64>>()?;
@@ -984,20 +928,6 @@ impl PyMatchingProblemBuilder {
             merged_parallel_edge_count,
         })
     }
-}
-
-fn extract_ids(sequence: Bound<'_, PyAny>, kind: &str) -> PyResult<Vec<i64>> {
-    PyIterator::from_object(&sequence)?
-        .enumerate()
-        .map(|(index, item)| {
-            let item = item?;
-            item.getattr("id")?.extract::<i64>().map_err(|err| {
-                PyValueError::new_err(format!(
-                    "pymatching {kind} at index {index} does not expose integer id: {err}"
-                ))
-            })
-        })
-        .collect()
 }
 
 fn scale_weights(edges: &mut [BuiltPyMatchingEdge]) -> PyResult<()> {

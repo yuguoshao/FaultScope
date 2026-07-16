@@ -135,6 +135,35 @@ class FusionBlossomBackendPackageTests(unittest.TestCase):
         self.assertIsNotNone(decoder.__faultscope_native_decoder_capsule__())
 
     @requires_native_backend
+    def test_backend_ignores_parity_cancelled_no_op_edges(self) -> None:
+        dem = DetectorErrorModel(
+            detectors=(
+                Detector(id=5, measurement_keys=()),
+                Detector(id=2, measurement_keys=()),
+            ),
+            observables=(LogicalObservable(id=8),),
+            edges=(
+                DetectorErrorEdge(0.37, (7, 7), (9, 9), "cancelled", "X"),
+                DetectorErrorEdge(0.2, (2,), (9,), "active", "Z"),
+            ),
+        )
+
+        decoder = faultscope_fusion_blossom.NativeFusionBlossomDecoder.from_dem(dem)
+
+        self.assertEqual(decoder.detector_ids, (5, 2, 7))
+        self.assertEqual(decoder.observable_ids, (8, 9))
+        self.assertEqual(decoder.edge_count, 2)
+        self.assertEqual(decoder.solver_edge_count, 1)
+        self.assertEqual(decoder.build_summary["dem_edge_count"], 2)
+        self.assertEqual(decoder.build_summary["solver_edge_count"], 1)
+
+        class Batch:
+            shots = 1
+            detectors = {5: 0, 2: 1, 7: 0}
+
+        self.assertEqual(decoder.decode_batch_masks(Batch()), {8: 0, 9: 1})
+
+    @requires_native_backend
     def test_exact_v2_factory_creates_distinct_workers_and_fast_paths(self) -> None:
         dem = DetectorErrorModel(
             detectors=(Detector(id=0, measurement_keys=()),),

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import importlib
 import json
-import math
 from dataclasses import dataclass
 from typing import Any, Mapping, Sequence
 
@@ -71,11 +70,10 @@ class PyMatchingDecoder:
             numpy_module,
             scipy_sparse_module,
         )
-        detector_ids, observable_ids = _dem_ids(dem)
-        _validate_graphlike_dem(dem)
-
-        detector_index = {detector_id: idx for idx, detector_id in enumerate(detector_ids)}
-        observable_index = {observable_id: idx for idx, observable_id in enumerate(observable_ids)}
+        problem = _compile_graphlike_problem(dem)
+        detector_ids = tuple(int(detector_id) for detector_id in problem.detector_ids)
+        observable_ids = tuple(int(observable_id) for observable_id in problem.observable_ids)
+        edges = tuple(problem.edges)
 
         h_rows: list[int] = []
         h_cols: list[int] = []
@@ -86,27 +84,27 @@ class PyMatchingDecoder:
         weights: list[float] = []
         probabilities: list[float] = []
 
-        for col, edge in enumerate(dem.edges):
-            probability = _clamped_probability(edge.probability)
+        for col, edge in enumerate(edges):
+            probability = float(edge.probability)
             probabilities.append(probability)
-            weights.append(math.log((1.0 - probability) / probability))
-            for detector_id in edge.detectors:
-                h_rows.append(detector_index[detector_id])
+            weights.append(float(edge.weight))
+            for detector_index in edge.detectors:
+                h_rows.append(int(detector_index))
                 h_cols.append(col)
                 h_data.append(1)
-            for observable_id in edge.observables:
-                f_rows.append(observable_index[observable_id])
+            for observable_index in edge.fault_observables:
+                f_rows.append(int(observable_index))
                 f_cols.append(col)
                 f_data.append(1)
 
         h = sparse.csc_matrix(
             (h_data, (h_rows, h_cols)),
-            shape=(len(detector_ids), len(dem.edges)),
+            shape=(len(detector_ids), len(edges)),
             dtype=np.uint8,
         )
         faults_matrix = sparse.csc_matrix(
             (f_data, (f_rows, f_cols)),
-            shape=(len(observable_ids), len(dem.edges)),
+            shape=(len(observable_ids), len(edges)),
             dtype=np.uint8,
         )
         weights_array = np.array(weights, dtype=float)
@@ -123,7 +121,7 @@ class PyMatchingDecoder:
             matching=matching,
             detector_ids=detector_ids,
             observable_ids=observable_ids,
-            edge_count=len(dem.edges),
+            edge_count=len(edges),
         )
 
     def decode_detector_record(
@@ -300,32 +298,13 @@ def _load_optional_modules(
     return pymatching_module, numpy_module, scipy_sparse_module
 
 
-def _dem_ids(dem: DetectorErrorModel) -> tuple[tuple[int, ...], tuple[int, ...]]:
-    detector_ids = {detector.id for detector in dem.detectors}
-    observable_ids = {observable.id for observable in dem.observables}
-    for edge in dem.edges:
-        detector_ids.update(edge.detectors)
-        observable_ids.update(edge.observables)
-    return tuple(sorted(detector_ids)), tuple(sorted(observable_ids))
-
-
-def _validate_graphlike_dem(dem: DetectorErrorModel) -> None:
-    for edge_index, edge in enumerate(dem.edges):
-        if len(edge.detectors) > 2:
-            raise UnsupportedPyMatchingDemError(
-                "PyMatching graph construction requires graphlike DEM edges "
-                f"with at most two detectors; edge {edge_index} has {edge.detectors}"
-            )
-        if not edge.detectors and edge.observables:
-            raise UnsupportedPyMatchingDemError(
-                "DEM contains an undetectable logical edge with no detectors; "
-                f"edge {edge_index} has observables {edge.observables}"
-            )
-
-
-def _clamped_probability(probability: float) -> float:
-    eps = 1e-15
-    return min(1.0 - eps, max(eps, float(probability)))
+def _compile_graphlike_problem(dem: DetectorErrorModel) -> Any:
+    try:
+        return dem.compile_graphlike_problem()
+    except ValueError as exc:
+        if not dem.is_graphlike():
+            raise UnsupportedPyMatchingDemError(str(exc)) from exc
+        raise
 
 
 def _rows(predictions: Any) -> list[Any]:

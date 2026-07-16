@@ -833,6 +833,14 @@ impl FusionBlossomProblemBuilder {
         }
 
         match detectors.as_slice() {
+            [] => {
+                if fault_observables.is_empty() {
+                    return Ok(());
+                }
+                return Err(PyValueError::new_err(format!(
+                    "fusion-blossom edge {dem_edge_index} flips observables but has no detectors; pure logical edges are unsupported"
+                )));
+            }
             [detector] => {
                 let key = (*detector, fault_observables.clone());
                 if let Some(group_index) = self.boundary_group_by_key.get(&key).copied() {
@@ -2419,6 +2427,29 @@ fn string_view_to_string(view: FaultScopeNativeDecoderStringViewV1) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn accepts_no_op_edges_without_creating_solver_groups() {
+        let mut builder = FusionBlossomProblemBuilder {
+            detector_ids: vec![1, 2],
+            detector_coords: vec![Vec::new(), Vec::new()],
+            observable_ids: vec![9],
+            weight_scale: 10_000.0,
+            dem_edge_count: 0,
+            boundary_groups: Vec::new(),
+            boundary_group_by_key: HashMap::new(),
+            graph_groups: Vec::new(),
+            graph_group_by_endpoint: HashMap::new(),
+        };
+
+        builder
+            .push_edge(4, Vec::new(), Vec::new(), 0.37, 0.0)
+            .unwrap();
+
+        assert_eq!(builder.dem_edge_count, 1);
+        assert!(builder.boundary_groups.is_empty());
+        assert!(builder.graph_groups.is_empty());
+    }
 
     #[test]
     fn normalizes_weighted_edges_without_creating_odd_weights() {

@@ -249,12 +249,12 @@ pub(crate) fn validate_task(task: &DemLogicalCollectionTask) -> NpResult<()> {
     validate_collection_options(task.options)?;
     validate_mask_shape(
         task.postselection_mask.as_deref(),
-        task.sampler.detector_ids.len(),
+        task.sampler.detector_ids().len(),
         "postselection_mask",
     )?;
     validate_mask_shape(
         task.postselected_observables_mask.as_deref(),
-        task.sampler.observable_ids.len(),
+        task.sampler.observable_ids().len(),
         "postselected_observables_mask",
     )?;
     if task.strong_id.is_empty() {

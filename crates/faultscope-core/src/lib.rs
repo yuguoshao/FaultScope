@@ -8,6 +8,7 @@
 mod compile;
 mod decoder;
 mod dem;
+mod dem_canonical;
 mod dem_problem;
 mod dem_sampling;
 mod expr;

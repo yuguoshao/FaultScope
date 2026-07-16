@@ -102,6 +102,31 @@ class PyMatchingBackendPackageTests(unittest.TestCase):
         self.assertEqual(payload["solver"], decoder.build_summary)
 
     @requires_native_backend
+    def test_backend_from_dem_uses_canonical_ids_and_parity(self) -> None:
+        dem = DetectorErrorModel(
+            detectors=(
+                Detector(id=5, measurement_keys=()),
+                Detector(id=2, measurement_keys=()),
+            ),
+            observables=(LogicalObservable(id=8),),
+            edges=(
+                DetectorErrorEdge(0.1, (7, 7), (9, 9), "cancelled", "X"),
+                DetectorErrorEdge(0.2, (4, 2, 4), (11, 11, 9), "odd", "Z"),
+            ),
+        )
+
+        decoder = faultscope_pymatching.NativePyMatchingDecoder.from_dem(dem)
+
+        self.assertEqual(decoder.detector_ids, (5, 2, 7, 4))
+        self.assertEqual(decoder.observable_ids, (8, 9, 11))
+        self.assertEqual(decoder.edge_count, 2)
+        self.assertEqual(decoder.solver_edge_count, 1)
+        self.assertEqual(
+            decoder.decode_batch_masks(_Batch(shots=1, detectors={5: 0, 2: 1, 7: 0, 4: 0})),
+            {8: 0, 9: 1, 11: 0},
+        )
+
+    @requires_native_backend
     def test_exact_v2_factory_creates_distinct_workers_and_fast_paths(self) -> None:
         decoder = faultscope_pymatching.NativePyMatchingDecoder.from_dem(single_boundary_dem())
 

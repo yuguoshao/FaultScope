@@ -2198,6 +2198,37 @@ class NativeDetectorErrorModelTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             bad.compile_graphlike_problem()
 
+    def test_native_dem_problem_views_canonicalize_ids_and_edge_parity(self) -> None:
+        self._require_native_dem()
+        dem = DetectorErrorModel(
+            detectors=(
+                Detector(id=5, measurement_keys=()),
+                Detector(id=2, measurement_keys=()),
+            ),
+            observables=(LogicalObservable(id=8),),
+            edges=(
+                DetectorErrorEdge(0.1, (7, 7), (9, 9), "cancelled", "X"),
+                DetectorErrorEdge(0.2, (4, 2, 4), (11, 11, 9), "odd", "Z"),
+            ),
+        )
+
+        indexed = dem.compile_indexed()
+        binary = dem.compile_binary_linear_problem()
+
+        self.assertEqual(indexed.detector_ids, (5, 2, 7, 4))
+        self.assertEqual(indexed.observable_ids, (8, 9, 11))
+        self.assertEqual(indexed.edges[0].detectors, ())
+        self.assertEqual(indexed.edges[0].observables, ())
+        self.assertEqual(indexed.edges[1].detectors, (1,))
+        self.assertEqual(indexed.edges[1].observables, (1,))
+        self.assertEqual(binary.h.entries, ((1, 1),))
+        self.assertEqual(binary.f.entries, ((1, 1),))
+        self.assertTrue(dem.is_graphlike())
+
+        decoder = create_native_decoder("no-correction", dem=dem)
+        self.assertEqual(decoder.detector_ids, indexed.detector_ids)
+        self.assertEqual(decoder.observable_ids, indexed.observable_ids)
+
     def test_native_dem_sampler_compiles_directly_from_circuit(self) -> None:
         self._require_native_dem()
         location = NoiseLocation(
@@ -2806,6 +2837,34 @@ class PyMatchingDecoderTests(unittest.TestCase):
         self.assertEqual(kwargs["weights"], (2.1972245773362196, 1.3862943611198906))
         self.assertEqual(kwargs["error_probabilities"], (0.1, 0.2))
 
+    def test_build_uses_core_canonical_ids_and_parity(self) -> None:
+        dem = DetectorErrorModel(
+            detectors=(
+                Detector(id=5, measurement_keys=()),
+                Detector(id=2, measurement_keys=()),
+            ),
+            observables=(LogicalObservable(id=8),),
+            edges=(
+                DetectorErrorEdge(0.1, (7, 7), (9, 9), "cancelled", "X"),
+                DetectorErrorEdge(0.2, (4, 2, 4), (11, 11, 9), "odd", "Z"),
+            ),
+        )
+
+        decoder = PyMatchingDecoder.from_dem(
+            dem,
+            pymatching_module=_FakePyMatching,
+            numpy_module=_FakeNumpy,
+            scipy_sparse_module=_FakeSparse,
+        )
+
+        self.assertEqual(decoder.detector_ids, (5, 2, 7, 4))
+        self.assertEqual(decoder.observable_ids, (8, 9, 11))
+        h, kwargs = _FakePyMatching.calls[0]
+        self.assertEqual(h.shape, (4, 2))
+        self.assertEqual(h.args, ([1], ([1], [1])))
+        self.assertEqual(kwargs["faults_matrix"].shape, (3, 2))
+        self.assertEqual(kwargs["faults_matrix"].args, ([1], ([1], [1])))
+
     def test_decodes_single_and_batch_records(self) -> None:
         decoder = PyMatchingDecoder.from_dem(
             self._build_dem(),
@@ -2890,6 +2949,36 @@ class PyMatchingDecoderTests(unittest.TestCase):
             [{0: 0}, {0: 1}],
         )
         self.assertEqual(decoder.decode_batch_masks({0: 0b1010}, shots=4), {0: 0b1010})
+
+    def test_real_pymatching_accepts_canonicalized_duplicate_targets(self) -> None:
+        os.environ.setdefault(
+            "MPLCONFIGDIR",
+            os.path.join(tempfile.gettempdir(), "faultscope-matplotlib-cache"),
+        )
+        try:
+            import pymatching  # noqa: F401
+            import numpy  # noqa: F401
+            from scipy import sparse  # noqa: F401
+        except ImportError as exc:
+            self.skipTest(f"optional PyMatching dependencies are not installed: {exc}")
+
+        dem = DetectorErrorModel(
+            detectors=(Detector(id=5, measurement_keys=()), Detector(id=2, measurement_keys=())),
+            observables=(LogicalObservable(id=8),),
+            edges=(
+                DetectorErrorEdge(0.1, (7, 7), (9, 9), "cancelled", "X"),
+                DetectorErrorEdge(0.2, (4, 2, 4), (11, 11, 9), "odd", "Z"),
+            ),
+        )
+
+        decoder = PyMatchingDecoder.from_dem(dem)
+
+        self.assertEqual(decoder.detector_ids, (5, 2, 7, 4))
+        self.assertEqual(decoder.observable_ids, (8, 9, 11))
+        self.assertEqual(
+            decoder.decode_detector_record({2: 1}),
+            {8: 0, 9: 1, 11: 0},
+        )
 
     def test_real_pymatching_decodes_bit_packed_masks_from_batch_objects(self) -> None:
         os.environ.setdefault(

@@ -454,6 +454,14 @@ Methods:
 error model: detector declarations, logical observable declarations, and
 materialized detector error matrix columns with probabilities.
 
+Compilation and sampling use one canonical layout. Detector and observable ids
+are ordered as explicit declarations followed by ids first encountered in the
+raw edge sequence. Within each edge, repeated ids are reduced over GF(2): even
+multiplicity cancels and odd multiplicity leaves one target in first-occurrence
+order. The source `DetectorErrorModel` remains unchanged; compiled views and
+samplers expose the canonical interpretation. Duplicate explicit declarations
+are rejected.
+
 Methods:
 
 ```text

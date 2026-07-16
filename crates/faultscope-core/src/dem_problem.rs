@@ -1,5 +1,6 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
+use crate::dem_canonical::{canonical_id_order, parity_canonicalize, parity_support_len};
 use crate::{DetectorErrorModel, NpError, NpResult};
 
 #[derive(Debug, Clone, PartialEq)]
@@ -58,16 +59,34 @@ pub struct BinaryLinearDecodingProblem {
 
 impl DetectorErrorModel {
     pub fn compile_indexed(&self) -> NpResult<IndexedDem> {
-        let detector_ids = stable_detector_ids(self);
+        let declared_detector_ids = self
+            .detectors
+            .iter()
+            .map(|detector| detector.id)
+            .collect::<Vec<_>>();
+        let detector_ids = canonical_id_order(
+            &declared_detector_ids,
+            self.edges.iter().map(|edge| edge.detectors.as_slice()),
+            "detector ids must be unique",
+        )?;
         let detector_coords = stable_detector_coords(self, &detector_ids);
-        let observable_ids = stable_observable_ids(self);
+        let declared_observable_ids = self
+            .observables
+            .iter()
+            .map(|observable| observable.id)
+            .collect::<Vec<_>>();
+        let observable_ids = canonical_id_order(
+            &declared_observable_ids,
+            self.edges.iter().map(|edge| edge.observables.as_slice()),
+            "logical observable ids must be unique",
+        )?;
         let detector_index = id_index(&detector_ids);
         let observable_index = id_index(&observable_ids);
         let mut edges = Vec::with_capacity(self.edges.len());
 
         for (edge_index, edge) in self.edges.iter().enumerate() {
             edge.validate()?;
-            let detectors = edge
+            let mut detectors = edge
                 .detectors
                 .iter()
                 .map(|detector_id| {
@@ -76,7 +95,8 @@ impl DetectorErrorModel {
                     })
                 })
                 .collect::<NpResult<Vec<_>>>()?;
-            let observables = edge
+            parity_canonicalize(&mut detectors);
+            let mut observables = edge
                 .observables
                 .iter()
                 .map(|observable_id| {
@@ -87,6 +107,7 @@ impl DetectorErrorModel {
                     })
                 })
                 .collect::<NpResult<Vec<_>>>()?;
+            parity_canonicalize(&mut observables);
             edges.push(IndexedDemEdge {
                 probability: edge.probability,
                 weight: log_likelihood_ratio(edge.probability),
@@ -106,7 +127,9 @@ impl DetectorErrorModel {
 
     pub fn is_graphlike(&self) -> bool {
         self.edges.iter().all(|edge| {
-            (edge.observables.is_empty() || !edge.detectors.is_empty()) && edge.detectors.len() <= 2
+            let detector_count = parity_support_len(&edge.detectors);
+            detector_count <= 2
+                && (detector_count != 0 || parity_support_len(&edge.observables) == 0)
         })
     }
 
@@ -185,23 +208,6 @@ impl DetectorErrorModel {
     }
 }
 
-fn stable_detector_ids(dem: &DetectorErrorModel) -> Vec<i64> {
-    let mut ids = dem
-        .detectors
-        .iter()
-        .map(|detector| detector.id)
-        .collect::<Vec<_>>();
-    let mut seen = ids.iter().copied().collect::<HashSet<_>>();
-    for edge in &dem.edges {
-        for detector_id in &edge.detectors {
-            if seen.insert(*detector_id) {
-                ids.push(*detector_id);
-            }
-        }
-    }
-    ids
-}
-
 fn stable_detector_coords(dem: &DetectorErrorModel, detector_ids: &[i64]) -> Vec<Vec<f64>> {
     let coords_by_id = dem
         .detectors
@@ -212,23 +218,6 @@ fn stable_detector_coords(dem: &DetectorErrorModel, detector_ids: &[i64]) -> Vec
         .iter()
         .map(|detector_id| coords_by_id.get(detector_id).cloned().unwrap_or_default())
         .collect()
-}
-
-fn stable_observable_ids(dem: &DetectorErrorModel) -> Vec<i64> {
-    let mut ids = dem
-        .observables
-        .iter()
-        .map(|observable| observable.id)
-        .collect::<Vec<_>>();
-    let mut seen = ids.iter().copied().collect::<HashSet<_>>();
-    for edge in &dem.edges {
-        for observable_id in &edge.observables {
-            if seen.insert(*observable_id) {
-                ids.push(*observable_id);
-            }
-        }
-    }
-    ids
 }
 
 fn id_index(ids: &[i64]) -> HashMap<i64, usize> {
@@ -360,5 +349,62 @@ mod tests {
         assert_eq!(problem.f.entries, vec![(0, 0)]);
         assert_eq!(problem.probabilities, vec![0.1, 0.2]);
         assert_eq!(problem.dem_edge_indices, vec![0, 1]);
+    }
+
+    #[test]
+    fn canonical_problem_views_reduce_edge_targets_by_parity() {
+        let dem = DetectorErrorModel {
+            detectors: Vec::new(),
+            observables: Vec::new(),
+            edges: vec![
+                edge(1.0, vec![1, 1], vec![9, 9], "cancelled"),
+                edge(0.5, vec![4, 2, 4], vec![8, 8, 7], "odd"),
+            ],
+        };
+
+        let indexed = dem.compile_indexed().unwrap();
+        let binary = dem.compile_binary_linear_problem().unwrap();
+
+        assert_eq!(indexed.detector_ids, vec![1, 4, 2]);
+        assert_eq!(indexed.detector_coords, vec![vec![], vec![], vec![]]);
+        assert_eq!(indexed.observable_ids, vec![9, 8, 7]);
+        assert!(indexed.edges[0].detectors.is_empty());
+        assert!(indexed.edges[0].observables.is_empty());
+        assert_eq!(indexed.edges[1].detectors, vec![2]);
+        assert_eq!(indexed.edges[1].observables, vec![2]);
+        assert_eq!(binary.h.entries, vec![(2, 1)]);
+        assert_eq!(binary.f.entries, vec![(2, 1)]);
+    }
+
+    #[test]
+    fn graphlike_classification_uses_parity_reduced_support() {
+        let graphlike = DetectorErrorModel {
+            detectors: Vec::new(),
+            observables: Vec::new(),
+            edges: vec![edge(0.25, vec![1, 2, 3, 2], vec![], "reduced")],
+        };
+        let hypergraph = DetectorErrorModel {
+            detectors: Vec::new(),
+            observables: Vec::new(),
+            edges: vec![edge(0.25, vec![1, 2, 3, 2, 4], vec![], "hyper")],
+        };
+
+        assert!(graphlike.is_graphlike());
+        assert_eq!(
+            graphlike.compile_graphlike_problem().unwrap().edges[0].detectors,
+            vec![0, 2]
+        );
+        assert!(!hypergraph.is_graphlike());
+        assert!(hypergraph.compile_graphlike_problem().is_err());
+    }
+
+    #[test]
+    fn compiled_views_reject_duplicate_declarations() {
+        let mut dem = dem();
+        dem.detectors.push(dem.detectors[0].clone());
+
+        let err = dem.compile_indexed().unwrap_err();
+
+        assert_eq!(err.message(), "detector ids must be unique");
     }
 }

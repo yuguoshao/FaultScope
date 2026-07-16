@@ -1132,6 +1132,49 @@ class CollectionTests(unittest.TestCase):
         self.assertEqual(stats.custom_counts["detection_events"], 4)
         self.assertEqual(stats.custom_counts["detectors_checked"], 4)
 
+    def test_implicit_dem_ids_match_fast_detailed_and_postselection_paths(self) -> None:
+        dem = DetectorErrorModel(
+            detectors=(),
+            observables=(),
+            edges=(DetectorErrorEdge(1.0, (7,), (9,), "implicit", "X"),),
+        )
+
+        fast = _collect(
+            [CollectionTask(dem=dem, task_id="fast")],
+            max_shots=4,
+            batch_size=4,
+            seed=11,
+        )[0]
+        detailed = _collect(
+            [CollectionTask(dem=dem, task_id="detailed")],
+            max_shots=4,
+            batch_size=4,
+            seed=11,
+            count_observable_error_combos=True,
+            count_detection_events=True,
+        )[0]
+        selected = _collect(
+            [
+                CollectionTask(
+                    dem=dem,
+                    task_id="selected",
+                    postselection_mask=bytes([1]),
+                )
+            ],
+            max_shots=4,
+            batch_size=4,
+            seed=11,
+            count_observable_error_combos=True,
+            count_detection_events=True,
+        )[0]
+
+        self.assertEqual((fast.errors, fast.discards), (4, 0))
+        self.assertEqual((detailed.errors, detailed.discards), (4, 0))
+        self.assertEqual(detailed.custom_counts["obs_mistake_mask=E"], 4)
+        self.assertEqual(detailed.custom_counts["detection_events"], 4)
+        self.assertEqual(detailed.custom_counts["detectors_checked"], 4)
+        self.assertEqual((selected.errors, selected.discards), (0, 4))
+
     def test_save_resume_filepath_skips_completed_task(self) -> None:
         task = CollectionTask(dem=_logical_edge_dem(), task_id="resume")
         with tempfile.TemporaryDirectory() as temp_dir:
