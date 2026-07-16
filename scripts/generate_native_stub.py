@@ -14,7 +14,7 @@ import faultscope._native as native
 
 HEADER = """\
 from typing import Any, final
-from typing_extensions import Self
+from typing_extensions import Never, Self
 
 """
 
@@ -48,7 +48,9 @@ def _render_class(name: str, cls: type[object]) -> list[str]:
     lines = ["@final", f"class {name}:"]
     body: list[str] = []
     constructor = _constructor_signature(cls)
-    if constructor is not None:
+    if constructor is None:
+        body.append("    def __new__(cls, _no_direct_construction: Never, /) -> Self: ...")
+    else:
         body.append(f"    def __new__{constructor}: ...")
 
     for member_name in sorted(item for item in dir(cls) if not item.startswith("_")):

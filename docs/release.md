@@ -1,18 +1,21 @@
 # Release And Compatibility
 
 FaultScope uses one workspace version for the Python distribution and the
-published Rust libraries. The current release line is `0.2.x`.
+published Rust libraries. The current workspace version is `0.2.4`.
 
 ## Compatibility Contract
 
-- Python names listed by public-module `__all__` values are stable within
-  `0.2.x`. Private modules and `_`-prefixed names are not public API.
-- The root exports of `faultscope-core` and `faultscope-collection` are the Rust
-  compatibility boundary. Their source modules are private.
-- Compatible additions may ship in a patch release. Removal or renaming is
-  deprecated first and deferred to a later minor release.
-- The collection CSV header, strong-id input encoding, and native decoder plugin
-  ABI are covered by golden compatibility tests.
+- FaultScope is pre-1.0. Python and Rust API compatibility is not promised
+  between releases, including patch releases; removals and renames may ship
+  without deprecated aliases.
+- Public Python modules and Rust crate-root exports remain the intended import
+  surfaces. Private modules and `_`-prefixed names are implementation details.
+- `tests/public_api_contract.json` records the current Python export surface for
+  deliberate review; it is not a historical compatibility guarantee.
+- The native decoder plugin ABI is independently versioned. ABI v3 is the only
+  runtime contract in `0.2.4`; ABI v2 plugins are rejected and must be rebuilt.
+- Collection CSV and strong-id regression tests detect changes, but pre-1.0
+  releases may deliberately revise those formats with release notes.
 
 ## Supported Toolchains
 
@@ -33,6 +36,9 @@ with an `abi3-py310` wheel tag.
 - crates.io: `faultscope-core`, then `faultscope-collection`.
 - `faultscope-fusion-blossom` remains a source-install beta for the `0.2.x`
   release line.
+
+Official backend packages require `faultscope>=0.2.4,<0.3` so they are not
+installed against an older main package with a different pre-1.0 API surface.
 
 ## Release Process
 

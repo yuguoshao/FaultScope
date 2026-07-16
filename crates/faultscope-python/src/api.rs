@@ -162,6 +162,19 @@ impl NativePackedSampler {
             ));
         }
         let baseline = native_baseline_value(baseline)?;
+        let native_decoder = match decoder {
+            Some(decoder) => native_decoder_from_py(decoder)?,
+            None => None,
+        };
+        if let Some(native_decoder) = native_decoder.as_deref() {
+            let canonical_observable_ids = self
+                .program
+                .observables
+                .iter()
+                .map(|observable| observable.id)
+                .collect::<Vec<_>>();
+            validate_native_decoder_observable_layout(native_decoder, &canonical_observable_ids)?;
+        }
         let state = py.allow_threads(|| run_packed_sample(self, shots, seed, true))?;
         if loss_mask_fn.is_none() && correction_mask_fn.is_none() {
             if decoder.is_none() {
@@ -187,8 +200,8 @@ impl NativePackedSampler {
                     &self.py_noise_locations,
                 );
             }
-            if let Some(decoder) = decoder {
-                if let Some(native_decoder) = native_decoder_from_py(decoder)? {
+            if decoder.is_some() {
+                if let Some(native_decoder) = native_decoder {
                     let detector_ids = native_decoder.detector_ids().to_vec();
                     let mut worker = native_decoder
                         .create_worker()
@@ -802,9 +815,19 @@ impl NativeDemSampler {
             ));
         }
         let baseline = native_baseline_value(baseline)?;
+        let native_decoder = match decoder {
+            Some(decoder) => native_decoder_from_py(decoder)?,
+            None => None,
+        };
+        if let Some(native_decoder) = native_decoder.as_deref() {
+            validate_native_decoder_observable_layout(
+                native_decoder,
+                self.simulator.observable_ids(),
+            )?;
+        }
         if correction_mask_fn.is_none() && loss_mask_fn.is_none() {
-            if let Some(decoder) = decoder {
-                if let Some(native_decoder) = native_decoder_from_py(decoder)? {
+            if decoder.is_some() {
+                if let Some(native_decoder) = native_decoder {
                     let detector_ids = native_decoder.detector_ids().to_vec();
                     let mut worker = native_decoder
                         .create_worker()
@@ -1473,12 +1496,12 @@ fn native_packed_sampler_from_circuit(
         _ => Vec::new(),
     };
     let native_circuit = circuit.extract::<PyRef<'_, PyCircuit>>().ok();
-    let shared_core_circuit = native_circuit
+    let cached_core_circuit = native_circuit
         .as_ref()
-        .and_then(|circuit| circuit.core_circuit.clone());
+        .and_then(|circuit| circuit.core_circuit.as_ref());
     let fallback_core_circuit;
-    let core_circuit = match shared_core_circuit.as_deref() {
-        Some(core_circuit) => core_circuit,
+    let core_circuit = match cached_core_circuit {
+        Some(core_circuit) => core_circuit.circuit(),
         None => {
             fallback_core_circuit = parse_core_circuit_object(circuit)?;
             &fallback_core_circuit
@@ -1587,31 +1610,25 @@ pub(crate) fn core_dem_generator_from_circuit(
     detectors: Option<&Bound<'_, PyAny>>,
     observables: Option<&Bound<'_, PyAny>>,
 ) -> PyResult<CoreDetectorErrorModelGenerator> {
-    if let (Some(event_plan), Some(core_circuit)) = (
-        cached_core_event_plan(circuit),
-        cached_core_circuit(circuit),
-    ) {
-        let detector_specs = match detectors {
-            Some(items) if !items.is_none() => Some(parse_dem_detector_sequence(items)?),
-            _ => None,
-        };
-        let observable_specs = match observables {
-            Some(items) if !items.is_none() => Some(parse_dem_observable_sequence(items)?),
-            _ => None,
-        };
-        let detector_specs = detector_specs.unwrap_or_else(|| event_plan.inferred_detectors());
-        let observable_specs =
-            observable_specs.unwrap_or_else(|| event_plan.inferred_observables());
-        return CoreDetectorErrorModelGenerator::new_with_shared_event_plan(
-            core_circuit,
-            detector_specs,
-            observable_specs,
-            event_plan,
-        )
-        .map_err(|err| PyValueError::new_err(err.to_string()));
+    if let Ok(native_circuit) = circuit.extract::<PyRef<'_, PyCircuit>>() {
+        if let Some(core_circuit) = native_circuit.core_circuit.as_ref() {
+            let detector_specs = match detectors {
+                Some(items) if !items.is_none() => Some(parse_dem_detector_sequence(items)?),
+                _ => None,
+            };
+            let observable_specs = match observables {
+                Some(items) if !items.is_none() => Some(parse_dem_observable_sequence(items)?),
+                _ => None,
+            };
+            return CoreDetectorErrorModelGenerator::new_with_validated_dem_circuit_options(
+                core_circuit,
+                detector_specs,
+                observable_specs,
+            )
+            .map_err(|err| PyValueError::new_err(err.to_string()));
+        }
     }
 
-    let cached_event_plan = cached_core_event_plan(circuit);
     let core_circuit = parse_core_circuit_object(circuit)?;
     let detector_specs = match detectors {
         Some(items) if !items.is_none() => Some(parse_dem_detector_sequence(items)?),
@@ -1621,18 +1638,8 @@ pub(crate) fn core_dem_generator_from_circuit(
         Some(items) if !items.is_none() => Some(parse_dem_observable_sequence(items)?),
         _ => None,
     };
-    match cached_event_plan {
-        Some(event_plan) => CoreDetectorErrorModelGenerator::new_with_shared_event_plan_options(
-            std::sync::Arc::new(core_circuit),
-            detector_specs,
-            observable_specs,
-            event_plan,
-        ),
-        None => {
-            CoreDetectorErrorModelGenerator::new(core_circuit, detector_specs, observable_specs)
-        }
-    }
-    .map_err(|err| PyValueError::new_err(err.to_string()))
+    CoreDetectorErrorModelGenerator::new(core_circuit, detector_specs, observable_specs)
+        .map_err(|err| PyValueError::new_err(err.to_string()))
 }
 
 fn native_dem_sampler_from_core_generator(
@@ -1640,11 +1647,6 @@ fn native_dem_sampler_from_core_generator(
     generator: &CoreDetectorErrorModelGenerator,
     materialize_dem: bool,
 ) -> PyResult<NativeDemSampler> {
-    let observable_ids: Vec<i64> = generator
-        .observables
-        .iter()
-        .map(|observable| observable.id)
-        .collect();
     let lazy_dem = generator
         .generate_lazy()
         .map_err(|err| PyValueError::new_err(err.to_string()))?;
@@ -1656,8 +1658,9 @@ fn native_dem_sampler_from_core_generator(
         (lazy_dem.into_sampling_estimator(), None)
     };
     let edge_count = simulator.edge_count();
+    let observables = simulator.observable_ids().to_vec();
     Ok(NativeDemSampler {
-        observables: observable_ids,
+        observables,
         edge_count,
         simulator,
         py_dem,
@@ -1717,11 +1720,12 @@ fn native_dem_sampler_from_parts(
 ) -> PyResult<NativeDemSampler> {
     let edge_count = edges.len();
     let simulator = if py_dem.is_some() {
-        CoreDemHotspotEstimator::from_parts(detectors, observables.clone(), edges)
+        CoreDemHotspotEstimator::from_parts(detectors, observables, edges)
     } else {
-        CoreDemHotspotEstimator::from_sampling_parts(detectors, observables.clone(), edges)
+        CoreDemHotspotEstimator::from_sampling_parts(detectors, observables, edges)
     }
     .map_err(|err| PyValueError::new_err(err.to_string()))?;
+    let observables = simulator.observable_ids().to_vec();
     Ok(NativeDemSampler {
         observables,
         edge_count,
@@ -1752,6 +1756,22 @@ pub(crate) fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add(
         "NATIVE_DECODER_PLUGIN_ENTRY_POINT_GROUP",
         faultscope_core::NATIVE_DECODER_PLUGIN_ENTRY_POINT_GROUP,
+    )?;
+    module.add(
+        "NATIVE_GRAPHLIKE_PROBLEM_ABI_VERSION",
+        faultscope_core::NATIVE_GRAPHLIKE_PROBLEM_ABI_VERSION,
+    )?;
+    module.add(
+        "NATIVE_GRAPHLIKE_PROBLEM_ABI",
+        faultscope_core::NATIVE_GRAPHLIKE_PROBLEM_ABI_NAME,
+    )?;
+    module.add(
+        "NATIVE_GRAPHLIKE_PROBLEM_CAPSULE_NAME",
+        faultscope_core::NATIVE_GRAPHLIKE_PROBLEM_CAPSULE_NAME,
+    )?;
+    module.add(
+        "NATIVE_GRAPHLIKE_PROBLEM_CAPSULE_METHOD",
+        faultscope_core::NATIVE_GRAPHLIKE_PROBLEM_CAPSULE_METHOD,
     )?;
     module.add_class::<PyBernoulliPauliNoise>()?;
     module.add_class::<PyPauliChannel>()?;

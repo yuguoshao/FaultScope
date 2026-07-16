@@ -46,8 +46,8 @@ typedef struct {
     size_t observable_byte_count;
 } FsPackedOutput;
 
-typedef struct FsWorkerV2 FsWorkerV2;
-struct FsWorkerV2 {
+typedef struct FsWorkerV3 FsWorkerV3;
+struct FsWorkerV3 {
     size_t struct_size;
     void *worker_state;
     void (*drop_worker_state)(void *);
@@ -65,8 +65,8 @@ typedef struct {
     FsStatus (*name)(const void *, FsString *);
     FsStatus (*detector_ids)(const void *, FsI64Slice *);
     FsStatus (*observable_ids)(const void *, FsI64Slice *);
-    FsStatus (*create_worker)(const void *, FsWorkerV2 *, size_t);
-} FsFactoryV2;
+    FsStatus (*create_worker)(const void *, FsWorkerV3 *, size_t);
+} FsFactoryV3;
 
 typedef struct TestFactory TestFactory;
 typedef struct {
@@ -75,7 +75,7 @@ typedef struct {
 } TestWorker;
 
 struct TestFactory {
-    FsFactoryV2 abi;
+    FsFactoryV3 abi;
     int mode;
     uint64_t creates;
     uint64_t worker_drops;
@@ -98,7 +98,7 @@ enum {
     MODE_MISSING_MASK_DECODE = 7,
     MODE_NULL_WORKER_STATE = 8,
     MODE_INVALID_MASK_OUTPUT = 9,
-    MODE_ABI_ONE = 10,
+    MODE_ABI_TWO = 10,
     MODE_TRUNCATED_FACTORY = 11,
     MODE_MISSING_THREAD_SAFE = 12,
     MODE_NULL_FACTORY_STATE = 13,
@@ -108,13 +108,15 @@ enum {
     MODE_MISSING_CREATE_WORKER = 17,
     MODE_INVALID_PACKED_OUTPUT = 18,
     MODE_INVALID_EVENT_OUTPUT = 19,
-    MODE_INCONSISTENT_METADATA = 20
+    MODE_INCONSISTENT_METADATA = 20,
+    MODE_INVALID_PACKED_PADDING = 21,
+    MODE_INVALID_EVENT_PADDING = 22
 };
 
 static const int64_t DETECTOR_IDS[] = {0};
 static const int64_t OBSERVABLE_IDS[] = {0};
-static const char NAME[] = "test-v2-factory";
-static const char CHANGED_NAME[] = "changed-v2-factory";
+static const char NAME[] = "test-v3-factory";
+static const char CHANGED_NAME[] = "changed-v3-factory";
 static const char CREATE_ERROR[] = "test create failure";
 
 static FsStatus ok(void) {
@@ -184,6 +186,10 @@ static FsStatus decode_packed(void *state, const FsPackedBatch *input, FsPackedO
         output->shots += 1;
         return ok();
     }
+    if (worker->factory->mode == MODE_INVALID_PACKED_PADDING) {
+        output->data[0] = 0x80;
+        return ok();
+    }
     for (size_t shot = 0; shot < input->shots; shot++) {
         output->data[shot * output->observable_byte_count] =
             input->data[shot * input->detector_byte_count] & 1;
@@ -198,6 +204,10 @@ static FsStatus decode_events(void *state, const FsEventBatch *input, FsPackedOu
         output->shots += 1;
         return ok();
     }
+    if (worker->factory->mode == MODE_INVALID_EVENT_PADDING) {
+        output->data[0] = 0x80;
+        return ok();
+    }
     memset(output->data, 0, output->shots * output->observable_byte_count);
     for (size_t shot = 0; shot < input->shots; shot++) {
         for (size_t k = input->offsets[shot]; k < input->offsets[shot + 1]; k++) {
@@ -207,7 +217,7 @@ static FsStatus decode_events(void *state, const FsEventBatch *input, FsPackedOu
     return ok();
 }
 
-static FsStatus create_worker(const void *state, FsWorkerV2 *out, size_t capacity) {
+static FsStatus create_worker(const void *state, FsWorkerV3 *out, size_t capacity) {
     TestFactory *factory = (TestFactory *)state;
     factory->last_capacity = capacity;
     if (factory->mode == MODE_CREATE_FAIL_EMPTY) return error_status();
@@ -217,21 +227,23 @@ static FsStatus create_worker(const void *state, FsWorkerV2 *out, size_t capacit
     worker->serial = ++factory->creates;
     if (factory->creates <= 32) factory->worker_addresses[factory->creates - 1] = (uintptr_t)worker;
 
-    out->struct_size = sizeof(FsWorkerV2);
+    out->struct_size = sizeof(FsWorkerV3);
     out->worker_state = worker;
     out->drop_worker_state = drop_worker;
     out->decode_batch = decode_masks;
     out->decode_packed_batch =
-        factory->mode == MODE_PACKED || factory->mode == MODE_INVALID_PACKED_OUTPUT
+        factory->mode == MODE_PACKED || factory->mode == MODE_INVALID_PACKED_OUTPUT ||
+                factory->mode == MODE_INVALID_PACKED_PADDING
             ? decode_packed
             : NULL;
     out->decode_detector_event_batch =
-        factory->mode == MODE_EVENT || factory->mode == MODE_INVALID_EVENT_OUTPUT
+        factory->mode == MODE_EVENT || factory->mode == MODE_INVALID_EVENT_OUTPUT ||
+                factory->mode == MODE_INVALID_EVENT_PADDING
             ? decode_events
             : NULL;
 
     if (factory->mode == MODE_CREATE_FAIL_PARTIAL) return error_status();
-    if (factory->mode == MODE_TRUNCATED_WORKER) out->struct_size = offsetof(FsWorkerV2, decode_batch);
+    if (factory->mode == MODE_TRUNCATED_WORKER) out->struct_size = offsetof(FsWorkerV3, decode_batch);
     if (factory->mode == MODE_MISSING_WORKER_DROP) out->drop_worker_state = NULL;
     if (factory->mode == MODE_MISSING_MASK_DECODE) out->decode_batch = NULL;
     if (factory->mode == MODE_NULL_WORKER_STATE) {
@@ -243,10 +255,10 @@ static FsStatus create_worker(const void *state, FsWorkerV2 *out, size_t capacit
 void *fs_fixture_new(int mode) {
     TestFactory *factory = (TestFactory *)calloc(1, sizeof(TestFactory));
     factory->mode = mode;
-    factory->abi.abi_version = mode == MODE_ABI_ONE ? 1 : 2;
+    factory->abi.abi_version = mode == MODE_ABI_TWO ? 2 : 3;
     factory->abi.struct_size = mode == MODE_TRUNCATED_FACTORY
-        ? offsetof(FsFactoryV2, create_worker)
-        : sizeof(FsFactoryV2);
+        ? offsetof(FsFactoryV3, create_worker)
+        : sizeof(FsFactoryV3);
     factory->abi.flags = mode == MODE_MISSING_THREAD_SAFE ? 0 : 1;
     factory->abi.factory_state = mode == MODE_NULL_FACTORY_STATE ? NULL : factory;
     factory->abi.drop_factory_state = mode == MODE_MISSING_FACTORY_DROP ? NULL : drop_factory;
@@ -278,7 +290,7 @@ uint64_t fs_fixture_event_decode_calls(void *pointer) {
     return ((TestFactory *)pointer)->event_decode_calls;
 }
 size_t fs_fixture_last_capacity(void *pointer) { return ((TestFactory *)pointer)->last_capacity; }
-size_t fs_fixture_worker_size(void) { return sizeof(FsWorkerV2); }
+size_t fs_fixture_worker_size(void) { return sizeof(FsWorkerV3); }
 uintptr_t fs_fixture_worker_address(void *pointer, size_t index) {
     return ((TestFactory *)pointer)->worker_addresses[index];
 }

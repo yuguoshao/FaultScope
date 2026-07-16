@@ -1,9 +1,10 @@
 use std::collections::HashMap;
 
+use crate::pauli::pauli_to_xz;
 use crate::{
     bernoulli_mask, choose_weighted_event, compile_pauli_channel_events, for_each_bernoulli_event,
-    pauli_to_xz, set_shot_bit, word_count, Circuit, HotspotEstimate, IndexedNoiseLocation,
-    LocationCatalog, LogicalObservable, Mask, NoiseModel, NpError, NpResult, SmallRng,
+    set_shot_bit, word_count, Circuit, HotspotEstimate, IndexedNoiseLocation, LocationCatalog,
+    LogicalObservable, Mask, NoiseModel, NpError, NpResult, SmallRng,
     TWO_QUBIT_DEPOLARIZING_EVENTS,
 };
 
@@ -373,14 +374,22 @@ fn apply_sampler_operation(
             detector_id,
             measurement_ids,
         } => {
-            let value = indexed_measurement_parity(&state.measurements, measurement_ids)?;
+            let value = indexed_measurement_parity(
+                &state.measurements,
+                measurement_ids,
+                state.all_mask.words.len(),
+            )?;
             state.detectors.insert(*detector_id, value);
         }
         SamplerOperation::ObservableInclude {
             observable_id,
             measurement_ids,
         } => {
-            let value = indexed_measurement_parity(&state.measurements, measurement_ids)?;
+            let value = indexed_measurement_parity(
+                &state.measurements,
+                measurement_ids,
+                state.all_mask.words.len(),
+            )?;
             state
                 .observables
                 .entry(*observable_id)
@@ -424,12 +433,8 @@ fn record_indexed_measurement(
 fn indexed_measurement_parity(
     measurements: &[Option<Mask>],
     measurement_ids: &[usize],
+    words: usize,
 ) -> NpResult<Mask> {
-    let words = measurements
-        .iter()
-        .find_map(Option::as_ref)
-        .map(|mask| mask.words.len())
-        .unwrap_or(1);
     let mut parity = Mask::zero(words);
     for measurement_id in measurement_ids {
         let value = measurements[*measurement_id].as_ref().ok_or_else(|| {
@@ -445,8 +450,11 @@ fn evaluate_sampler_observables(
     state: &mut RuntimeState,
 ) -> NpResult<()> {
     for observable in &program.compiled_observables {
-        let mut value =
-            indexed_measurement_parity(&state.measurements, &observable.measurement_ids)?;
+        let mut value = indexed_measurement_parity(
+            &state.measurements,
+            &observable.measurement_ids,
+            state.all_mask.words.len(),
+        )?;
         if !observable.pauli.is_empty() {
             xor_frame_measurement_flip_into(
                 &mut value,
@@ -815,20 +823,6 @@ mod tests {
             assert_eq!(state.x_frame, vec![b.clone(), a.clone()]);
             assert_eq!(state.z_frame, vec![d.clone(), c.clone()]);
 
-            let mut state = RuntimeState::new(1, shots, 0, 0, false);
-            state.x_frame[0] = a.clone();
-            state.z_frame[0] = b.clone();
-            apply_test_operation(SamplerOperation::Cx(0, 0), &program, &mut state, &mut rng);
-            assert_eq!(state.x_frame[0], Mask::zero(word_count(shots)));
-            assert_eq!(state.z_frame[0], Mask::zero(word_count(shots)));
-
-            let mut state = RuntimeState::new(1, shots, 0, 0, false);
-            state.x_frame[0] = a.clone();
-            state.z_frame[0] = b.clone();
-            apply_test_operation(SamplerOperation::Cz(0, 0), &program, &mut state, &mut rng);
-            assert_eq!(state.x_frame[0], a.clone());
-            assert_eq!(state.z_frame[0], b.clone());
-
             let mut state = RuntimeState::new(1, shots, 1, 0, false);
             state.x_frame[0] = a.clone();
             state.z_frame[0] = b;
@@ -1047,6 +1041,60 @@ mod tests {
 
         assert_eq!(state.shots, 0);
         assert!(state.measurements[0].as_ref().unwrap().words.is_empty());
+    }
+
+    #[test]
+    fn measurement_free_parity_and_frame_observables_preserve_batch_width() {
+        let simulator = FaultScopeSimulator::new(
+            Circuit {
+                n_qubits: 1,
+                operations: vec![
+                    Operation::Noise(NoiseLocation {
+                        id: "x0".to_string(),
+                        model: NoiseModel::BernoulliPauli("X".to_string()),
+                        rate: 1.0,
+                        qubits: vec![0],
+                        tags: HashMap::new(),
+                    }),
+                    Operation::Detector {
+                        detector_id: Some(7),
+                        measurement_keys: Vec::new(),
+                        coords: Vec::new(),
+                    },
+                    Operation::ObservableInclude {
+                        observable_id: 8,
+                        measurement_keys: Vec::new(),
+                    },
+                ],
+            },
+            vec![LogicalObservable {
+                id: 9,
+                measurement_keys: Vec::new(),
+                pauli_qubits: vec![0],
+                pauli: "Z".to_string(),
+            }],
+        )
+        .unwrap();
+
+        for shots in [0, 1, 63, 64, 65, 129, 513] {
+            let state = run_sampler_program(&simulator.program, shots, Some(1), true).unwrap();
+            let words = word_count(shots);
+
+            assert_eq!(state.all_mask.words.len(), words);
+            assert_eq!(state.detectors[&7], Mask::zero(words));
+            assert_eq!(state.observables[&8], Mask::zero(words));
+            assert_eq!(state.observables[&9], state.all_mask);
+            for mask in state
+                .x_frame
+                .iter()
+                .chain(&state.z_frame)
+                .chain(state.detectors.values())
+                .chain(state.observables.values())
+                .chain(&state.event_masks)
+            {
+                assert_eq!(mask.words.len(), words);
+            }
+        }
     }
 
     #[test]

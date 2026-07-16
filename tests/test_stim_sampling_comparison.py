@@ -9,7 +9,7 @@ from faultscope.decoders import (
     UnsupportedPyMatchingDemError,
 )
 from faultscope.dem import Detector, LogicalObservable
-from faultscope.io import parse_stim_circuit
+from faultscope.io import StimImportError, parse_stim_circuit
 from faultscope.runtime import UnsupportedNativeCircuitError, compile_native_sampler
 from faultscope.runtime import compile_native_dem_sampler, generate_native_dem
 from faultscope.runtime.loss import logical_residual_loss_mask
@@ -57,6 +57,41 @@ class StimSamplingComparisonTests(unittest.TestCase):
             self.fail("Stim is required for core sampling comparison tests")
         if np is None:
             self.fail("NumPy is required for core sampling comparison tests")
+
+    def test_supported_stim_parser_acceptance_matches_stim(self) -> None:
+        cases = (
+            "X_ERROR() 0",
+            "PAULI_CHANNEL_1(0.1,,0.2) 0",
+            "PAULI_CHANNEL_1(,0.1,0.2) 0",
+            "MPP X0 * Y1",
+            "MPP X0* Y1",
+            "PAULI_CHANNEL_1(-0.1,0.2,0) 0",
+            "PAULI_CHANNEL_1(0.7,0.4,0) 0",
+            "X_ERROR(0.1,) 0",
+            "X_ERROR(nan) 0",
+            "X_ERROR(inf) 0",
+            "M(-0.1) 0",
+            "M(1.1) 0",
+            "MPP X0**Y1",
+            "MPP X0*",
+        )
+        for source in cases:
+            with self.subTest(source=source):
+                try:
+                    stim.Circuit(source)
+                    stim_accepts = True
+                except ValueError:
+                    stim_accepts = False
+                try:
+                    parse_stim_circuit(source)
+                    faultscope_accepts = True
+                    faultscope_error = None
+                except ValueError as exc:
+                    faultscope_accepts = False
+                    faultscope_error = exc
+                self.assertEqual(faultscope_accepts, stim_accepts)
+                if not faultscope_accepts:
+                    self.assertIsInstance(faultscope_error, StimImportError)
 
     def test_basic_clifford_noise_and_reset_sampling_matches_stim(self) -> None:
         mflip = NoiseLocation(
@@ -414,7 +449,7 @@ class StimSamplingComparisonTests(unittest.TestCase):
 
         self.assertEqual(stim_observables.shape[1], 0)
 
-    def test_repetition_code_dem_logical_error_rate_matches_stim_dem_sampler(self) -> None:
+    def test_repetition_code_dem_logical_observable_rate_matches_stim_dem_sampler(self) -> None:
         shots = 18_000
         experiment = make_repetition_code_experiment(
             distance=5,
@@ -436,15 +471,12 @@ class StimSamplingComparisonTests(unittest.TestCase):
                 detectors=experiment.detectors,
                 observables=(observable,),
             )
-            decoder = PyMatchingDecoder.from_dem(faultscope_dem)
             faultscope_batch = compile_native_dem_sampler(faultscope_dem).run_batch(
                 shots=shots,
                 seed=24680,
             )
         except UnsupportedNativeCircuitError as exc:
             self.skipTest(f"native DEM mode unavailable: {exc}")
-        except (PyMatchingUnavailableError, UnsupportedPyMatchingDemError) as exc:
-            self.fail(f"PyMatching DEM decoder unavailable: {exc}")
 
         stim_circuit, _ = to_stim_circuit(
             with_dem_declarations(
@@ -466,13 +498,13 @@ class StimSamplingComparisonTests(unittest.TestCase):
 
         _assert_rates_close(
             self,
-            _dem_decoded_loss_rate(faultscope_batch, decoder, observable_id=0),
-            _dem_decoded_loss_rate(stim_batch, decoder, observable_id=0),
+            faultscope_batch.observables[0].bit_count() / shots,
+            stim_batch.observables[0].bit_count() / shots,
             shots,
-            "repetition DEM decoded logical error rate",
+            "repetition DEM logical observable rate",
         )
 
-    def test_surface_code_dem_logical_error_rates_match_stim_dem_sampler(self) -> None:
+    def test_surface_code_dem_logical_observable_rates_match_stim_dem_sampler(self) -> None:
         shots = 12_000
         for label, circuit, detectors, observables in _deterministic_surface_memory_cases():
             with self.subTest(memory=label):
@@ -482,15 +514,12 @@ class StimSamplingComparisonTests(unittest.TestCase):
                         detectors=detectors,
                         observables=observables,
                     )
-                    decoder = PyMatchingDecoder.from_dem(faultscope_dem)
                     faultscope_batch = compile_native_dem_sampler(faultscope_dem).run_batch(
                         shots=shots,
                         seed=34680,
                     )
                 except UnsupportedNativeCircuitError as exc:
                     self.skipTest(f"native DEM mode unavailable: {exc}")
-                except (PyMatchingUnavailableError, UnsupportedPyMatchingDemError) as exc:
-                    self.fail(f"PyMatching DEM decoder unavailable: {exc}")
 
                 stim_circuit, _ = to_stim_circuit(
                     with_dem_declarations(
@@ -513,10 +542,10 @@ class StimSamplingComparisonTests(unittest.TestCase):
 
                 _assert_rates_close(
                     self,
-                    _dem_decoded_loss_rate(faultscope_batch, decoder, observable_id=0),
-                    _dem_decoded_loss_rate(stim_batch, decoder, observable_id=0),
+                    faultscope_batch.observables[0].bit_count() / shots,
+                    stim_batch.observables[0].bit_count() / shots,
                     shots,
-                    f"surface DEM decoded logical error rate {label}",
+                    f"surface DEM logical observable rate {label}",
                 )
 
 

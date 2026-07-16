@@ -1,4 +1,6 @@
-use crate::{pauli_to_xz, word_count, Mask, NpError, NpResult, SmallRng};
+use crate::model::validate_pauli_channel_weights;
+use crate::pauli::pauli_to_xz;
+use crate::{word_count, Mask, NpError, NpResult, SmallRng};
 
 pub const TWO_QUBIT_DEPOLARIZING_EVENTS: [(bool, bool, bool, bool); 15] = [
     (false, false, true, false),
@@ -87,18 +89,17 @@ pub fn compile_pauli_channel_events(
     qubits: &[usize],
     weights: &[(String, f64)],
 ) -> NpResult<Vec<CompiledPauliEvent>> {
+    let event_length = validate_pauli_channel_weights(weights, "PauliChannel")?;
+    if event_length != qubits.len() {
+        return Err(NpError::new(
+            "PauliChannel event length does not match qubits",
+        ));
+    }
+
     let mut events = Vec::new();
     for (event, weight) in weights {
-        if *weight < 0.0 {
-            return Err(NpError::new("PauliChannel weights must be non-negative"));
-        }
         if *weight == 0.0 {
             continue;
-        }
-        if event.len() != qubits.len() {
-            return Err(NpError::new(
-                "PauliChannel event length does not match qubits",
-            ));
         }
         let mut x = Vec::with_capacity(event.len());
         let mut z = Vec::with_capacity(event.len());
@@ -158,5 +159,23 @@ mod tests {
         let err = compile_pauli_channel_events(&[0], &[("X".to_string(), -1.0)]).unwrap_err();
 
         assert!(err.message().contains("non-negative"));
+    }
+
+    #[test]
+    fn rejects_non_finite_and_non_event_channel_weights() {
+        let invalid_weights = vec![
+            vec![("X".to_string(), f64::NAN)],
+            vec![("X".to_string(), f64::INFINITY)],
+            vec![(String::new(), 1.0)],
+            vec![("I".to_string(), 1.0)],
+            vec![("X".to_string(), 0.0)],
+        ];
+
+        for weights in invalid_weights {
+            assert!(
+                compile_pauli_channel_events(&[0], &weights).is_err(),
+                "accepted invalid weights {weights:?}"
+            );
+        }
     }
 }

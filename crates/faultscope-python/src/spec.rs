@@ -17,7 +17,7 @@ pub(crate) fn parse_core_circuit_object(
 ) -> PyResult<faultscope_core::Circuit> {
     if let Ok(circuit) = value.extract::<PyRef<'_, PyCircuit>>() {
         if let Some(core_circuit) = &circuit.core_circuit {
-            return Ok((**core_circuit).clone());
+            return Ok(core_circuit.circuit().clone());
         }
         let py = value.py();
         let operations = circuit
@@ -35,27 +35,6 @@ pub(crate) fn parse_core_circuit_object(
         n_qubits,
         operations,
     })
-}
-
-pub(crate) fn cached_core_event_plan(
-    value: &Bound<'_, PyAny>,
-) -> Option<std::sync::Arc<faultscope_core::DemEventPlan>> {
-    let circuit = value.extract::<PyRef<'_, PyCircuit>>().ok()?;
-    if let Some(event_plan) = circuit.core_event_plan.get() {
-        return Some(event_plan.clone());
-    }
-    let source = circuit.core_circuit.as_ref()?;
-    let event_plan =
-        std::sync::Arc::new(faultscope_core::collect_dem_event_plan(&source.operations).ok()?);
-    let _ = circuit.core_event_plan.set(event_plan.clone());
-    Some(event_plan)
-}
-
-pub(crate) fn cached_core_circuit(
-    value: &Bound<'_, PyAny>,
-) -> Option<std::sync::Arc<faultscope_core::Circuit>> {
-    let circuit = value.extract::<PyRef<'_, PyCircuit>>().ok()?;
-    circuit.core_circuit.clone()
 }
 
 pub(crate) fn parse_circuit_object(value: &Bound<'_, PyAny>) -> PyResult<(usize, Vec<Op>)> {
@@ -490,13 +469,18 @@ pub(crate) fn parse_noise_model_object(value: &Bound<'_, PyAny>) -> PyResult<Noi
     }
 
     let type_name = value.get_type().getattr("__name__")?.extract::<String>()?;
-    match type_name.as_str() {
+    let model = match type_name.as_str() {
         "BernoulliPauliNoise" => Ok(NoiseModel::BernoulliPauli(
             required_attr(value, "pauli", "BernoulliPauliNoise")?.extract::<String>()?,
         )),
         "MeasurementBitFlip" => Ok(NoiseModel::MeasurementBitFlip),
         "SingleQubitDepolarizing" => Ok(NoiseModel::SingleQubitDepolarizing),
-        "TwoQubitDepolarizing" => Ok(NoiseModel::TwoQubitDepolarizing),
+        "TwoQubitDepolarizing" => {
+            let events = required_attr(value, "_events", "TwoQubitDepolarizing")?
+                .extract::<Vec<String>>()?;
+            validate_two_qubit_events(&events)?;
+            Ok(NoiseModel::TwoQubitDepolarizing)
+        }
         "PauliChannel" => {
             let weights = required_attr(value, "weights", "PauliChannel")?;
             let weights = weights
@@ -511,7 +495,11 @@ pub(crate) fn parse_noise_model_object(value: &Bound<'_, PyAny>) -> PyResult<Noi
         _ => Err(PyValueError::new_err(format!(
             "unsupported native noise model {type_name:?}"
         ))),
-    }
+    }?;
+    model
+        .validate()
+        .map_err(|error| PyValueError::new_err(error.to_string()))?;
+    Ok(model)
 }
 
 fn cache_safe_native_noise_model(value: &Bound<'_, PyAny>) -> Option<NoiseModel> {

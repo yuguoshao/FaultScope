@@ -3,8 +3,8 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use crate::counting::{
-    prepare_dem_count_plan, sample_dem_logical_error_stats_with_rng, validate_mask_shape,
-    CountOptions,
+    prepare_dem_count_plan, sample_dem_logical_error_stats_with_rng,
+    validate_decoder_observable_layout, validate_mask_shape, CountOptions,
 };
 use crate::scheduler::{
     batch_seed, collect_task_set, collect_task_set_with_progress, next_batch_size,
@@ -249,14 +249,21 @@ pub(crate) fn validate_task(task: &DemLogicalCollectionTask) -> NpResult<()> {
     validate_collection_options(task.options)?;
     validate_mask_shape(
         task.postselection_mask.as_deref(),
-        task.sampler.detector_ids.len(),
+        task.sampler.detector_ids().len(),
         "postselection_mask",
     )?;
     validate_mask_shape(
         task.postselected_observables_mask.as_deref(),
-        task.sampler.observable_ids.len(),
+        task.sampler.observable_ids().len(),
         "postselected_observables_mask",
     )?;
+    if let Some(decoder) = &task.decoder {
+        validate_decoder_observable_layout(
+            task.sampler.observable_ids(),
+            decoder.observable_ids(),
+            decoder.name(),
+        )?;
+    }
     if task.strong_id.is_empty() {
         return Err(NpError::new("strong_id must not be empty"));
     }

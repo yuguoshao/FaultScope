@@ -23,12 +23,12 @@ from faultscope.dem import (
 from faultscope.runtime import compile_native_dem_sampler, compile_native_sampler
 
 
+CAPSULE_V3 = b"faultscope.native_decoder_plugin.v3"
 CAPSULE_V2 = b"faultscope.native_decoder_plugin.v2"
-CAPSULE_V1 = b"faultscope.native_decoder_plugin.v1"
 
 
 class _FixtureDecoder:
-    def __init__(self, library, mode, capsule_name=CAPSULE_V2):
+    def __init__(self, library, mode, capsule_name=CAPSULE_V3):
         self._library = library
         self._pointer = library.fs_fixture_new(mode)
         self._capsule_name = ctypes.create_string_buffer(capsule_name)
@@ -92,12 +92,12 @@ class _FixtureDecoder:
             self._pointer = None
 
 
-class NativeDecoderAbiV2Tests(unittest.TestCase):
+class NativeDecoderAbiV3Tests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls._tempdir = tempfile.TemporaryDirectory(prefix="faultscope-abi-v2-")
-        source = pathlib.Path(__file__).with_name("native_decoder_v2_fixture.c")
-        library_path = pathlib.Path(cls._tempdir.name) / "native_decoder_v2_fixture.so"
+        cls._tempdir = tempfile.TemporaryDirectory(prefix="faultscope-abi-v3-")
+        source = pathlib.Path(__file__).with_name("native_decoder_v3_fixture.c")
+        library_path = pathlib.Path(cls._tempdir.name) / "native_decoder_v3_fixture.so"
         subprocess.run(
             ["cc", "-shared", "-fPIC", "-O0", str(source), "-o", str(library_path)],
             check=True,
@@ -134,7 +134,7 @@ class NativeDecoderAbiV2Tests(unittest.TestCase):
     def tearDownClass(cls):
         cls._tempdir.cleanup()
 
-    def fixture(self, mode, capsule_name=CAPSULE_V2):
+    def fixture(self, mode, capsule_name=CAPSULE_V3):
         fixture = _FixtureDecoder(self.library, mode, capsule_name)
         self.addCleanup(fixture.close)
         return fixture
@@ -172,7 +172,7 @@ class NativeDecoderAbiV2Tests(unittest.TestCase):
         copying = NativeGraphlikeDetectorCopyDecoder.from_dem(self.dem())
         self.assertEqual(copying.decode_batch_masks(self.batch()), {0: 0b1011})
 
-    def test_exact_v2_capsule_creates_distinct_temporary_workers(self):
+    def test_exact_v3_capsule_creates_distinct_temporary_workers(self):
         fixture = self.fixture(0)
         decoder = NativeCompositeDecoder((fixture,))
 
@@ -208,21 +208,21 @@ class NativeDecoderAbiV2Tests(unittest.TestCase):
         gc.collect()
         self.assertEqual(fixture.factory_drops, 1)
 
-    def test_v1_capsule_name_is_rejected_with_v2_context(self):
-        fixture = self.fixture(0, CAPSULE_V1)
-        with self.assertRaisesRegex(ValueError, r"v2"):
+    def test_v2_capsule_name_is_rejected_with_v3_context(self):
+        fixture = self.fixture(0, CAPSULE_V2)
+        with self.assertRaisesRegex(ValueError, r"v3"):
             NativeCompositeDecoder((fixture,))
 
-    def test_invalid_v2_factory_descriptors_are_rejected(self):
+    def test_invalid_v3_factory_descriptors_are_rejected(self):
         cases = {
-            10: r"expected ABI v2",
-            11: r"ABI v2.*size",
-            12: r"ABI v2.*thread-safe",
-            13: r"ABI v2.*null factory state",
-            14: r"ABI v2.*required callbacks",
-            15: r"ABI v2.*required callbacks",
-            16: r"ABI v2.*required callbacks",
-            17: r"ABI v2.*required callbacks",
+            10: r"expected ABI v3",
+            11: r"ABI v3.*size",
+            12: r"ABI v3.*thread-safe",
+            13: r"ABI v3.*null factory state",
+            14: r"ABI v3.*required callbacks",
+            15: r"ABI v3.*required callbacks",
+            16: r"ABI v3.*required callbacks",
+            17: r"ABI v3.*required callbacks",
         }
         for mode, message in cases.items():
             with self.subTest(mode=mode):
@@ -232,12 +232,12 @@ class NativeDecoderAbiV2Tests(unittest.TestCase):
 
     def test_invalid_worker_descriptors_and_output_shape_are_rejected(self):
         cases = {
-            5: (r"ABI v2.*worker descriptor size", 1),
-            6: (r"ABI v2.*unsafe non-null partial worker state", 0),
-            7: (r"ABI v2.*missing required callbacks", 1),
-            8: (r"ABI v2.*null worker state", 0),
-            9: (r"ABI v2.*invalid mask output shape", 1),
-            20: (r"ABI v2.*inconsistent decoder metadata", 1),
+            5: (r"ABI v3.*worker descriptor size", 1),
+            6: (r"ABI v3.*unsafe non-null partial worker state", 0),
+            7: (r"ABI v3.*missing required callbacks", 1),
+            8: (r"ABI v3.*null worker state", 0),
+            9: (r"ABI v3.*invalid mask output shape", 1),
+            20: (r"ABI v3.*inconsistent decoder metadata", 1),
         }
         for mode, (message, expected_drops) in cases.items():
             with self.subTest(mode=mode):
@@ -299,6 +299,40 @@ class NativeDecoderAbiV2Tests(unittest.TestCase):
                     )
                 self.assertEqual(fixture.worker_drops, 1)
 
+    def test_packed_and_event_nonzero_padding_is_rejected(self):
+        for mode in (21, 22):
+            with self.subTest(mode=mode):
+                fixture = self.fixture(mode)
+                with self.assertRaisesRegex(ValueError, r"non-zero padding bits"):
+                    compile_native_dem_sampler(self.dem()).estimate(
+                        shots=4,
+                        seed=654,
+                        decoder=fixture,
+                        aggregate_hotspots=False,
+                    )
+                self.assertEqual(fixture.worker_drops, 1)
+
+    def test_sampler_layout_mismatch_is_rejected_before_worker_creation(self):
+        dem = DetectorErrorModel(
+            detectors=(Detector(id=0, measurement_keys=()),),
+            observables=(LogicalObservable(id=1),),
+            edges=(DetectorErrorEdge(1.0, (0,), (1,), "edge1", "X"),),
+        )
+        fixture = self.fixture(0)
+
+        with self.assertRaisesRegex(
+            ValueError,
+            r"expected sampler canonical ids \[1\], got \[0\]",
+        ):
+            compile_native_dem_sampler(dem).estimate(
+                shots=4,
+                seed=987,
+                decoder=fixture,
+            )
+
+        self.assertEqual(fixture.creates, 0)
+        self.assertEqual(fixture.callback_calls, (0, 0, 0))
+
     def test_packed_estimate_uses_temporary_mask_worker(self):
         location = NoiseLocation("x0", BernoulliPauliNoise("X"), 1.0, (0,))
         circuit = Circuit(
@@ -312,7 +346,10 @@ class NativeDecoderAbiV2Tests(unittest.TestCase):
         )
         fixture = self.fixture(0)
 
-        result = compile_native_sampler(circuit).estimate(
+        result = compile_native_sampler(
+            circuit,
+            observables=(LogicalObservable(id=0, measurement_keys=("m",)),),
+        ).estimate(
             shots=16,
             seed=456,
             decoder=fixture,
@@ -327,8 +364,8 @@ class NativeDecoderAbiV2Tests(unittest.TestCase):
         sampler = compile_native_dem_sampler(self.dem())
         tasks = (
             {
-                "task_id": "abi-v2",
-                "strong_id": "abi-v2-strong",
+                "task_id": "abi-v3",
+                "strong_id": "abi-v3-strong",
                 "sampler": sampler,
                 "decoder": fixture,
                 "metadata_json": "{}",

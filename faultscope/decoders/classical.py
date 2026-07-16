@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import operator
 from dataclasses import dataclass
 from typing import Any, Mapping, Sequence
 
@@ -45,6 +46,16 @@ def _packed_count_greater_than(
 class NoCorrectionDecoder:
     """Decoder that returns no correction."""
 
+    def strong_id_payload(self) -> Mapping[str, object]:
+        """Return the stable collection identity for this decoder."""
+
+        return {
+            "backend": "faultscope-python",
+            "decoder": "no-correction",
+            "implementation_version": 1,
+            "parameters": {},
+        }
+
     def decode(
         self,
         detector_record: Any,
@@ -62,6 +73,43 @@ class RepetitionCodeDecoder:
     distance: int
     measurement_keys: tuple[str, ...] = ()
     observable_id: int = 0
+
+    def __post_init__(self) -> None:
+        if isinstance(self.distance, bool) or not isinstance(self.distance, int):
+            raise ValueError("distance must be a positive integer")
+        if self.distance <= 0:
+            raise ValueError("distance must be a positive integer")
+        if isinstance(self.observable_id, bool) or not isinstance(self.observable_id, int):
+            raise ValueError("observable_id must be a non-negative integer")
+        if self.observable_id < 0:
+            raise ValueError("observable_id must be a non-negative integer")
+        if isinstance(self.measurement_keys, str):
+            raise ValueError("measurement_keys must be a sequence of strings")
+        try:
+            measurement_keys = tuple(self.measurement_keys)
+        except TypeError as exc:
+            raise ValueError("measurement_keys must be a sequence of strings") from exc
+        if any(not isinstance(key, str) for key in measurement_keys):
+            raise ValueError("measurement_keys must contain only strings")
+        if len(set(measurement_keys)) != len(measurement_keys):
+            raise ValueError("measurement_keys must not contain duplicates")
+        if measurement_keys and len(measurement_keys) != self.distance - 1:
+            raise ValueError("measurement_keys must contain distance-1 entries")
+        object.__setattr__(self, "measurement_keys", measurement_keys)
+
+    def strong_id_payload(self) -> Mapping[str, object]:
+        """Return the stable collection identity for this decoder."""
+
+        return {
+            "backend": "faultscope-python",
+            "decoder": "repetition-code",
+            "implementation_version": 1,
+            "parameters": {
+                "distance": self.distance,
+                "measurement_keys": list(self.measurement_keys),
+                "observable_id": self.observable_id,
+            },
+        }
 
     def decode(
         self,
@@ -81,13 +129,39 @@ class RepetitionCodeDecoder:
         complement = [bit ^ 1 for bit in candidate]
         return candidate if sum(candidate) <= sum(complement) else complement
 
-    @staticmethod
-    def _coerce_syndrome(detector_record: Any) -> list[int]:
+    def _coerce_syndrome(self, detector_record: Any) -> list[int]:
         if isinstance(detector_record, Mapping):
-            return [int(detector_record[key]) for key in sorted(detector_record)]
-        if isinstance(detector_record, Sequence) and not isinstance(detector_record, str):
-            return [int(bit) for bit in detector_record]
+            if not self.measurement_keys and self.distance > 1:
+                raise ValueError("mapping syndrome requires explicit measurement_keys")
+            expected = set(self.measurement_keys)
+            missing = [key for key in self.measurement_keys if key not in detector_record]
+            extra = [key for key in detector_record if key not in expected]
+            if missing or extra:
+                raise ValueError(
+                    "mapping syndrome keys do not match measurement_keys: "
+                    f"missing={missing!r}, extra={extra!r}"
+                )
+            return self._validate_syndrome_bits(
+                [detector_record[key] for key in self.measurement_keys]
+            )
+        if isinstance(detector_record, Sequence) and not isinstance(
+            detector_record, (str, bytes, bytearray)
+        ):
+            return self._validate_syndrome_bits(detector_record)
         raise ValueError("repetition decoder requires a sequence or mapping syndrome")
+
+    @staticmethod
+    def _validate_syndrome_bits(bits: Sequence[Any]) -> list[int]:
+        syndrome: list[int] = []
+        for index, bit in enumerate(bits):
+            try:
+                value = operator.index(bit)
+            except TypeError as exc:
+                raise ValueError(f"syndrome bit {index} must be 0 or 1") from exc
+            if value not in (0, 1):
+                raise ValueError(f"syndrome bit {index} must be 0 or 1")
+            syndrome.append(value)
+        return syndrome
 
     def decode_batch_masks(self, batch: Any) -> dict[int, int]:
         if len(self.measurement_keys) != self.distance - 1:

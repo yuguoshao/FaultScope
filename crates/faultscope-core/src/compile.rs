@@ -16,6 +16,10 @@ pub fn compile_sampler_program_ref(
     operations: &[Operation],
     observables: Vec<LogicalObservable>,
 ) -> NpResult<SamplerProgram> {
+    crate::model::validate_operations(n_qubits, operations)?;
+    for observable in &observables {
+        observable.validate_for_n_qubits(n_qubits)?;
+    }
     let expanded = crate::program::expand_operations(operations, ExpansionMode::Sampler)?;
     compile_expanded_program(n_qubits, expanded, observables)
 }
@@ -683,6 +687,28 @@ mod tests {
             }],
             "unsupported measurement basis \"Q\"",
         );
+    }
+
+    #[test]
+    fn compiler_rejects_invalid_circuit_and_observable_targets() {
+        for operation in [Operation::H(1), Operation::Cx(0, 0), Operation::Swap(0, 0)] {
+            let err = compile_sampler(1, vec![operation]).unwrap_err();
+            assert!(
+                err.message().contains("targets qubit 1")
+                    || err.message().contains("duplicate qubit 0"),
+                "{err}"
+            );
+        }
+
+        let observable = LogicalObservable {
+            id: 7,
+            measurement_keys: Vec::new(),
+            pauli_qubits: vec![1],
+            pauli: "Z".to_string(),
+        };
+        let err = compile_sampler_program_ref(1, &[], vec![observable]).unwrap_err();
+        assert!(err.message().contains("logical observable 7"));
+        assert!(err.message().contains("targets qubit 1"));
     }
 
     #[test]

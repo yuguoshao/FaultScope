@@ -12,11 +12,22 @@ use faultscope_collection::{
 };
 use faultscope_core::{
     CorrectionMaskBatch, DemEvent, DemHotspotEstimator, Detector, DetectorErrorEdge,
-    DetectorErrorModel, DetectorMaskBatchView, LogicalObservable, NativeDecoderFactory,
+    DetectorErrorModel, DetectorMaskBatchView, LogicalObservable, Mask, NativeDecoderFactory,
     NativeDecoderWorker, NativeGraphlikeDetectorCopyDecoder,
 };
 
 const TEST_COORDINATION_TIMEOUT: Duration = Duration::from_secs(2);
+
+fn zero_correction_batch(
+    observable_ids: &[i64],
+    shots: usize,
+) -> faultscope_core::NpResult<CorrectionMaskBatch> {
+    CorrectionMaskBatch::new(
+        observable_ids.to_vec(),
+        vec![Mask::zero(faultscope_core::word_count(shots)); observable_ids.len()],
+        shots,
+    )
+}
 
 #[derive(Debug)]
 struct BoundedTestLatch {
@@ -259,7 +270,7 @@ impl NativeDecoderWorker for WorkerOwnedDecoder {
         drop(owner);
         thread::sleep(Duration::from_millis(5));
         self.active.store(false, Ordering::SeqCst);
-        Ok(CorrectionMaskBatch::empty(detectors.shots))
+        zero_correction_batch(&self.observable_ids, detectors.shots)
     }
 }
 
@@ -462,11 +473,11 @@ impl NativeDecoderWorker for SecondInstancePanickingDecoder {
         detectors: DetectorMaskBatchView<'_>,
     ) -> faultscope_core::NpResult<CorrectionMaskBatch> {
         if !self.is_worker {
-            return Ok(CorrectionMaskBatch::empty(detectors.shots));
+            return zero_correction_batch(&self.observable_ids, detectors.shots);
         }
         self.coordination.first_decode_started.signal()?;
         self.coordination.release_decode.wait()?;
-        Ok(CorrectionMaskBatch::empty(detectors.shots))
+        zero_correction_batch(&self.observable_ids, detectors.shots)
     }
 }
 
@@ -529,11 +540,11 @@ impl NativeDecoderWorker for SecondInstanceFailingDecoder {
         detectors: DetectorMaskBatchView<'_>,
     ) -> faultscope_core::NpResult<CorrectionMaskBatch> {
         if !self.is_worker {
-            return Ok(CorrectionMaskBatch::empty(detectors.shots));
+            return zero_correction_batch(&self.observable_ids, detectors.shots);
         }
         self.coordination.first_decode_started.signal()?;
         self.coordination.release_decode.wait()?;
-        Ok(CorrectionMaskBatch::empty(detectors.shots))
+        zero_correction_batch(&self.observable_ids, detectors.shots)
     }
 }
 
@@ -596,7 +607,7 @@ impl NativeDecoderWorker for GatedAdaptiveDecoder {
         while !*released {
             released = ready.wait(released).unwrap();
         }
-        Ok(CorrectionMaskBatch::empty(detectors.shots))
+        zero_correction_batch(&self.observable_ids, detectors.shots)
     }
 }
 
@@ -649,7 +660,7 @@ impl NativeDecoderWorker for SignalingUnsupportedDecoder {
         detectors: DetectorMaskBatchView<'_>,
     ) -> faultscope_core::NpResult<CorrectionMaskBatch> {
         self.decode_calls.fetch_add(1, Ordering::SeqCst);
-        Ok(CorrectionMaskBatch::empty(detectors.shots))
+        zero_correction_batch(&self.observable_ids, detectors.shots)
     }
 }
 
@@ -698,7 +709,7 @@ impl NativeDecoderWorker for NearMatchFactoryErrorDecoder {
         detectors: DetectorMaskBatchView<'_>,
     ) -> faultscope_core::NpResult<CorrectionMaskBatch> {
         self.decode_calls.fetch_add(1, Ordering::SeqCst);
-        Ok(CorrectionMaskBatch::empty(detectors.shots))
+        zero_correction_batch(&self.observable_ids, detectors.shots)
     }
 }
 
@@ -782,7 +793,7 @@ impl NativeDecoderWorker for LegacyTrackingDecoder {
         if !self.is_worker {
             self.tracker.prototype_calls.fetch_add(1, Ordering::SeqCst);
         }
-        Ok(CorrectionMaskBatch::empty(detectors.shots))
+        zero_correction_batch(&self.observable_ids, detectors.shots)
     }
 }
 
@@ -855,7 +866,7 @@ impl NativeDecoderWorker for ThreadRecordingDecoder {
     ) -> faultscope_core::NpResult<CorrectionMaskBatch> {
         self.threads.lock().unwrap().insert(thread::current().id());
         thread::sleep(self.sleep);
-        Ok(CorrectionMaskBatch::empty(detectors.shots))
+        zero_correction_batch(&self.observable_ids, detectors.shots)
     }
 }
 
@@ -920,7 +931,7 @@ impl NativeDecoderWorker for CountingDecoder {
         detectors: DetectorMaskBatchView<'_>,
     ) -> faultscope_core::NpResult<CorrectionMaskBatch> {
         *self.calls.lock().unwrap() += 1;
-        Ok(CorrectionMaskBatch::empty(detectors.shots))
+        zero_correction_batch(&self.observable_ids, detectors.shots)
     }
 }
 
@@ -988,7 +999,7 @@ impl NativeDecoderWorker for MaskRecordingDecoder {
             .lock()
             .unwrap()
             .push(detectors.masks[0].words.clone());
-        Ok(CorrectionMaskBatch::empty(detectors.shots))
+        zero_correction_batch(&self.observable_ids, detectors.shots)
     }
 }
 
@@ -1056,7 +1067,7 @@ impl NativeDecoderWorker for CalibrationCorrectingDecoder {
                 shots: detectors.shots,
             });
         }
-        Ok(CorrectionMaskBatch::empty(detectors.shots))
+        zero_correction_batch(&self.observable_ids, detectors.shots)
     }
 }
 
@@ -1086,7 +1097,7 @@ impl NativeDecoderWorker for BorrowedDecoder<'_> {
         detectors: DetectorMaskBatchView<'_>,
     ) -> faultscope_core::NpResult<CorrectionMaskBatch> {
         *self.calls += 1;
-        Ok(CorrectionMaskBatch::empty(detectors.shots))
+        zero_correction_batch(self.observable_ids, detectors.shots)
     }
 }
 
@@ -1257,6 +1268,46 @@ fn direct_counting_apis_accept_non_static_borrowed_workers() {
         assert_eq!(collected.decoder.as_deref(), Some("borrowed"));
     }
     assert_eq!(calls, 2);
+}
+
+#[test]
+fn direct_counting_rejects_noncanonical_decoder_layout_before_decode() {
+    let detector_ids = [0];
+    let observable_ids = [1];
+    let mut calls = 0;
+    let mut decoder = BorrowedDecoder {
+        name: "mismatched-borrowed",
+        detector_ids: &detector_ids,
+        observable_ids: &observable_ids,
+        calls: &mut calls,
+    };
+    let sampler = DemHotspotEstimator::new(graphlike_dem(1.0)).unwrap();
+
+    let err =
+        sample_dem_logical_error_stats(&sampler, 4, Some(17), Some(&mut decoder)).unwrap_err();
+
+    assert!(err
+        .message()
+        .contains("expected sampler canonical ids [0], got [1]"));
+    assert_eq!(calls, 0);
+}
+
+#[test]
+fn collection_task_rejects_noncanonical_factory_layout_before_worker_creation() {
+    let tracker = Arc::new(InstanceTracker::default());
+    let mut prototype = WorkerOwnedDecoder::prototype(tracker.clone());
+    prototype.observable_ids = vec![1];
+    let task = decoder_collection_task("mismatched-layout", Arc::new(prototype), 4, false);
+
+    let err =
+        collect_dem_logical_error_tasks(vec![task], collection_run_options(1), HashMap::new())
+            .unwrap_err();
+
+    assert!(err
+        .message()
+        .contains("expected sampler canonical ids [0], got [1]"));
+    assert_eq!(tracker.created.load(Ordering::SeqCst), 0);
+    assert_eq!(tracker.decode_calls.load(Ordering::SeqCst), 0);
 }
 
 #[test]
@@ -3161,6 +3212,82 @@ fn postselection_and_custom_counts_are_reported() {
     assert_eq!(selected[0].errors, 0);
     assert_eq!(selected[0].custom_counts["detection_events"], 8);
     assert_eq!(selected[0].custom_counts["detectors_checked"], 8);
+}
+
+#[test]
+fn implicit_dem_ids_are_consistent_across_fast_and_detailed_counting() {
+    let mut simulator = DemHotspotEstimator::new(DetectorErrorModel {
+        detectors: Vec::new(),
+        observables: Vec::new(),
+        edges: vec![DetectorErrorEdge {
+            probability: 1.0,
+            detectors: vec![7],
+            observables: vec![9],
+            location_id: "implicit".to_string(),
+            event: DemEvent::Bool(true),
+            tags: HashMap::new(),
+        }],
+    })
+    .unwrap();
+    assert_eq!(simulator.detector_ids, vec![7]);
+    assert_eq!(simulator.observable_ids, vec![9]);
+    assert_eq!(simulator.detector_ids(), &[7]);
+    assert_eq!(simulator.observable_ids(), &[9]);
+    simulator.detector_ids.clear();
+    simulator.observable_ids.clear();
+
+    let options = DemLogicalCollectionOptions {
+        max_shots: 8,
+        min_shots: 0,
+        max_errors: None,
+        batch_size: 8,
+        seed: Some(17),
+        start_batch_size: None,
+        max_batch_size: None,
+        max_batch_seconds: None,
+    };
+    let fast = collect_dem_logical_error_stats(&simulator, options, None).unwrap();
+    assert_eq!(fast.errors, 8);
+
+    let task = |task_id: &str,
+                postselection_mask: Option<Vec<u8>>,
+                postselected_observables_mask: Option<Vec<u8>>| {
+        DemLogicalCollectionTask {
+            task_id: task_id.to_string(),
+            strong_id: format!("{task_id}-strong"),
+            sampler: Arc::new(simulator.clone()),
+            decoder: None,
+            decoder_name: None,
+            metadata_json: "{}".to_string(),
+            options,
+            postselection_mask,
+            postselected_observables_mask,
+        }
+    };
+    let detailed = collect_dem_logical_error_tasks(
+        vec![
+            task("implicit", None, None),
+            task("detector-postselection", Some(vec![1]), None),
+            task("observable-postselection", None, Some(vec![1])),
+        ],
+        DemLogicalCollectionRunOptions {
+            num_workers: 1,
+            seed: None,
+            count_observable_error_combos: true,
+            count_detection_events: true,
+            custom_error_count_key: None,
+        },
+        HashMap::new(),
+    )
+    .unwrap();
+
+    assert_eq!(detailed[0].errors, fast.errors);
+    assert_eq!(detailed[0].discards, 0);
+    assert_eq!(detailed[0].custom_counts["detection_events"], 8);
+    assert_eq!(detailed[0].custom_counts["detectors_checked"], 8);
+    assert_eq!(detailed[0].custom_counts["obs_mistake_mask=E"], 8);
+    assert_eq!((detailed[1].errors, detailed[1].discards), (0, 8));
+    assert_eq!((detailed[2].errors, detailed[2].discards), (0, 8));
 }
 
 #[test]

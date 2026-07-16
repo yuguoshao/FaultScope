@@ -4,18 +4,47 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use faultscope_core::{
-    collect_dem_event_plan, generate_dem_edges_from_event_plan, Circuit, CorrectionMaskBatch,
-    DemHotspotEstimator, Detector, DetectorErrorModelGenerator, DetectorMaskBatchView,
-    FaultScopeNativeCorrectionMaskBatchMutViewV1, FaultScopeNativeDecoderFactoryV2,
-    FaultScopeNativeDecoderStatusV1, FaultScopeNativeDecoderStringViewV1,
-    FaultScopeNativeDecoderWorkerV2, FaultScopeNativeDetectorEventShotBatchViewV1,
-    FaultScopeNativeDetectorMaskBatchViewV1, FaultScopeNativePackedDetectorShotBatchViewV1,
-    FaultScopeSimulator, LogicalObservable, Mask, NativeCompositeDecoder, NativeDecoderFactory,
-    NativeDecoderWorker, NoiseLocation, NoiseModel, NpError, NpResult, Operation,
-    NATIVE_DECODER_FACTORY_FLAG_THREAD_SAFE, NATIVE_DECODER_PLUGIN_ABI_NAME,
-    NATIVE_DECODER_PLUGIN_ABI_VERSION, NATIVE_DECODER_PLUGIN_CAPSULE_NAME,
-    NATIVE_DECODER_PLUGIN_ENTRY_POINT_GROUP,
+    collect_dem_event_plan, generate_dem_edges_from_event_plan, Circuit, ConcreteStabilizer,
+    CorrectionMaskBatch, DemHotspotEstimator, Detector, DetectorErrorModelGenerator,
+    DetectorMaskBatchView, FaultScopeNativeCorrectionMaskBatchMutViewV1,
+    FaultScopeNativeDecoderFactoryV3, FaultScopeNativeDecoderStatusV1,
+    FaultScopeNativeDecoderStringViewV1, FaultScopeNativeDecoderWorkerV3,
+    FaultScopeNativeDetectorEventShotBatchViewV1, FaultScopeNativeDetectorMaskBatchViewV1,
+    FaultScopeNativeGraphlikeEdgeV1, FaultScopeNativeGraphlikeProblemV1,
+    FaultScopeNativePackedDetectorShotBatchViewV1, FaultScopeSimulator, LogicalObservable, Mask,
+    NativeCompositeDecoder, NativeDecoderFactory, NativeDecoderWorker, NoiseLocation, NoiseModel,
+    NpError, NpResult, Operation, PauliFrame, NATIVE_DECODER_FACTORY_FLAG_THREAD_SAFE,
+    NATIVE_DECODER_PLUGIN_ABI_NAME, NATIVE_DECODER_PLUGIN_ABI_VERSION,
+    NATIVE_DECODER_PLUGIN_CAPSULE_NAME, NATIVE_DECODER_PLUGIN_ENTRY_POINT_GROUP,
+    NATIVE_GRAPHLIKE_PROBLEM_ABI_NAME, NATIVE_GRAPHLIKE_PROBLEM_ABI_VERSION,
+    NATIVE_GRAPHLIKE_PROBLEM_CAPSULE_NAME,
 };
+
+#[test]
+fn pauli_api_exposes_only_validated_stateful_operations() {
+    let mut state = ConcreteStabilizer::zero(1);
+    let apply: fn(&mut ConcreteStabilizer, &[u8], &[u8]) -> NpResult<()> =
+        ConcreteStabilizer::apply_pauli_string;
+    let is_deterministic: fn(&ConcreteStabilizer, &[u8], &[u8]) -> NpResult<bool> =
+        ConcreteStabilizer::is_deterministic_pauli;
+    let apply_h: fn(&mut ConcreteStabilizer, usize) -> NpResult<()> = ConcreteStabilizer::apply_h;
+    apply(&mut state, &[0], &[0]).unwrap();
+    assert!(is_deterministic(&state, &[0], &[1]).unwrap());
+    apply_h(&mut state, 0).unwrap();
+
+    let frame_apply_h: fn(&mut PauliFrame, usize) -> NpResult<()> = PauliFrame::apply_h;
+    let mut frame = PauliFrame::new(vec![0], vec![0]).unwrap();
+    frame_apply_h(&mut frame, 0).unwrap();
+    frame.apply_pauli_string(&[0], "X").unwrap();
+    assert_eq!(frame.pauli_on(&[0]).unwrap(), "X");
+
+    let apply_event: fn(&mut ConcreteStabilizer, &mut PauliFrame, &[usize], &str) -> NpResult<()> =
+        ConcreteStabilizer::apply_pauli_event;
+    apply_event(&mut state, &mut frame, &[0], "Z").unwrap();
+
+    assert!(state.apply_pauli_string(&[1, 0], &[0]).is_err());
+    assert!(state.is_deterministic_pauli(&[1, 0], &[0]).is_err());
+}
 
 struct FactoryDecoder {
     created: Arc<AtomicUsize>,
@@ -392,11 +421,11 @@ fn composite_worker_factory_error_identifies_duplicate_named_child_by_index() {
 }
 
 #[test]
-fn native_decoder_v2_abi_layout_is_frozen_on_64_bit_targets() {
-    assert_eq!(NATIVE_DECODER_PLUGIN_ABI_VERSION, 2);
+fn native_decoder_v3_abi_layout_is_frozen_on_64_bit_targets() {
+    assert_eq!(NATIVE_DECODER_PLUGIN_ABI_VERSION, 3);
     assert_eq!(
         NATIVE_DECODER_PLUGIN_ABI_NAME,
-        "faultscope.native_decoder_plugin.v2"
+        "faultscope.native_decoder_plugin.v3"
     );
     assert_eq!(
         NATIVE_DECODER_PLUGIN_CAPSULE_NAME,
@@ -424,52 +453,101 @@ fn native_decoder_v2_abi_layout_is_frozen_on_64_bit_targets() {
             56
         );
         assert_eq!(size_of::<FaultScopeNativeDecoderStatusV1>(), 24);
-        assert_eq!(size_of::<FaultScopeNativeDecoderFactoryV2>(), 72);
-        assert_eq!(align_of::<FaultScopeNativeDecoderFactoryV2>(), 8);
-        assert_eq!(offset_of!(FaultScopeNativeDecoderFactoryV2, abi_version), 0);
-        assert_eq!(offset_of!(FaultScopeNativeDecoderFactoryV2, struct_size), 8);
-        assert_eq!(offset_of!(FaultScopeNativeDecoderFactoryV2, flags), 16);
+        assert_eq!(size_of::<FaultScopeNativeDecoderFactoryV3>(), 72);
+        assert_eq!(align_of::<FaultScopeNativeDecoderFactoryV3>(), 8);
+        assert_eq!(offset_of!(FaultScopeNativeDecoderFactoryV3, abi_version), 0);
+        assert_eq!(offset_of!(FaultScopeNativeDecoderFactoryV3, struct_size), 8);
+        assert_eq!(offset_of!(FaultScopeNativeDecoderFactoryV3, flags), 16);
         assert_eq!(
-            offset_of!(FaultScopeNativeDecoderFactoryV2, factory_state),
+            offset_of!(FaultScopeNativeDecoderFactoryV3, factory_state),
             24
         );
         assert_eq!(
-            offset_of!(FaultScopeNativeDecoderFactoryV2, drop_factory_state),
+            offset_of!(FaultScopeNativeDecoderFactoryV3, drop_factory_state),
             32
         );
-        assert_eq!(offset_of!(FaultScopeNativeDecoderFactoryV2, name), 40);
+        assert_eq!(offset_of!(FaultScopeNativeDecoderFactoryV3, name), 40);
         assert_eq!(
-            offset_of!(FaultScopeNativeDecoderFactoryV2, detector_ids),
+            offset_of!(FaultScopeNativeDecoderFactoryV3, detector_ids),
             48
         );
         assert_eq!(
-            offset_of!(FaultScopeNativeDecoderFactoryV2, observable_ids),
+            offset_of!(FaultScopeNativeDecoderFactoryV3, observable_ids),
             56
         );
         assert_eq!(
-            offset_of!(FaultScopeNativeDecoderFactoryV2, create_worker),
+            offset_of!(FaultScopeNativeDecoderFactoryV3, create_worker),
             64
         );
 
-        assert_eq!(size_of::<FaultScopeNativeDecoderWorkerV2>(), 48);
-        assert_eq!(align_of::<FaultScopeNativeDecoderWorkerV2>(), 8);
-        assert_eq!(offset_of!(FaultScopeNativeDecoderWorkerV2, struct_size), 0);
-        assert_eq!(offset_of!(FaultScopeNativeDecoderWorkerV2, worker_state), 8);
+        assert_eq!(size_of::<FaultScopeNativeDecoderWorkerV3>(), 48);
+        assert_eq!(align_of::<FaultScopeNativeDecoderWorkerV3>(), 8);
+        assert_eq!(offset_of!(FaultScopeNativeDecoderWorkerV3, struct_size), 0);
+        assert_eq!(offset_of!(FaultScopeNativeDecoderWorkerV3, worker_state), 8);
         assert_eq!(
-            offset_of!(FaultScopeNativeDecoderWorkerV2, drop_worker_state),
+            offset_of!(FaultScopeNativeDecoderWorkerV3, drop_worker_state),
             16
         );
         assert_eq!(
-            offset_of!(FaultScopeNativeDecoderWorkerV2, decode_batch),
+            offset_of!(FaultScopeNativeDecoderWorkerV3, decode_batch),
             24
         );
         assert_eq!(
-            offset_of!(FaultScopeNativeDecoderWorkerV2, decode_packed_batch),
+            offset_of!(FaultScopeNativeDecoderWorkerV3, decode_packed_batch),
             32
         );
         assert_eq!(
-            offset_of!(FaultScopeNativeDecoderWorkerV2, decode_detector_event_batch),
+            offset_of!(FaultScopeNativeDecoderWorkerV3, decode_detector_event_batch),
             40
+        );
+    }
+}
+
+#[test]
+fn native_graphlike_problem_v1_abi_layout_is_frozen_on_64_bit_targets() {
+    assert_eq!(NATIVE_GRAPHLIKE_PROBLEM_ABI_VERSION, 1);
+    assert_eq!(
+        NATIVE_GRAPHLIKE_PROBLEM_ABI_NAME,
+        "faultscope.native_graphlike_problem.v1"
+    );
+    assert_eq!(
+        NATIVE_GRAPHLIKE_PROBLEM_CAPSULE_NAME,
+        NATIVE_GRAPHLIKE_PROBLEM_ABI_NAME
+    );
+
+    if cfg!(target_pointer_width = "64") {
+        assert_eq!(size_of::<FaultScopeNativeGraphlikeEdgeV1>(), 48);
+        assert_eq!(align_of::<FaultScopeNativeGraphlikeEdgeV1>(), 8);
+        assert_eq!(
+            offset_of!(FaultScopeNativeGraphlikeEdgeV1, dem_edge_index),
+            0
+        );
+        assert_eq!(offset_of!(FaultScopeNativeGraphlikeEdgeV1, probability), 8);
+        assert_eq!(offset_of!(FaultScopeNativeGraphlikeEdgeV1, weight), 16);
+        assert_eq!(
+            offset_of!(FaultScopeNativeGraphlikeEdgeV1, fault_observable_offset),
+            24
+        );
+        assert_eq!(offset_of!(FaultScopeNativeGraphlikeEdgeV1, detector0), 32);
+        assert_eq!(
+            offset_of!(FaultScopeNativeGraphlikeEdgeV1, detector_count),
+            40
+        );
+
+        assert_eq!(size_of::<FaultScopeNativeGraphlikeProblemV1>(), 88);
+        assert_eq!(align_of::<FaultScopeNativeGraphlikeProblemV1>(), 8);
+        assert_eq!(
+            offset_of!(FaultScopeNativeGraphlikeProblemV1, abi_version),
+            0
+        );
+        assert_eq!(
+            offset_of!(FaultScopeNativeGraphlikeProblemV1, struct_size),
+            8
+        );
+        assert_eq!(offset_of!(FaultScopeNativeGraphlikeProblemV1, edges), 56);
+        assert_eq!(
+            offset_of!(FaultScopeNativeGraphlikeProblemV1, fault_observables),
+            72
         );
     }
 }

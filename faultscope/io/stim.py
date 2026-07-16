@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -46,7 +47,12 @@ def parse_stim_circuit(text: str) -> StimImportResult:
     """Parse supported Stim syntax into a FaultScope circuit and declarations."""
 
     importer = _StructuredStimImporter()
-    return importer.parse(text)
+    try:
+        return importer.parse(text)
+    except StimImportError:
+        raise
+    except (TypeError, ValueError) as exc:
+        raise StimImportError(f"invalid Stim circuit: {exc}") from exc
 
 
 @dataclass(frozen=True)
@@ -188,7 +194,7 @@ class _StructuredStimImporter:
         if name == "MPP":
             rate = _optional_single_arg(args, name, line_no)
             out = []
-            for product in _split_mpp_products(targets):
+            for product in _split_mpp_products(targets, line_no):
                 product_qubits: list[int] = []
                 paulis: list[str] = []
                 for factor in product:
@@ -338,6 +344,12 @@ class _StructuredStimImporter:
         )
         if len(node.args) != len(events):
             raise StimImportError(f"{node.name} requires {len(events)} args on line {node.line_no}")
+        for probability in node.args:
+            _validate_probability(probability, node.name, node.line_no)
+        if sum(node.args) > 1.0:
+            raise StimImportError(
+                f"{node.name} probabilities must sum to at most 1 on line {node.line_no}"
+            )
         weights = {
             event: probability for event, probability in zip(events, node.args) if probability > 0
         }
@@ -381,7 +393,7 @@ class _StructuredStimImporter:
                 for _ in node.targets:
                     self._next_measurement_key()
             elif name == "MPP":
-                for _ in _split_mpp_products(node.targets):
+                for _ in _split_mpp_products(node.targets, node.line_no):
                     self._next_measurement_key()
             elif name == "DETECTOR":
                 keys = self._keys_for_lookbacks(_parse_rec_lookbacks(node.targets, node.line_no))
@@ -472,7 +484,7 @@ def _parse_stim_nodes(text: str) -> tuple[_StimNode, ...]:
         current.append(
             _InstructionNode(
                 name=match.group(1).upper(),
-                args=_parse_args(match.group(2)),
+                args=_parse_args(match.group(2), line_no),
                 targets=tuple(match.group(3).split()) if match.group(3) else (),
                 line_no=line_no,
             )
@@ -691,16 +703,29 @@ def _strip_comment(line: str) -> str:
     return line.split("#", 1)[0]
 
 
-def _parse_args(raw: str | None) -> tuple[float, ...]:
-    if raw is None or not raw.strip():
+def _parse_args(raw: str | None, line_no: int) -> tuple[float, ...]:
+    if raw is None:
         return ()
-    return tuple(float(part.strip()) for part in raw.split(",") if part.strip())
+    parsed: list[float] = []
+    for part in raw.split(","):
+        token = part.strip()
+        if not token:
+            parsed.append(0.0)
+            continue
+        try:
+            value = float(token)
+        except ValueError as exc:
+            raise StimImportError(f"invalid numeric argument {token!r} on line {line_no}") from exc
+        if not math.isfinite(value):
+            raise StimImportError(f"numeric arguments must be finite on line {line_no}")
+        parsed.append(value)
+    return tuple(parsed)
 
 
 def _required_single_arg(args: tuple[float, ...], name: str, line_no: int) -> float:
     if len(args) != 1:
         raise StimImportError(f"{name} requires exactly one arg on line {line_no}")
-    return args[0]
+    return _validate_probability(args[0], name, line_no)
 
 
 def _optional_single_arg(
@@ -712,7 +737,13 @@ def _optional_single_arg(
         return None
     if len(args) != 1:
         raise StimImportError(f"{name} accepts at most one arg on line {line_no}")
-    return args[0]
+    return _validate_probability(args[0], name, line_no)
+
+
+def _validate_probability(value: float, name: str, line_no: int) -> float:
+    if not math.isfinite(value) or value < 0.0 or value > 1.0:
+        raise StimImportError(f"{name} probability must be in [0, 1] on line {line_no}")
+    return value
 
 
 def _parse_qubit_targets(targets: Sequence[str], line_no: int) -> tuple[int, ...]:
@@ -730,11 +761,40 @@ def _parse_qubit_targets(targets: Sequence[str], line_no: int) -> tuple[int, ...
     return tuple(qubits)
 
 
-def _split_mpp_products(targets: Sequence[str]) -> list[list[str]]:
-    products: list[list[str]] = []
+def _split_mpp_products(targets: Sequence[str], line_no: int) -> list[list[str]]:
+    pieces: list[str] = []
     for target in targets:
-        factors = [factor for factor in target.split("*") if factor]
-        if not factors:
+        start = 0
+        for index, char in enumerate(target):
+            if char != "*":
+                continue
+            if index > start:
+                pieces.append(target[start:index])
+            pieces.append("*")
+            start = index + 1
+        if start < len(target):
+            pieces.append(target[start:])
+
+    products: list[list[str]] = []
+    current: list[str] = []
+    after_combiner = False
+    for piece in pieces:
+        if piece == "*":
+            if not current or after_combiner:
+                raise StimImportError(f"invalid MPP combiner on line {line_no}")
+            after_combiner = True
             continue
-        products.append(factors)
+        if not _MPP_TARGET_RE.match(piece):
+            raise StimImportError(f"unsupported MPP target {piece!r} on line {line_no}")
+        if current and not after_combiner:
+            products.append(current)
+            current = []
+        current.append(piece)
+        after_combiner = False
+    if after_combiner:
+        raise StimImportError(f"invalid trailing MPP combiner on line {line_no}")
+    if current:
+        products.append(current)
+    if not products:
+        raise StimImportError(f"MPP requires at least one Pauli product on line {line_no}")
     return products

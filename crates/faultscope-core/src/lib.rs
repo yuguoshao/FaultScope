@@ -8,6 +8,7 @@
 mod compile;
 mod decoder;
 mod dem;
+mod dem_canonical;
 mod dem_problem;
 mod dem_sampling;
 mod expr;
@@ -28,10 +29,10 @@ pub use decoder::NativeFusionBlossomDecoder;
 pub use decoder::{
     logical_residual_loss_mask_native, packed_residual_failure_count, CorrectionMaskBatch,
     DetectorEventShotBatchView, DetectorMaskBatchView,
-    FaultScopeNativeCorrectionMaskBatchMutViewV1, FaultScopeNativeDecoderFactoryV2,
+    FaultScopeNativeCorrectionMaskBatchMutViewV1, FaultScopeNativeDecoderFactoryV3,
     FaultScopeNativeDecoderI64SliceV1, FaultScopeNativeDecoderMaskMutViewV1,
     FaultScopeNativeDecoderMaskViewV1, FaultScopeNativeDecoderStatusV1,
-    FaultScopeNativeDecoderStringViewV1, FaultScopeNativeDecoderWorkerV2,
+    FaultScopeNativeDecoderStringViewV1, FaultScopeNativeDecoderWorkerV3,
     FaultScopeNativeDetectorEventShotBatchViewV1, FaultScopeNativeDetectorMaskBatchViewV1,
     FaultScopeNativePackedDetectorShotBatchViewV1,
     FaultScopeNativePackedObservableShotBatchMutViewV1, NativeCompositeDecoder,
@@ -45,11 +46,14 @@ pub use decoder::{
 pub use dem::{
     collect_dem_event_plan, detectors_from_circuit, generate_dem_edges,
     generate_dem_edges_from_event_plan, observables_from_circuit, DemEventPlan,
-    DetectorErrorModelGenerator, LazyDetectorErrorModel,
+    DetectorErrorModelGenerator, LazyDetectorErrorModel, ValidatedDemCircuit,
 };
 pub use dem_problem::{
-    log_likelihood_ratio, BinaryLinearDecodingProblem, GraphlikeDecodingProblem, GraphlikeEdge,
-    IndexedDem, IndexedDemEdge, SparseBinaryMatrix,
+    log_likelihood_ratio, BinaryLinearDecodingProblem, FaultScopeNativeGraphlikeEdgeV1,
+    FaultScopeNativeGraphlikeProblemV1, GraphlikeDecodingProblem, GraphlikeEdge, GraphlikeEdgeRef,
+    IndexedDem, IndexedDemEdge, SparseBinaryMatrix, NATIVE_GRAPHLIKE_PROBLEM_ABI_NAME,
+    NATIVE_GRAPHLIKE_PROBLEM_ABI_VERSION, NATIVE_GRAPHLIKE_PROBLEM_CAPSULE_METHOD,
+    NATIVE_GRAPHLIKE_PROBLEM_CAPSULE_NAME,
 };
 pub use dem_sampling::{
     CompiledDemLogicalCountPlan, CompiledDemSamplingPlan, DemHotspotEstimator,
@@ -68,10 +72,6 @@ pub use packed::{
     run_sampler_program, FaultScopeSimulator, PauliBasis, RuntimeCapacities, RuntimeState,
     SamplerObservable, SamplerOperation, SamplerProgram,
 };
-pub use pauli::{
-    coeff_bit, highest_bit, multiply_concrete_rows, pauli_product, pauli_to_xz, solve_row_span,
-    sparse_pauli_to_xz, support_to_words, symplectic_product, xor_words, xz_to_pauli,
-};
 pub use program::expand_circuit_operations;
 pub use rng::SmallRng;
 pub use sampling::{
@@ -79,7 +79,4 @@ pub use sampling::{
     positive_unit_f64, random_bit_mask, set_shot_bit, CompiledPauliEvent,
     TWO_QUBIT_DEPOLARIZING_EVENTS,
 };
-pub use stabilizer::{
-    frame_apply_cx, frame_apply_cz, frame_apply_h, frame_apply_pauli_string, frame_apply_s,
-    frame_apply_swap, frame_measurement_flip_bits, ConcreteStabilizer,
-};
+pub use stabilizer::{ConcreteStabilizer, PauliFrame};

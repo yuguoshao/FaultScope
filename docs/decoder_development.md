@@ -29,8 +29,8 @@ circuit or DEM again.
 The runtime expects detector and observable ids to be stable:
 
 - `detector_ids` define the syndrome order consumed by the decoder.
-- `observable_ids` define the logical correction ids that the decoder may
-  return.
+- `observable_ids` must be the sampler's complete canonical logical-id sequence;
+  native decoders may not omit, add, or reorder ids.
 - A correction mask bit `k` is the decoder's predicted logical correction for
   shot `k`.
 
@@ -143,6 +143,38 @@ its required keys in advance; ordinary Python batch-like objects without this
 method remain supported by decoders that fall back to reading `measurements`
 once.
 
+### Stable collection identity
+
+Native decoder objects passed to `CollectionTask.decoder` must implement a
+stable identity protocol:
+
+```python
+def strong_id_payload(self):
+    return {
+        "backend": "my-decoder",
+        "backend_version": "1.2.3",
+        "implementation_version": 1,
+        "detector_ids": list(self.detector_ids),
+        "observable_ids": list(self.observable_ids),
+        "parameters": dict(self.normalized_options),
+        "solver": self.canonical_solver_problem,
+    }
+```
+
+The return value must be a JSON-serializable mapping derived from effective
+decoder state, not `repr(...)` or object identity. Include every parameter that
+can alter corrections, the detector and observable layouts, the effective
+graph or matrix, backend/ABI version information, and ordered payloads for all
+children of a composite decoder. Equivalent mapping insertion orders must
+produce equivalent payloads. Increment `implementation_version` when bundled
+decoder behavior changes without an otherwise visible configuration change.
+
+Collection rejects native decoder objects without this method before reading
+resume data or starting workers. There is intentionally no caller-supplied
+identity override, because it could recreate silent cross-decoder merges.
+Python prototype decoders remain usable with simulator `estimate(...)`, but are
+not accepted by native collection.
+
 ## Getting Circuit And DEM Information
 
 When starting from a circuit, first generate a detector error model:
@@ -182,9 +214,13 @@ The problem views expose ids, detector coordinates, counts, `edge_summary`,
 probabilities, weights, and sparse binary matrix entries for construction-time
 inspection. `detector_coords` is ordered exactly like `detector_ids`; backend
 builders can use it for geometry-aware graph compilation or partition planning.
-They intentionally do not expose `to_numpy_*` hot-path helpers. A native
-decoder should consume the native problem representation instead of moving
-batch data through Python.
+They intentionally do not expose `to_numpy_*` hot-path helpers.
+
+A native problem view uses the same canonical ids as DEM sampling: declarations
+first, then ids first referenced by raw edges. Per-edge detector and observable
+supports are reduced over GF(2), so sparse matrices never encode duplicate
+coordinates with numeric values greater than one. Decoder builders should
+consume these views instead of rebuilding ids or matrices from raw DEM fields.
 
 ## Native Decoder Backends
 
@@ -537,12 +573,12 @@ no backend decoder pool or worker mutex. A Python subclass that only implements
 native fast path.
 
 Native backends are discovered through built-in handles and post-install plugin
-entry points. FaultScope 0.2 uses the strict pure factory/worker ABI v2:
+entry points. FaultScope 0.2 uses the strict pure factory/worker ABI v3:
 
 ```text
 entry point group: faultscope.native_decoders
-ABI and capsule name: faultscope.native_decoder_plugin.v2
-numeric ABI: 2
+ABI and capsule name: faultscope.native_decoder_plugin.v3
+numeric ABI: 3
 capsule method: __faultscope_native_decoder_capsule__
 ```
 
@@ -551,14 +587,14 @@ handles. The factory cannot decode; FaultScope creates private exclusive workers
 for collection, estimate, debug, and composite decoding. Collection caches a
 worker per thread and task, including a one-worker collection, so a backend does
 not need a solver pool or a mutex around mutable solver state. See
-[Native Decoder ABI v2](native_decoder_abi.md) for layouts and lifecycle rules.
+[Native Decoder ABI v3](native_decoder_abi.md) for layouts and lifecycle rules.
 
 Official backend installation metadata lives in the built-in catalog. Each
 entry records the backend name, backend package, proxy class name, target
 problem view, source repository, default revision, installability, and a short
 description. `pymatching`, `fusion-blossom`, and `bpdecoder` are installable.
 `mwpm` remains discoverable but unavailable because its package is ABI v1 and
-not yet migrated to FaultScope native decoder ABI v2. `bposd` is a reserved,
+not yet migrated to FaultScope native decoder ABI v3. `bposd` is a reserved,
 unimplemented, non-installable catalog/status entry. A generic install request
 for either unavailable entry reports why it is unavailable and returns no
 install plan or steps.
@@ -655,7 +691,7 @@ python -m faultscope.backends install bpdecoder --dry-run
 ```
 
 These commands print clone/build/install steps for the three installable
-entries. `mwpm` is shown by `status` as unavailable pending ABI v2 migration
+entries. `mwpm` is shown by `status` as unavailable pending ABI v3 migration
 and a generic install request returns no plan. `bposd` is a reserved,
 unimplemented, non-installable catalog/status entry; the generic
 `python -m faultscope.backends install bposd --dry-run` command is accepted but
@@ -674,7 +710,7 @@ from faultscope.decoders import (
 
 decoder = NativeBpDecoder.from_dem(dem)  # raises until installed
 decoder = NativeFusionBlossomDecoder.from_dem(dem)  # raises until installed
-decoder = NativeMwpmDecoder.from_dem(dem)  # unavailable pending ABI v2 migration
+decoder = NativeMwpmDecoder.from_dem(dem)  # unavailable pending ABI v3 migration
 decoder = NativePyMatchingDecoder.from_dem(dem)  # raises until installed
 ```
 
@@ -876,8 +912,14 @@ FaultScope validates native decoder output before using it:
 - correction `shots` must match the sampled batch;
 - correction mask word count must match the shot count;
 - correction observable ids must be unique;
-- correction observable ids must be declared by the decoder;
-- missing observable corrections are treated as all-zero correction masks.
+- correction observable ids must exactly equal the decoder and sampler
+  canonical sequence;
+- packed output padding bits must be zero.
+
+Layout mismatches are rejected before sampling or worker creation whenever the
+decoder is bound to a sampler. There is no native ID-alignment fallback and no
+implicit zero correction for a missing native observable. Only the explicit
+no-decoder path supplies an all-zero correction batch.
 
 The native fast path is used only when:
 

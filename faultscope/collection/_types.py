@@ -138,6 +138,35 @@ class TaskStats:
     strong_id: str = ""
     custom_counts: Mapping[str, int] = field(default_factory=dict)
 
+    def __post_init__(self) -> None:
+        for field_name, value in (
+            ("shots", self.shots),
+            ("errors", self.errors),
+            ("discards", self.discards),
+        ):
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise ValueError(f"{field_name} must be a non-negative integer")
+            if value < 0:
+                raise ValueError(f"{field_name} must be non-negative")
+        if self.discards > self.shots:
+            raise ValueError("discards must not exceed shots")
+        if self.errors > self.shots - self.discards:
+            raise ValueError("errors count must not exceed accepted shots")
+        if (
+            isinstance(self.seconds, bool)
+            or not isinstance(self.seconds, (int, float))
+            or not math.isfinite(self.seconds)
+            or self.seconds < 0
+        ):
+            raise ValueError("seconds must be finite and non-negative")
+        if not isinstance(self.custom_counts, Mapping):
+            raise ValueError("custom_counts must be a mapping")
+        for value in self.custom_counts.values():
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise ValueError("custom_counts values must be integers")
+            if value < 0:
+                raise ValueError("custom_counts values must be non-negative")
+
     @property
     def raw_error_rate(self) -> float:
         if self.shots == 0:
@@ -327,8 +356,8 @@ def _parse_non_negative_int(value: str, *, field_name: str) -> int:
 
 def _parse_non_negative_float(value: str, *, field_name: str) -> float:
     parsed = float(value)
-    if parsed < 0:
-        raise ValueError(f"collection CSV {field_name} must be non-negative")
+    if not math.isfinite(parsed) or parsed < 0:
+        raise ValueError(f"collection CSV {field_name} must be finite and non-negative")
     return parsed
 
 
