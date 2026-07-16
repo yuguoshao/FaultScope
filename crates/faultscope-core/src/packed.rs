@@ -1,9 +1,10 @@
 use std::collections::HashMap;
 
+use crate::pauli::pauli_to_xz;
 use crate::{
     bernoulli_mask, choose_weighted_event, compile_pauli_channel_events, for_each_bernoulli_event,
-    pauli_to_xz, set_shot_bit, word_count, Circuit, HotspotEstimate, IndexedNoiseLocation,
-    LocationCatalog, LogicalObservable, Mask, NoiseModel, NpError, NpResult, SmallRng,
+    set_shot_bit, word_count, Circuit, HotspotEstimate, IndexedNoiseLocation, LocationCatalog,
+    LogicalObservable, Mask, NoiseModel, NpError, NpResult, SmallRng,
     TWO_QUBIT_DEPOLARIZING_EVENTS,
 };
 

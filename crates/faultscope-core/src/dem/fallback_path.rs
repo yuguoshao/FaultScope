@@ -113,29 +113,29 @@ fn apply_fault_propagation_operation(
 ) -> NpResult<()> {
     match operation {
         ExpandedOperation::H(q) => {
-            state.reference.apply_h(*q);
+            state.reference.apply_h_impl(*q);
             std::mem::swap(&mut state.x_frame[*q], &mut state.z_frame[*q]);
         }
         ExpandedOperation::S(q) => {
-            state.reference.apply_s(*q);
+            state.reference.apply_s_impl(*q);
             xor_between_frames(&state.x_frame, &mut state.z_frame, *q, *q);
         }
         ExpandedOperation::SDag(q) => {
-            state.reference.apply_s_dag(*q);
+            state.reference.apply_s_dag_impl(*q);
             xor_between_frames(&state.x_frame, &mut state.z_frame, *q, *q);
         }
         ExpandedOperation::Cx(control, target) => {
-            state.reference.apply_cx(*control, *target);
+            state.reference.apply_cx_impl(*control, *target);
             xor_within_frame(&mut state.x_frame, *target, *control);
             xor_within_frame(&mut state.z_frame, *control, *target);
         }
         ExpandedOperation::Cz(left, right) => {
-            state.reference.apply_cz(*left, *right);
+            state.reference.apply_cz_impl(*left, *right);
             xor_between_frames(&state.x_frame, &mut state.z_frame, *left, *right);
             xor_between_frames(&state.x_frame, &mut state.z_frame, *right, *left);
         }
         ExpandedOperation::Swap(left, right) => {
-            state.reference.apply_swap(*left, *right);
+            state.reference.apply_swap_impl(*left, *right);
             state.x_frame.swap(*left, *right);
             state.z_frame.swap(*left, *right);
         }
@@ -219,7 +219,7 @@ fn apply_fault_propagation_operation(
                     )?;
                 }
             }
-            state.reference.reset_prepare(*qubit, pauli)?;
+            state.reference.reset_prepare_impl(*qubit, pauli)?;
             state.x_frame[*qubit] = Mask::zero(state.event_words);
             state.z_frame[*qubit] = Mask::zero(state.event_words);
         }

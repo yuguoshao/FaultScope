@@ -69,10 +69,6 @@ pub use packed::{
     run_sampler_program, FaultScopeSimulator, PauliBasis, RuntimeCapacities, RuntimeState,
     SamplerObservable, SamplerOperation, SamplerProgram,
 };
-pub use pauli::{
-    coeff_bit, highest_bit, multiply_concrete_rows, pauli_product, pauli_to_xz, solve_row_span,
-    sparse_pauli_to_xz, support_to_words, symplectic_product, xor_words, xz_to_pauli,
-};
 pub use program::expand_circuit_operations;
 pub use rng::SmallRng;
 pub use sampling::{
@@ -80,7 +76,4 @@ pub use sampling::{
     positive_unit_f64, random_bit_mask, set_shot_bit, CompiledPauliEvent,
     TWO_QUBIT_DEPOLARIZING_EVENTS,
 };
-pub use stabilizer::{
-    frame_apply_cx, frame_apply_cz, frame_apply_h, frame_apply_pauli_string, frame_apply_s,
-    frame_apply_swap, frame_measurement_flip_bits, ConcreteStabilizer,
-};
+pub use stabilizer::{ConcreteStabilizer, PauliFrame};

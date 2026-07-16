@@ -1,8 +1,151 @@
-use crate::pauli::sparse_symplectic_product;
-use crate::{
-    coeff_bit, multiply_concrete_rows, sparse_pauli_to_xz, support_to_words, symplectic_product,
-    Expr, NpError, NpResult,
+use crate::pauli::{
+    coeff_bit, multiply_concrete_rows, solve_row_span, sparse_symplectic_product_bits,
+    support_to_words, symplectic_product_bits, xz_to_pauli, DensePauliRef, SparsePauli,
 };
+use crate::{Expr, NpError, NpResult};
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PauliFrame {
+    x: Vec<u8>,
+    z: Vec<u8>,
+}
+
+impl PauliFrame {
+    pub fn new(x: Vec<u8>, z: Vec<u8>) -> NpResult<Self> {
+        DensePauliRef::new(&x, &z, x.len())?;
+        Ok(Self { x, z })
+    }
+
+    pub fn zero(n_qubits: usize) -> Self {
+        Self {
+            x: vec![0; n_qubits],
+            z: vec![0; n_qubits],
+        }
+    }
+
+    pub fn n_qubits(&self) -> usize {
+        self.x.len()
+    }
+
+    pub fn x_bits(&self) -> &[u8] {
+        &self.x
+    }
+
+    pub fn z_bits(&self) -> &[u8] {
+        &self.z
+    }
+
+    pub fn apply_pauli(&mut self, qubit: usize, pauli: &str) -> NpResult<()> {
+        let qubits = [qubit];
+        let target = SparsePauli::new(self.n_qubits(), &qubits, pauli, "PauliFrame.apply_pauli")?;
+        self.apply_sparse_impl(target);
+        Ok(())
+    }
+
+    pub fn apply_pauli_string(&mut self, qubits: &[usize], pauli: &str) -> NpResult<()> {
+        let target = SparsePauli::new(
+            self.n_qubits(),
+            qubits,
+            pauli,
+            "PauliFrame.apply_pauli_string",
+        )?;
+        self.apply_sparse_impl(target);
+        Ok(())
+    }
+
+    pub fn apply_h(&mut self, qubit: usize) -> NpResult<()> {
+        crate::model::validate_qubit_index(self.n_qubits(), qubit, "PauliFrame.apply_h")?;
+        self.apply_h_impl(qubit);
+        Ok(())
+    }
+
+    pub fn apply_s(&mut self, qubit: usize) -> NpResult<()> {
+        crate::model::validate_qubit_index(self.n_qubits(), qubit, "PauliFrame.apply_s")?;
+        self.apply_s_impl(qubit);
+        Ok(())
+    }
+
+    pub fn apply_s_dag(&mut self, qubit: usize) -> NpResult<()> {
+        crate::model::validate_qubit_index(self.n_qubits(), qubit, "PauliFrame.apply_s_dag")?;
+        self.apply_s_impl(qubit);
+        Ok(())
+    }
+
+    pub fn apply_cx(&mut self, control: usize, target: usize) -> NpResult<()> {
+        crate::model::validate_qubit_pair(self.n_qubits(), control, target, "PauliFrame.apply_cx")?;
+        self.apply_cx_impl(control, target);
+        Ok(())
+    }
+
+    pub fn apply_cz(&mut self, left: usize, right: usize) -> NpResult<()> {
+        crate::model::validate_qubit_pair(self.n_qubits(), left, right, "PauliFrame.apply_cz")?;
+        self.apply_cz_impl(left, right);
+        Ok(())
+    }
+
+    pub fn apply_swap(&mut self, left: usize, right: usize) -> NpResult<()> {
+        crate::model::validate_qubit_pair(self.n_qubits(), left, right, "PauliFrame.apply_swap")?;
+        self.apply_swap_impl(left, right);
+        Ok(())
+    }
+
+    pub fn reset(&mut self, qubit: usize) -> NpResult<()> {
+        crate::model::validate_qubit_index(self.n_qubits(), qubit, "PauliFrame.reset")?;
+        self.x[qubit] = 0;
+        self.z[qubit] = 0;
+        Ok(())
+    }
+
+    pub fn measurement_flip(&self, qubits: &[usize], pauli: &str) -> NpResult<bool> {
+        let target = SparsePauli::new(
+            self.n_qubits(),
+            qubits,
+            pauli,
+            "PauliFrame.measurement_flip",
+        )?;
+        Ok(sparse_symplectic_product_bits(&self.x, &self.z, target) != 0)
+    }
+
+    pub fn pauli_on(&self, qubits: &[usize]) -> NpResult<String> {
+        crate::model::validate_qubit_targets(self.n_qubits(), qubits, "PauliFrame.pauli_on")?;
+        Ok(qubits
+            .iter()
+            .map(|qubit| xz_to_pauli(self.x[*qubit], self.z[*qubit]))
+            .collect())
+    }
+
+    fn apply_sparse_impl(&mut self, target: SparsePauli<'_>) {
+        for (qubit, x, z) in target.entries() {
+            self.x[qubit] ^= x;
+            self.z[qubit] ^= z;
+        }
+    }
+
+    fn apply_h_impl(&mut self, qubit: usize) {
+        std::mem::swap(&mut self.x[qubit], &mut self.z[qubit]);
+    }
+
+    fn apply_s_impl(&mut self, qubit: usize) {
+        self.z[qubit] ^= self.x[qubit];
+    }
+
+    fn apply_cx_impl(&mut self, control: usize, target: usize) {
+        self.x[target] ^= self.x[control];
+        self.z[control] ^= self.z[target];
+    }
+
+    fn apply_cz_impl(&mut self, left: usize, right: usize) {
+        self.apply_h_impl(right);
+        self.apply_cx_impl(left, right);
+        self.apply_h_impl(right);
+    }
+
+    fn apply_swap_impl(&mut self, left: usize, right: usize) {
+        self.apply_cx_impl(left, right);
+        self.apply_cx_impl(right, left);
+        self.apply_cx_impl(left, right);
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ConcreteStabilizer {
@@ -12,17 +155,6 @@ pub struct ConcreteStabilizer {
 }
 
 impl ConcreteStabilizer {
-    pub fn new(x: Vec<Vec<u8>>, z: Vec<Vec<u8>>, sign: Vec<bool>) -> NpResult<Self> {
-        if x.len() != z.len() || x.len() != sign.len() {
-            return Err(NpError::new("x, z, and sign must have the same length"));
-        }
-        let n_qubits = x.len();
-        if x.iter().any(|row| row.len() != n_qubits) || z.iter().any(|row| row.len() != n_qubits) {
-            return Err(NpError::new("stabilizer rows must be square"));
-        }
-        Ok(Self { x, z, sign })
-    }
-
     pub fn zero(n_qubits: usize) -> Self {
         let x = vec![vec![0; n_qubits]; n_qubits];
         let mut z = vec![vec![0; n_qubits]; n_qubits];
@@ -52,7 +184,13 @@ impl ConcreteStabilizer {
         &self.sign
     }
 
-    pub fn apply_h(&mut self, qubit: usize) {
+    pub fn apply_h(&mut self, qubit: usize) -> NpResult<()> {
+        crate::model::validate_qubit_index(self.n_qubits(), qubit, "ConcreteStabilizer.apply_h")?;
+        self.apply_h_impl(qubit);
+        Ok(())
+    }
+
+    pub(crate) fn apply_h_impl(&mut self, qubit: usize) {
         for row in 0..self.n_qubits() {
             let old_x = self.x[row][qubit];
             let old_z = self.z[row][qubit];
@@ -64,7 +202,13 @@ impl ConcreteStabilizer {
         }
     }
 
-    pub fn apply_s(&mut self, qubit: usize) {
+    pub fn apply_s(&mut self, qubit: usize) -> NpResult<()> {
+        crate::model::validate_qubit_index(self.n_qubits(), qubit, "ConcreteStabilizer.apply_s")?;
+        self.apply_s_impl(qubit);
+        Ok(())
+    }
+
+    pub(crate) fn apply_s_impl(&mut self, qubit: usize) {
         for row in 0..self.n_qubits() {
             let old_x = self.x[row][qubit];
             let old_z = self.z[row][qubit];
@@ -75,7 +219,17 @@ impl ConcreteStabilizer {
         }
     }
 
-    pub fn apply_s_dag(&mut self, qubit: usize) {
+    pub fn apply_s_dag(&mut self, qubit: usize) -> NpResult<()> {
+        crate::model::validate_qubit_index(
+            self.n_qubits(),
+            qubit,
+            "ConcreteStabilizer.apply_s_dag",
+        )?;
+        self.apply_s_dag_impl(qubit);
+        Ok(())
+    }
+
+    pub(crate) fn apply_s_dag_impl(&mut self, qubit: usize) {
         for row in 0..self.n_qubits() {
             let old_x = self.x[row][qubit];
             let old_z = self.z[row][qubit];
@@ -86,7 +240,18 @@ impl ConcreteStabilizer {
         }
     }
 
-    pub fn apply_cx(&mut self, control: usize, target: usize) {
+    pub fn apply_cx(&mut self, control: usize, target: usize) -> NpResult<()> {
+        crate::model::validate_qubit_pair(
+            self.n_qubits(),
+            control,
+            target,
+            "ConcreteStabilizer.apply_cx",
+        )?;
+        self.apply_cx_impl(control, target);
+        Ok(())
+    }
+
+    pub(crate) fn apply_cx_impl(&mut self, control: usize, target: usize) {
         for row in 0..self.n_qubits() {
             let x_c = self.x[row][control];
             let z_c = self.z[row][control];
@@ -100,24 +265,62 @@ impl ConcreteStabilizer {
         }
     }
 
-    pub fn apply_cz(&mut self, left: usize, right: usize) {
-        self.apply_h(right);
-        self.apply_cx(left, right);
-        self.apply_h(right);
+    pub fn apply_cz(&mut self, left: usize, right: usize) -> NpResult<()> {
+        crate::model::validate_qubit_pair(
+            self.n_qubits(),
+            left,
+            right,
+            "ConcreteStabilizer.apply_cz",
+        )?;
+        self.apply_cz_impl(left, right);
+        Ok(())
     }
 
-    pub fn apply_swap(&mut self, left: usize, right: usize) {
-        if left == right {
-            return;
-        }
-        self.apply_cx(left, right);
-        self.apply_cx(right, left);
-        self.apply_cx(left, right);
+    pub(crate) fn apply_cz_impl(&mut self, left: usize, right: usize) {
+        self.apply_h_impl(right);
+        self.apply_cx_impl(left, right);
+        self.apply_h_impl(right);
     }
 
-    pub fn apply_pauli_string(&mut self, x: &[u8], z: &[u8]) {
+    pub fn apply_swap(&mut self, left: usize, right: usize) -> NpResult<()> {
+        crate::model::validate_qubit_pair(
+            self.n_qubits(),
+            left,
+            right,
+            "ConcreteStabilizer.apply_swap",
+        )?;
+        self.apply_swap_impl(left, right);
+        Ok(())
+    }
+
+    pub(crate) fn apply_swap_impl(&mut self, left: usize, right: usize) {
+        debug_assert_ne!(left, right);
+        self.apply_cx_impl(left, right);
+        self.apply_cx_impl(right, left);
+        self.apply_cx_impl(left, right);
+    }
+
+    pub fn apply_pauli(&mut self, qubit: usize, pauli: &str) -> NpResult<()> {
+        let qubits = [qubit];
+        let target = SparsePauli::new(
+            self.n_qubits(),
+            &qubits,
+            pauli,
+            "ConcreteStabilizer.apply_pauli",
+        )?;
+        self.apply_sparse_pauli_impl(target);
+        Ok(())
+    }
+
+    pub fn apply_pauli_string(&mut self, x: &[u8], z: &[u8]) -> NpResult<()> {
+        let target = DensePauliRef::new(x, z, self.n_qubits())?;
+        self.apply_dense_pauli_impl(target);
+        Ok(())
+    }
+
+    fn apply_dense_pauli_impl(&mut self, target: DensePauliRef<'_>) {
         for row in 0..self.n_qubits() {
-            if symplectic_product(&self.x[row], &self.z[row], x, z) != 0 {
+            if symplectic_product_bits(&self.x[row], &self.z[row], target.x(), target.z()) != 0 {
                 self.sign[row] ^= true;
             }
         }
@@ -128,87 +331,127 @@ impl ConcreteStabilizer {
         qubits: &[usize],
         pauli: &str,
     ) -> NpResult<()> {
-        crate::model::validate_pauli_targets(self.n_qubits(), qubits, pauli, "stabilizer Pauli")?;
-        for row in 0..self.n_qubits() {
-            if sparse_symplectic_product(&self.x[row], &self.z[row], qubits, pauli)? != 0 {
-                self.sign[row] ^= true;
-            }
-        }
+        let target = SparsePauli::new(self.n_qubits(), qubits, pauli, "stabilizer Pauli")?;
+        self.apply_sparse_pauli_impl(target);
         Ok(())
     }
 
-    pub fn is_deterministic_pauli(&self, x: &[u8], z: &[u8]) -> bool {
-        (0..self.n_qubits()).all(|row| symplectic_product(&self.x[row], &self.z[row], x, z) == 0)
+    /// Apply one validated sparse Pauli event to this state and its frame.
+    ///
+    /// Both objects are checked before either is mutated, so an error leaves
+    /// the state and frame unchanged.
+    pub fn apply_pauli_event(
+        &mut self,
+        frame: &mut PauliFrame,
+        qubits: &[usize],
+        pauli: &str,
+    ) -> NpResult<()> {
+        if self.n_qubits() != frame.n_qubits() {
+            return Err(NpError::new(format!(
+                "stabilizer state and Pauli frame must have the same width, got state={} and frame={}",
+                self.n_qubits(),
+                frame.n_qubits()
+            )));
+        }
+        let target = SparsePauli::new(self.n_qubits(), qubits, pauli, "stabilizer Pauli event")?;
+        self.apply_sparse_pauli_impl(target);
+        frame.apply_sparse_impl(target);
+        Ok(())
     }
 
-    pub fn is_deterministic_sparse_pauli(&self, qubits: &[usize], pauli: &str) -> NpResult<bool> {
-        let pauli_bytes = pauli.as_bytes();
-        crate::model::validate_pauli_targets(self.n_qubits(), qubits, pauli, "stabilizer Pauli")?;
-        if pauli_bytes.iter().all(|local| *local == b'Z') {
-            for row in 0..self.n_qubits() {
-                let mut acc = 0;
-                for qubit in qubits {
-                    acc ^= self.x[row][*qubit];
-                }
-                if (acc & 1) != 0 {
-                    return Ok(false);
-                }
+    fn apply_sparse_pauli_impl(&mut self, target: SparsePauli<'_>) {
+        for row in 0..self.n_qubits() {
+            if sparse_symplectic_product_bits(&self.x[row], &self.z[row], target) != 0 {
+                self.sign[row] ^= true;
             }
-            return Ok(true);
         }
-        if pauli_bytes.iter().all(|local| *local == b'X') {
+    }
+
+    pub fn is_deterministic_pauli(&self, x: &[u8], z: &[u8]) -> NpResult<bool> {
+        let target = DensePauliRef::new(x, z, self.n_qubits())?;
+        Ok(self.is_deterministic_impl(target))
+    }
+
+    fn is_deterministic_impl(&self, target: DensePauliRef<'_>) -> bool {
+        (0..self.n_qubits()).all(|row| {
+            symplectic_product_bits(&self.x[row], &self.z[row], target.x(), target.z()) == 0
+        })
+    }
+
+    pub(crate) fn is_deterministic_sparse_pauli(
+        &self,
+        qubits: &[usize],
+        pauli: &str,
+    ) -> NpResult<bool> {
+        let target = SparsePauli::new(self.n_qubits(), qubits, pauli, "stabilizer Pauli")?;
+        Ok(self.is_deterministic_sparse_impl(target))
+    }
+
+    fn is_deterministic_sparse_impl(&self, target: SparsePauli<'_>) -> bool {
+        if target.entries().all(|(_, x, z)| x == 0 && z == 1) {
             for row in 0..self.n_qubits() {
                 let mut acc = 0;
-                for qubit in qubits {
-                    acc ^= self.z[row][*qubit];
+                for (qubit, _, _) in target.entries() {
+                    acc ^= self.x[row][qubit];
                 }
                 if (acc & 1) != 0 {
-                    return Ok(false);
+                    return false;
                 }
             }
-            return Ok(true);
+            return true;
         }
-        if pauli_bytes.iter().all(|local| *local == b'Y') {
+        if target.entries().all(|(_, x, z)| x == 1 && z == 0) {
             for row in 0..self.n_qubits() {
                 let mut acc = 0;
-                for qubit in qubits {
-                    acc ^= self.x[row][*qubit] ^ self.z[row][*qubit];
+                for (qubit, _, _) in target.entries() {
+                    acc ^= self.z[row][qubit];
                 }
                 if (acc & 1) != 0 {
-                    return Ok(false);
+                    return false;
                 }
             }
-            return Ok(true);
+            return true;
+        }
+        if target.entries().all(|(_, x, z)| x == 1 && z == 1) {
+            for row in 0..self.n_qubits() {
+                let mut acc = 0;
+                for (qubit, _, _) in target.entries() {
+                    acc ^= self.x[row][qubit] ^ self.z[row][qubit];
+                }
+                if (acc & 1) != 0 {
+                    return false;
+                }
+            }
+            return true;
         }
         for row in 0..self.n_qubits() {
             let mut acc = 0;
-            for (qubit, local) in qubits.iter().zip(pauli_bytes) {
-                match *local {
-                    b'I' => {}
-                    b'X' => acc ^= self.z[row][*qubit],
-                    b'Z' => acc ^= self.x[row][*qubit],
-                    b'Y' => acc ^= self.x[row][*qubit] ^ self.z[row][*qubit],
-                    _ => {
-                        return Err(NpError::new(format!(
-                            "unsupported Pauli {:?}",
-                            *local as char
-                        )))
-                    }
-                }
+            for (qubit, x, z) in target.entries() {
+                acc ^= (self.x[row][qubit] & z) ^ (self.z[row][qubit] & x);
             }
             if (acc & 1) != 0 {
-                return Ok(false);
+                return false;
             }
         }
-        Ok(true)
+        true
     }
 
     pub fn deterministic_measurement_bit(&self, x: &[u8], z: &[u8]) -> NpResult<bool> {
+        let target = DensePauliRef::new(x, z, self.n_qubits())?;
+        if !self.is_deterministic_impl(target) {
+            return Err(NpError::new(
+                "Pauli measurement is random for this stabilizer state",
+            ));
+        }
+        self.deterministic_measurement_bit_impl(target)
+    }
+
+    fn deterministic_measurement_bit_impl(&self, target: DensePauliRef<'_>) -> NpResult<bool> {
         let rows: Vec<Vec<u64>> = (0..self.n_qubits())
             .map(|row| support_to_words(&self.x[row], &self.z[row]))
             .collect();
-        let target = support_to_words(x, z);
-        let coeff = crate::solve_row_span(&rows, &target, self.n_qubits())
+        let target_words = support_to_words(target.x(), target.z());
+        let coeff = solve_row_span(&rows, &target_words, self.n_qubits())
             .ok_or_else(|| NpError::new("commuting Pauli was not in the stabilizer span"))?;
 
         let mut selected_any = false;
@@ -241,17 +484,34 @@ impl ConcreteStabilizer {
         Ok(selected_any && acc_sign)
     }
 
-    pub fn measure_pauli_with_outcome(
+    pub fn measure_pauli_with<E, F>(&mut self, x: &[u8], z: &[u8], random_bit: F) -> Result<bool, E>
+    where
+        E: From<NpError>,
+        F: FnOnce() -> Result<bool, E>,
+    {
+        let target = DensePauliRef::new(x, z, self.n_qubits()).map_err(E::from)?;
+        if self.is_deterministic_impl(target) {
+            return self
+                .deterministic_measurement_bit_impl(target)
+                .map_err(E::from);
+        }
+        let outcome = random_bit()?;
+        self.measure_pauli_with_outcome_impl(target, outcome)
+            .map_err(E::from)
+    }
+
+    fn measure_pauli_with_outcome_impl(
         &mut self,
-        x: &[u8],
-        z: &[u8],
+        target: DensePauliRef<'_>,
         outcome: bool,
     ) -> NpResult<bool> {
         let anti: Vec<usize> = (0..self.n_qubits())
-            .filter(|row| symplectic_product(&self.x[*row], &self.z[*row], x, z) != 0)
+            .filter(|row| {
+                symplectic_product_bits(&self.x[*row], &self.z[*row], target.x(), target.z()) != 0
+            })
             .collect();
         if anti.is_empty() {
-            return self.deterministic_measurement_bit(x, z);
+            return self.deterministic_measurement_bit_impl(target);
         }
 
         let pivot = anti[0];
@@ -271,92 +531,54 @@ impl ConcreteStabilizer {
             self.z[row] = new_z;
             self.sign[row] = new_sign;
         }
-        self.x[pivot] = x.to_vec();
-        self.z[pivot] = z.to_vec();
+        self.x[pivot] = target.x().to_vec();
+        self.z[pivot] = target.z().to_vec();
         self.sign[pivot] = outcome;
         Ok(outcome)
     }
 
     pub fn reset_prepare(&mut self, qubit: usize, basis: &str) -> NpResult<()> {
-        let qubits = vec![qubit];
-        let (x, z) = sparse_pauli_to_xz(self.n_qubits(), &qubits, basis)?;
-        if self.is_deterministic_pauli(&x, &z) {
-            let bit = self.deterministic_measurement_bit(&x, &z)?;
+        crate::model::validate_qubit_index(
+            self.n_qubits(),
+            qubit,
+            "ConcreteStabilizer.reset_prepare",
+        )?;
+        self.reset_prepare_impl(qubit, basis)
+    }
+
+    pub(crate) fn reset_prepare_impl(&mut self, qubit: usize, basis: &str) -> NpResult<()> {
+        let (target_x, target_z, correction_x, correction_z) = match basis {
+            "Z" => (0, 1, 1, 0),
+            "X" => (1, 0, 0, 1),
+            "Y" => (1, 1, 1, 0),
+            _ => return Err(NpError::new(format!("unsupported reset basis {basis:?}"))),
+        };
+        debug_assert!(qubit < self.n_qubits());
+        let mut x = vec![0; self.n_qubits()];
+        let mut z = vec![0; self.n_qubits()];
+        x[qubit] = target_x;
+        z[qubit] = target_z;
+        let dense = DensePauliRef::from_validated(&x, &z);
+        if self.is_deterministic_impl(dense) {
+            let bit = self.deterministic_measurement_bit_impl(dense)?;
             if bit {
-                let correction = match basis {
-                    "Z" => "X",
-                    "X" => "Z",
-                    "Y" => "X",
-                    _ => return Err(NpError::new(format!("unsupported reset basis {basis:?}"))),
-                };
-                let (cx, cz) = sparse_pauli_to_xz(self.n_qubits(), &qubits, correction)?;
-                self.apply_pauli_string(&cx, &cz);
+                self.apply_single_pauli_impl(qubit, correction_x, correction_z);
             }
         } else {
-            self.measure_pauli_with_outcome(&x, &z, false)?;
+            self.measure_pauli_with_outcome_impl(dense, false)?;
         }
         Ok(())
     }
-}
 
-pub fn frame_apply_h(x_frame: &mut [u8], z_frame: &mut [u8], qubit: usize) {
-    std::mem::swap(&mut x_frame[qubit], &mut z_frame[qubit]);
-}
-
-pub fn frame_apply_s(x_frame: &mut [u8], z_frame: &mut [u8], qubit: usize) {
-    z_frame[qubit] ^= x_frame[qubit];
-}
-
-pub fn frame_apply_cx(x_frame: &mut [u8], z_frame: &mut [u8], control: usize, target: usize) {
-    x_frame[target] ^= x_frame[control];
-    z_frame[control] ^= z_frame[target];
-}
-
-pub fn frame_apply_cz(x_frame: &mut [u8], z_frame: &mut [u8], left: usize, right: usize) {
-    frame_apply_h(x_frame, z_frame, right);
-    frame_apply_cx(x_frame, z_frame, left, right);
-    frame_apply_h(x_frame, z_frame, right);
-}
-
-pub fn frame_apply_swap(x_frame: &mut [u8], z_frame: &mut [u8], left: usize, right: usize) {
-    if left == right {
-        return;
+    fn apply_single_pauli_impl(&mut self, qubit: usize, x: u8, z: u8) {
+        debug_assert!(qubit < self.n_qubits());
+        debug_assert!(x <= 1 && z <= 1);
+        for row in 0..self.n_qubits() {
+            if ((self.x[row][qubit] & z) ^ (self.z[row][qubit] & x)) != 0 {
+                self.sign[row] ^= true;
+            }
+        }
     }
-    frame_apply_cx(x_frame, z_frame, left, right);
-    frame_apply_cx(x_frame, z_frame, right, left);
-    frame_apply_cx(x_frame, z_frame, left, right);
-}
-
-pub fn frame_apply_pauli_string(
-    x_frame: &mut [u8],
-    z_frame: &mut [u8],
-    qubits: &[usize],
-    pauli: &str,
-) -> NpResult<()> {
-    crate::model::validate_pauli_targets(x_frame.len(), qubits, pauli, "Pauli frame event")?;
-    for (qubit, local) in qubits.iter().zip(pauli.chars()) {
-        let (x, z) = crate::pauli_to_xz(local)?;
-        x_frame[*qubit] ^= x;
-        z_frame[*qubit] ^= z;
-    }
-    Ok(())
-}
-
-pub fn frame_measurement_flip_bits(
-    x_frame: &[u8],
-    z_frame: &[u8],
-    qubits: &[usize],
-    pauli: &str,
-) -> NpResult<bool> {
-    crate::model::validate_pauli_targets(x_frame.len(), qubits, pauli, "Pauli frame measurement")?;
-    let mut x = vec![0; x_frame.len()];
-    let mut z = vec![0; z_frame.len()];
-    for (qubit, local) in qubits.iter().zip(pauli.chars()) {
-        let (px, pz) = crate::pauli_to_xz(local)?;
-        x[*qubit] ^= px;
-        z[*qubit] ^= pz;
-    }
-    Ok(symplectic_product(x_frame, z_frame, &x, &z) != 0)
 }
 
 /// Compiler-only symbolic Aaronson-Gottesman tableau.
@@ -960,6 +1182,7 @@ fn toggle_flat_column_bit(matrix: &mut [u64], row_words: usize, column: usize, r
 }
 
 fn xor_words_in_place(target: &mut [u64], source: &[u64]) {
+    debug_assert_eq!(target.len(), source.len(), "word counts must match");
     for (target, source) in target.iter_mut().zip(source) {
         *target ^= source;
     }
@@ -1019,21 +1242,20 @@ fn first_set_bit_from(words: &[u64], start: usize) -> Option<usize> {
 
 impl SparsePackedPauli {
     fn new(n_qubits: usize, qubits: &[usize], pauli: &str) -> NpResult<Self> {
-        crate::model::validate_pauli_targets(n_qubits, qubits, pauli, "stabilizer Pauli")?;
+        let target = SparsePauli::new(n_qubits, qubits, pauli, "stabilizer Pauli")?;
         let words = n_qubits.div_ceil(64);
-        let mut entries = Vec::with_capacity(qubits.len());
+        let mut entries = Vec::with_capacity(target.len());
         let mut x = vec![0; words];
         let mut z = vec![0; words];
-        for (qubit, local) in qubits.iter().zip(pauli.chars()) {
-            let (local_x, local_z) = crate::pauli_to_xz(local)?;
+        for (qubit, local_x, local_z) in target.entries() {
             let local_x = local_x != 0;
             let local_z = local_z != 0;
-            entries.push((*qubit, local_x, local_z));
+            entries.push((qubit, local_x, local_z));
             if local_x {
-                toggle_packed_bit(&mut x, *qubit);
+                toggle_packed_bit(&mut x, qubit);
             }
             if local_z {
-                toggle_packed_bit(&mut z, *qubit);
+                toggle_packed_bit(&mut z, qubit);
             }
         }
         Ok(Self { entries, x, z })
@@ -1075,6 +1297,9 @@ fn packed_rowsum(
     source_z: &[u64],
     source_sign: &Expr,
 ) -> NpResult<()> {
+    debug_assert_eq!(target_x.len(), target_z.len(), "word counts must match");
+    debug_assert_eq!(target_x.len(), source_x.len(), "word counts must match");
+    debug_assert_eq!(target_x.len(), source_z.len(), "word counts must match");
     let mut phase = 0u32;
     for (((target_x_word, target_z_word), source_x_word), source_z_word) in target_x
         .iter_mut()
@@ -1112,6 +1337,7 @@ fn packed_rowsum(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pauli::sparse_pauli_to_xz;
 
     struct DenseSymbolicReference {
         x: Vec<Vec<u8>>,
@@ -1202,7 +1428,7 @@ mod tests {
         fn apply_sparse_pauli_expr(&mut self, qubits: &[usize], pauli: &str, expr: &Expr) {
             let (x, z) = sparse_pauli_to_xz(self.n_qubits(), qubits, pauli).unwrap();
             for row in 0..self.n_qubits() {
-                if symplectic_product(&self.x[row], &self.z[row], &x, &z) != 0 {
+                if symplectic_product_bits(&self.x[row], &self.z[row], &x, &z) != 0 {
                     self.sign[row].xor_assign(expr);
                 }
             }
@@ -1215,7 +1441,7 @@ mod tests {
 
         fn measure(&mut self, x: &[u8], z: &[u8]) -> Expr {
             let anti: Vec<usize> = (0..self.n_qubits())
-                .filter(|row| symplectic_product(&self.x[*row], &self.z[*row], x, z) != 0)
+                .filter(|row| symplectic_product_bits(&self.x[*row], &self.z[*row], x, z) != 0)
                 .collect();
             if anti.is_empty() {
                 return self.deterministic_measurement(x, z);
@@ -1253,7 +1479,7 @@ mod tests {
                 .map(|row| support_to_words(&self.x[row], &self.z[row]))
                 .collect();
             let target = support_to_words(x, z);
-            let coeff = crate::solve_row_span(&rows, &target, self.n_qubits()).unwrap();
+            let coeff = solve_row_span(&rows, &target, self.n_qubits()).unwrap();
             let mut acc_x = vec![0; self.n_qubits()];
             let mut acc_z = vec![0; self.n_qubits()];
             let mut acc_sign = Expr::default();
@@ -1313,20 +1539,128 @@ mod tests {
 
         state.reset_prepare(0, "Z").unwrap();
 
-        assert!(state.is_deterministic_pauli(&x, &z));
+        assert!(state.is_deterministic_pauli(&x, &z).unwrap());
         assert!(!state.deterministic_measurement_bit(&x, &z).unwrap());
     }
 
     #[test]
+    fn dense_pauli_methods_reject_before_rng_or_mutation() {
+        let mut state = ConcreteStabilizer::zero(2);
+        let before = state.clone();
+        let mut rng_calls = 0;
+
+        assert!(state.apply_pauli_string(&[1], &[0]).is_err());
+        assert!(state.is_deterministic_pauli(&[1], &[0]).is_err());
+        assert!(state.deterministic_measurement_bit(&[1], &[0]).is_err());
+        assert!(state
+            .deterministic_measurement_bit(&[1, 0], &[0, 0])
+            .is_err());
+        let measured: NpResult<bool> = state.measure_pauli_with(&[1], &[0], || {
+            rng_calls += 1;
+            Ok(false)
+        });
+        assert!(measured.is_err());
+        assert!(state.apply_pauli_string(&[2, 0], &[0, 0]).is_err());
+
+        assert_eq!(rng_calls, 0);
+        assert_eq!(state, before);
+        assert!(state.x_rows().iter().all(|row| row.len() == 2));
+        assert!(state.z_rows().iter().all(|row| row.len() == 2));
+    }
+
+    #[test]
+    fn public_gate_methods_reject_invalid_targets() {
+        let mut state = ConcreteStabilizer::zero(2);
+        let before = state.clone();
+
+        assert!(state.apply_h(2).is_err());
+        assert!(state.apply_cx(0, 0).is_err());
+        assert!(state.apply_swap(0, 2).is_err());
+        assert_eq!(state, before);
+    }
+
+    #[test]
+    fn pauli_frame_validates_construction_and_targets() {
+        assert!(PauliFrame::new(vec![1], vec![0, 0]).is_err());
+        assert!(PauliFrame::new(vec![2], vec![0]).is_err());
+
+        let mut frame = PauliFrame::new(vec![1], vec![0]).unwrap();
+        let before = frame.clone();
+        assert!(frame.apply_pauli_string(&[0, 0], "XZ").is_err());
+        assert!(frame.measurement_flip(&[1], "Z").is_err());
+        assert_eq!(frame, before);
+    }
+
+    #[test]
+    fn pauli_event_validates_state_and_frame_before_mutation() {
+        let mut state = ConcreteStabilizer::zero(2);
+        let mut short_frame = PauliFrame::zero(1);
+        let state_before = state.clone();
+        let frame_before = short_frame.clone();
+
+        assert!(state
+            .apply_pauli_event(&mut short_frame, &[1], "X")
+            .is_err());
+        assert_eq!(state, state_before);
+        assert_eq!(short_frame, frame_before);
+
+        let mut frame = PauliFrame::zero(2);
+        let state_before = state.clone();
+        let frame_before = frame.clone();
+        assert!(state.apply_pauli_event(&mut frame, &[0, 0], "XZ").is_err());
+        assert_eq!(state, state_before);
+        assert_eq!(frame, frame_before);
+
+        state.apply_pauli_event(&mut frame, &[0, 1], "XZ").unwrap();
+        let mut expected_state = ConcreteStabilizer::zero(2);
+        expected_state.apply_pauli_string(&[1, 0], &[0, 1]).unwrap();
+        assert_eq!(state, expected_state);
+        assert_eq!(frame.pauli_on(&[0, 1]).unwrap(), "XZ");
+    }
+
+    #[test]
+    fn pauli_frame_sparse_work_is_independent_of_frame_width() {
+        let mut frame = PauliFrame::zero(10_000);
+        frame
+            .apply_pauli_string(&[1, 127, 4_095, 9_999], "XYZX")
+            .unwrap();
+
+        assert_eq!(frame.pauli_on(&[1, 127, 4_095, 9_999]).unwrap(), "XYZX");
+        assert!(frame.measurement_flip(&[1], "Z").unwrap());
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    fn packed_rowsum_debug_asserts_mismatched_widths_before_mutation() {
+        let mut target_x = vec![1];
+        let mut target_z = vec![0, 0];
+        let mut target_sign = Expr::constant(true);
+        let before = (target_x.clone(), target_z.clone(), target_sign.clone());
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = packed_rowsum(
+                &mut target_x,
+                &mut target_z,
+                &mut target_sign,
+                &[0],
+                &[0],
+                &Expr::default(),
+            );
+        }));
+
+        assert!(result.is_err());
+        assert_eq!((target_x, target_z, target_sign), before);
+    }
+
+    #[test]
     fn frame_pauli_flips_measurement_when_anticommuting() {
-        let mut x_frame = vec![1];
-        let mut z_frame = vec![0];
+        let mut frame = PauliFrame::new(vec![1], vec![0]).unwrap();
 
-        assert!(frame_measurement_flip_bits(&x_frame, &z_frame, &[0], "Z").unwrap());
+        assert!(frame.measurement_flip(&[0], "Z").unwrap());
 
-        frame_apply_h(&mut x_frame, &mut z_frame, 0);
+        frame.apply_h(0).unwrap();
 
-        assert!(!frame_measurement_flip_bits(&x_frame, &z_frame, &[0], "Z").unwrap());
+        assert!(!frame.measurement_flip(&[0], "Z").unwrap());
     }
 
     #[test]
@@ -1339,14 +1673,14 @@ mod tests {
         ] {
             let mut sparse = ConcreteStabilizer::zero(3);
             let mut dense = ConcreteStabilizer::zero(3);
-            sparse.apply_h(0);
-            dense.apply_h(0);
-            sparse.apply_cx(0, 1);
-            dense.apply_cx(0, 1);
+            sparse.apply_h(0).unwrap();
+            dense.apply_h(0).unwrap();
+            sparse.apply_cx(0, 1).unwrap();
+            dense.apply_cx(0, 1).unwrap();
             let (x, z) = sparse_pauli_to_xz(3, &qubits, pauli).unwrap();
 
             sparse.apply_sparse_pauli_string(&qubits, pauli).unwrap();
-            dense.apply_pauli_string(&x, &z);
+            dense.apply_pauli_string(&x, &z).unwrap();
 
             assert_eq!(sparse, dense);
         }

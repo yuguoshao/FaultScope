@@ -48,6 +48,7 @@ impl Mask {
     }
 
     pub fn and_count(&self, other: &Mask) -> usize {
+        self.assert_same_width(other);
         self.words
             .iter()
             .zip(&other.words)
@@ -122,5 +123,11 @@ mod tests {
     #[should_panic(expected = "mask word counts must match")]
     fn and_assign_rejects_mismatched_widths() {
         Mask::zero(1).and_assign(&Mask::zero(2));
+    }
+
+    #[test]
+    #[should_panic(expected = "mask word counts must match")]
+    fn and_count_rejects_mismatched_widths() {
+        let _ = Mask::zero(1).and_count(&Mask::zero(2));
     }
 }

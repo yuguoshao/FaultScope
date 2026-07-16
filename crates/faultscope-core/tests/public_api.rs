@@ -4,18 +4,44 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use faultscope_core::{
-    collect_dem_event_plan, generate_dem_edges_from_event_plan, Circuit, CorrectionMaskBatch,
-    DemHotspotEstimator, Detector, DetectorErrorModelGenerator, DetectorMaskBatchView,
-    FaultScopeNativeCorrectionMaskBatchMutViewV1, FaultScopeNativeDecoderFactoryV2,
-    FaultScopeNativeDecoderStatusV1, FaultScopeNativeDecoderStringViewV1,
-    FaultScopeNativeDecoderWorkerV2, FaultScopeNativeDetectorEventShotBatchViewV1,
-    FaultScopeNativeDetectorMaskBatchViewV1, FaultScopeNativePackedDetectorShotBatchViewV1,
-    FaultScopeSimulator, LogicalObservable, Mask, NativeCompositeDecoder, NativeDecoderFactory,
-    NativeDecoderWorker, NoiseLocation, NoiseModel, NpError, NpResult, Operation,
-    NATIVE_DECODER_FACTORY_FLAG_THREAD_SAFE, NATIVE_DECODER_PLUGIN_ABI_NAME,
-    NATIVE_DECODER_PLUGIN_ABI_VERSION, NATIVE_DECODER_PLUGIN_CAPSULE_NAME,
-    NATIVE_DECODER_PLUGIN_ENTRY_POINT_GROUP,
+    collect_dem_event_plan, generate_dem_edges_from_event_plan, Circuit, ConcreteStabilizer,
+    CorrectionMaskBatch, DemHotspotEstimator, Detector, DetectorErrorModelGenerator,
+    DetectorMaskBatchView, FaultScopeNativeCorrectionMaskBatchMutViewV1,
+    FaultScopeNativeDecoderFactoryV2, FaultScopeNativeDecoderStatusV1,
+    FaultScopeNativeDecoderStringViewV1, FaultScopeNativeDecoderWorkerV2,
+    FaultScopeNativeDetectorEventShotBatchViewV1, FaultScopeNativeDetectorMaskBatchViewV1,
+    FaultScopeNativePackedDetectorShotBatchViewV1, FaultScopeSimulator, LogicalObservable, Mask,
+    NativeCompositeDecoder, NativeDecoderFactory, NativeDecoderWorker, NoiseLocation, NoiseModel,
+    NpError, NpResult, Operation, PauliFrame, NATIVE_DECODER_FACTORY_FLAG_THREAD_SAFE,
+    NATIVE_DECODER_PLUGIN_ABI_NAME, NATIVE_DECODER_PLUGIN_ABI_VERSION,
+    NATIVE_DECODER_PLUGIN_CAPSULE_NAME, NATIVE_DECODER_PLUGIN_ENTRY_POINT_GROUP,
 };
+
+#[test]
+fn pauli_api_exposes_only_validated_stateful_operations() {
+    let mut state = ConcreteStabilizer::zero(1);
+    let apply: fn(&mut ConcreteStabilizer, &[u8], &[u8]) -> NpResult<()> =
+        ConcreteStabilizer::apply_pauli_string;
+    let is_deterministic: fn(&ConcreteStabilizer, &[u8], &[u8]) -> NpResult<bool> =
+        ConcreteStabilizer::is_deterministic_pauli;
+    let apply_h: fn(&mut ConcreteStabilizer, usize) -> NpResult<()> = ConcreteStabilizer::apply_h;
+    apply(&mut state, &[0], &[0]).unwrap();
+    assert!(is_deterministic(&state, &[0], &[1]).unwrap());
+    apply_h(&mut state, 0).unwrap();
+
+    let frame_apply_h: fn(&mut PauliFrame, usize) -> NpResult<()> = PauliFrame::apply_h;
+    let mut frame = PauliFrame::new(vec![0], vec![0]).unwrap();
+    frame_apply_h(&mut frame, 0).unwrap();
+    frame.apply_pauli_string(&[0], "X").unwrap();
+    assert_eq!(frame.pauli_on(&[0]).unwrap(), "X");
+
+    let apply_event: fn(&mut ConcreteStabilizer, &mut PauliFrame, &[usize], &str) -> NpResult<()> =
+        ConcreteStabilizer::apply_pauli_event;
+    apply_event(&mut state, &mut frame, &[0], "Z").unwrap();
+
+    assert!(state.apply_pauli_string(&[1, 0], &[0]).is_err());
+    assert!(state.is_deterministic_pauli(&[1, 0], &[0]).is_err());
+}
 
 struct FactoryDecoder {
     created: Arc<AtomicUsize>,

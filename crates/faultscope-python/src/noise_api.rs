@@ -45,13 +45,12 @@ impl PyBernoulliPauliNoise {
 
     pub(crate) fn apply(
         &self,
-        py: Python<'_>,
         event: &Bound<'_, PyAny>,
-        state: &Bound<'_, PyAny>,
-        frame: &Bound<'_, PyAny>,
+        mut state: PyRefMut<'_, PyStabilizerState>,
+        mut frame: PyRefMut<'_, PyPauliFrame>,
         qubits: &Bound<'_, PyAny>,
     ) -> PyResult<()> {
-        apply_pauli_event(py, event, state, frame, qubits, None)
+        apply_pauli_event(event, &mut state, &mut frame, qubits, None)
     }
 
     pub(crate) fn __repr__(&self) -> String {
@@ -132,13 +131,12 @@ impl PyPauliChannel {
 
     pub(crate) fn apply(
         &self,
-        py: Python<'_>,
         event: &Bound<'_, PyAny>,
-        state: &Bound<'_, PyAny>,
-        frame: &Bound<'_, PyAny>,
+        mut state: PyRefMut<'_, PyStabilizerState>,
+        mut frame: PyRefMut<'_, PyPauliFrame>,
         qubits: &Bound<'_, PyAny>,
     ) -> PyResult<()> {
-        apply_pauli_event(py, event, state, frame, qubits, None)
+        apply_pauli_event(event, &mut state, &mut frame, qubits, None)
     }
 
     pub(crate) fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
@@ -182,17 +180,15 @@ impl PySingleQubitDepolarizing {
 
     pub(crate) fn apply(
         &self,
-        py: Python<'_>,
         event: &Bound<'_, PyAny>,
-        state: &Bound<'_, PyAny>,
-        frame: &Bound<'_, PyAny>,
+        mut state: PyRefMut<'_, PyStabilizerState>,
+        mut frame: PyRefMut<'_, PyPauliFrame>,
         qubits: &Bound<'_, PyAny>,
     ) -> PyResult<()> {
         apply_pauli_event(
-            py,
             event,
-            state,
-            frame,
+            &mut state,
+            &mut frame,
             qubits,
             Some((1, "single-qubit depolarizing noise requires one qubit")),
         )
@@ -251,17 +247,15 @@ impl PyTwoQubitDepolarizing {
 
     pub(crate) fn apply(
         &self,
-        py: Python<'_>,
         event: &Bound<'_, PyAny>,
-        state: &Bound<'_, PyAny>,
-        frame: &Bound<'_, PyAny>,
+        mut state: PyRefMut<'_, PyStabilizerState>,
+        mut frame: PyRefMut<'_, PyPauliFrame>,
         qubits: &Bound<'_, PyAny>,
     ) -> PyResult<()> {
         apply_pauli_event(
-            py,
             event,
-            state,
-            frame,
+            &mut state,
+            &mut frame,
             qubits,
             Some((2, "two-qubit depolarizing noise requires two qubits")),
         )
@@ -395,32 +389,21 @@ fn validate_pauli_channel(weights: &[(String, f64)]) -> PyResult<()> {
 }
 
 fn apply_pauli_event(
-    py: Python<'_>,
     event: &Bound<'_, PyAny>,
-    state: &Bound<'_, PyAny>,
-    frame: &Bound<'_, PyAny>,
+    state: &mut PyStabilizerState,
+    frame: &mut PyPauliFrame,
     qubits: &Bound<'_, PyAny>,
     required_qubits: Option<(usize, &'static str)>,
 ) -> PyResult<()> {
     let pauli = py_str(event)?;
-    let qubits = qubits.extract::<Vec<usize>>()?;
+    let qubits = usize_vector(qubits, "qubits")?;
     if let Some((required_len, message)) = required_qubits {
         if qubits.len() != required_len {
             return Err(PyValueError::new_err(message));
         }
     }
-    if pauli.len() != qubits.len() {
-        return Err(PyValueError::new_err(
-            "event Pauli length does not match qubits",
-        ));
-    }
-    let n_qubits = state.getattr("n_qubits")?.extract::<usize>()?;
-    let (x, z) = faultscope_core::sparse_pauli_to_xz(n_qubits, &qubits, &pauli)
-        .map_err(|err| PyValueError::new_err(err.to_string()))?;
-    state.call_method1(
-        "apply_pauli_string",
-        (PyList::new(py, x)?, PyList::new(py, z)?),
-    )?;
-    frame.call_method1("apply_pauli_string", (PyTuple::new(py, qubits)?, pauli))?;
-    Ok(())
+    state
+        .state
+        .apply_pauli_event(&mut frame.frame, &qubits, &pauli)
+        .map_err(|error| PyValueError::new_err(error.to_string()))
 }

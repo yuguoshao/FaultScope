@@ -10,12 +10,11 @@ sparse binary structure. User code should import from the public Python modules:
 `faultscope.collection`, `faultscope.decoders`, `faultscope.io`, and
 `faultscope.viz`.
 
-The package is pre-1.0. Within `0.2.x`, names listed in public Python module
-`__all__` values and the documented root APIs of `faultscope-core` and
-`faultscope-collection` are compatibility contracts. Compatible additions may
-land in patch releases. Removal or renaming requires deprecation before a later
-minor release. Private modules and names beginning with `_` are implementation
-details.
+The package is pre-1.0. Python and Rust API compatibility is not guaranteed
+between releases, including patch releases. Public module `__all__` values and
+documented crate-root exports describe the current supported surface, while
+private modules and names beginning with `_` are implementation details. The
+native decoder ABI is versioned separately.
 
 `faultscope.__version__` reports the installed distribution version. The Python
 package includes `py.typed` and a generated structural stub for the private
@@ -155,14 +154,34 @@ Additional attributes and methods:
 pauli_to_xz(pauli)
 xz_to_pauli(x, z)
 pauli_string_to_xz(pauli_string, n_qubits=None)
-sparse_pauli_to_xz(n_qubits, qubits, paulis)
-symplectic_product(x1, z1, x2, z2)
-multiply_pauli_rows(left_x, left_z, left_sign, right_x, right_z, right_sign)
 ```
+
+`PauliFrame(x, z)` validates matching binary x/z vectors once and owns the
+validated data. `PauliFrame.zero(n_qubits)` constructs an empty frame.
+`StabilizerState` has no raw-tableau constructor; create it with
+`StabilizerState.zero(n_qubits)` and use its invariant-preserving operations.
+
+Dense x/z arguments must match the state's `n_qubits` and contain only binary
+integer values. Sparse Pauli and gate targets must be unique non-negative
+integers in `0 <= qubit < n_qubits`. Malformed calls raise `ValueError` before
+computation, RNG use, or state mutation. Zero-qubit empty supports and
+correctly-sized identity supports remain valid.
+
+Noise-model `apply(...)` requires a `StabilizerState` and `PauliFrame` with the
+same `n_qubits`; event validation completes before both objects are updated as
+one operation.
 
 `PauliFrame` and `StabilizerState` are helper classes exposed from
 `faultscope.core`. They are useful for tests and low-level workflows; the packed
 runtime APIs below are the normal product path.
+
+The Rust crate root exposes owning `PauliFrame` and zero-state-only
+`ConcreteStabilizer`. Their public gates and Pauli operations return `NpResult`;
+low-level conversion, symplectic, row/word, validator, and frame free functions
+are private implementation details. `ConcreteStabilizer::measure_pauli_with`
+validates first and calls its RNG closure only when the measurement is random.
+`ConcreteStabilizer::apply_pauli_event` validates a sparse event once and then
+atomically updates the state and matching `PauliFrame`.
 
 ## Forward Runtime
 

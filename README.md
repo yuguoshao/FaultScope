@@ -32,6 +32,9 @@ FaultScope `0.2.x` 支持 CPython 3.10–3.14。预构建 wheels 的目标平台
 manylinux x86_64/aarch64、macOS 11+ x86_64/arm64 和 Windows x86_64；源码构建需要
 Rust 1.85 或更新版本。
 
+当前 workspace 版本为 `0.2.2`。项目仍处于 pre-1.0，补丁版本也可能收口或重命名 Python/Rust
+API；native decoder ABI 则使用独立版本号管理。
+
 从源码 checkout 直接安装：
 
 ```bash
@@ -111,6 +114,9 @@ print(result.hotspot_table(top_k=5))
 
 - `Operation.pauli_gate(...)` 是 Pauli gate 构造器；`Operation.pauli` 是只读属性。
 - `PauliFrame` 和 `StabilizerState` 从 `faultscope.core` 导入，不是顶层 `faultscope` export。
+- `PauliFrame(x, z)` 在构造边界校验并持有 binary x/z 不变量；`StabilizerState` 只能通过
+  `StabilizerState.zero(n_qubits)` 构造。无效 dense/sparse Pauli 输入会在计算、RNG 调用和
+  state mutation 前抛出 `ValueError`。
 - `FaultScopeSimulator` 是前向 packed batch runtime 的主要入口。
 - `DemFaultScopeSimulator` 是同形的 DEM runtime 入口：从 circuit 直接生成 DEM sampler，
   再按 DEM edge 概率采样 detector syndrome / logical observable flips。它不会逐门执行

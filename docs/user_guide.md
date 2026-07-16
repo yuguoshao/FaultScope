@@ -94,6 +94,11 @@ from faultscope.dem import Detector, LogicalObservable, DemHotspotEstimator
 the top-level `faultscope` package. Avoid importing from `faultscope._native`
 directly unless you are debugging the binding layer.
 
+Construct a frame with validated x/z vectors or `PauliFrame.zero(...)`.
+`StabilizerState` intentionally has no raw-tableau constructor; use
+`StabilizerState.zero(...)`. Invalid Pauli supports and targets raise
+`ValueError` before random-number generation or state mutation.
+
 ## Core Concepts
 
 A `Circuit` stores `n_qubits` and an ordered tuple of `Operation` objects.

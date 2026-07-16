@@ -1,24 +1,121 @@
 #[cfg(test)]
 use crate::Expr;
 use crate::{NpError, NpResult};
+use std::fmt;
 
-pub fn sparse_pauli_to_xz(
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct DensePauliRef<'a> {
+    x: &'a [u8],
+    z: &'a [u8],
+}
+
+impl<'a> DensePauliRef<'a> {
+    pub(crate) fn new(x: &'a [u8], z: &'a [u8], n_qubits: usize) -> NpResult<Self> {
+        if x.len() != n_qubits || z.len() != n_qubits {
+            return Err(NpError::new(format!(
+                "x and z vectors must each have length {n_qubits}, got x={} and z={}",
+                x.len(),
+                z.len()
+            )));
+        }
+        validate_binary_vector(x, "x")?;
+        validate_binary_vector(z, "z")?;
+        Ok(Self { x, z })
+    }
+
+    pub(crate) fn from_validated(x: &'a [u8], z: &'a [u8]) -> Self {
+        debug_assert_eq!(x.len(), z.len(), "Pauli row widths must match");
+        debug_assert!(x.iter().chain(z).all(|bit| *bit <= 1));
+        Self { x, z }
+    }
+
+    pub(crate) fn x(self) -> &'a [u8] {
+        self.x
+    }
+
+    pub(crate) fn z(self) -> &'a [u8] {
+        self.z
+    }
+}
+
+fn validate_binary_vector(values: &[u8], name: &str) -> NpResult<()> {
+    if let Some((index, value)) = values
+        .iter()
+        .copied()
+        .enumerate()
+        .find(|(_, value)| *value > 1)
+    {
+        return Err(NpError::new(format!(
+            "{name} vector must contain only 0 or 1, found {value} at index {index}"
+        )));
+    }
+    Ok(())
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct SparsePauli<'a> {
+    qubits: &'a [usize],
+    pauli: &'a [u8],
+}
+
+impl<'a> SparsePauli<'a> {
+    pub(crate) fn new<C>(
+        n_qubits: usize,
+        qubits: &'a [usize],
+        pauli: &'a str,
+        context: &C,
+    ) -> NpResult<Self>
+    where
+        C: fmt::Display + ?Sized,
+    {
+        crate::model::validate_pauli_targets(n_qubits, qubits, pauli, context)?;
+        Ok(Self {
+            qubits,
+            pauli: pauli.as_bytes(),
+        })
+    }
+
+    pub(crate) fn len(self) -> usize {
+        self.qubits.len()
+    }
+
+    pub(crate) fn entries(self) -> impl Iterator<Item = (usize, u8, u8)> + 'a {
+        self.qubits
+            .iter()
+            .copied()
+            .zip(self.pauli.iter().copied())
+            .map(sparse_entry)
+    }
+}
+
+fn sparse_entry((qubit, local): (usize, u8)) -> (usize, u8, u8) {
+    let (x, z) = match local {
+        b'I' => (0, 0),
+        b'X' => (1, 0),
+        b'Y' => (1, 1),
+        b'Z' => (0, 1),
+        _ => unreachable!("SparsePauli stores only validated Pauli bytes"),
+    };
+    (qubit, x, z)
+}
+
+#[cfg(test)]
+pub(crate) fn sparse_pauli_to_xz(
     n_qubits: usize,
     qubits: &[usize],
     pauli: &str,
 ) -> NpResult<(Vec<u8>, Vec<u8>)> {
-    crate::model::validate_pauli_targets(n_qubits, qubits, pauli, "sparse Pauli")?;
+    let target = SparsePauli::new(n_qubits, qubits, pauli, "sparse Pauli")?;
     let mut x = vec![0; n_qubits];
     let mut z = vec![0; n_qubits];
-    for (qubit, local) in qubits.iter().zip(pauli.chars()) {
-        let (px, pz) = pauli_to_xz(local)?;
-        x[*qubit] ^= px;
-        z[*qubit] ^= pz;
+    for (qubit, local_x, local_z) in target.entries() {
+        x[qubit] = local_x;
+        z[qubit] = local_z;
     }
     Ok((x, z))
 }
 
-pub fn pauli_to_xz(pauli: char) -> NpResult<(u8, u8)> {
+pub(crate) fn pauli_to_xz(pauli: char) -> NpResult<(u8, u8)> {
     match pauli {
         'I' => Ok((0, 0)),
         'X' => Ok((1, 0)),
@@ -28,8 +125,9 @@ pub fn pauli_to_xz(pauli: char) -> NpResult<(u8, u8)> {
     }
 }
 
-pub fn xz_to_pauli(x: u8, z: u8) -> char {
-    match (x & 1, z & 1) {
+pub(crate) fn xz_to_pauli(x: u8, z: u8) -> char {
+    debug_assert!(x <= 1 && z <= 1, "Pauli bits must be binary");
+    match (x, z) {
         (0, 0) => 'I',
         (1, 0) => 'X',
         (1, 1) => 'Y',
@@ -38,7 +136,10 @@ pub fn xz_to_pauli(x: u8, z: u8) -> char {
     }
 }
 
-pub fn symplectic_product(x1: &[u8], z1: &[u8], x2: &[u8], z2: &[u8]) -> u8 {
+pub(crate) fn symplectic_product_bits(x1: &[u8], z1: &[u8], x2: &[u8], z2: &[u8]) -> u8 {
+    debug_assert_eq!(x1.len(), z1.len(), "Pauli row widths must match");
+    debug_assert_eq!(x1.len(), x2.len(), "Pauli row widths must match");
+    debug_assert_eq!(x1.len(), z2.len(), "Pauli row widths must match");
     let mut acc = 0;
     for (((a_x, a_z), b_x), b_z) in x1.iter().zip(z1).zip(x2).zip(z2) {
         acc ^= (a_x & b_z) ^ (a_z & b_x);
@@ -46,24 +147,20 @@ pub fn symplectic_product(x1: &[u8], z1: &[u8], x2: &[u8], z2: &[u8]) -> u8 {
     acc & 1
 }
 
-pub(crate) fn sparse_symplectic_product(
+pub(crate) fn sparse_symplectic_product_bits(
     row_x: &[u8],
     row_z: &[u8],
-    qubits: &[usize],
-    pauli: &str,
-) -> NpResult<u8> {
-    if qubits.len() != pauli.len() {
-        return Err(NpError::new("qubits and paulis must have the same length"));
-    }
+    target: SparsePauli<'_>,
+) -> u8 {
+    debug_assert_eq!(row_x.len(), row_z.len(), "Pauli row widths must match");
     let mut acc = 0;
-    for (qubit, local) in qubits.iter().zip(pauli.chars()) {
-        let (target_x, target_z) = pauli_to_xz(local)?;
-        acc ^= (row_x[*qubit] & target_z) ^ (row_z[*qubit] & target_x);
+    for (qubit, target_x, target_z) in target.entries() {
+        acc ^= (row_x[qubit] & target_z) ^ (row_z[qubit] & target_x);
     }
-    Ok(acc & 1)
+    acc & 1
 }
 
-pub fn multiply_concrete_rows(
+pub(crate) fn multiply_concrete_rows(
     left_x: &[u8],
     left_z: &[u8],
     left_sign: bool,
@@ -71,6 +168,9 @@ pub fn multiply_concrete_rows(
     right_z: &[u8],
     right_sign: bool,
 ) -> NpResult<(Vec<u8>, Vec<u8>, bool)> {
+    debug_assert_eq!(left_x.len(), left_z.len(), "Pauli row widths must match");
+    debug_assert_eq!(left_x.len(), right_x.len(), "Pauli row widths must match");
+    debug_assert_eq!(left_x.len(), right_z.len(), "Pauli row widths must match");
     let mut phase = 0u8;
     let mut out_x = Vec::with_capacity(left_x.len());
     let mut out_z = Vec::with_capacity(left_x.len());
@@ -79,7 +179,7 @@ pub fn multiply_concrete_rows(
         let rp = xz_to_pauli(*rx, *rz);
         let (local_phase, product) = pauli_product(lp, rp);
         phase = (phase + local_phase) & 3;
-        let (px, pz) = pauli_to_xz(product)?;
+        let (px, pz) = pauli_to_xz(product).expect("Pauli products are valid");
         out_x.push(px);
         out_z.push(pz);
     }
@@ -103,6 +203,9 @@ pub(crate) fn multiply_symbolic_rows(
     right_z: &[u8],
     right_sign: &Expr,
 ) -> NpResult<(Vec<u8>, Vec<u8>, Expr)> {
+    debug_assert_eq!(left_x.len(), left_z.len(), "Pauli row widths must match");
+    debug_assert_eq!(left_x.len(), right_x.len(), "Pauli row widths must match");
+    debug_assert_eq!(left_x.len(), right_z.len(), "Pauli row widths must match");
     let mut phase = 0u8;
     let mut out_x = Vec::with_capacity(left_x.len());
     let mut out_z = Vec::with_capacity(left_x.len());
@@ -111,7 +214,7 @@ pub(crate) fn multiply_symbolic_rows(
         let rp = xz_to_pauli(*rx, *rz);
         let (local_phase, product) = pauli_product(lp, rp);
         phase = (phase + local_phase) & 3;
-        let (px, pz) = pauli_to_xz(product)?;
+        let (px, pz) = pauli_to_xz(product).expect("Pauli products are valid");
         out_x.push(px);
         out_z.push(pz);
     }
@@ -127,7 +230,7 @@ pub(crate) fn multiply_symbolic_rows(
     Ok((out_x, out_z, out_sign))
 }
 
-pub fn pauli_product(left: char, right: char) -> (u8, char) {
+pub(crate) fn pauli_product(left: char, right: char) -> (u8, char) {
     match (left, right) {
         ('I', p) => (0, p),
         (p, 'I') => (0, p),
@@ -142,7 +245,9 @@ pub fn pauli_product(left: char, right: char) -> (u8, char) {
     }
 }
 
-pub fn support_to_words(x: &[u8], z: &[u8]) -> Vec<u64> {
+pub(crate) fn support_to_words(x: &[u8], z: &[u8]) -> Vec<u64> {
+    debug_assert_eq!(x.len(), z.len(), "Pauli row widths must match");
+    debug_assert!(x.iter().chain(z).all(|bit| *bit <= 1));
     let bits = x.len() * 2;
     let mut words = vec![0u64; bits.div_ceil(64)];
     for (idx, bit) in x.iter().chain(z.iter()).enumerate() {
@@ -153,8 +258,21 @@ pub fn support_to_words(x: &[u8], z: &[u8]) -> Vec<u64> {
     words
 }
 
-pub fn solve_row_span(rows: &[Vec<u64>], target: &[u64], row_count: usize) -> Option<Vec<u64>> {
-    let bit_count = rows.first().map(|row| row.len() * 64).unwrap_or(0);
+pub(crate) fn solve_row_span(
+    rows: &[Vec<u64>],
+    target: &[u64],
+    row_count: usize,
+) -> Option<Vec<u64>> {
+    debug_assert!(
+        row_count >= rows.len(),
+        "row_count must be at least the number of rows"
+    );
+    let word_count = rows.first().map(Vec::len).unwrap_or(target.len());
+    debug_assert!(
+        rows.iter().all(|row| row.len() == word_count) && target.len() == word_count,
+        "row-span word counts must match"
+    );
+    let bit_count = word_count * 64;
     let coeff_words = row_count.div_ceil(64);
     let mut basis: Vec<Option<(Vec<u64>, Vec<u64>)>> = vec![None; bit_count];
     for (row_idx, row) in rows.iter().enumerate() {
@@ -182,7 +300,7 @@ pub fn solve_row_span(rows: &[Vec<u64>], target: &[u64], row_count: usize) -> Op
     Some(coeff)
 }
 
-pub fn highest_bit(words: &[u64]) -> Option<usize> {
+fn highest_bit(words: &[u64]) -> Option<usize> {
     for (word_idx, word) in words.iter().enumerate().rev() {
         if *word != 0 {
             let local = 63 - word.leading_zeros() as usize;
@@ -192,13 +310,15 @@ pub fn highest_bit(words: &[u64]) -> Option<usize> {
     None
 }
 
-pub fn xor_words(left: &mut [u64], right: &[u64]) {
+fn xor_words(left: &mut [u64], right: &[u64]) {
+    debug_assert_eq!(left.len(), right.len(), "word counts must match");
     for (a, b) in left.iter_mut().zip(right) {
         *a ^= *b;
     }
 }
 
-pub fn coeff_bit(coeff: &[u64], idx: usize) -> bool {
+pub(crate) fn coeff_bit(coeff: &[u64], idx: usize) -> bool {
+    debug_assert!(idx / 64 < coeff.len(), "coefficient index out of range");
     ((coeff[idx / 64] >> (idx % 64)) & 1) != 0
 }
 
@@ -239,10 +359,41 @@ mod tests {
         let qubits = vec![0, 2, 3];
         let pauli = "XYZ";
         let (target_x, target_z) = sparse_pauli_to_xz(4, &qubits, pauli).unwrap();
+        let sparse = SparsePauli::new(4, &qubits, pauli, "test Pauli").unwrap();
 
         assert_eq!(
-            sparse_symplectic_product(&row_x, &row_z, &qubits, pauli).unwrap(),
-            symplectic_product(&row_x, &row_z, &target_x, &target_z),
+            sparse_symplectic_product_bits(&row_x, &row_z, sparse),
+            symplectic_product_bits(&row_x, &row_z, &target_x, &target_z),
         );
+    }
+
+    #[test]
+    fn validates_dense_pauli_support() {
+        DensePauliRef::new(&[], &[], 0).unwrap();
+        DensePauliRef::new(&[0, 1], &[1, 0], 2).unwrap();
+
+        let length_error = DensePauliRef::new(&[1], &[0], 2).unwrap_err();
+        assert!(length_error.message().contains("each have length 2"));
+        let binary_error = DensePauliRef::new(&[2], &[0], 1).unwrap_err();
+        assert!(binary_error.message().contains("only 0 or 1"));
+    }
+
+    #[test]
+    fn sparse_pauli_stores_validated_bits() {
+        let target = SparsePauli::new(3, &[0, 2], "XY", "test Pauli").unwrap();
+        assert_eq!(
+            target.entries().collect::<Vec<_>>(),
+            vec![(0, 1, 0), (2, 1, 1)]
+        );
+
+        assert!(SparsePauli::new(3, &[0, 0], "XY", "test Pauli").is_err());
+        assert!(SparsePauli::new(3, &[3], "X", "test Pauli").is_err());
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "word counts must match")]
+    fn xor_words_debug_asserts_mismatched_widths() {
+        xor_words(&mut [0], &[0, 1]);
     }
 }

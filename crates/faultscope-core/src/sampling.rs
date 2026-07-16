@@ -1,4 +1,5 @@
-use crate::{pauli_to_xz, word_count, Mask, NpError, NpResult, SmallRng};
+use crate::pauli::pauli_to_xz;
+use crate::{word_count, Mask, NpError, NpResult, SmallRng};
 
 pub const TWO_QUBIT_DEPOLARIZING_EVENTS: [(bool, bool, bool, bool); 15] = [
     (false, false, true, false),
