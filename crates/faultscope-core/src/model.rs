@@ -69,6 +69,13 @@ pub enum NoiseModel {
     PauliChannel(Vec<(String, f64)>),
 }
 
+impl NoiseModel {
+    /// Validate configuration that is intrinsic to this noise model.
+    pub fn validate(&self) -> NpResult<()> {
+        validate_noise_model(self, "noise model").map(|_| ())
+    }
+}
+
 /// A named stochastic noise source attached to a circuit operation.
 ///
 /// Noise location ids must be unique within runtime compilation and DEM
@@ -84,13 +91,10 @@ pub struct NoiseLocation {
 
 impl NoiseLocation {
     pub fn validate(&self) -> NpResult<()> {
-        if !(0.0..=1.0).contains(&self.rate) {
-            return Err(NpError::new(format!(
-                "noise rate must be in [0, 1], got {}",
-                self.rate
-            )));
-        }
-        Ok(())
+        validate_noise_rate(self.rate)?;
+        let context = format!("noise location {:?}", self.id);
+        validate_unique_qubits(&self.qubits, &context)?;
+        validate_noise_shape(&self.model, &self.qubits, &context)
     }
 
     pub(crate) fn validate_for_n_qubits<C>(&self, n_qubits: usize, context: &C) -> NpResult<()>
@@ -543,12 +547,25 @@ pub(crate) fn validate_noise_parts<C>(
 where
     C: fmt::Display + ?Sized,
 {
+    validate_noise_rate(rate)?;
+    validate_qubit_targets(n_qubits, qubits, context)?;
+    validate_noise_shape(model, qubits, context)
+}
+
+fn validate_noise_rate(rate: f64) -> NpResult<()> {
     if !(0.0..=1.0).contains(&rate) {
         return Err(NpError::new(format!(
             "noise rate must be in [0, 1], got {rate}"
         )));
     }
-    validate_qubit_targets(n_qubits, qubits, context)?;
+    Ok(())
+}
+
+fn validate_noise_shape<C>(model: &NoiseModel, qubits: &[usize], context: &C) -> NpResult<()>
+where
+    C: fmt::Display + ?Sized,
+{
+    let event_length = validate_noise_model(model, context)?;
     match model {
         NoiseModel::MeasurementBitFlip | NoiseModel::SingleQubitDepolarizing => {
             if qubits.len() != 1 {
@@ -566,26 +583,107 @@ where
                 )));
             }
         }
-        NoiseModel::BernoulliPauli(pauli) => {
-            if qubits.len() != pauli_len(pauli) {
+        NoiseModel::BernoulliPauli(_) => {
+            if qubits.len() != event_length {
                 return Err(NpError::new(format!(
                     "{context} qubit targets and Pauli event must have the same length"
                 )));
             }
-            validate_pauli_string(pauli, context)?;
         }
-        NoiseModel::PauliChannel(weights) => {
-            for (event, _) in weights {
-                if qubits.len() != pauli_len(event) {
-                    return Err(NpError::new(format!(
-                        "{context} qubit targets and PauliChannel event {event:?} must have the same length"
-                    )));
-                }
-                validate_pauli_string(event, context)?;
+        NoiseModel::PauliChannel(_) => {
+            if qubits.len() != event_length {
+                return Err(NpError::new(format!(
+                    "{context} qubit targets and PauliChannel events must have the same length"
+                )));
             }
         }
     }
     Ok(())
+}
+
+fn validate_noise_model<C>(model: &NoiseModel, context: &C) -> NpResult<usize>
+where
+    C: fmt::Display + ?Sized,
+{
+    match model {
+        NoiseModel::MeasurementBitFlip | NoiseModel::SingleQubitDepolarizing => Ok(1),
+        NoiseModel::TwoQubitDepolarizing => Ok(2),
+        NoiseModel::BernoulliPauli(pauli) => {
+            validate_non_identity_pauli_event(pauli, context)?;
+            Ok(pauli_len(pauli))
+        }
+        NoiseModel::PauliChannel(weights) => validate_pauli_channel_weights(weights, context),
+    }
+}
+
+fn validate_non_identity_pauli_event<C>(pauli: &str, context: &C) -> NpResult<()>
+where
+    C: fmt::Display + ?Sized,
+{
+    if pauli.is_empty() {
+        return Err(NpError::new(format!(
+            "{context} Pauli event must not be empty"
+        )));
+    }
+    validate_pauli_string(pauli, context)?;
+    if pauli.chars().all(|local| local == 'I') {
+        return Err(NpError::new(format!(
+            "{context} Pauli event must be non-identity"
+        )));
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_pauli_channel_weights<C>(
+    weights: &[(String, f64)],
+    context: &C,
+) -> NpResult<usize>
+where
+    C: fmt::Display + ?Sized,
+{
+    if weights.is_empty() {
+        return Err(NpError::new(format!(
+            "{context} PauliChannel requires at least one non-identity event"
+        )));
+    }
+
+    let mut total = 0.0;
+    let mut event_length = None;
+    for (event, weight) in weights {
+        validate_non_identity_pauli_event(event, context)?;
+        if !weight.is_finite() {
+            return Err(NpError::new(format!(
+                "{context} PauliChannel weights must be finite"
+            )));
+        }
+        if *weight < 0.0 {
+            return Err(NpError::new(format!(
+                "{context} PauliChannel weights must be non-negative"
+            )));
+        }
+        match event_length {
+            None => event_length = Some(pauli_len(event)),
+            Some(length) if pauli_len(event) != length => {
+                return Err(NpError::new(format!(
+                    "{context} PauliChannel events must have the same length"
+                )));
+            }
+            _ => {}
+        }
+        total += *weight;
+        if !total.is_finite() {
+            return Err(NpError::new(format!(
+                "{context} PauliChannel total weight must be finite"
+            )));
+        }
+    }
+
+    if total <= 0.0 {
+        return Err(NpError::new(format!(
+            "{context} PauliChannel weights must have positive total weight"
+        )));
+    }
+    Ok(event_length.expect("non-empty PauliChannel has an event length"))
 }
 
 #[inline]
@@ -717,6 +815,60 @@ mod tests {
             qubits: vec![0],
             tags: HashMap::new(),
         }
+    }
+
+    #[test]
+    fn noise_models_reject_invalid_pauli_configurations() {
+        let invalid_models = vec![
+            NoiseModel::BernoulliPauli(String::new()),
+            NoiseModel::BernoulliPauli("II".to_string()),
+            NoiseModel::BernoulliPauli("A".to_string()),
+            NoiseModel::PauliChannel(Vec::new()),
+            NoiseModel::PauliChannel(vec![(String::new(), 1.0)]),
+            NoiseModel::PauliChannel(vec![("I".to_string(), 1.0)]),
+            NoiseModel::PauliChannel(vec![("X".to_string(), f64::NAN)]),
+            NoiseModel::PauliChannel(vec![("X".to_string(), f64::INFINITY)]),
+            NoiseModel::PauliChannel(vec![("X".to_string(), f64::NEG_INFINITY)]),
+            NoiseModel::PauliChannel(vec![
+                ("X".to_string(), f64::MAX),
+                ("Z".to_string(), f64::MAX),
+            ]),
+            NoiseModel::PauliChannel(vec![("X".to_string(), -1.0)]),
+            NoiseModel::PauliChannel(vec![("X".to_string(), 0.0)]),
+            NoiseModel::PauliChannel(vec![("X".to_string(), 1.0), ("ZZ".to_string(), 1.0)]),
+        ];
+
+        for model in invalid_models {
+            assert!(
+                model.validate().is_err(),
+                "accepted invalid model {model:?}"
+            );
+        }
+
+        NoiseModel::BernoulliPauli("XI".to_string())
+            .validate()
+            .unwrap();
+        NoiseModel::PauliChannel(vec![("IX".to_string(), 0.0), ("XI".to_string(), 2.0)])
+            .validate()
+            .unwrap();
+    }
+
+    #[test]
+    fn noise_location_rejects_invalid_model_at_zero_rate() {
+        let location = NoiseLocation {
+            id: "bad".to_string(),
+            model: NoiseModel::BernoulliPauli("A".to_string()),
+            rate: 0.0,
+            qubits: vec![0],
+            tags: HashMap::new(),
+        };
+
+        assert!(location.validate().is_err());
+        let circuit = Circuit {
+            n_qubits: 1,
+            operations: vec![Operation::Noise(location)],
+        };
+        assert!(circuit.validate().is_err());
     }
 
     #[test]

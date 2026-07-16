@@ -955,6 +955,62 @@ class NoiseAwareSimulatorTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             PauliChannel({"X": 1.0, "ZZ": 1.0})
 
+    def test_noise_model_constructors_reject_invalid_configurations(self) -> None:
+        for pauli in ("", "I", "II", "A", "x"):
+            with self.subTest(model="bernoulli", pauli=pauli):
+                with self.assertRaises(ValueError):
+                    BernoulliPauliNoise(pauli)
+
+        invalid_channels = (
+            {"": 1.0},
+            {"II": 1.0},
+            {"A": 1.0},
+            {"X": float("nan")},
+            {"X": float("inf")},
+            {"X": float("-inf")},
+            {
+                "X": float.fromhex("0x1.fffffffffffffp+1023"),
+                "Z": float.fromhex("0x1.fffffffffffffp+1023"),
+            },
+            {"X": 0.0, "Z": 0.0},
+        )
+        for weights in invalid_channels:
+            with self.subTest(model="channel", weights=weights):
+                with self.assertRaises(ValueError):
+                    PauliChannel(weights)
+
+    def test_two_qubit_depolarizing_accepts_only_canonical_events(self) -> None:
+        canonical = TwoQubitDepolarizing()._events
+        self.assertEqual(TwoQubitDepolarizing(canonical)._events, canonical)
+
+        duplicated = list(canonical)
+        duplicated[-1] = duplicated[0]
+        malformed = list(canonical)
+        malformed[-1] = "AA"
+        for events in ((), ("XX",), tuple(reversed(canonical)), duplicated, malformed):
+            with self.subTest(events=events):
+                with self.assertRaises(ValueError):
+                    TwoQubitDepolarizing(events)
+
+        DuckTwoQubit = type("TwoQubitDepolarizing", (), {})
+        duck_model = DuckTwoQubit()
+        duck_model._events = ("XX",)
+        location = NoiseLocation("duck", duck_model, 1.0, (0, 1))
+        circuit = Circuit(n_qubits=2, operations=(Operation.noise(location),))
+        with self.assertRaises(UnsupportedNativeCircuitError):
+            compile_native_sampler(circuit)
+
+    def test_pauli_channel_boundary_selection_matches_native_rule(self) -> None:
+        class BoundaryRng:
+            def __init__(self) -> None:
+                self._draws = iter((0.0, 0.5))
+
+            def random(self) -> float:
+                return next(self._draws)
+
+        channel = PauliChannel({"X": 1.0, "Z": 1.0})
+        self.assertEqual(channel.sample(BoundaryRng(), 1.0), "Z")
+
 
 class BatchNoiseAwareSimulatorTests(unittest.TestCase):
     def test_repetition_decoder_strong_id_payload_tracks_parameters(self) -> None:
@@ -1432,6 +1488,21 @@ class NativePackedSamplerTests(unittest.TestCase):
         self.assertEqual(native_batch.detectors, stim_batch.detectors)
         self.assertEqual(native_batch.observables, stim_batch.observables)
         self.assertEqual(native_batch.noise_event_masks["x0"], native_batch.all_mask)
+
+    def test_single_event_pauli_channel_matches_reference_at_extreme_rates(self) -> None:
+        model = PauliChannel({"X": 1.0})
+        for rate, reference_event in ((0.0, "I"), (1.0, "X")):
+            with self.subTest(rate=rate):
+                self.assertEqual(model.sample(random.Random(1), rate), reference_event)
+                location = NoiseLocation("pc", model, rate, (0,))
+                sampler = self._native_sampler_or_skip(
+                    Circuit(n_qubits=1, operations=(Operation.noise(location),)),
+                    observables=(LogicalObservable(id=0, pauli_qubits=(0,), pauli="Z"),),
+                )
+                batch = sampler.sample(shots=9, seed=123)
+                expected = batch.all_mask if rate == 1.0 else 0
+                self.assertEqual(batch.observables[0], expected)
+                self.assertEqual(batch.noise_event_masks["pc"], expected)
 
     def test_measurement_free_frame_observable_preserves_batch_width(self) -> None:
         location = NoiseLocation(

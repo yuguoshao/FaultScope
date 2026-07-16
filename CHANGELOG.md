@@ -66,6 +66,10 @@ patch releases may make breaking API changes.
   tableau mutation.
 - Python noise-model Pauli events validate state/frame widths and sparse targets
   before atomically updating both objects.
+- Noise models now reject empty, identity-only, invalid, or non-finite Pauli
+  configurations before sampling. Python and native weighted channels share
+  boundary semantics, and two-qubit depolarizing noise is fixed to its
+  canonical 15-event distribution.
 - Generated type stubs now mark factory-only native classes, including
   `StabilizerState`, as unavailable for direct construction.
 

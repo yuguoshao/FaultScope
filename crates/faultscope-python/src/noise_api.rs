@@ -14,8 +14,9 @@ pub(crate) struct PyBernoulliPauliNoise {
 #[pymethods]
 impl PyBernoulliPauliNoise {
     #[new]
-    pub(crate) fn new(pauli: String) -> Self {
-        Self { pauli }
+    pub(crate) fn new(pauli: String) -> PyResult<Self> {
+        validate_native_noise_model(&NoiseModel::BernoulliPauli(pauli.clone()))?;
+        Ok(Self { pauli })
     }
 
     #[getter]
@@ -101,22 +102,21 @@ impl PyPauliChannel {
             return Ok("I".repeat(self.event_length()));
         }
 
-        let threshold = rng.call_method0("random")?.extract::<f64>()? * self.total_weight();
-        let mut acc = 0.0;
+        let mut threshold = rng.call_method0("random")?.extract::<f64>()? * self.total_weight();
+        let mut fallback = None;
         for (pauli, weight) in &self.weights {
             if *weight == 0.0 {
                 continue;
             }
-            acc += *weight;
-            if threshold <= acc {
+            fallback = Some(pauli);
+            if threshold < *weight {
                 return Ok(pauli.clone());
             }
+            threshold -= *weight;
         }
-        Ok(self
-            .weights
-            .last()
-            .map(|(pauli, _)| pauli.clone())
-            .unwrap_or_default())
+        Ok(fallback
+            .expect("validated PauliChannel has a positive-weight event")
+            .clone())
     }
 
     pub(crate) fn score(&self, event: &Bound<'_, PyAny>, rate: f64) -> PyResult<f64> {
@@ -210,13 +210,11 @@ impl PyTwoQubitDepolarizing {
     #[new]
     #[pyo3(signature = (_events=None))]
     pub(crate) fn new(_events: Option<&Bound<'_, PyAny>>) -> PyResult<Self> {
-        let events = match _events {
-            Some(events) if !events.is_none() => events.extract::<Vec<String>>()?,
-            _ => TWO_QUBIT_EVENTS
-                .iter()
-                .map(|event| event.to_string())
-                .collect(),
-        };
+        let events = canonical_two_qubit_events();
+        if let Some(supplied) = _events.filter(|value| !value.is_none()) {
+            let supplied = supplied.extract::<Vec<String>>()?;
+            validate_two_qubit_events(&supplied)?;
+        }
         Ok(Self { events })
     }
 
@@ -340,49 +338,26 @@ fn coerce_weights(weights: &Bound<'_, PyAny>) -> PyResult<Vec<(String, f64)>> {
 }
 
 fn validate_pauli_channel(weights: &[(String, f64)]) -> PyResult<()> {
-    if weights.is_empty() {
-        return Err(PyValueError::new_err(
-            "PauliChannel requires at least one non-identity event",
-        ));
-    }
+    validate_native_noise_model(&NoiseModel::PauliChannel(weights.to_vec()))
+}
 
-    let mut total = 0.0;
-    let mut length = None;
-    for (pauli, weight) in weights {
-        if let Some(bad) = pauli
-            .chars()
-            .find(|value| !matches!(value, 'I' | 'X' | 'Y' | 'Z'))
-        {
-            let _ = bad;
-            return Err(PyValueError::new_err(format!(
-                "unsupported Pauli string {pauli:?}"
-            )));
-        }
-        if !pauli.is_empty() && pauli.chars().all(|value| value == 'I') {
-            return Err(PyValueError::new_err(
-                "identity should not appear in PauliChannel weights",
-            ));
-        }
-        if *weight < 0.0 {
-            return Err(PyValueError::new_err(
-                "PauliChannel weights must be non-negative",
-            ));
-        }
-        match length {
-            None => length = Some(pauli.len()),
-            Some(length) if pauli.len() != length => {
-                return Err(PyValueError::new_err(
-                    "all PauliChannel events must have the same length",
-                ));
-            }
-            _ => {}
-        }
-        total += *weight;
-    }
+fn validate_native_noise_model(model: &NoiseModel) -> PyResult<()> {
+    model
+        .validate()
+        .map_err(|error| PyValueError::new_err(error.to_string()))
+}
 
-    if total <= 0.0 {
+fn canonical_two_qubit_events() -> Vec<String> {
+    TWO_QUBIT_EVENTS
+        .iter()
+        .map(|event| event.to_string())
+        .collect()
+}
+
+pub(crate) fn validate_two_qubit_events(events: &[String]) -> PyResult<()> {
+    if events != canonical_two_qubit_events() {
         return Err(PyValueError::new_err(
-            "PauliChannel weights must have positive total weight",
+            "TwoQubitDepolarizing _events must be the canonical ordered 15-event set",
         ));
     }
     Ok(())

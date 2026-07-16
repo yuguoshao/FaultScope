@@ -131,6 +131,11 @@ TwoQubitDepolarizing(_events=None)
 MeasurementBitFlip()
 ```
 
+`TwoQubitDepolarizing` always uses the canonical ordered set of 15 non-identity
+two-qubit Pauli events. The compatibility `_events` argument may be omitted or
+set to that exact sequence; custom subsets, duplicates, and reorderings are
+rejected.
+
 Common methods:
 
 - `sample(rng, rate)` samples an event from a Python RNG object.

@@ -490,13 +490,18 @@ pub(crate) fn parse_noise_model_object(value: &Bound<'_, PyAny>) -> PyResult<Noi
     }
 
     let type_name = value.get_type().getattr("__name__")?.extract::<String>()?;
-    match type_name.as_str() {
+    let model = match type_name.as_str() {
         "BernoulliPauliNoise" => Ok(NoiseModel::BernoulliPauli(
             required_attr(value, "pauli", "BernoulliPauliNoise")?.extract::<String>()?,
         )),
         "MeasurementBitFlip" => Ok(NoiseModel::MeasurementBitFlip),
         "SingleQubitDepolarizing" => Ok(NoiseModel::SingleQubitDepolarizing),
-        "TwoQubitDepolarizing" => Ok(NoiseModel::TwoQubitDepolarizing),
+        "TwoQubitDepolarizing" => {
+            let events = required_attr(value, "_events", "TwoQubitDepolarizing")?
+                .extract::<Vec<String>>()?;
+            validate_two_qubit_events(&events)?;
+            Ok(NoiseModel::TwoQubitDepolarizing)
+        }
         "PauliChannel" => {
             let weights = required_attr(value, "weights", "PauliChannel")?;
             let weights = weights
@@ -511,7 +516,11 @@ pub(crate) fn parse_noise_model_object(value: &Bound<'_, PyAny>) -> PyResult<Noi
         _ => Err(PyValueError::new_err(format!(
             "unsupported native noise model {type_name:?}"
         ))),
-    }
+    }?;
+    model
+        .validate()
+        .map_err(|error| PyValueError::new_err(error.to_string()))?;
+    Ok(model)
 }
 
 fn cache_safe_native_noise_model(value: &Bound<'_, PyAny>) -> Option<NoiseModel> {
