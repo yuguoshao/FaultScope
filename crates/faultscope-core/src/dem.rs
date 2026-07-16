@@ -21,11 +21,13 @@ use product_path::{
     generate_indexed_product_dem_flip_masks_from_plan, supports_product_reference_fast_path,
 };
 
+use crate::dem_canonical::parity_support_len;
+use crate::dem_problem::{compile_graphlike_problem_from_edge_views, GraphlikeSourceEdge};
 use crate::dem_sampling::{DemHotspotEstimator, DemProgramEdge, DemProgramEdgeMetadata};
 use crate::program::{ExpandedOperation, ExpandedProgram, ExpansionMode};
 use crate::{
-    Circuit, Detector, DetectorErrorEdge, DetectorErrorModel, LogicalObservable, NpError, NpResult,
-    Operation,
+    Circuit, Detector, DetectorErrorEdge, DetectorErrorModel, GraphlikeDecodingProblem,
+    LogicalObservable, NpError, NpResult, Operation,
 };
 
 /// Detector error model generator based on single-error propagation.
@@ -475,6 +477,36 @@ pub struct LazyDetectorErrorModel {
 }
 
 impl LazyDetectorErrorModel {
+    /// Test whether parity-reduced lazy DEM edges satisfy graphlike constraints.
+    pub fn is_graphlike(&self) -> bool {
+        self.edges.iter().all(|edge| {
+            let detector_count = parity_support_len(&edge.detectors);
+            detector_count <= 2
+                && (detector_count != 0 || parity_support_len(&edge.observables) == 0)
+        })
+    }
+
+    /// Compile directly into the compact graphlike representation without
+    /// materializing location labels, events, or tag dictionaries.
+    pub fn compile_graphlike_problem(&self) -> NpResult<GraphlikeDecodingProblem> {
+        compile_graphlike_problem_from_edge_views(
+            &self.detectors,
+            &self.observables,
+            self.edges.len(),
+            || {
+                self.edges
+                    .iter()
+                    .enumerate()
+                    .map(|(edge_index, edge)| GraphlikeSourceEdge {
+                        probability: self.event_plan.fault_events[edge.event_index].probability,
+                        detectors: &edge.detectors,
+                        observables: &edge.observables,
+                        original_edge_index: edge_index,
+                    })
+            },
+        )
+    }
+
     /// Consume a lazy DEM into the metadata-free sampling representation.
     #[doc(hidden)]
     pub fn into_sampling_estimator(self) -> DemHotspotEstimator {

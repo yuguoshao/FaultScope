@@ -1757,6 +1757,22 @@ pub(crate) fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
         "NATIVE_DECODER_PLUGIN_ENTRY_POINT_GROUP",
         faultscope_core::NATIVE_DECODER_PLUGIN_ENTRY_POINT_GROUP,
     )?;
+    module.add(
+        "NATIVE_GRAPHLIKE_PROBLEM_ABI_VERSION",
+        faultscope_core::NATIVE_GRAPHLIKE_PROBLEM_ABI_VERSION,
+    )?;
+    module.add(
+        "NATIVE_GRAPHLIKE_PROBLEM_ABI",
+        faultscope_core::NATIVE_GRAPHLIKE_PROBLEM_ABI_NAME,
+    )?;
+    module.add(
+        "NATIVE_GRAPHLIKE_PROBLEM_CAPSULE_NAME",
+        faultscope_core::NATIVE_GRAPHLIKE_PROBLEM_CAPSULE_NAME,
+    )?;
+    module.add(
+        "NATIVE_GRAPHLIKE_PROBLEM_CAPSULE_METHOD",
+        faultscope_core::NATIVE_GRAPHLIKE_PROBLEM_CAPSULE_METHOD,
+    )?;
     module.add_class::<PyBernoulliPauliNoise>()?;
     module.add_class::<PyPauliChannel>()?;
     module.add_class::<PySingleQubitDepolarizing>()?;

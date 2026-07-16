@@ -49,8 +49,11 @@ pub use dem::{
     DetectorErrorModelGenerator, LazyDetectorErrorModel, ValidatedDemCircuit,
 };
 pub use dem_problem::{
-    log_likelihood_ratio, BinaryLinearDecodingProblem, GraphlikeDecodingProblem, GraphlikeEdge,
-    IndexedDem, IndexedDemEdge, SparseBinaryMatrix,
+    log_likelihood_ratio, BinaryLinearDecodingProblem, FaultScopeNativeGraphlikeEdgeV1,
+    FaultScopeNativeGraphlikeProblemV1, GraphlikeDecodingProblem, GraphlikeEdge, GraphlikeEdgeRef,
+    IndexedDem, IndexedDemEdge, SparseBinaryMatrix, NATIVE_GRAPHLIKE_PROBLEM_ABI_NAME,
+    NATIVE_GRAPHLIKE_PROBLEM_ABI_VERSION, NATIVE_GRAPHLIKE_PROBLEM_CAPSULE_METHOD,
+    NATIVE_GRAPHLIKE_PROBLEM_CAPSULE_NAME,
 };
 pub use dem_sampling::{
     CompiledDemLogicalCountPlan, CompiledDemSamplingPlan, DemHotspotEstimator,

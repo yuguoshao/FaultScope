@@ -1232,6 +1232,8 @@ impl PyDetectorErrorEdge {
 #[pyclass(name = "DetectorErrorModel", module = "faultscope._native", frozen)]
 pub(crate) struct PyDetectorErrorModel {
     core_lazy_dem: Option<faultscope_core::LazyDetectorErrorModel>,
+    core_graphlike_problem:
+        std::sync::OnceLock<std::sync::Arc<faultscope_core::GraphlikeDecodingProblem>>,
     detectors: Vec<Py<PyAny>>,
     observables: Vec<Py<PyAny>>,
     edges: Vec<Py<PyAny>>,
@@ -1256,6 +1258,7 @@ impl PyDetectorErrorModel {
     ) -> Self {
         Self {
             core_lazy_dem: None,
+            core_graphlike_problem: std::sync::OnceLock::new(),
             detectors,
             observables,
             edges,
@@ -1539,11 +1542,27 @@ impl PyDetectorErrorModel {
         &self,
         py: Python<'_>,
     ) -> PyResult<PyGraphlikeDecodingProblem> {
-        let dem = self.to_core_dem(py)?;
-        let problem = dem
-            .compile_graphlike_problem()
-            .map_err(|err| PyValueError::new_err(err.to_string()))?;
-        Ok(PyGraphlikeDecodingProblem { problem })
+        let problem = if let Some(dem) = &self.core_lazy_dem {
+            if let Some(problem) = self.core_graphlike_problem.get() {
+                std::sync::Arc::clone(problem)
+            } else {
+                let compiled = std::sync::Arc::new(
+                    dem.compile_graphlike_problem()
+                        .map_err(|err| PyValueError::new_err(err.to_string()))?,
+                );
+                let _ = self
+                    .core_graphlike_problem
+                    .set(std::sync::Arc::clone(&compiled));
+                std::sync::Arc::clone(self.core_graphlike_problem.get().unwrap_or(&compiled))
+            }
+        } else {
+            let dem = self.to_core_dem(py)?;
+            std::sync::Arc::new(
+                dem.compile_graphlike_problem()
+                    .map_err(|err| PyValueError::new_err(err.to_string()))?,
+            )
+        };
+        Ok(PyGraphlikeDecodingProblem::new(problem))
     }
 
     pub(crate) fn compile_binary_linear_problem(
@@ -1558,6 +1577,9 @@ impl PyDetectorErrorModel {
     }
 
     pub(crate) fn is_graphlike(&self, py: Python<'_>) -> PyResult<bool> {
+        if let Some(dem) = &self.core_lazy_dem {
+            return Ok(dem.is_graphlike());
+        }
         Ok(self.to_core_dem(py)?.is_graphlike())
     }
 
@@ -1575,6 +1597,7 @@ impl PyDetectorErrorModel {
     pub(crate) fn from_core_lazy_dem(dem: faultscope_core::LazyDetectorErrorModel) -> Self {
         Self {
             core_lazy_dem: Some(dem),
+            core_graphlike_problem: std::sync::OnceLock::new(),
             detectors: Vec::new(),
             observables: Vec::new(),
             edges: Vec::new(),

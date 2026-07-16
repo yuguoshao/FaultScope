@@ -8,7 +8,8 @@ use faultscope_core::{
     FaultScopeNativeDecoderMaskMutViewV1, FaultScopeNativeDecoderMaskViewV1,
     FaultScopeNativeDecoderStatusV1, FaultScopeNativeDecoderStringViewV1,
     FaultScopeNativeDecoderWorkerV3, FaultScopeNativeDetectorEventShotBatchViewV1,
-    FaultScopeNativeDetectorMaskBatchViewV1, FaultScopeNativePackedDetectorShotBatchViewV1,
+    FaultScopeNativeDetectorMaskBatchViewV1, FaultScopeNativeGraphlikeProblemV1,
+    FaultScopeNativePackedDetectorShotBatchViewV1,
     FaultScopeNativePackedObservableShotBatchMutViewV1, GraphlikeDecodingProblem, IndexedDem,
     NativeCompositeDecoder as CoreNativeCompositeDecoder,
     NativeDecoderFactory as CoreNativeDecoderFactory,
@@ -18,14 +19,15 @@ use faultscope_core::{
     PackedObservableShotBatch, SparseBinaryMatrix, NATIVE_DECODER_FACTORY_FLAG_THREAD_SAFE,
     NATIVE_DECODER_PLUGIN_ABI_VERSION, NATIVE_DECODER_PLUGIN_CAPSULE_METHOD,
     NATIVE_DECODER_PLUGIN_CAPSULE_NAME, NATIVE_DECODER_PLUGIN_STATUS_OK,
+    NATIVE_GRAPHLIKE_PROBLEM_CAPSULE_NAME,
 };
-use std::ffi::CString;
+use std::ffi::{c_void, CString};
 use std::mem;
 use std::ptr::NonNull;
 use std::slice;
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
-    Arc,
+    Arc, OnceLock,
 };
 
 #[pyfunction]
@@ -1439,65 +1441,150 @@ impl PyGraphlikeEdge {
     frozen
 )]
 pub(crate) struct PyGraphlikeDecodingProblem {
-    pub(crate) problem: GraphlikeDecodingProblem,
+    pub(crate) problem: Arc<GraphlikeDecodingProblem>,
+    native_capsule: OnceLock<Py<PyAny>>,
+}
+
+impl PyGraphlikeDecodingProblem {
+    pub(crate) fn new(problem: Arc<GraphlikeDecodingProblem>) -> Self {
+        Self {
+            problem,
+            native_capsule: OnceLock::new(),
+        }
+    }
 }
 
 #[pymethods]
 impl PyGraphlikeDecodingProblem {
     #[getter]
     pub(crate) fn detector_ids(&self, py: Python<'_>) -> PyResult<PyObject> {
-        tuple_i64(py, &self.problem.detector_ids)
+        tuple_i64(py, self.problem.detector_ids())
     }
 
     #[getter]
     pub(crate) fn detector_coords(&self, py: Python<'_>) -> PyResult<PyObject> {
-        tuple_f64_tuples(py, &self.problem.detector_coords)
+        tuple_f64_tuples(py, self.problem.detector_coords())
     }
 
     #[getter]
     pub(crate) fn observable_ids(&self, py: Python<'_>) -> PyResult<PyObject> {
-        tuple_i64(py, &self.problem.observable_ids)
+        tuple_i64(py, self.problem.observable_ids())
     }
 
     #[getter]
     pub(crate) fn detector_count(&self) -> usize {
-        self.problem.detector_ids.len()
+        self.problem.detector_ids().len()
     }
 
     #[getter]
     pub(crate) fn observable_count(&self) -> usize {
-        self.problem.observable_ids.len()
+        self.problem.observable_ids().len()
     }
 
     #[getter]
     pub(crate) fn edge_count(&self) -> usize {
-        self.problem.edges.len()
+        self.problem.edge_count()
     }
 
     #[getter]
     pub(crate) fn edges(&self, py: Python<'_>) -> PyResult<PyObject> {
         let items = self
             .problem
-            .edges
-            .iter()
-            .cloned()
-            .map(|edge| Py::new(py, PyGraphlikeEdge { edge }))
+            .iter_edges()
+            .map(|edge| {
+                Py::new(
+                    py,
+                    PyGraphlikeEdge {
+                        edge: edge.to_owned(),
+                    },
+                )
+            })
             .collect::<PyResult<Vec<_>>>()?;
         Ok(PyTuple::new(py, items.iter().map(|item| item.clone_ref(py)))?.into())
     }
 
     #[getter]
     pub(crate) fn edge_summary(&self, py: Python<'_>) -> PyResult<PyObject> {
-        graphlike_edge_summary_to_py(py, &self.problem.edges)
+        graphlike_edge_summary_to_py(py, &self.problem)
+    }
+
+    pub(crate) fn __faultscope_native_graphlike_problem_capsule__(
+        &self,
+        py: Python<'_>,
+    ) -> PyResult<Py<PyAny>> {
+        if let Some(capsule) = self.native_capsule.get() {
+            return Ok(capsule.clone_ref(py));
+        }
+        let capsule =
+            unsafe { create_native_graphlike_problem_capsule(py, Arc::clone(&self.problem))? };
+        let _ = self.native_capsule.set(capsule);
+        Ok(self
+            .native_capsule
+            .get()
+            .expect("native graphlike capsule must be initialized after set")
+            .clone_ref(py))
     }
 
     pub(crate) fn __repr__(&self) -> String {
         format!(
             "GraphlikeDecodingProblem(detector_count={}, observable_count={}, edge_count={})",
-            self.problem.detector_ids.len(),
-            self.problem.observable_ids.len(),
-            self.problem.edges.len()
+            self.problem.detector_ids().len(),
+            self.problem.observable_ids().len(),
+            self.problem.edge_count()
         )
+    }
+}
+
+const NATIVE_GRAPHLIKE_PROBLEM_CAPSULE_NAME_NUL: &[u8] =
+    b"faultscope.native_graphlike_problem.v1\0";
+
+#[repr(C)]
+struct OwnedNativeGraphlikeProblemCapsule {
+    descriptor: FaultScopeNativeGraphlikeProblemV1,
+    #[allow(dead_code)]
+    problem: Arc<GraphlikeDecodingProblem>,
+}
+
+unsafe fn create_native_graphlike_problem_capsule(
+    py: Python<'_>,
+    problem: Arc<GraphlikeDecodingProblem>,
+) -> PyResult<Py<PyAny>> {
+    debug_assert_eq!(
+        NATIVE_GRAPHLIKE_PROBLEM_CAPSULE_NAME_NUL.strip_suffix(&[0]),
+        Some(NATIVE_GRAPHLIKE_PROBLEM_CAPSULE_NAME.as_bytes())
+    );
+    debug_assert_eq!(
+        mem::offset_of!(OwnedNativeGraphlikeProblemCapsule, descriptor),
+        0
+    );
+    let owned = Box::new(OwnedNativeGraphlikeProblemCapsule {
+        descriptor: problem.native_view(),
+        problem,
+    });
+    let owned = Box::into_raw(owned);
+    let capsule = pyo3::ffi::PyCapsule_New(
+        owned.cast::<c_void>(),
+        NATIVE_GRAPHLIKE_PROBLEM_CAPSULE_NAME_NUL.as_ptr().cast(),
+        Some(native_graphlike_problem_capsule_destructor),
+    );
+    if capsule.is_null() {
+        drop(Box::from_raw(owned));
+        return Err(PyErr::fetch(py));
+    }
+    Ok(Py::from_owned_ptr(py, capsule))
+}
+
+unsafe extern "C" fn native_graphlike_problem_capsule_destructor(
+    capsule: *mut pyo3::ffi::PyObject,
+) {
+    let pointer = pyo3::ffi::PyCapsule_GetPointer(
+        capsule,
+        NATIVE_GRAPHLIKE_PROBLEM_CAPSULE_NAME_NUL.as_ptr().cast(),
+    );
+    if !pointer.is_null() {
+        drop(Box::from_raw(
+            pointer.cast::<OwnedNativeGraphlikeProblemCapsule>(),
+        ));
     }
 }
 
@@ -1682,23 +1769,20 @@ fn indexed_edge_summary_to_py(
 
 fn graphlike_edge_summary_to_py(
     py: Python<'_>,
-    edges: &[faultscope_core::GraphlikeEdge],
+    problem: &GraphlikeDecodingProblem,
 ) -> PyResult<PyObject> {
-    let rows = edges
-        .iter()
+    let rows = problem
+        .iter_edges()
         .map(|edge| {
             let row = PyDict::new(py);
-            row.set_item("dem_edge_index", edge.dem_edge_index)?;
-            row.set_item(
-                "detectors",
-                PyTuple::new(py, edge.detectors.iter().copied())?,
-            )?;
+            row.set_item("dem_edge_index", edge.dem_edge_index())?;
+            row.set_item("detectors", PyTuple::new(py, edge.detectors())?)?;
             row.set_item(
                 "fault_observables",
-                PyTuple::new(py, edge.fault_observables.iter().copied())?,
+                PyTuple::new(py, edge.fault_observables())?,
             )?;
-            row.set_item("probability", edge.probability)?;
-            row.set_item("weight", edge.weight)?;
+            row.set_item("probability", edge.probability())?;
+            row.set_item("weight", edge.weight())?;
             Ok(row.into())
         })
         .collect::<PyResult<Vec<PyObject>>>()?;

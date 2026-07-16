@@ -63,6 +63,9 @@ class PyMatchingDecoder:
 
         The DEM must be graphlike: every edge may touch at most two detectors.
         Logical flips are passed through PyMatching's ``faults_matrix``.
+        Parallel edges with the same endpoints must have identical logical
+        effects because PyMatching cannot preserve conflicting fault IDs when
+        it merges those edges.
         """
 
         pymatching, np, sparse = _load_optional_modules(
@@ -74,6 +77,7 @@ class PyMatchingDecoder:
         detector_ids = tuple(int(detector_id) for detector_id in problem.detector_ids)
         observable_ids = tuple(int(observable_id) for observable_id in problem.observable_ids)
         edges = tuple(problem.edges)
+        _validate_parallel_logical_effects(edges)
 
         h_rows: list[int] = []
         h_cols: list[int] = []
@@ -305,6 +309,44 @@ def _compile_graphlike_problem(dem: DetectorErrorModel) -> Any:
         if not dem.is_graphlike():
             raise UnsupportedPyMatchingDemError(str(exc)) from exc
         raise
+
+
+def _validate_parallel_logical_effects(edges: Sequence[Any]) -> None:
+    groups: dict[
+        tuple[int, int | None],
+        tuple[tuple[int, ...], list[int]],
+    ] = {}
+    for edge in edges:
+        detectors = tuple(int(detector) for detector in edge.detectors)
+        if not detectors:
+            continue
+        endpoint: tuple[int, int | None]
+        if len(detectors) == 1:
+            endpoint = (detectors[0], None)
+        elif len(detectors) == 2:
+            endpoint = (min(detectors), max(detectors))
+        else:  # pragma: no cover - compile_graphlike_problem rejects this first.
+            raise UnsupportedPyMatchingDemError(
+                f"pymatching edge {edge.dem_edge_index} has {len(detectors)} detectors; "
+                "expected one boundary detector or two graph detectors"
+            )
+
+        fault_observables = tuple(int(index) for index in edge.fault_observables)
+        dem_edge_index = int(edge.dem_edge_index)
+        existing = groups.get(endpoint)
+        if existing is None:
+            groups[endpoint] = (fault_observables, [dem_edge_index])
+            continue
+
+        existing_observables, existing_edge_indices = existing
+        if existing_observables != fault_observables:
+            raise UnsupportedPyMatchingDemError(
+                f"pymatching found ambiguous parallel endpoint {endpoint}: "
+                f"DEM edge {dem_edge_index} fault_observables {fault_observables} "
+                f"conflicts with DEM edge(s) {tuple(existing_edge_indices)} "
+                f"fault_observables {existing_observables}"
+            )
+        existing_edge_indices.append(dem_edge_index)
 
 
 def _rows(predictions: Any) -> list[Any]:

@@ -1096,42 +1096,51 @@ pub struct NativeGraphlikeDetectorCopyDecoder {
 
 impl NativeGraphlikeDetectorCopyDecoder {
     pub fn from_graphlike_problem(problem: GraphlikeDecodingProblem) -> NpResult<Self> {
-        let mut observable_detector_indices = vec![None; problem.observable_ids.len()];
-        for edge in &problem.edges {
-            if edge.detectors.len() != 1 || edge.fault_observables.len() != 1 {
+        let detector_count = problem.detector_ids().len();
+        let observable_count = problem.observable_ids().len();
+        let mut observable_detector_indices = vec![None; observable_count];
+        for edge in problem.iter_edges() {
+            if edge.detector_count() != 1 || edge.fault_observables().len() != 1 {
                 continue;
             }
-            let detector_index = edge.detectors[0];
-            let observable_index = edge.fault_observables[0];
-            if detector_index >= problem.detector_ids.len() {
+            let detector_index = edge
+                .detectors()
+                .next()
+                .expect("single-detector edge has one detector");
+            let observable_index = edge
+                .fault_observables()
+                .next()
+                .expect("single-observable edge has one observable");
+            if detector_index >= detector_count {
                 return Err(NpError::new(format!(
                     "graphlike-detector-copy edge {} references detector index {} but only {} detectors exist",
-                    edge.dem_edge_index,
+                    edge.dem_edge_index(),
                     detector_index,
-                    problem.detector_ids.len()
+                    detector_count
                 )));
             }
-            if observable_index >= problem.observable_ids.len() {
+            if observable_index >= observable_count {
                 return Err(NpError::new(format!(
                     "graphlike-detector-copy edge {} references observable index {} but only {} observables exist",
-                    edge.dem_edge_index,
+                    edge.dem_edge_index(),
                     observable_index,
-                    problem.observable_ids.len()
+                    observable_count
                 )));
             }
             if let Some(existing_detector_index) = observable_detector_indices[observable_index] {
                 return Err(NpError::new(format!(
                     "graphlike-detector-copy found multiple single-detector candidate edges for observable id {}; detector indices {} and {}",
-                    problem.observable_ids[observable_index],
+                    problem.observable_ids()[observable_index],
                     existing_detector_index,
                     detector_index
                 )));
             }
             observable_detector_indices[observable_index] = Some(detector_index);
         }
+        let (detector_ids, observable_ids) = problem.into_ids();
         Ok(Self {
-            detector_ids: problem.detector_ids,
-            observable_ids: problem.observable_ids,
+            detector_ids,
+            observable_ids,
             observable_detector_indices,
         })
     }
@@ -1224,10 +1233,12 @@ pub struct NativeFusionBlossomDecoder {
 #[cfg(feature = "decoder-fusion-blossom")]
 impl NativeFusionBlossomDecoder {
     pub fn from_graphlike_problem(problem: GraphlikeDecodingProblem) -> NpResult<Self> {
+        let edge_count = problem.edge_count();
+        let (detector_ids, observable_ids) = problem.into_ids();
         Ok(Self {
-            detector_ids: problem.detector_ids,
-            observable_ids: problem.observable_ids,
-            edge_count: problem.edges.len(),
+            detector_ids,
+            observable_ids,
+            edge_count,
         })
     }
 
@@ -1352,28 +1363,33 @@ mod tests {
         observable_ids: Vec<i64>,
     }
 
+    fn graphlike_edges() -> Vec<GraphlikeEdge> {
+        vec![
+            GraphlikeEdge {
+                detectors: vec![1],
+                fault_observables: vec![0],
+                probability: 0.1,
+                weight: 2.0,
+                dem_edge_index: 0,
+            },
+            GraphlikeEdge {
+                detectors: vec![0, 1],
+                fault_observables: vec![1],
+                probability: 0.2,
+                weight: 1.0,
+                dem_edge_index: 1,
+            },
+        ]
+    }
+
     fn graphlike_problem() -> GraphlikeDecodingProblem {
-        GraphlikeDecodingProblem {
-            detector_ids: vec![10, 20],
-            detector_coords: vec![Vec::new(), Vec::new()],
-            observable_ids: vec![0, 1],
-            edges: vec![
-                GraphlikeEdge {
-                    detectors: vec![1],
-                    fault_observables: vec![0],
-                    probability: 0.1,
-                    weight: 2.0,
-                    dem_edge_index: 0,
-                },
-                GraphlikeEdge {
-                    detectors: vec![0, 1],
-                    fault_observables: vec![1],
-                    probability: 0.2,
-                    weight: 1.0,
-                    dem_edge_index: 1,
-                },
-            ],
-        }
+        GraphlikeDecodingProblem::new(
+            vec![10, 20],
+            vec![Vec::new(), Vec::new()],
+            vec![0, 1],
+            graphlike_edges(),
+        )
+        .unwrap()
     }
 
     #[test]
@@ -2022,14 +2038,21 @@ mod tests {
 
     #[test]
     fn graphlike_detector_copy_rejects_ambiguous_observable_mapping() {
-        let mut problem = graphlike_problem();
-        problem.edges.push(GraphlikeEdge {
+        let mut edges = graphlike_edges();
+        edges.push(GraphlikeEdge {
             detectors: vec![0],
             fault_observables: vec![0],
             probability: 0.3,
             weight: 0.8,
             dem_edge_index: 2,
         });
+        let problem = GraphlikeDecodingProblem::new(
+            vec![10, 20],
+            vec![Vec::new(), Vec::new()],
+            vec![0, 1],
+            edges,
+        )
+        .unwrap();
 
         let err = NativeGraphlikeDetectorCopyDecoder::from_graphlike_problem(problem).unwrap_err();
 

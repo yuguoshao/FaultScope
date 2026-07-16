@@ -3,10 +3,12 @@ use faultscope_core::{
     FaultScopeNativeDecoderFactoryV3, FaultScopeNativeDecoderI64SliceV1,
     FaultScopeNativeDecoderStatusV1, FaultScopeNativeDecoderStringViewV1,
     FaultScopeNativeDecoderWorkerV3, FaultScopeNativeDetectorEventShotBatchViewV1,
-    FaultScopeNativeDetectorMaskBatchViewV1, FaultScopeNativePackedDetectorShotBatchViewV1,
+    FaultScopeNativeDetectorMaskBatchViewV1, FaultScopeNativeGraphlikeEdgeV1,
+    FaultScopeNativeGraphlikeProblemV1, FaultScopeNativePackedDetectorShotBatchViewV1,
     FaultScopeNativePackedObservableShotBatchMutViewV1, NATIVE_DECODER_FACTORY_FLAG_THREAD_SAFE,
     NATIVE_DECODER_PLUGIN_ABI_VERSION, NATIVE_DECODER_PLUGIN_STATUS_ERROR,
-    NATIVE_DECODER_PLUGIN_STATUS_OK,
+    NATIVE_DECODER_PLUGIN_STATUS_OK, NATIVE_GRAPHLIKE_PROBLEM_ABI_VERSION,
+    NATIVE_GRAPHLIKE_PROBLEM_CAPSULE_METHOD, NATIVE_GRAPHLIKE_PROBLEM_CAPSULE_NAME,
 };
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
@@ -810,15 +812,17 @@ struct BuiltPyMatchingProblem {
 
 impl PyMatchingProblemBuilder {
     fn from_graphlike_problem(problem: &Bound<'_, PyAny>) -> PyResult<Self> {
+        if problem.hasattr(NATIVE_GRAPHLIKE_PROBLEM_CAPSULE_METHOD)? {
+            let capsule = problem.call_method0(NATIVE_GRAPHLIKE_PROBLEM_CAPSULE_METHOD)?;
+            return unsafe { Self::from_native_graphlike_capsule(&capsule) };
+        }
+        Self::from_python_graphlike_problem(problem)
+    }
+
+    fn from_python_graphlike_problem(problem: &Bound<'_, PyAny>) -> PyResult<Self> {
         let detector_ids = problem.getattr("detector_ids")?.extract::<Vec<i64>>()?;
         let observable_ids = problem.getattr("observable_ids")?.extract::<Vec<i64>>()?;
-        let mut builder = Self {
-            detector_ids,
-            observable_ids,
-            dem_edge_count: 0,
-            groups: Vec::new(),
-            group_by_endpoint: HashMap::new(),
-        };
+        let mut builder = Self::new(detector_ids, observable_ids);
         let edges = problem.getattr("edges")?;
         for edge in PyIterator::from_object(&edges)? {
             let edge = edge?;
@@ -830,6 +834,103 @@ impl PyMatchingProblemBuilder {
             )?;
         }
         Ok(builder)
+    }
+
+    unsafe fn from_native_graphlike_capsule(capsule: &Bound<'_, PyAny>) -> PyResult<Self> {
+        let capsule_name = CString::new(NATIVE_GRAPHLIKE_PROBLEM_CAPSULE_NAME)
+            .expect("native graphlike capsule name must not contain NUL");
+        if pyo3::ffi::PyCapsule_IsValid(capsule.as_ptr(), capsule_name.as_ptr()) != 1 {
+            return Err(PyValueError::new_err(format!(
+                "native graphlike problem capsule must be named {NATIVE_GRAPHLIKE_PROBLEM_CAPSULE_NAME:?}"
+            )));
+        }
+        let pointer = pyo3::ffi::PyCapsule_GetPointer(capsule.as_ptr(), capsule_name.as_ptr());
+        if pointer.is_null() {
+            return Err(PyValueError::new_err(
+                "native graphlike problem capsule contained a null descriptor pointer",
+            ));
+        }
+        let descriptor = &*pointer.cast::<FaultScopeNativeGraphlikeProblemV1>();
+        if descriptor.abi_version != NATIVE_GRAPHLIKE_PROBLEM_ABI_VERSION {
+            return Err(PyValueError::new_err(format!(
+                "native graphlike problem ABI version {} is incompatible with expected version {}",
+                descriptor.abi_version, NATIVE_GRAPHLIKE_PROBLEM_ABI_VERSION
+            )));
+        }
+        if descriptor.struct_size != mem::size_of::<FaultScopeNativeGraphlikeProblemV1>() {
+            return Err(PyValueError::new_err(format!(
+                "native graphlike problem descriptor size {} does not match expected size {}",
+                descriptor.struct_size,
+                mem::size_of::<FaultScopeNativeGraphlikeProblemV1>()
+            )));
+        }
+        if descriptor.edge_struct_size != mem::size_of::<FaultScopeNativeGraphlikeEdgeV1>() {
+            return Err(PyValueError::new_err(format!(
+                "native graphlike edge size {} does not match expected size {}",
+                descriptor.edge_struct_size,
+                mem::size_of::<FaultScopeNativeGraphlikeEdgeV1>()
+            )));
+        }
+
+        let detector_ids = checked_native_slice(
+            descriptor.detector_ids,
+            descriptor.detector_count,
+            "detector ids",
+        )?;
+        let observable_ids = checked_native_slice(
+            descriptor.observable_ids,
+            descriptor.observable_count,
+            "observable ids",
+        )?;
+        let edges = checked_native_slice(descriptor.edges, descriptor.edge_count, "edges")?;
+        let fault_observables = checked_native_slice(
+            descriptor.fault_observables,
+            descriptor.fault_observable_count,
+            "fault observables",
+        )?;
+        let mut builder = Self::new(detector_ids.to_vec(), observable_ids.to_vec());
+        for edge in edges {
+            if edge.reserved != 0 {
+                return Err(PyValueError::new_err(format!(
+                    "native graphlike edge {} has non-zero reserved flags {}",
+                    edge.dem_edge_index, edge.reserved
+                )));
+            }
+            let observable_start = edge.fault_observable_offset as usize;
+            let observable_count = edge.fault_observable_count as usize;
+            let observable_end =
+                observable_start
+                    .checked_add(observable_count)
+                    .ok_or_else(|| {
+                        PyValueError::new_err(format!(
+                            "native graphlike edge {} observable range overflow",
+                            edge.dem_edge_index
+                        ))
+                    })?;
+            let edge_observables = fault_observables
+                .get(observable_start..observable_end)
+                .ok_or_else(|| {
+                    PyValueError::new_err(format!(
+                        "native graphlike edge {} observable range {}..{} exceeds pool length {}",
+                        edge.dem_edge_index,
+                        observable_start,
+                        observable_end,
+                        fault_observables.len()
+                    ))
+                })?;
+            builder.push_native_edge(edge, edge_observables)?;
+        }
+        Ok(builder)
+    }
+
+    fn new(detector_ids: Vec<i64>, observable_ids: Vec<i64>) -> Self {
+        Self {
+            detector_ids,
+            observable_ids,
+            dem_edge_count: 0,
+            groups: Vec::new(),
+            group_by_endpoint: HashMap::new(),
+        }
     }
 
     fn push_edge(
@@ -885,8 +986,101 @@ impl PyMatchingProblemBuilder {
             }
         };
 
+        self.push_grouped_edge(dem_edge_index, endpoint, fault_observables, probability)
+    }
+
+    fn push_native_edge(
+        &mut self,
+        edge: &FaultScopeNativeGraphlikeEdgeV1,
+        native_fault_observables: &[u32],
+    ) -> PyResult<()> {
+        let dem_edge_index = edge.dem_edge_index;
+        let probability = edge.probability;
+        self.dem_edge_count += 1;
+        validate_probability(probability, dem_edge_index)?;
+        let fault_observables = canonical_fault_observables(
+            native_fault_observables
+                .iter()
+                .map(|index| *index as usize)
+                .collect(),
+        );
+        for &observable_index in &fault_observables {
+            if observable_index >= self.observable_ids.len() {
+                return Err(PyValueError::new_err(format!(
+                    "pymatching edge {dem_edge_index} references observable index {observable_index} but only {} observables exist",
+                    self.observable_ids.len()
+                )));
+            }
+        }
+        let endpoint = match edge.detector_count {
+            0 => {
+                if fault_observables.is_empty() {
+                    return Ok(());
+                }
+                return Err(PyValueError::new_err(format!(
+                    "pymatching edge {dem_edge_index} flips observables but has no detectors; pure logical edges are unsupported"
+                )));
+            }
+            1 => {
+                let detector = edge.detector0 as usize;
+                self.validate_native_detector_index(dem_edge_index, detector)?;
+                (detector, None)
+            }
+            2 => {
+                let left = edge.detector0 as usize;
+                let right = edge.detector1 as usize;
+                self.validate_native_detector_index(dem_edge_index, left)?;
+                self.validate_native_detector_index(dem_edge_index, right)?;
+                if left == right {
+                    return Err(PyValueError::new_err(format!(
+                        "pymatching edge {dem_edge_index} has identical endpoints {left}"
+                    )));
+                }
+                normalized_endpoint(left, right)
+            }
+            detector_count => {
+                return Err(PyValueError::new_err(format!(
+                    "pymatching edge {dem_edge_index} has {detector_count} detectors; expected one boundary detector or two graph detectors"
+                )));
+            }
+        };
+
+        self.push_grouped_edge(dem_edge_index, endpoint, fault_observables, probability)
+    }
+
+    fn validate_native_detector_index(
+        &self,
+        dem_edge_index: usize,
+        detector_index: usize,
+    ) -> PyResult<()> {
+        if detector_index >= self.detector_ids.len() {
+            return Err(PyValueError::new_err(format!(
+                "pymatching edge {dem_edge_index} references detector index {detector_index} but only {} detectors exist",
+                self.detector_ids.len()
+            )));
+        }
+        Ok(())
+    }
+
+    fn push_grouped_edge(
+        &mut self,
+        dem_edge_index: usize,
+        endpoint: (usize, Option<usize>),
+        fault_observables: Vec<usize>,
+        probability: f64,
+    ) -> PyResult<()> {
         if let Some(group_index) = self.group_by_endpoint.get(&endpoint).copied() {
             let group = &mut self.groups[group_index];
+            if group.fault_observables != fault_observables {
+                return Err(PyValueError::new_err(format!(
+                    "pymatching found ambiguous parallel endpoint {:?}: DEM edge {} fault_observables {:?} conflicts with DEM edge(s) {:?} fault_observables {:?}",
+                    endpoint,
+                    dem_edge_index,
+                    fault_observables,
+                    group.dem_edge_indices,
+                    group.fault_observables
+                )));
+            }
             group.dem_edge_indices.push(dem_edge_index);
             group.probabilities.push(probability);
         } else {
@@ -928,6 +1122,27 @@ impl PyMatchingProblemBuilder {
             merged_parallel_edge_count,
         })
     }
+}
+
+unsafe fn checked_native_slice<'a, T>(
+    pointer: *const T,
+    len: usize,
+    label: &str,
+) -> PyResult<&'a [T]> {
+    if len == 0 {
+        return Ok(&[]);
+    }
+    if pointer.is_null() {
+        return Err(PyValueError::new_err(format!(
+            "native graphlike problem {label} pointer is null for length {len}"
+        )));
+    }
+    if len > isize::MAX as usize / mem::size_of::<T>() {
+        return Err(PyValueError::new_err(format!(
+            "native graphlike problem {label} length {len} exceeds addressable memory"
+        )));
+    }
+    Ok(slice::from_raw_parts(pointer, len))
 }
 
 fn scale_weights(edges: &mut [BuiltPyMatchingEdge]) -> PyResult<()> {

@@ -281,9 +281,12 @@ fn generator_sampler_edges_match_full_dem_edges() {
     let first = generator.generate().unwrap();
     let second = generator.generate().unwrap();
     let lazy = generator.generate_lazy().unwrap();
+    let lazy_graphlike = lazy.compile_graphlike_problem().unwrap();
+    let materialized_graphlike = first.compile_graphlike_problem().unwrap();
     let sampler_edges = lazy.compile_hotspot_estimator().edges();
 
     assert_eq!(first, second);
+    assert_eq!(lazy_graphlike, materialized_graphlike);
     assert_eq!(sampler_edges.len(), first.edges.len());
     for (sampler_edge, dem_edge) in sampler_edges.iter().zip(first.edges.iter()) {
         assert_eq!(sampler_edge.probability, dem_edge.probability);

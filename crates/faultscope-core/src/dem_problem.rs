@@ -1,4 +1,6 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::fmt;
+use std::mem;
 
 use crate::dem_canonical::{canonical_id_order, parity_canonicalize, parity_support_len};
 use crate::{DetectorErrorModel, NpError, NpResult};
@@ -29,12 +31,441 @@ pub struct GraphlikeEdge {
     pub dem_edge_index: usize,
 }
 
+pub const NATIVE_GRAPHLIKE_PROBLEM_ABI_VERSION: u32 = 1;
+pub const NATIVE_GRAPHLIKE_PROBLEM_ABI_NAME: &str = "faultscope.native_graphlike_problem.v1";
+pub const NATIVE_GRAPHLIKE_PROBLEM_CAPSULE_NAME: &str = "faultscope.native_graphlike_problem.v1";
+pub const NATIVE_GRAPHLIKE_PROBLEM_CAPSULE_METHOD: &str =
+    "__faultscope_native_graphlike_problem_capsule__";
+
+/// Compact graphlike edge record shared through the versioned construction ABI.
+///
+/// Detector and observable indices use `u32` to keep the per-edge record small.
+/// The owning problem validates all conversions before storing a record.
+#[doc(hidden)]
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FaultScopeNativeGraphlikeEdgeV1 {
+    pub dem_edge_index: usize,
+    pub probability: f64,
+    pub weight: f64,
+    pub fault_observable_offset: u32,
+    pub fault_observable_count: u32,
+    pub detector0: u32,
+    pub detector1: u32,
+    pub detector_count: u32,
+    pub reserved: u32,
+}
+
+/// Borrowed descriptor exposed by the graphlike construction capsule.
+///
+/// All pointers remain valid only while the capsule that owns the problem is
+/// alive. Consumers must validate `abi_version`, `struct_size`, and
+/// `edge_struct_size` before dereferencing any data pointer.
+#[doc(hidden)]
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct FaultScopeNativeGraphlikeProblemV1 {
+    pub abi_version: u32,
+    pub struct_size: usize,
+    pub edge_struct_size: usize,
+    pub detector_ids: *const i64,
+    pub detector_count: usize,
+    pub observable_ids: *const i64,
+    pub observable_count: usize,
+    pub edges: *const FaultScopeNativeGraphlikeEdgeV1,
+    pub edge_count: usize,
+    pub fault_observables: *const u32,
+    pub fault_observable_count: usize,
+}
+
+/// Borrowed edge view over the compact graphlike representation.
+#[derive(Clone, Copy)]
+pub struct GraphlikeEdgeRef<'a> {
+    edge: &'a FaultScopeNativeGraphlikeEdgeV1,
+    fault_observables: &'a [u32],
+}
+
+impl GraphlikeEdgeRef<'_> {
+    pub fn detector_count(&self) -> usize {
+        self.edge.detector_count as usize
+    }
+
+    pub fn detectors(&self) -> impl ExactSizeIterator<Item = usize> + DoubleEndedIterator + '_ {
+        [self.edge.detector0 as usize, self.edge.detector1 as usize]
+            .into_iter()
+            .take(self.detector_count())
+    }
+
+    pub fn fault_observables(
+        &self,
+    ) -> impl ExactSizeIterator<Item = usize> + DoubleEndedIterator + '_ {
+        self.fault_observables.iter().map(|index| *index as usize)
+    }
+
+    pub fn probability(&self) -> f64 {
+        self.edge.probability
+    }
+
+    pub fn weight(&self) -> f64 {
+        self.edge.weight
+    }
+
+    pub fn dem_edge_index(&self) -> usize {
+        self.edge.dem_edge_index
+    }
+
+    pub fn to_owned(self) -> GraphlikeEdge {
+        GraphlikeEdge {
+            detectors: self.detectors().collect(),
+            fault_observables: self.fault_observables().collect(),
+            probability: self.probability(),
+            weight: self.weight(),
+            dem_edge_index: self.dem_edge_index(),
+        }
+    }
+}
+
+impl fmt::Debug for GraphlikeEdgeRef<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("GraphlikeEdgeRef")
+            .field("dem_edge_index", &self.dem_edge_index())
+            .field("detectors", &self.detectors().collect::<Vec<_>>())
+            .field(
+                "fault_observables",
+                &self.fault_observables().collect::<Vec<_>>(),
+            )
+            .field("probability", &self.probability())
+            .field("weight", &self.weight())
+            .finish()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct GraphlikeDecodingProblem {
-    pub detector_ids: Vec<i64>,
-    pub detector_coords: Vec<Vec<f64>>,
-    pub observable_ids: Vec<i64>,
-    pub edges: Vec<GraphlikeEdge>,
+    detector_ids: Vec<i64>,
+    detector_coords: Vec<Vec<f64>>,
+    observable_ids: Vec<i64>,
+    edges: Vec<FaultScopeNativeGraphlikeEdgeV1>,
+    fault_observables: Vec<u32>,
+}
+
+impl GraphlikeDecodingProblem {
+    /// Build a validated compact problem from owned compatibility edge DTOs.
+    pub fn new(
+        detector_ids: Vec<i64>,
+        detector_coords: Vec<Vec<f64>>,
+        observable_ids: Vec<i64>,
+        edges: Vec<GraphlikeEdge>,
+    ) -> NpResult<Self> {
+        let mut builder = GraphlikeProblemBuilder::new(
+            detector_ids,
+            detector_coords,
+            observable_ids,
+            edges.len(),
+        )?;
+        for mut edge in edges {
+            validate_graphlike_probability(edge.probability)?;
+            parity_canonicalize(&mut edge.detectors);
+            parity_canonicalize(&mut edge.fault_observables);
+            builder.push_edge(
+                &edge.detectors,
+                &edge.fault_observables,
+                edge.probability,
+                edge.weight,
+                edge.dem_edge_index,
+            )?;
+        }
+        Ok(builder.build())
+    }
+
+    pub fn detector_ids(&self) -> &[i64] {
+        &self.detector_ids
+    }
+
+    pub fn detector_coords(&self) -> &[Vec<f64>] {
+        &self.detector_coords
+    }
+
+    pub fn observable_ids(&self) -> &[i64] {
+        &self.observable_ids
+    }
+
+    pub fn edge_count(&self) -> usize {
+        self.edges.len()
+    }
+
+    pub fn edge(&self, index: usize) -> Option<GraphlikeEdgeRef<'_>> {
+        self.edges.get(index).map(|edge| self.edge_ref(edge))
+    }
+
+    pub fn iter_edges(
+        &self,
+    ) -> impl ExactSizeIterator<Item = GraphlikeEdgeRef<'_>> + DoubleEndedIterator + '_ {
+        self.edges.iter().map(|edge| self.edge_ref(edge))
+    }
+
+    /// Return a zero-copy descriptor for a versioned native construction capsule.
+    #[doc(hidden)]
+    pub fn native_view(&self) -> FaultScopeNativeGraphlikeProblemV1 {
+        FaultScopeNativeGraphlikeProblemV1 {
+            abi_version: NATIVE_GRAPHLIKE_PROBLEM_ABI_VERSION,
+            struct_size: mem::size_of::<FaultScopeNativeGraphlikeProblemV1>(),
+            edge_struct_size: mem::size_of::<FaultScopeNativeGraphlikeEdgeV1>(),
+            detector_ids: self.detector_ids.as_ptr(),
+            detector_count: self.detector_ids.len(),
+            observable_ids: self.observable_ids.as_ptr(),
+            observable_count: self.observable_ids.len(),
+            edges: self.edges.as_ptr(),
+            edge_count: self.edges.len(),
+            fault_observables: self.fault_observables.as_ptr(),
+            fault_observable_count: self.fault_observables.len(),
+        }
+    }
+
+    pub(crate) fn into_ids(self) -> (Vec<i64>, Vec<i64>) {
+        (self.detector_ids, self.observable_ids)
+    }
+
+    fn edge_ref<'a>(&'a self, edge: &'a FaultScopeNativeGraphlikeEdgeV1) -> GraphlikeEdgeRef<'a> {
+        let start = edge.fault_observable_offset as usize;
+        let end = start + edge.fault_observable_count as usize;
+        GraphlikeEdgeRef {
+            edge,
+            fault_observables: &self.fault_observables[start..end],
+        }
+    }
+}
+
+struct GraphlikeProblemBuilder {
+    detector_ids: Vec<i64>,
+    detector_coords: Vec<Vec<f64>>,
+    observable_ids: Vec<i64>,
+    edges: Vec<FaultScopeNativeGraphlikeEdgeV1>,
+    fault_observables: Vec<u32>,
+}
+
+impl GraphlikeProblemBuilder {
+    fn new(
+        detector_ids: Vec<i64>,
+        detector_coords: Vec<Vec<f64>>,
+        observable_ids: Vec<i64>,
+        edge_capacity: usize,
+    ) -> NpResult<Self> {
+        if detector_coords.len() != detector_ids.len() {
+            return Err(NpError::new(format!(
+                "graphlike detector coordinate count {} does not match detector count {}",
+                detector_coords.len(),
+                detector_ids.len()
+            )));
+        }
+        ensure_unique_ids(&detector_ids, "graphlike detector ids must be unique")?;
+        ensure_unique_ids(
+            &observable_ids,
+            "graphlike logical observable ids must be unique",
+        )?;
+        if u32::try_from(detector_ids.len()).is_err() {
+            return Err(NpError::new(
+                "graphlike detector count exceeds the native u32 index capacity",
+            ));
+        }
+        if u32::try_from(observable_ids.len()).is_err() {
+            return Err(NpError::new(
+                "graphlike observable count exceeds the native u32 index capacity",
+            ));
+        }
+        Ok(Self {
+            detector_ids,
+            detector_coords,
+            observable_ids,
+            edges: Vec::with_capacity(edge_capacity),
+            fault_observables: Vec::with_capacity(edge_capacity),
+        })
+    }
+
+    fn push_edge(
+        &mut self,
+        detectors: &[usize],
+        fault_observables: &[usize],
+        probability: f64,
+        weight: f64,
+        dem_edge_index: usize,
+    ) -> NpResult<()> {
+        if detectors.len() > 2 {
+            return Err(NpError::new(format!(
+                "graphlike decoder requires at most two detectors per edge; edge {dem_edge_index} has {}",
+                detectors.len()
+            )));
+        }
+        if detectors.is_empty() && !fault_observables.is_empty() {
+            return Err(NpError::new(format!(
+                "graphlike decoder cannot use undetectable logical edge {dem_edge_index}; observables={fault_observables:?}"
+            )));
+        }
+        for detector in detectors {
+            if *detector >= self.detector_ids.len() {
+                return Err(NpError::new(format!(
+                    "graphlike edge {dem_edge_index} references detector index {detector} but only {} detectors exist",
+                    self.detector_ids.len()
+                )));
+            }
+        }
+        for observable in fault_observables {
+            if *observable >= self.observable_ids.len() {
+                return Err(NpError::new(format!(
+                    "graphlike edge {dem_edge_index} references observable index {observable} but only {} observables exist",
+                    self.observable_ids.len()
+                )));
+            }
+        }
+
+        let fault_observable_offset = u32::try_from(self.fault_observables.len())
+            .map_err(|_| NpError::new("graphlike observable pool exceeds native u32 capacity"))?;
+        let fault_observable_count = u32::try_from(fault_observables.len()).map_err(|_| {
+            NpError::new(format!(
+                "graphlike edge {dem_edge_index} observable support exceeds native u32 capacity"
+            ))
+        })?;
+        let new_observable_count = self
+            .fault_observables
+            .len()
+            .checked_add(fault_observables.len())
+            .ok_or_else(|| NpError::new("graphlike observable pool length overflow"))?;
+        if u32::try_from(new_observable_count).is_err() {
+            return Err(NpError::new(
+                "graphlike observable pool exceeds native u32 capacity",
+            ));
+        }
+        self.fault_observables.extend(
+            fault_observables
+                .iter()
+                .map(|index| u32::try_from(*index).expect("observable index capacity validated")),
+        );
+
+        self.edges.push(FaultScopeNativeGraphlikeEdgeV1 {
+            dem_edge_index,
+            probability,
+            weight,
+            fault_observable_offset,
+            fault_observable_count,
+            detector0: detectors
+                .first()
+                .map(|index| u32::try_from(*index).expect("detector index capacity validated"))
+                .unwrap_or(0),
+            detector1: detectors
+                .get(1)
+                .map(|index| u32::try_from(*index).expect("detector index capacity validated"))
+                .unwrap_or(0),
+            detector_count: detectors.len() as u32,
+            reserved: 0,
+        });
+        Ok(())
+    }
+
+    fn build(self) -> GraphlikeDecodingProblem {
+        GraphlikeDecodingProblem {
+            detector_ids: self.detector_ids,
+            detector_coords: self.detector_coords,
+            observable_ids: self.observable_ids,
+            edges: self.edges,
+            fault_observables: self.fault_observables,
+        }
+    }
+}
+
+fn ensure_unique_ids(ids: &[i64], message: &'static str) -> NpResult<()> {
+    let mut seen = HashSet::with_capacity(ids.len());
+    if ids.iter().all(|id| seen.insert(*id)) {
+        Ok(())
+    } else {
+        Err(NpError::new(message))
+    }
+}
+
+fn validate_graphlike_probability(probability: f64) -> NpResult<()> {
+    if !(0.0..=1.0).contains(&probability) {
+        return Err(NpError::new(format!(
+            "DEM edge probability must be in [0, 1], got {probability}"
+        )));
+    }
+    Ok(())
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct GraphlikeSourceEdge<'a> {
+    pub probability: f64,
+    pub detectors: &'a [i64],
+    pub observables: &'a [i64],
+    pub original_edge_index: usize,
+}
+
+pub(crate) fn compile_graphlike_problem_from_edge_views<'a, F, I>(
+    detectors: &'a [crate::Detector],
+    observables: &'a [crate::LogicalObservable],
+    edge_count: usize,
+    edges: F,
+) -> NpResult<GraphlikeDecodingProblem>
+where
+    F: Fn() -> I,
+    I: Iterator<Item = GraphlikeSourceEdge<'a>>,
+{
+    let declared_detector_ids = detectors
+        .iter()
+        .map(|detector| detector.id)
+        .collect::<Vec<_>>();
+    let detector_ids = canonical_id_order(
+        &declared_detector_ids,
+        edges().map(|edge| edge.detectors),
+        "detector ids must be unique",
+    )?;
+    let detector_coords = stable_detector_coords_from_declarations(detectors, &detector_ids);
+    let declared_observable_ids = observables
+        .iter()
+        .map(|observable| observable.id)
+        .collect::<Vec<_>>();
+    let observable_ids = canonical_id_order(
+        &declared_observable_ids,
+        edges().map(|edge| edge.observables),
+        "logical observable ids must be unique",
+    )?;
+    let detector_index = id_index(&detector_ids);
+    let observable_index = id_index(&observable_ids);
+    let mut builder =
+        GraphlikeProblemBuilder::new(detector_ids, detector_coords, observable_ids, edge_count)?;
+
+    for edge in edges() {
+        validate_graphlike_probability(edge.probability)?;
+        let mut detector_indices = edge
+            .detectors
+            .iter()
+            .map(|detector_id| {
+                detector_index.get(detector_id).copied().ok_or_else(|| {
+                    NpError::new(format!("unknown detector id {detector_id} in DEM edge"))
+                })
+            })
+            .collect::<NpResult<Vec<_>>>()?;
+        parity_canonicalize(&mut detector_indices);
+        let mut observable_indices = edge
+            .observables
+            .iter()
+            .map(|observable_id| {
+                observable_index.get(observable_id).copied().ok_or_else(|| {
+                    NpError::new(format!(
+                        "unknown logical observable id {observable_id} in DEM edge"
+                    ))
+                })
+            })
+            .collect::<NpResult<Vec<_>>>()?;
+        parity_canonicalize(&mut observable_indices);
+        builder.push_edge(
+            &detector_indices,
+            &observable_indices,
+            edge.probability,
+            log_likelihood_ratio(edge.probability),
+            edge.original_edge_index,
+        )?;
+    }
+    Ok(builder.build())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -134,36 +565,22 @@ impl DetectorErrorModel {
     }
 
     pub fn compile_graphlike_problem(&self) -> NpResult<GraphlikeDecodingProblem> {
-        let indexed = self.compile_indexed()?;
-        let mut edges = Vec::with_capacity(indexed.edges.len());
-        for edge in &indexed.edges {
-            if edge.detectors.len() > 2 {
-                return Err(NpError::new(format!(
-                    "graphlike decoder requires at most two detectors per edge; edge {} has {}",
-                    edge.original_edge_index,
-                    edge.detectors.len()
-                )));
-            }
-            if edge.detectors.is_empty() && !edge.observables.is_empty() {
-                return Err(NpError::new(format!(
-                    "graphlike decoder cannot use undetectable logical edge {}; observables={:?}",
-                    edge.original_edge_index, edge.observables
-                )));
-            }
-            edges.push(GraphlikeEdge {
-                detectors: edge.detectors.clone(),
-                fault_observables: edge.observables.clone(),
-                probability: edge.probability,
-                weight: edge.weight,
-                dem_edge_index: edge.original_edge_index,
-            });
-        }
-        Ok(GraphlikeDecodingProblem {
-            detector_ids: indexed.detector_ids,
-            detector_coords: indexed.detector_coords,
-            observable_ids: indexed.observable_ids,
-            edges,
-        })
+        compile_graphlike_problem_from_edge_views(
+            &self.detectors,
+            &self.observables,
+            self.edges.len(),
+            || {
+                self.edges
+                    .iter()
+                    .enumerate()
+                    .map(|(edge_index, edge)| GraphlikeSourceEdge {
+                        probability: edge.probability,
+                        detectors: &edge.detectors,
+                        observables: &edge.observables,
+                        original_edge_index: edge_index,
+                    })
+            },
+        )
     }
 
     pub fn compile_binary_linear_problem(&self) -> NpResult<BinaryLinearDecodingProblem> {
@@ -209,8 +626,14 @@ impl DetectorErrorModel {
 }
 
 fn stable_detector_coords(dem: &DetectorErrorModel, detector_ids: &[i64]) -> Vec<Vec<f64>> {
-    let coords_by_id = dem
-        .detectors
+    stable_detector_coords_from_declarations(&dem.detectors, detector_ids)
+}
+
+fn stable_detector_coords_from_declarations(
+    detectors: &[crate::Detector],
+    detector_ids: &[i64],
+) -> Vec<Vec<f64>> {
+    let coords_by_id = detectors
         .iter()
         .map(|detector| (detector.id, detector.coords.clone()))
         .collect::<HashMap<_, _>>();
@@ -310,10 +733,10 @@ mod tests {
     fn graphlike_problem_preserves_detector_coords() {
         let problem = dem().compile_graphlike_problem().unwrap();
 
-        assert_eq!(problem.detector_ids, vec![5, 2, 9]);
+        assert_eq!(problem.detector_ids(), &[5, 2, 9]);
         assert_eq!(
-            problem.detector_coords,
-            vec![vec![5.0, 0.0], vec![2.0, 0.0], Vec::<f64>::new()]
+            problem.detector_coords(),
+            &[vec![5.0, 0.0], vec![2.0, 0.0], Vec::<f64>::new()]
         );
     }
 
@@ -391,11 +814,78 @@ mod tests {
 
         assert!(graphlike.is_graphlike());
         assert_eq!(
-            graphlike.compile_graphlike_problem().unwrap().edges[0].detectors,
-            vec![0, 2]
+            graphlike
+                .compile_graphlike_problem()
+                .unwrap()
+                .edge(0)
+                .unwrap()
+                .detectors()
+                .collect::<Vec<_>>(),
+            vec![0, 2],
         );
         assert!(!hypergraph.is_graphlike());
         assert!(hypergraph.compile_graphlike_problem().is_err());
+    }
+
+    #[test]
+    fn compact_graphlike_problem_round_trips_owned_edges_and_native_view() {
+        let problem = dem().compile_graphlike_problem().unwrap();
+        let owned = problem
+            .iter_edges()
+            .map(GraphlikeEdgeRef::to_owned)
+            .collect::<Vec<_>>();
+
+        assert_eq!(owned.len(), 2);
+        assert_eq!(owned[0].detectors, vec![1, 2]);
+        assert_eq!(owned[0].fault_observables, vec![0]);
+        assert_eq!(
+            problem.edge(1).unwrap().detectors().collect::<Vec<_>>(),
+            vec![0]
+        );
+
+        let view = problem.native_view();
+        assert_eq!(view.abi_version, NATIVE_GRAPHLIKE_PROBLEM_ABI_VERSION);
+        assert_eq!(
+            view.struct_size,
+            mem::size_of::<FaultScopeNativeGraphlikeProblemV1>()
+        );
+        assert_eq!(
+            view.edge_struct_size,
+            mem::size_of::<FaultScopeNativeGraphlikeEdgeV1>()
+        );
+        assert_eq!(view.detector_count, 3);
+        assert_eq!(view.observable_count, 1);
+        assert_eq!(view.edge_count, 2);
+        assert_eq!(view.fault_observable_count, 1);
+        let native_edges = unsafe { std::slice::from_raw_parts(view.edges, view.edge_count) };
+        assert_eq!(native_edges[0].detector_count, 2);
+        assert_eq!(native_edges[0].detector0, 1);
+        assert_eq!(native_edges[0].detector1, 2);
+        assert_eq!(native_edges[0].fault_observable_offset, 0);
+        assert_eq!(native_edges[0].fault_observable_count, 1);
+    }
+
+    #[test]
+    fn graphlike_constructor_validates_metadata_and_canonicalizes_edge_parity() {
+        let problem = GraphlikeDecodingProblem::new(
+            vec![10, 20],
+            vec![vec![], vec![]],
+            vec![0, 1],
+            vec![GraphlikeEdge {
+                detectors: vec![1, 0, 1],
+                fault_observables: vec![1, 0, 1],
+                probability: 0.25,
+                weight: log_likelihood_ratio(0.25),
+                dem_edge_index: 7,
+            }],
+        )
+        .unwrap();
+        let edge = problem.edge(0).unwrap();
+        assert_eq!(edge.detectors().collect::<Vec<_>>(), vec![0]);
+        assert_eq!(edge.fault_observables().collect::<Vec<_>>(), vec![0]);
+
+        let err = GraphlikeDecodingProblem::new(vec![10], vec![], vec![], vec![]).unwrap_err();
+        assert!(err.message().contains("coordinate count"));
     }
 
     #[test]

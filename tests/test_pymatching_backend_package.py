@@ -62,6 +62,33 @@ class _Batch:
         self.detectors = detectors
 
 
+class _CapsuleOnlyGraphlikeProblem:
+    def __init__(self, problem):
+        self._problem = problem
+
+    def __faultscope_native_graphlike_problem_capsule__(self):
+        return self._problem.__faultscope_native_graphlike_problem_capsule__()
+
+    @property
+    def detector_ids(self):  # pragma: no cover - a fast-path regression trips this.
+        raise AssertionError("native graphlike path must not read Python detector_ids")
+
+    @property
+    def observable_ids(self):  # pragma: no cover - a fast-path regression trips this.
+        raise AssertionError("native graphlike path must not read Python observable_ids")
+
+    @property
+    def edges(self):  # pragma: no cover - a fast-path regression trips this.
+        raise AssertionError("native graphlike path must not materialize Python edges")
+
+
+class _PythonGraphlikeProblem:
+    def __init__(self, problem):
+        self.detector_ids = problem.detector_ids
+        self.observable_ids = problem.observable_ids
+        self.edges = problem.edges
+
+
 class PyMatchingBackendPackageTests(unittest.TestCase):
     def tearDown(self) -> None:
         clear_native_decoder_plugin_cache()
@@ -100,6 +127,72 @@ class PyMatchingBackendPackageTests(unittest.TestCase):
         self.assertEqual(payload["native_decoder_abi"], NATIVE_DECODER_PLUGIN_ABI)
         self.assertEqual(payload["parameters"], {})
         self.assertEqual(payload["solver"], decoder.build_summary)
+
+    @requires_native_backend
+    def test_backend_consumes_native_graphlike_capsule_without_python_edge_objects(self) -> None:
+        problem = single_boundary_dem().compile_graphlike_problem()
+
+        decoder = pymatching_native.NativePyMatchingNativeDecoder.from_graphlike_problem(
+            _CapsuleOnlyGraphlikeProblem(problem)
+        )
+
+        self.assertEqual(decoder.detector_ids, (0,))
+        self.assertEqual(decoder.observable_ids, (0,))
+        self.assertEqual(decoder.edge_count, 1)
+        self.assertEqual(decoder.solver_edge_count, 1)
+
+    @requires_native_backend
+    def test_backend_retains_python_graphlike_compatibility_fallback(self) -> None:
+        problem = single_boundary_dem().compile_graphlike_problem()
+
+        decoder = pymatching_native.NativePyMatchingNativeDecoder.from_graphlike_problem(
+            _PythonGraphlikeProblem(problem)
+        )
+
+        self.assertEqual(decoder.detector_ids, (0,))
+        self.assertEqual(decoder.observable_ids, (0,))
+        self.assertEqual(decoder.edge_count, 1)
+        self.assertEqual(decoder.solver_edge_count, 1)
+
+    @requires_native_backend
+    def test_backend_merges_parallel_edges_with_the_same_logical_effect(self) -> None:
+        decoder = faultscope_pymatching.NativePyMatchingDecoder.from_dem(
+            parallel_edge_dem((0,), (0,), (0,))
+        )
+
+        summary = decoder.build_summary
+        self.assertEqual(decoder.edge_count, 2)
+        self.assertEqual(decoder.solver_edge_count, 1)
+        self.assertEqual(summary["merged_parallel_edge_count"], 1)
+        self.assertEqual(summary["edges"][0]["dem_edge_indices"], (0, 1))
+        self.assertEqual(summary["edges"][0]["fault_observables"], (0,))
+        self.assertAlmostEqual(summary["edges"][0]["probability"], 0.26)
+
+    @requires_native_backend
+    def test_backend_rejects_ambiguous_parallel_logical_effects_on_both_paths(self) -> None:
+        detector_pairs = (
+            ("boundary", (0,), (0,)),
+            ("graph", (0, 1), (1, 0)),
+        )
+        for endpoint_kind, first_detectors, second_detectors in detector_pairs:
+            dem = parallel_edge_dem(first_detectors, second_detectors, (1,))
+            problem = dem.compile_graphlike_problem()
+            builders = (
+                (
+                    "native-capsule",
+                    lambda: faultscope_pymatching.NativePyMatchingDecoder.from_dem(dem),
+                ),
+                (
+                    "python-fallback",
+                    lambda: pymatching_native.NativePyMatchingNativeDecoder.from_graphlike_problem(
+                        _PythonGraphlikeProblem(problem)
+                    ),
+                ),
+            )
+            for path, build in builders:
+                with self.subTest(endpoint_kind=endpoint_kind, path=path):
+                    with self.assertRaisesRegex(ValueError, "ambiguous parallel endpoint"):
+                        build()
 
     @requires_native_backend
     def test_backend_from_dem_uses_canonical_ids_and_parity(self) -> None:
@@ -365,6 +458,24 @@ def many_observable_dem(observable_count: int) -> DetectorErrorModel:
                 location_id="edge0",
                 event="X",
             ),
+        ),
+    )
+
+
+def parallel_edge_dem(
+    first_detectors: tuple[int, ...],
+    second_detectors: tuple[int, ...],
+    second_observables: tuple[int, ...],
+) -> DetectorErrorModel:
+    return DetectorErrorModel(
+        detectors=(
+            Detector(id=0, measurement_keys=()),
+            Detector(id=1, measurement_keys=()),
+        ),
+        observables=(LogicalObservable(id=0), LogicalObservable(id=1)),
+        edges=(
+            DetectorErrorEdge(0.1, first_detectors, (0,), "edge0", "X"),
+            DetectorErrorEdge(0.2, second_detectors, second_observables, "edge1", "Z"),
         ),
     )
 

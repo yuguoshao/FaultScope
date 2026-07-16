@@ -10,11 +10,14 @@ use faultscope_core::{
     FaultScopeNativeDecoderFactoryV3, FaultScopeNativeDecoderStatusV1,
     FaultScopeNativeDecoderStringViewV1, FaultScopeNativeDecoderWorkerV3,
     FaultScopeNativeDetectorEventShotBatchViewV1, FaultScopeNativeDetectorMaskBatchViewV1,
+    FaultScopeNativeGraphlikeEdgeV1, FaultScopeNativeGraphlikeProblemV1,
     FaultScopeNativePackedDetectorShotBatchViewV1, FaultScopeSimulator, LogicalObservable, Mask,
     NativeCompositeDecoder, NativeDecoderFactory, NativeDecoderWorker, NoiseLocation, NoiseModel,
     NpError, NpResult, Operation, PauliFrame, NATIVE_DECODER_FACTORY_FLAG_THREAD_SAFE,
     NATIVE_DECODER_PLUGIN_ABI_NAME, NATIVE_DECODER_PLUGIN_ABI_VERSION,
     NATIVE_DECODER_PLUGIN_CAPSULE_NAME, NATIVE_DECODER_PLUGIN_ENTRY_POINT_GROUP,
+    NATIVE_GRAPHLIKE_PROBLEM_ABI_NAME, NATIVE_GRAPHLIKE_PROBLEM_ABI_VERSION,
+    NATIVE_GRAPHLIKE_PROBLEM_CAPSULE_NAME,
 };
 
 #[test]
@@ -496,6 +499,55 @@ fn native_decoder_v3_abi_layout_is_frozen_on_64_bit_targets() {
         assert_eq!(
             offset_of!(FaultScopeNativeDecoderWorkerV3, decode_detector_event_batch),
             40
+        );
+    }
+}
+
+#[test]
+fn native_graphlike_problem_v1_abi_layout_is_frozen_on_64_bit_targets() {
+    assert_eq!(NATIVE_GRAPHLIKE_PROBLEM_ABI_VERSION, 1);
+    assert_eq!(
+        NATIVE_GRAPHLIKE_PROBLEM_ABI_NAME,
+        "faultscope.native_graphlike_problem.v1"
+    );
+    assert_eq!(
+        NATIVE_GRAPHLIKE_PROBLEM_CAPSULE_NAME,
+        NATIVE_GRAPHLIKE_PROBLEM_ABI_NAME
+    );
+
+    if cfg!(target_pointer_width = "64") {
+        assert_eq!(size_of::<FaultScopeNativeGraphlikeEdgeV1>(), 48);
+        assert_eq!(align_of::<FaultScopeNativeGraphlikeEdgeV1>(), 8);
+        assert_eq!(
+            offset_of!(FaultScopeNativeGraphlikeEdgeV1, dem_edge_index),
+            0
+        );
+        assert_eq!(offset_of!(FaultScopeNativeGraphlikeEdgeV1, probability), 8);
+        assert_eq!(offset_of!(FaultScopeNativeGraphlikeEdgeV1, weight), 16);
+        assert_eq!(
+            offset_of!(FaultScopeNativeGraphlikeEdgeV1, fault_observable_offset),
+            24
+        );
+        assert_eq!(offset_of!(FaultScopeNativeGraphlikeEdgeV1, detector0), 32);
+        assert_eq!(
+            offset_of!(FaultScopeNativeGraphlikeEdgeV1, detector_count),
+            40
+        );
+
+        assert_eq!(size_of::<FaultScopeNativeGraphlikeProblemV1>(), 88);
+        assert_eq!(align_of::<FaultScopeNativeGraphlikeProblemV1>(), 8);
+        assert_eq!(
+            offset_of!(FaultScopeNativeGraphlikeProblemV1, abi_version),
+            0
+        );
+        assert_eq!(
+            offset_of!(FaultScopeNativeGraphlikeProblemV1, struct_size),
+            8
+        );
+        assert_eq!(offset_of!(FaultScopeNativeGraphlikeProblemV1, edges), 56);
+        assert_eq!(
+            offset_of!(FaultScopeNativeGraphlikeProblemV1, fault_observables),
+            72
         );
     }
 }

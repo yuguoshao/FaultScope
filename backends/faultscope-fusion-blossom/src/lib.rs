@@ -3,9 +3,12 @@ use faultscope_core::{
     FaultScopeNativeDecoderFactoryV3, FaultScopeNativeDecoderI64SliceV1,
     FaultScopeNativeDecoderStatusV1, FaultScopeNativeDecoderStringViewV1,
     FaultScopeNativeDecoderWorkerV3, FaultScopeNativeDetectorEventShotBatchViewV1,
-    FaultScopeNativeDetectorMaskBatchViewV1, FaultScopeNativePackedDetectorShotBatchViewV1,
+    FaultScopeNativeDetectorMaskBatchViewV1, FaultScopeNativeGraphlikeEdgeV1,
+    FaultScopeNativeGraphlikeProblemV1, FaultScopeNativePackedDetectorShotBatchViewV1,
     FaultScopeNativePackedObservableShotBatchMutViewV1, NATIVE_DECODER_FACTORY_FLAG_THREAD_SAFE,
     NATIVE_DECODER_PLUGIN_ABI_VERSION, NATIVE_DECODER_PLUGIN_STATUS_ERROR,
+    NATIVE_GRAPHLIKE_PROBLEM_ABI_VERSION, NATIVE_GRAPHLIKE_PROBLEM_CAPSULE_METHOD,
+    NATIVE_GRAPHLIKE_PROBLEM_CAPSULE_NAME,
 };
 use fusion_blossom::complete_graph::CompleteGraph;
 use fusion_blossom::dual_module::{DualNodeClass, DualNodePtr};
@@ -764,30 +767,21 @@ impl SolverVertexLayout {
 
 impl FusionBlossomProblemBuilder {
     fn from_graphlike_problem(problem: &Bound<'_, PyAny>, weight_scale: f64) -> PyResult<Self> {
-        let detector_ids = problem.getattr("detector_ids")?.extract::<Vec<i64>>()?;
-        let detector_coords = problem
-            .getattr("detector_coords")
-            .and_then(|coords| coords.extract::<Vec<Vec<f64>>>())
-            .unwrap_or_else(|_| vec![Vec::new(); detector_ids.len()]);
-        if detector_coords.len() != detector_ids.len() {
-            return Err(PyValueError::new_err(format!(
-                "fusion-blossom graphlike problem has {} detector coords entries but {} detector ids",
-                detector_coords.len(),
-                detector_ids.len()
-            )));
+        if problem.hasattr(NATIVE_GRAPHLIKE_PROBLEM_CAPSULE_METHOD)? {
+            let capsule = problem.call_method0(NATIVE_GRAPHLIKE_PROBLEM_CAPSULE_METHOD)?;
+            return unsafe { Self::from_native_graphlike_capsule(problem, &capsule, weight_scale) };
         }
+        Self::from_python_graphlike_problem(problem, weight_scale)
+    }
+
+    fn from_python_graphlike_problem(
+        problem: &Bound<'_, PyAny>,
+        weight_scale: f64,
+    ) -> PyResult<Self> {
+        let detector_ids = problem.getattr("detector_ids")?.extract::<Vec<i64>>()?;
+        let detector_coords = detector_coords_from_problem(problem, detector_ids.len())?;
         let observable_ids = problem.getattr("observable_ids")?.extract::<Vec<i64>>()?;
-        let mut builder = Self {
-            detector_ids,
-            detector_coords,
-            observable_ids,
-            weight_scale,
-            dem_edge_count: 0,
-            boundary_groups: Vec::new(),
-            boundary_group_by_key: HashMap::new(),
-            graph_groups: Vec::new(),
-            graph_group_by_endpoint: HashMap::new(),
-        };
+        let mut builder = Self::new(detector_ids, detector_coords, observable_ids, weight_scale);
 
         let edges = problem.getattr("edges")?;
         for edge in PyIterator::from_object(&edges)? {
@@ -802,6 +796,141 @@ impl FusionBlossomProblemBuilder {
         }
 
         Ok(builder)
+    }
+
+    unsafe fn from_native_graphlike_capsule(
+        problem: &Bound<'_, PyAny>,
+        capsule: &Bound<'_, PyAny>,
+        weight_scale: f64,
+    ) -> PyResult<Self> {
+        let capsule_name = CString::new(NATIVE_GRAPHLIKE_PROBLEM_CAPSULE_NAME)
+            .expect("native graphlike capsule name must not contain NUL");
+        if pyo3::ffi::PyCapsule_IsValid(capsule.as_ptr(), capsule_name.as_ptr()) != 1 {
+            return Err(PyValueError::new_err(format!(
+                "native graphlike problem capsule must be named {NATIVE_GRAPHLIKE_PROBLEM_CAPSULE_NAME:?}"
+            )));
+        }
+        let pointer = pyo3::ffi::PyCapsule_GetPointer(capsule.as_ptr(), capsule_name.as_ptr());
+        if pointer.is_null() {
+            return Err(PyValueError::new_err(
+                "native graphlike problem capsule contained a null descriptor pointer",
+            ));
+        }
+        let descriptor = &*pointer.cast::<FaultScopeNativeGraphlikeProblemV1>();
+        if descriptor.abi_version != NATIVE_GRAPHLIKE_PROBLEM_ABI_VERSION {
+            return Err(PyValueError::new_err(format!(
+                "native graphlike problem ABI version {} is incompatible with expected version {}",
+                descriptor.abi_version, NATIVE_GRAPHLIKE_PROBLEM_ABI_VERSION
+            )));
+        }
+        if descriptor.struct_size != mem::size_of::<FaultScopeNativeGraphlikeProblemV1>() {
+            return Err(PyValueError::new_err(format!(
+                "native graphlike problem descriptor size {} does not match expected size {}",
+                descriptor.struct_size,
+                mem::size_of::<FaultScopeNativeGraphlikeProblemV1>()
+            )));
+        }
+        if descriptor.edge_struct_size != mem::size_of::<FaultScopeNativeGraphlikeEdgeV1>() {
+            return Err(PyValueError::new_err(format!(
+                "native graphlike edge size {} does not match expected size {}",
+                descriptor.edge_struct_size,
+                mem::size_of::<FaultScopeNativeGraphlikeEdgeV1>()
+            )));
+        }
+
+        let detector_ids = checked_native_graphlike_slice(
+            descriptor.detector_ids,
+            descriptor.detector_count,
+            "detector ids",
+        )?;
+        let observable_ids = checked_native_graphlike_slice(
+            descriptor.observable_ids,
+            descriptor.observable_count,
+            "observable ids",
+        )?;
+        let edges =
+            checked_native_graphlike_slice(descriptor.edges, descriptor.edge_count, "edges")?;
+        let fault_observables = checked_native_graphlike_slice(
+            descriptor.fault_observables,
+            descriptor.fault_observable_count,
+            "fault observables",
+        )?;
+        let detector_coords = detector_coords_from_problem(problem, detector_ids.len())?;
+        let mut builder = Self::new(
+            detector_ids.to_vec(),
+            detector_coords,
+            observable_ids.to_vec(),
+            weight_scale,
+        );
+        for edge in edges {
+            if edge.reserved != 0 {
+                return Err(PyValueError::new_err(format!(
+                    "native graphlike edge {} has non-zero reserved flags {}",
+                    edge.dem_edge_index, edge.reserved
+                )));
+            }
+            let observable_start = edge.fault_observable_offset as usize;
+            let observable_end = observable_start
+                .checked_add(edge.fault_observable_count as usize)
+                .ok_or_else(|| {
+                    PyValueError::new_err(format!(
+                        "native graphlike edge {} observable range overflow",
+                        edge.dem_edge_index
+                    ))
+                })?;
+            let edge_observables = fault_observables
+                .get(observable_start..observable_end)
+                .ok_or_else(|| {
+                    PyValueError::new_err(format!(
+                        "native graphlike edge {} observable range {}..{} exceeds pool length {}",
+                        edge.dem_edge_index,
+                        observable_start,
+                        observable_end,
+                        fault_observables.len()
+                    ))
+                })?;
+            let detectors = match edge.detector_count {
+                0 => Vec::new(),
+                1 => vec![edge.detector0 as usize],
+                2 => vec![edge.detector0 as usize, edge.detector1 as usize],
+                detector_count => {
+                    return Err(PyValueError::new_err(format!(
+                        "fusion-blossom edge {} has {detector_count} detectors; expected one boundary detector or two graph detectors",
+                        edge.dem_edge_index
+                    )));
+                }
+            };
+            builder.push_edge(
+                edge.dem_edge_index,
+                detectors,
+                edge_observables
+                    .iter()
+                    .map(|observable| *observable as usize)
+                    .collect(),
+                edge.probability,
+                edge.weight,
+            )?;
+        }
+        Ok(builder)
+    }
+
+    fn new(
+        detector_ids: Vec<i64>,
+        detector_coords: Vec<Vec<f64>>,
+        observable_ids: Vec<i64>,
+        weight_scale: f64,
+    ) -> Self {
+        Self {
+            detector_ids,
+            detector_coords,
+            observable_ids,
+            weight_scale,
+            dem_edge_count: 0,
+            boundary_groups: Vec::new(),
+            boundary_group_by_key: HashMap::new(),
+            graph_groups: Vec::new(),
+            graph_group_by_endpoint: HashMap::new(),
+        }
     }
 
     fn push_edge(
@@ -1002,6 +1131,45 @@ impl FusionBlossomProblemBuilder {
             summary,
         })
     }
+}
+
+fn detector_coords_from_problem(
+    problem: &Bound<'_, PyAny>,
+    detector_count: usize,
+) -> PyResult<Vec<Vec<f64>>> {
+    let detector_coords = problem
+        .getattr("detector_coords")
+        .and_then(|coords| coords.extract::<Vec<Vec<f64>>>())
+        .unwrap_or_else(|_| vec![Vec::new(); detector_count]);
+    if detector_coords.len() != detector_count {
+        return Err(PyValueError::new_err(format!(
+            "fusion-blossom graphlike problem has {} detector coords entries but {} detector ids",
+            detector_coords.len(),
+            detector_count
+        )));
+    }
+    Ok(detector_coords)
+}
+
+unsafe fn checked_native_graphlike_slice<'a, T>(
+    pointer: *const T,
+    len: usize,
+    label: &str,
+) -> PyResult<&'a [T]> {
+    if len == 0 {
+        return Ok(&[]);
+    }
+    if pointer.is_null() {
+        return Err(PyValueError::new_err(format!(
+            "native graphlike problem {label} pointer is null for length {len}"
+        )));
+    }
+    if len > isize::MAX as usize / mem::size_of::<T>() {
+        return Err(PyValueError::new_err(format!(
+            "native graphlike problem {label} length {len} exceeds addressable memory"
+        )));
+    }
+    Ok(slice::from_raw_parts(pointer, len))
 }
 
 impl SolverEdgeEffect {

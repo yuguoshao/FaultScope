@@ -2377,6 +2377,11 @@ class NativeDetectorErrorModelTests(unittest.TestCase):
         self.assertEqual(graphlike.observable_count, 1)
         self.assertEqual(graphlike.edges[0].fault_observables, (0,))
         self.assertEqual(graphlike.edge_summary[0]["fault_observables"], (0,))
+        native_problem_capsule = graphlike.__faultscope_native_graphlike_problem_capsule__()
+        self.assertIs(
+            native_problem_capsule,
+            graphlike.__faultscope_native_graphlike_problem_capsule__(),
+        )
         self.assertIn("GraphlikeDecodingProblem(detector_count=3", repr(graphlike))
         self.assertIsInstance(binary.h, SparseBinaryMatrix)
         self.assertEqual(binary.detector_coords, indexed.detector_coords)
@@ -3117,6 +3122,58 @@ class PyMatchingDecoderTests(unittest.TestCase):
                 numpy_module=_FakeNumpy,
                 scipy_sparse_module=_FakeSparse,
             )
+
+    def test_rejects_parallel_edges_with_different_logical_effects(self) -> None:
+        detector_pairs = (
+            ("boundary", (0,), (0,)),
+            ("graph", (0, 1), (1, 0)),
+        )
+        for endpoint_kind, first_detectors, second_detectors in detector_pairs:
+            dem = DetectorErrorModel(
+                detectors=(
+                    Detector(id=0, measurement_keys=()),
+                    Detector(id=1, measurement_keys=()),
+                ),
+                observables=(LogicalObservable(id=0), LogicalObservable(id=1)),
+                edges=(
+                    DetectorErrorEdge(0.1, first_detectors, (0,), "edge0", "X"),
+                    DetectorErrorEdge(0.4, second_detectors, (1,), "edge1", "Z"),
+                ),
+            )
+
+            with self.subTest(endpoint_kind=endpoint_kind):
+                with self.assertRaisesRegex(
+                    UnsupportedPyMatchingDemError,
+                    "ambiguous parallel endpoint",
+                ):
+                    PyMatchingDecoder.from_dem(
+                        dem,
+                        pymatching_module=_FakePyMatching,
+                        numpy_module=_FakeNumpy,
+                        scipy_sparse_module=_FakeSparse,
+                    )
+
+        self.assertEqual(_FakePyMatching.calls, [])
+
+    def test_accepts_parallel_edges_with_the_same_logical_effect(self) -> None:
+        dem = DetectorErrorModel(
+            detectors=(Detector(id=0, measurement_keys=()),),
+            observables=(LogicalObservable(id=0),),
+            edges=(
+                DetectorErrorEdge(0.1, (0,), (0,), "edge0", "X"),
+                DetectorErrorEdge(0.2, (0,), (0,), "edge1", "Z"),
+            ),
+        )
+
+        decoder = PyMatchingDecoder.from_dem(
+            dem,
+            pymatching_module=_FakePyMatching,
+            numpy_module=_FakeNumpy,
+            scipy_sparse_module=_FakeSparse,
+        )
+
+        self.assertEqual(decoder.edge_count, 2)
+        self.assertEqual(len(_FakePyMatching.calls), 1)
 
     def test_real_pymatching_decodes_boundary_logical_edge_when_installed(self) -> None:
         os.environ.setdefault(
