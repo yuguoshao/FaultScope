@@ -1496,12 +1496,12 @@ fn native_packed_sampler_from_circuit(
         _ => Vec::new(),
     };
     let native_circuit = circuit.extract::<PyRef<'_, PyCircuit>>().ok();
-    let shared_core_circuit = native_circuit
+    let cached_core_circuit = native_circuit
         .as_ref()
-        .and_then(|circuit| circuit.core_circuit.clone());
+        .and_then(|circuit| circuit.core_circuit.as_ref());
     let fallback_core_circuit;
-    let core_circuit = match shared_core_circuit.as_deref() {
-        Some(core_circuit) => core_circuit,
+    let core_circuit = match cached_core_circuit {
+        Some(core_circuit) => core_circuit.circuit(),
         None => {
             fallback_core_circuit = parse_core_circuit_object(circuit)?;
             &fallback_core_circuit
@@ -1610,31 +1610,25 @@ pub(crate) fn core_dem_generator_from_circuit(
     detectors: Option<&Bound<'_, PyAny>>,
     observables: Option<&Bound<'_, PyAny>>,
 ) -> PyResult<CoreDetectorErrorModelGenerator> {
-    if let (Some(event_plan), Some(core_circuit)) = (
-        cached_core_event_plan(circuit),
-        cached_core_circuit(circuit),
-    ) {
-        let detector_specs = match detectors {
-            Some(items) if !items.is_none() => Some(parse_dem_detector_sequence(items)?),
-            _ => None,
-        };
-        let observable_specs = match observables {
-            Some(items) if !items.is_none() => Some(parse_dem_observable_sequence(items)?),
-            _ => None,
-        };
-        let detector_specs = detector_specs.unwrap_or_else(|| event_plan.inferred_detectors());
-        let observable_specs =
-            observable_specs.unwrap_or_else(|| event_plan.inferred_observables());
-        return CoreDetectorErrorModelGenerator::new_with_shared_event_plan(
-            core_circuit,
-            detector_specs,
-            observable_specs,
-            event_plan,
-        )
-        .map_err(|err| PyValueError::new_err(err.to_string()));
+    if let Ok(native_circuit) = circuit.extract::<PyRef<'_, PyCircuit>>() {
+        if let Some(core_circuit) = native_circuit.core_circuit.as_ref() {
+            let detector_specs = match detectors {
+                Some(items) if !items.is_none() => Some(parse_dem_detector_sequence(items)?),
+                _ => None,
+            };
+            let observable_specs = match observables {
+                Some(items) if !items.is_none() => Some(parse_dem_observable_sequence(items)?),
+                _ => None,
+            };
+            return CoreDetectorErrorModelGenerator::new_with_validated_dem_circuit_options(
+                core_circuit,
+                detector_specs,
+                observable_specs,
+            )
+            .map_err(|err| PyValueError::new_err(err.to_string()));
+        }
     }
 
-    let cached_event_plan = cached_core_event_plan(circuit);
     let core_circuit = parse_core_circuit_object(circuit)?;
     let detector_specs = match detectors {
         Some(items) if !items.is_none() => Some(parse_dem_detector_sequence(items)?),
@@ -1644,18 +1638,8 @@ pub(crate) fn core_dem_generator_from_circuit(
         Some(items) if !items.is_none() => Some(parse_dem_observable_sequence(items)?),
         _ => None,
     };
-    match cached_event_plan {
-        Some(event_plan) => CoreDetectorErrorModelGenerator::new_with_shared_event_plan_options(
-            std::sync::Arc::new(core_circuit),
-            detector_specs,
-            observable_specs,
-            event_plan,
-        ),
-        None => {
-            CoreDetectorErrorModelGenerator::new(core_circuit, detector_specs, observable_specs)
-        }
-    }
-    .map_err(|err| PyValueError::new_err(err.to_string()))
+    CoreDetectorErrorModelGenerator::new(core_circuit, detector_specs, observable_specs)
+        .map_err(|err| PyValueError::new_err(err.to_string()))
 }
 
 fn native_dem_sampler_from_core_generator(

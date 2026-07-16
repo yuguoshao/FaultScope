@@ -803,8 +803,7 @@ fn validate_lookbacks(lookbacks: &[usize]) -> PyResult<()> {
 pub(crate) struct PyCircuit {
     pub(crate) n_qubits: usize,
     pub(crate) operations: Vec<Py<PyAny>>,
-    pub(crate) core_circuit: Option<std::sync::Arc<faultscope_core::Circuit>>,
-    pub(crate) core_event_plan: std::sync::OnceLock<std::sync::Arc<faultscope_core::DemEventPlan>>,
+    pub(crate) core_circuit: Option<faultscope_core::ValidatedDemCircuit>,
 }
 
 #[pymethods]
@@ -832,13 +831,11 @@ impl PyCircuit {
         // rejecting any fully parseable invalid target at construction time;
         // execution entry points parse and validate those objects again.
         let core_circuit = if let Some(core_operations) = core_operations {
-            let circuit = std::sync::Arc::new(faultscope_core::Circuit {
+            let circuit = faultscope_core::ValidatedDemCircuit::new(faultscope_core::Circuit {
                 n_qubits,
                 operations: core_operations,
-            });
-            circuit
-                .validate()
-                .map_err(|err| PyValueError::new_err(err.to_string()))?;
+            })
+            .map_err(|err| PyValueError::new_err(err.to_string()))?;
             Some(circuit)
         } else {
             let parsed_operations = operations
@@ -855,7 +852,8 @@ impl PyCircuit {
             }
             None
         };
-        let initial_event_plan = core_circuit.as_ref().and_then(|circuit| {
+        if let Some(validated_circuit) = &core_circuit {
+            let circuit = validated_circuit.circuit();
             let structured = circuit.operations.iter().any(|operation| {
                 matches!(
                     operation,
@@ -867,23 +865,16 @@ impl PyCircuit {
                         | faultscope_core::Operation::MeasureReset { .. }
                 )
             });
-            if structured {
-                None
-            } else {
-                faultscope_core::collect_dem_event_plan(&circuit.operations)
-                    .ok()
-                    .map(std::sync::Arc::new)
+            if !structured {
+                // Preserve eager plan construction for flat native circuits so
+                // DEM compile timing only measures generator construction.
+                let _ = validated_circuit.event_plan();
             }
-        });
-        let core_event_plan = std::sync::OnceLock::new();
-        if let Some(event_plan) = initial_event_plan {
-            let _ = core_event_plan.set(event_plan);
         }
         Ok(Self {
             n_qubits,
             operations,
             core_circuit,
-            core_event_plan,
         })
     }
 

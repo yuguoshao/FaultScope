@@ -115,6 +115,13 @@ fn dem_entrypoints_reject_invalid_circuit_event_plan_and_observable_targets() {
     .unwrap_err();
     assert!(err.message().contains("targets qubit 1"));
 
+    let err = ValidatedDemCircuit::new(Circuit {
+        n_qubits: 1,
+        operations: invalid_operations.clone(),
+    })
+    .unwrap_err();
+    assert!(err.message().contains("targets qubit 1"));
+
     let event_plan = collect_dem_event_plan(&invalid_operations).unwrap();
     let err = generate_dem_edges_from_event_plan(1, &[], &[], &event_plan).unwrap_err();
     assert!(err.message().contains("targets qubit 1"));
@@ -139,6 +146,49 @@ fn dem_entrypoints_reject_invalid_circuit_event_plan_and_observable_targets() {
     };
     let err = generate_dem_edges(1, &[], &[], &[observable]).unwrap_err();
     assert!(err.message().contains("logical observable 3"));
+}
+
+#[test]
+fn validated_dem_circuit_reuses_bound_plan_and_matches_checked_generator() {
+    let circuit = Circuit {
+        n_qubits: 1,
+        operations: vec![
+            Operation::Noise(NoiseLocation {
+                id: "x0".to_string(),
+                model: NoiseModel::BernoulliPauli("X".to_string()),
+                rate: 0.125,
+                qubits: vec![0],
+                tags: HashMap::new(),
+            }),
+            Operation::Measure {
+                qubit: 0,
+                key: Some("m0".to_string()),
+                basis: "Z".to_string(),
+                noise: None,
+            },
+            Operation::Detector {
+                detector_id: Some(0),
+                measurement_keys: vec!["m0".to_string()],
+                coords: vec![1.0],
+            },
+        ],
+    };
+    let checked = DetectorErrorModelGenerator::new(circuit.clone(), None, None)
+        .unwrap()
+        .generate()
+        .unwrap();
+    let validated = ValidatedDemCircuit::new(circuit).unwrap();
+
+    let first_plan = validated.event_plan().unwrap();
+    let second_plan = validated.event_plan().unwrap();
+    assert!(Arc::ptr_eq(&first_plan, &second_plan));
+
+    let fast =
+        DetectorErrorModelGenerator::new_with_validated_dem_circuit_options(&validated, None, None)
+            .unwrap()
+            .generate()
+            .unwrap();
+    assert_eq!(fast, checked);
 }
 
 #[test]

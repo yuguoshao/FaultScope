@@ -46,7 +46,7 @@ pub use decoder::{
 pub use dem::{
     collect_dem_event_plan, detectors_from_circuit, generate_dem_edges,
     generate_dem_edges_from_event_plan, observables_from_circuit, DemEventPlan,
-    DetectorErrorModelGenerator, LazyDetectorErrorModel,
+    DetectorErrorModelGenerator, LazyDetectorErrorModel, ValidatedDemCircuit,
 };
 pub use dem_problem::{
     log_likelihood_ratio, BinaryLinearDecodingProblem, GraphlikeDecodingProblem, GraphlikeEdge,

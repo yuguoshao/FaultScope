@@ -1,5 +1,5 @@
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 mod assembly;
 mod bitset;
@@ -40,6 +40,58 @@ pub struct DetectorErrorModelGenerator {
     pub observables: Vec<LogicalObservable>,
     event_plan: Arc<DemEventPlan>,
     measurement_plan: DemMeasurementPlan,
+}
+
+/// A circuit whose targets have been validated and whose DEM event plan is
+/// guaranteed to be derived from that exact circuit.
+///
+/// This type is intentionally opaque.  It lets trusted adapters carry the
+/// validation result across API boundaries without allowing callers to pair a
+/// circuit with an unrelated event plan.
+#[doc(hidden)]
+#[derive(Debug)]
+pub struct ValidatedDemCircuit {
+    circuit: Arc<Circuit>,
+    event_plan: OnceLock<Arc<DemEventPlan>>,
+}
+
+impl ValidatedDemCircuit {
+    /// Validate a circuit once and retain it for DEM compilation.
+    #[doc(hidden)]
+    pub fn new(circuit: Circuit) -> NpResult<Self> {
+        circuit.validate()?;
+        Ok(Self {
+            circuit: Arc::new(circuit),
+            event_plan: OnceLock::new(),
+        })
+    }
+
+    /// Borrow the validated circuit.
+    #[doc(hidden)]
+    pub fn circuit(&self) -> &Circuit {
+        &self.circuit
+    }
+
+    /// Return shared ownership of the validated circuit.
+    fn shared_circuit(&self) -> Arc<Circuit> {
+        Arc::clone(&self.circuit)
+    }
+
+    /// Return the event plan derived from this circuit, compiling it once.
+    #[doc(hidden)]
+    pub fn event_plan(&self) -> NpResult<Arc<DemEventPlan>> {
+        if let Some(event_plan) = self.event_plan.get() {
+            return Ok(Arc::clone(event_plan));
+        }
+
+        let event_plan = Arc::new(collect_dem_event_plan(&self.circuit.operations)?);
+        let _ = self.event_plan.set(event_plan);
+        Ok(Arc::clone(
+            self.event_plan
+                .get()
+                .expect("DEM event plan must be initialized after set"),
+        ))
+    }
 }
 
 impl DemEventPlan {
@@ -130,6 +182,37 @@ impl DetectorErrorModelGenerator {
     ) -> NpResult<Self> {
         circuit.validate()?;
         crate::program::validate_expanded_program_targets(circuit.n_qubits, &event_plan.program)?;
+        Self::new_with_prevalidated_shared_event_plan_options(
+            circuit,
+            detectors,
+            observables,
+            event_plan,
+        )
+    }
+
+    /// Create a generator from a circuit carrying proof that validation and
+    /// event-plan binding have already been performed.
+    #[doc(hidden)]
+    pub fn new_with_validated_dem_circuit_options(
+        circuit: &ValidatedDemCircuit,
+        detectors: Option<Vec<Detector>>,
+        observables: Option<Vec<LogicalObservable>>,
+    ) -> NpResult<Self> {
+        let event_plan = circuit.event_plan()?;
+        Self::new_with_prevalidated_shared_event_plan_options(
+            circuit.shared_circuit(),
+            detectors,
+            observables,
+            event_plan,
+        )
+    }
+
+    fn new_with_prevalidated_shared_event_plan_options(
+        circuit: Arc<Circuit>,
+        detectors: Option<Vec<Detector>>,
+        observables: Option<Vec<LogicalObservable>>,
+        event_plan: Arc<DemEventPlan>,
+    ) -> NpResult<Self> {
         let measurement_plan = compile_dem_measurement_plan_with_optional_declarations(
             &event_plan.program,
             detectors.as_deref(),
