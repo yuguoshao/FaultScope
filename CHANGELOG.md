@@ -80,6 +80,9 @@ patch releases may make breaking API changes.
 - Collection strong ids now use a versioned canonical source encoding and
   configuration-aware decoder fingerprints, preventing resume and aggregation
   from merging statistics produced by different same-named decoders.
+- Collection resume now rebinds validated historical statistics to the current
+  task identity before completion checks, so partial and already-complete CSV
+  resumes return the caller's current display label instead of the strong hash.
 - Pauli-frame and stabilizer-state APIs now reject mismatched, non-binary,
   negative, out-of-range, or duplicate targets before computation, RNG use, or
   tableau mutation.

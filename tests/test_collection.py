@@ -1669,6 +1669,60 @@ class CollectionTests(unittest.TestCase):
         self.assertEqual(second.shots, 6)
         self.assertEqual(second.errors, 6)
 
+    def test_csv_resume_rebinds_partial_and_completed_stats_to_current_task_id(self) -> None:
+        dem = _graphlike_dem()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "identity-resume.csv"
+            first = _collect(
+                [CollectionTask(dem=dem, task_id="first-label")],
+                max_shots=2,
+                batch_size=2,
+                seed=46,
+                save_resume_filepath=path,
+                count_observable_error_combos=True,
+                count_detection_events=True,
+            )[0]
+            partial = _collect(
+                [CollectionTask(dem=dem, task_id="renamed-label")],
+                max_shots=4,
+                batch_size=2,
+                seed=46,
+                save_resume_filepath=path,
+                count_observable_error_combos=True,
+                count_detection_events=True,
+            )[0]
+            before_completed_resume = path.read_bytes()
+            completed = _collect(
+                [CollectionTask(dem=dem, task_id="completed-label")],
+                max_shots=4,
+                batch_size=2,
+                seed=46,
+                save_resume_filepath=path,
+                count_observable_error_combos=True,
+                count_detection_events=True,
+            )[0]
+            after_completed_resume = path.read_bytes()
+
+        self.assertEqual(
+            [first.task_id, partial.task_id, completed.task_id],
+            ["first-label", "renamed-label", "completed-label"],
+        )
+        self.assertEqual(first.strong_id, partial.strong_id)
+        self.assertEqual(partial.strong_id, completed.strong_id)
+        self.assertEqual(
+            [
+                (first.shots, first.errors),
+                (partial.shots, partial.errors),
+                (completed.shots, completed.errors),
+            ],
+            [(2, 2), (4, 4), (4, 4)],
+        )
+        self.assertEqual(partial.custom_counts, completed.custom_counts)
+        self.assertEqual(completed.custom_counts["obs_mistake_mask=E"], 4)
+        self.assertEqual(completed.custom_counts["detection_events"], 4)
+        self.assertEqual(completed.custom_counts["detectors_checked"], 4)
+        self.assertEqual(after_completed_resume, before_completed_resume)
+
     def test_switching_counter_schema_collects_a_fresh_full_sample(self) -> None:
         task = CollectionTask(dem=_graphlike_dem(0.5), task_id="schema-switch")
         with tempfile.TemporaryDirectory() as temp_dir:

@@ -172,6 +172,14 @@ fn collect_task_set_inner(
         }
 
         let stats = existing
+            .map(|stats| {
+                stats.with_identity(
+                    task.task_id.clone(),
+                    task.strong_id.clone(),
+                    task.decoder_name.clone(),
+                    task.metadata_json.clone(),
+                )
+            })
             .unwrap_or_else(|| DemLogicalCollectionStats::empty_for_task(&task, counter_schema));
         if task_is_complete(&stats, &task.options, &stop_counter)? {
             results[output_index] = Some(stats);

@@ -2926,7 +2926,7 @@ fn adaptive_calibration_propagates_decoder_errors() {
 #[test]
 fn global_scheduler_resumes_partial_existing_stats() {
     let task = DemLogicalCollectionTask {
-        task_id: "partial".to_string(),
+        task_id: "renamed-partial".to_string(),
         strong_id: "partial-strong".to_string(),
         sampling_id: "partial-strong".to_string(),
         sampler: Arc::new(DemHotspotEstimator::new(logical_edge_dem(1.0)).unwrap()),
@@ -2947,7 +2947,7 @@ fn global_scheduler_resumes_partial_existing_stats() {
         postselected_observables_mask: None,
     };
     let existing = DemLogicalCollectionStats {
-        task_id: "partial".to_string(),
+        task_id: "partial-strong".to_string(),
         strong_id: "partial-strong".to_string(),
         decoder: None,
         metadata_json: "{\"p\":1}".to_string(),
@@ -2974,6 +2974,11 @@ fn global_scheduler_resumes_partial_existing_stats() {
 
     assert_eq!(stats[0].shots, 16);
     assert_eq!(stats[0].errors, 16);
+    assert_eq!(stats[0].discards, 0);
+    assert!(stats[0].seconds >= 0.25);
+    assert!(stats[0].custom_counts.is_empty());
+    assert_eq!(stats[0].task_id, "renamed-partial");
+    assert_eq!(stats[0].strong_id, "partial-strong");
 }
 
 #[test]
@@ -3323,12 +3328,11 @@ fn implicit_dem_ids_are_consistent_across_fast_and_detailed_counting() {
 
 #[test]
 fn existing_stats_resume_skips_completed_tasks() {
-    let simulator = Arc::new(DemHotspotEstimator::new(logical_edge_dem(1.0)).unwrap());
     let task = DemLogicalCollectionTask {
-        task_id: "csv".to_string(),
+        task_id: "renamed-complete".to_string(),
         strong_id: "csv-strong".to_string(),
         sampling_id: "csv-strong".to_string(),
-        sampler: simulator,
+        sampler: Arc::new(DemHotspotEstimator::new(graphlike_dem(1.0)).unwrap()),
         decoder: None,
         decoder_name: None,
         metadata_json: "{\"p\":1}".to_string(),
@@ -3345,41 +3349,53 @@ fn existing_stats_resume_skips_completed_tasks() {
         postselection_mask: None,
         postselected_observables_mask: None,
     };
-    let stats = collect_dem_logical_error_tasks(
-        vec![task.clone()],
-        DemLogicalCollectionRunOptions {
-            num_workers: 1,
-            seed: None,
-            count_observable_error_combos: false,
-            count_detection_events: false,
-            custom_error_count_key: None,
-        },
-        HashMap::new(),
-    )
-    .unwrap();
-
-    let loaded = HashMap::from([("csv-strong".to_string(), stats[0].clone())]);
-
-    assert_eq!(loaded["csv-strong"].strong_id, stats[0].strong_id);
-    assert_eq!(loaded["csv-strong"].metadata_json, stats[0].metadata_json);
-    assert_eq!(loaded["csv-strong"].shots, stats[0].shots);
-    assert_eq!(loaded["csv-strong"].errors, stats[0].errors);
-
+    let historical = DemLogicalCollectionStats {
+        task_id: "csv-strong".to_string(),
+        strong_id: task.strong_id.clone(),
+        decoder: task.decoder_name.clone(),
+        metadata_json: task.metadata_json.clone(),
+        shots: 4,
+        errors: 3,
+        discards: 1,
+        seconds: 0.25,
+        counter_schema: DemLogicalCounterSchema::new(false, true),
+        custom_counts: HashMap::from([
+            ("detection_events".to_string(), 4),
+            ("detectors_checked".to_string(), 4),
+        ]),
+    };
     let resumed = collect_dem_logical_error_tasks(
         vec![task],
         DemLogicalCollectionRunOptions {
             num_workers: 1,
             seed: None,
             count_observable_error_combos: false,
-            count_detection_events: false,
+            count_detection_events: true,
             custom_error_count_key: None,
         },
-        loaded,
+        HashMap::from([("csv-strong".to_string(), historical)]),
     )
     .unwrap();
 
-    assert_eq!(resumed[0].shots, 4);
-    assert_eq!(resumed[0].errors, 4);
+    assert_eq!(resumed.len(), 1);
+    let resumed = &resumed[0];
+    assert_eq!(resumed.task_id, "renamed-complete");
+    assert_eq!(resumed.strong_id, "csv-strong");
+    assert_eq!(resumed.decoder, None);
+    assert_eq!(resumed.metadata_json, "{\"p\":1}");
+    assert_eq!((resumed.shots, resumed.errors, resumed.discards), (4, 3, 1));
+    assert_eq!(resumed.seconds, 0.25);
+    assert_eq!(
+        resumed.counter_schema,
+        DemLogicalCounterSchema::new(false, true)
+    );
+    assert_eq!(
+        resumed.custom_counts,
+        HashMap::from([
+            ("detection_events".to_string(), 4),
+            ("detectors_checked".to_string(), 4),
+        ])
+    );
 }
 
 #[test]

@@ -606,7 +606,11 @@ This is the collection v3 CSV contract. `json_counter_schema` records the full
 versioned counter schema for every total and batch delta. Collection rejects a
 v2 header when reading or appending; it does not migrate or append v3 rows to an
 old file. Archive v2 files or convert them separately before choosing a v3
-resume path.
+resume path. CSV rows do not store the display-only `task_id`, so direct CSV
+reads temporarily expose `strong_id` as the task id. A collection resume
+rebinds validated history to the current `CollectionTask.task_id` before stop
+checks and returns the current label even when the saved task is already
+complete.
 
 `iter_collect(...)` yields only final `TaskStats`. Use `iter_progress(...)` to
 receive committed batch deltas. Resume CSV rows are appended and flushed before

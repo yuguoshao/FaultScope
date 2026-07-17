@@ -900,7 +900,10 @@ the exact current v3 schema and rejects missing/unsupported schemas or missing
 fixed counters before native workers start. A completed resume task is not
 sampled again, and only newly collected deltas are appended. CSV rows do not
 persist a display `task_id`, so `TaskStats.from_csv_row(...)` reconstructs
-`task_id` from `strong_id`.
+`task_id` from `strong_id`. When those rows are used for collection resume,
+validated historical stats are rebound to the current task identity before
+completion checks, so returned stats use the current task's display `task_id`
+even when no additional sampling is needed.
 
 The v3 header is deliberately incompatible with v2 CSV. Reading a v2 file or
 attempting to append to it raises `ValueError`; append validates the existing
