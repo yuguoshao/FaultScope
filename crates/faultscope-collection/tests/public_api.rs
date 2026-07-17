@@ -3456,11 +3456,13 @@ fn zero_error_limit_returns_schema_complete_empty_stats_without_workers() {
     let tracker = Arc::new(InstanceTracker::default());
     let decoder: Arc<dyn NativeDecoderFactory> =
         Arc::new(WorkerOwnedDecoder::prototype(tracker.clone()));
-    let mut task = decoder_collection_task("zero-limit", decoder, 8, true);
-    task.options.max_errors = Some(0);
+    let mut fixed_task = decoder_collection_task("zero-fixed-limit", decoder.clone(), 8, false);
+    fixed_task.options.max_errors = Some(0);
+    let mut adaptive_task = decoder_collection_task("zero-adaptive-limit", decoder, 8, true);
+    adaptive_task.options.max_errors = Some(0);
 
     let stats = collect_dem_logical_error_tasks(
-        vec![task],
+        vec![fixed_task, adaptive_task],
         DemLogicalCollectionRunOptions {
             count_detection_events: true,
             ..collection_run_options(4)
@@ -3469,9 +3471,11 @@ fn zero_error_limit_returns_schema_complete_empty_stats_without_workers() {
     )
     .unwrap();
 
-    assert_eq!(stats[0].shots, 0);
-    assert_eq!(stats[0].custom_counts["detection_events"], 0);
-    assert_eq!(stats[0].custom_counts["detectors_checked"], 0);
+    for stat in &stats {
+        assert_eq!(stat.shots, 0);
+        assert_eq!(stat.custom_counts["detection_events"], 0);
+        assert_eq!(stat.custom_counts["detectors_checked"], 0);
+    }
     assert_eq!(tracker.created.load(Ordering::SeqCst), 0);
     assert_eq!(tracker.decode_calls.load(Ordering::SeqCst), 0);
 
@@ -3492,6 +3496,145 @@ fn zero_error_limit_returns_schema_complete_empty_stats_without_workers() {
     assert_eq!(hotspot[0].stats.custom_counts["detectors_checked"], 0);
     assert_eq!(tracker.created.load(Ordering::SeqCst), 0);
     assert_eq!(tracker.decode_calls.load(Ordering::SeqCst), 0);
+
+    let decoder: Arc<dyn NativeDecoderFactory> =
+        Arc::new(WorkerOwnedDecoder::prototype(tracker.clone()));
+    let mut resumed_task = decoder_collection_task("zero-resume-limit", decoder, 8, false);
+    resumed_task.options.min_shots = 3;
+    resumed_task.options.max_errors = Some(0);
+    let mut existing = DemLogicalCollectionStats::empty_for_task(
+        &resumed_task,
+        DemLogicalCounterSchema::default(),
+    );
+    existing.shots = 4;
+    let resumed_strong_id = resumed_task.strong_id.clone();
+    let resumed = collect_dem_logical_error_tasks(
+        vec![resumed_task],
+        collection_run_options(4),
+        HashMap::from([(resumed_strong_id, existing)]),
+    )
+    .unwrap();
+    assert_eq!(resumed[0].shots, 4);
+    assert_eq!(tracker.created.load(Ordering::SeqCst), 0);
+    assert_eq!(tracker.decode_calls.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn completion_limit_matrix_matches_single_fixed_adaptive_and_hotspot_paths() {
+    let cases = [
+        (0, None, 6),
+        (0, Some(0), 0),
+        (0, Some(1), 2),
+        (3, None, 6),
+        (3, Some(0), 4),
+        (3, Some(1), 4),
+    ];
+    let sampler = Arc::new(DemHotspotEstimator::new(logical_edge_dem(1.0)).unwrap());
+    let options =
+        |min_shots: usize, max_errors: Option<usize>, adaptive: bool| DemLogicalCollectionOptions {
+            max_shots: 6,
+            min_shots,
+            max_errors,
+            batch_size: 2,
+            seed: Some(79),
+            start_batch_size: adaptive.then_some(2),
+            max_batch_size: adaptive.then_some(2),
+            max_batch_seconds: adaptive.then_some(1.0),
+        };
+    let task = |task_id: String, min_shots: usize, max_errors: Option<usize>, adaptive: bool| {
+        DemLogicalCollectionTask {
+            strong_id: format!("{task_id}-strong"),
+            sampling_id: format!("{task_id}-sampling"),
+            task_id,
+            sampler: sampler.clone(),
+            decoder: None,
+            decoder_name: None,
+            metadata_json: "{}".to_string(),
+            options: options(min_shots, max_errors, adaptive),
+            postselection_mask: None,
+            postselected_observables_mask: None,
+        }
+    };
+
+    for (min_shots, max_errors, expected_shots) in cases {
+        let stats = collect_dem_logical_error_stats(
+            sampler.as_ref(),
+            options(min_shots, max_errors, false),
+            None,
+        )
+        .unwrap();
+        assert_eq!(stats.shots, expected_shots);
+    }
+
+    let fixed_tasks = cases
+        .iter()
+        .enumerate()
+        .map(|(index, (min_shots, max_errors, _))| {
+            task(
+                format!("matrix-fixed-{index}"),
+                *min_shots,
+                *max_errors,
+                false,
+            )
+        })
+        .collect();
+    let fixed =
+        collect_dem_logical_error_tasks(fixed_tasks, collection_run_options(4), HashMap::new())
+            .unwrap();
+    assert_eq!(
+        fixed.iter().map(|stats| stats.shots).collect::<Vec<_>>(),
+        cases
+            .iter()
+            .map(|(_, _, expected_shots)| *expected_shots)
+            .collect::<Vec<_>>()
+    );
+
+    let adaptive_tasks = cases
+        .iter()
+        .enumerate()
+        .map(|(index, (min_shots, max_errors, _))| {
+            task(
+                format!("matrix-adaptive-{index}"),
+                *min_shots,
+                *max_errors,
+                true,
+            )
+        })
+        .collect();
+    let adaptive =
+        collect_dem_logical_error_tasks(adaptive_tasks, collection_run_options(4), HashMap::new())
+            .unwrap();
+    assert_eq!(
+        adaptive.iter().map(|stats| stats.shots).collect::<Vec<_>>(),
+        cases
+            .iter()
+            .map(|(_, _, expected_shots)| *expected_shots)
+            .collect::<Vec<_>>()
+    );
+
+    let hotspot_tasks = cases
+        .iter()
+        .enumerate()
+        .map(|(index, (min_shots, max_errors, _))| {
+            task(
+                format!("matrix-hotspot-{index}"),
+                *min_shots,
+                *max_errors,
+                false,
+            )
+        })
+        .collect();
+    let hotspot = collect_dem_hotspot_tasks(hotspot_tasks, collection_run_options(4)).unwrap();
+    assert_eq!(
+        hotspot
+            .iter()
+            .map(|result| result.stats.shots)
+            .collect::<Vec<_>>(),
+        cases
+            .iter()
+            .map(|(_, _, expected_shots)| *expected_shots)
+            .collect::<Vec<_>>()
+    );
 }
 
 #[test]

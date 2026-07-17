@@ -693,7 +693,16 @@ CollectionOptions(
 `max_batch_seconds` must be positive when set. `max_errors` must be
 non-negative when set; `min_shots` must be non-negative and no larger than
 `max_shots`. Collection stops at `max_shots`, or when both `min_shots` and
-`max_errors` have been reached.
+`max_errors` have been reached. Shot, error, and batch counts must be integers;
+booleans and floating-point counts are rejected. `max_batch_seconds` must be a
+finite positive number.
+
+When used as `CollectionTask.collection_options`, only arguments explicitly
+passed to `CollectionOptions` override the Collector defaults. Passing a
+default value such as `batch_size=10_000` or `min_shots=0` restores that
+default, while an explicit `None` clears an inherited nullable value. Clearing
+`max_shots` is allowed during option merging but collection then fails with
+`max_shots is required` before compiling the task.
 
 `CollectionRunOptions` is a frozen dataclass:
 
@@ -710,9 +719,10 @@ CollectionRunOptions(
 )
 ```
 
-`num_workers` must be positive. The run seed is passed once to the Rust
-scheduler, which derives deterministic task-local streams from each internal
-sampling id.
+`num_workers` must be a positive non-boolean integer. `seed`, when set, must be
+an integer in the unsigned 64-bit range. The run seed is passed once to the
+Rust scheduler, which derives deterministic task-local streams from each
+internal sampling id.
 
 `CollectionTask` is a frozen dataclass:
 

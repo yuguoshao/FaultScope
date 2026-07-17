@@ -417,6 +417,31 @@ class CollectionTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "max_batch_seconds"):
             CollectionOptions(max_batch_seconds=0)
 
+    def test_collection_numeric_options_reject_bool_float_and_non_finite_values(self) -> None:
+        integer_fields = (
+            "max_shots",
+            "max_errors",
+            "batch_size",
+            "start_batch_size",
+            "max_batch_size",
+            "min_shots",
+        )
+        for field_name in integer_fields:
+            for value in (True, 1.5):
+                with self.subTest(field_name=field_name, value=value):
+                    with self.assertRaisesRegex(TypeError, field_name):
+                        CollectionOptions(**{field_name: value})
+
+        self.assertEqual(CollectionOptions(max_batch_seconds=1).max_batch_seconds, 1.0)
+        for value in (True, "1"):
+            with self.subTest(max_batch_seconds=value):
+                with self.assertRaisesRegex(TypeError, "max_batch_seconds"):
+                    CollectionOptions(max_batch_seconds=value)
+        for value in (math.nan, math.inf, -math.inf):
+            with self.subTest(max_batch_seconds=value):
+                with self.assertRaisesRegex(ValueError, "finite and positive"):
+                    CollectionOptions(max_batch_seconds=value)
+
     def test_collection_run_options_validate_workers(self) -> None:
         options = CollectionRunOptions(seed=5, num_workers=2, decoders=("mwpm",))
 
@@ -426,6 +451,43 @@ class CollectionTests(unittest.TestCase):
         self.assertNotIn("seed", {field.name for field in fields(CollectionOptions)})
         with self.assertRaisesRegex(ValueError, "num_workers must be positive"):
             CollectionRunOptions(num_workers=0)
+
+        for value in (True, 1.5):
+            with self.subTest(num_workers=value):
+                with self.assertRaisesRegex(TypeError, "num_workers"):
+                    CollectionRunOptions(num_workers=value)
+            with self.subTest(seed=value):
+                with self.assertRaisesRegex(TypeError, "seed"):
+                    CollectionRunOptions(seed=value)
+        CollectionRunOptions(seed=0)
+        CollectionRunOptions(seed=(1 << 64) - 1)
+        for value in (-1, 1 << 64):
+            with self.subTest(seed=value):
+                with self.assertRaisesRegex(ValueError, "seed must be between"):
+                    CollectionRunOptions(seed=value)
+
+    def test_collection_options_preserve_public_signature_and_fields(self) -> None:
+        parameters = inspect.signature(CollectionOptions).parameters
+
+        self.assertEqual(
+            tuple(parameters),
+            (
+                "max_shots",
+                "max_errors",
+                "batch_size",
+                "start_batch_size",
+                "max_batch_size",
+                "max_batch_seconds",
+                "min_shots",
+            ),
+        )
+        self.assertEqual(
+            tuple(repr(parameter.default) for parameter in parameters.values()),
+            ("None", "None", "10000", "None", "None", "None", "0"),
+        )
+        self.assertEqual(
+            tuple(field.name for field in fields(CollectionOptions)), tuple(parameters)
+        )
 
     def test_task_requires_exactly_one_source(self) -> None:
         dem = _logical_edge_dem()
@@ -1077,6 +1139,82 @@ class CollectionTests(unittest.TestCase):
 
         self.assertEqual(stats.shots, 4)
         self.assertEqual(stats.errors, 4)
+
+    def test_task_option_overlay_distinguishes_omitted_default_and_none(self) -> None:
+        base = CollectionOptions(
+            max_shots=100,
+            min_shots=7,
+            max_errors=3,
+            batch_size=4,
+            start_batch_size=2,
+            max_batch_size=8,
+            max_batch_seconds=0.5,
+        )
+
+        self.assertEqual(
+            collection_collect_module._merge_options(base, CollectionOptions()),
+            base,
+        )
+        restored = collection_collect_module._merge_options(
+            base,
+            CollectionOptions(
+                min_shots=0,
+                max_errors=None,
+                batch_size=10_000,
+                start_batch_size=None,
+                max_batch_size=None,
+                max_batch_seconds=None,
+            ),
+        )
+        self.assertEqual(restored.max_shots, 100)
+        self.assertEqual(restored.min_shots, 0)
+        self.assertIsNone(restored.max_errors)
+        self.assertEqual(restored.batch_size, 10_000)
+        self.assertIsNone(restored.start_batch_size)
+        self.assertIsNone(restored.max_batch_size)
+        self.assertIsNone(restored.max_batch_seconds)
+
+        cleared_cap = collection_collect_module._merge_options(
+            base,
+            CollectionOptions(max_shots=None),
+        )
+        self.assertIsNone(cleared_cap.max_shots)
+
+        last_overlay_wins = collection_collect_module._merge_options(
+            base,
+            CollectionOptions(batch_size=20, max_errors=1),
+            CollectionOptions(batch_size=10_000, max_errors=None),
+        )
+        self.assertEqual(last_overlay_wins.batch_size, 10_000)
+        self.assertIsNone(last_overlay_wins.max_errors)
+
+    def test_explicit_none_clears_task_error_limit(self) -> None:
+        stats = public_collect(
+            [
+                CollectionTask(
+                    dem=_logical_edge_dem(),
+                    collection_options=CollectionOptions(max_errors=None),
+                )
+            ],
+            options=CollectionOptions(max_shots=4, max_errors=0, batch_size=2),
+            run_options=CollectionRunOptions(seed=34),
+        )[0]
+
+        self.assertEqual(stats.shots, 4)
+        self.assertEqual(stats.errors, 4)
+
+    def test_explicit_none_max_shots_fails_before_task_compilation(self) -> None:
+        task = CollectionTask(
+            dem=_logical_edge_dem(),
+            collection_options=CollectionOptions(max_shots=None),
+        )
+        with mock.patch("faultscope.collection._collect._compile_task_sampler") as compile_task:
+            with self.assertRaisesRegex(ValueError, "max_shots is required"):
+                public_collect(
+                    [task],
+                    options=CollectionOptions(max_shots=4),
+                )
+        compile_task.assert_not_called()
 
     def test_native_collection_delegates_loop_to_sampler(self) -> None:
         dem = _logical_edge_dem()

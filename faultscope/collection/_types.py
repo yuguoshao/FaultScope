@@ -9,7 +9,7 @@ from pathlib import Path
 from dataclasses import dataclass, field, replace
 import math
 from collections.abc import Iterable, Iterator
-from typing import Any, Mapping
+from typing import Any, ClassVar, Mapping
 
 
 COLLECTION_COUNTER_SCHEMA_VERSION = 1
@@ -31,12 +31,20 @@ COLLECTION_CSV_FIELDS = (
 COLLECTION_CSV_HEADER = ",".join(COLLECTION_CSV_FIELDS)
 
 
-class _UnsetMinShots:
+class _UnsetOptionDefault:
+    __slots__ = ("value",)
+
+    def __init__(self, value: object) -> None:
+        self.value = value
+
     def __repr__(self) -> str:
-        return "0"
+        return repr(self.value)
 
 
-_UNSET_MIN_SHOTS = _UnsetMinShots()
+_UNSET_NONE: Any = _UnsetOptionDefault(None)
+_UNSET_BATCH_SIZE: Any = _UnsetOptionDefault(10_000)
+_UNSET_MIN_SHOTS: Any = _UnsetOptionDefault(0)
+_MAX_U64 = (1 << 64) - 1
 
 
 @dataclass(frozen=True)
@@ -95,6 +103,15 @@ class CollectionCounterSchema:
 
 @dataclass(frozen=True, init=False)
 class CollectionOptions:
+    _MAX_SHOTS_EXPLICIT: ClassVar[int] = 1 << 0
+    _MAX_ERRORS_EXPLICIT: ClassVar[int] = 1 << 1
+    _BATCH_SIZE_EXPLICIT: ClassVar[int] = 1 << 2
+    _START_BATCH_SIZE_EXPLICIT: ClassVar[int] = 1 << 3
+    _MAX_BATCH_SIZE_EXPLICIT: ClassVar[int] = 1 << 4
+    _MAX_BATCH_SECONDS_EXPLICIT: ClassVar[int] = 1 << 5
+    _MIN_SHOTS_EXPLICIT: ClassVar[int] = 1 << 6
+    _explicit_mask: ClassVar[int] = 0
+
     max_shots: int | None = None
     max_errors: int | None = None
     batch_size: int = 10_000
@@ -105,32 +122,69 @@ class CollectionOptions:
 
     def __init__(
         self,
-        max_shots: int | None = None,
-        max_errors: int | None = None,
-        batch_size: int = 10_000,
-        start_batch_size: int | None = None,
-        max_batch_size: int | None = None,
-        max_batch_seconds: float | None = None,
+        max_shots: int | None = _UNSET_NONE,
+        max_errors: int | None = _UNSET_NONE,
+        batch_size: int = _UNSET_BATCH_SIZE,
+        start_batch_size: int | None = _UNSET_NONE,
+        max_batch_size: int | None = _UNSET_NONE,
+        max_batch_seconds: float | None = _UNSET_NONE,
         *,
-        min_shots: int | _UnsetMinShots = _UNSET_MIN_SHOTS,
+        min_shots: int = _UNSET_MIN_SHOTS,
     ) -> None:
-        explicit_min_shots = min_shots is not _UNSET_MIN_SHOTS
-        resolved_min_shots = 0 if not explicit_min_shots else min_shots
+        explicit_mask = 0
+        if max_shots is _UNSET_NONE:
+            max_shots = None
+        else:
+            explicit_mask |= self._MAX_SHOTS_EXPLICIT
+        if max_errors is _UNSET_NONE:
+            max_errors = None
+        else:
+            explicit_mask |= self._MAX_ERRORS_EXPLICIT
+        if batch_size is _UNSET_BATCH_SIZE:
+            batch_size = 10_000
+        else:
+            explicit_mask |= self._BATCH_SIZE_EXPLICIT
+        if start_batch_size is _UNSET_NONE:
+            start_batch_size = None
+        else:
+            explicit_mask |= self._START_BATCH_SIZE_EXPLICIT
+        if max_batch_size is _UNSET_NONE:
+            max_batch_size = None
+        else:
+            explicit_mask |= self._MAX_BATCH_SIZE_EXPLICIT
+        if max_batch_seconds is _UNSET_NONE:
+            max_batch_seconds = None
+        else:
+            explicit_mask |= self._MAX_BATCH_SECONDS_EXPLICIT
+        if min_shots is _UNSET_MIN_SHOTS:
+            min_shots = 0
+        else:
+            explicit_mask |= self._MIN_SHOTS_EXPLICIT
+
         object.__setattr__(self, "max_shots", max_shots)
         object.__setattr__(self, "max_errors", max_errors)
         object.__setattr__(self, "batch_size", batch_size)
         object.__setattr__(self, "start_batch_size", start_batch_size)
         object.__setattr__(self, "max_batch_size", max_batch_size)
         object.__setattr__(self, "max_batch_seconds", max_batch_seconds)
-        object.__setattr__(self, "min_shots", resolved_min_shots)
-        object.__setattr__(self, "_min_shots_explicit", explicit_min_shots)
+        object.__setattr__(self, "min_shots", min_shots)
+        object.__setattr__(self, "_explicit_mask", explicit_mask)
         self.__post_init__()
 
     def __post_init__(self) -> None:
+        for field_name, value in (
+            ("max_shots", self.max_shots),
+            ("max_errors", self.max_errors),
+            ("start_batch_size", self.start_batch_size),
+            ("max_batch_size", self.max_batch_size),
+        ):
+            if value is not None:
+                _require_integer(value, field_name=field_name)
+        _require_integer(self.batch_size, field_name="batch_size")
+        _require_integer(self.min_shots, field_name="min_shots")
+
         if self.max_shots is not None and self.max_shots <= 0:
             raise ValueError("max_shots must be positive")
-        if not isinstance(self.min_shots, int) or isinstance(self.min_shots, bool):
-            raise TypeError("min_shots must be an integer")
         if self.min_shots < 0:
             raise ValueError("min_shots must be non-negative")
         if self.max_shots is not None and self.min_shots > self.max_shots:
@@ -143,8 +197,14 @@ class CollectionOptions:
             raise ValueError("start_batch_size must be positive")
         if self.max_batch_size is not None and self.max_batch_size <= 0:
             raise ValueError("max_batch_size must be positive")
-        if self.max_batch_seconds is not None and self.max_batch_seconds <= 0:
-            raise ValueError("max_batch_seconds must be positive")
+        if self.max_batch_seconds is not None:
+            seconds = _require_finite_number(
+                self.max_batch_seconds,
+                field_name="max_batch_seconds",
+            )
+            if seconds <= 0:
+                raise ValueError("max_batch_seconds must be finite and positive")
+            object.__setattr__(self, "max_batch_seconds", seconds)
 
 
 @dataclass(frozen=True)
@@ -159,6 +219,11 @@ class CollectionRunOptions:
     decoders: tuple[str | object, ...] = ()
 
     def __post_init__(self) -> None:
+        if self.seed is not None:
+            _require_integer(self.seed, field_name="seed")
+            if self.seed < 0 or self.seed > _MAX_U64:
+                raise ValueError(f"seed must be between 0 and {_MAX_U64}")
+        _require_integer(self.num_workers, field_name="num_workers")
         if self.num_workers <= 0:
             raise ValueError("num_workers must be positive")
 
@@ -476,6 +541,24 @@ def _parse_custom_counts(custom_counts: Mapping[str, object]) -> dict[str, int]:
         if value < 0:
             raise ValueError("collection CSV custom_counts values must be non-negative")
         parsed[str(key)] = value
+    return parsed
+
+
+def _require_integer(value: object, *, field_name: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise TypeError(f"{field_name} must be an integer")
+    return value
+
+
+def _require_finite_number(value: object, *, field_name: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise TypeError(f"{field_name} must be a number")
+    try:
+        parsed = float(value)
+    except OverflowError as exc:
+        raise ValueError(f"{field_name} must be finite and positive") from exc
+    if not math.isfinite(parsed):
+        raise ValueError(f"{field_name} must be finite and positive")
     return parsed
 
 

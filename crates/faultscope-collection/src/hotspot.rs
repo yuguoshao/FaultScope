@@ -6,7 +6,7 @@ use std::time::Instant;
 use faultscope_core::{NativeDecoderWorker, NpError, NpResult, SmallRng};
 
 use crate::api::{
-    stop_error_count, validate_stop_counter_for_tasks, validate_task,
+    task_is_complete, validate_stop_counter_for_tasks, validate_task, DemLogicalCollectionOptions,
     DemLogicalCollectionRunOptions, DemLogicalCollectionStats, DemLogicalCollectionTask,
     ValidatedStopCounter,
 };
@@ -45,9 +45,7 @@ struct HotspotCommitState {
     sensitivity_sums: Vec<f64>,
     pending: HashMap<usize, HotspotBatchResult>,
     next_ordinal: usize,
-    max_shots: usize,
-    min_shots: usize,
-    max_errors: Option<usize>,
+    completion_options: DemLogicalCollectionOptions,
     complete: bool,
     started: Option<Instant>,
     completed_seconds: Option<f64>,
@@ -156,20 +154,22 @@ pub fn collect_dem_hotspot_tasks(
     let run_options = Arc::new(run_options);
     let mut states = tasks
         .iter()
-        .map(|task| HotspotCommitState {
-            stats: DemLogicalCollectionStats::empty_for_task(task, counter_schema),
-            batch_stats: Vec::new(),
-            sensitivity_sums: vec![0.0; task.sampler.edge_count()],
-            pending: HashMap::new(),
-            next_ordinal: 0,
-            max_shots: task.options.max_shots,
-            min_shots: task.options.min_shots,
-            max_errors: task.options.max_errors,
-            complete: task.options.min_shots == 0 && task.options.max_errors == Some(0),
-            started: None,
-            completed_seconds: None,
+        .map(|task| {
+            let stats = DemLogicalCollectionStats::empty_for_task(task, counter_schema);
+            let complete = task_is_complete(&stats, &task.options, &stop_counter)?;
+            Ok(HotspotCommitState {
+                stats,
+                batch_stats: Vec::new(),
+                sensitivity_sums: vec![0.0; task.sampler.edge_count()],
+                pending: HashMap::new(),
+                next_ordinal: 0,
+                completion_options: task.options,
+                complete,
+                started: None,
+                completed_seconds: None,
+            })
         })
-        .collect::<Vec<_>>();
+        .collect::<NpResult<Vec<_>>>()?;
     if states.iter().all(|state| state.complete) {
         return states.into_iter().map(finish_hotspot_state).collect();
     }
@@ -337,15 +337,7 @@ fn commit_hotspot_result(
         }
         state.batch_stats.push(batch.stats);
         state.next_ordinal += 1;
-        let reached_error_limit = if state.stats.shots >= state.min_shots {
-            match state.max_errors {
-                Some(limit) => stop_error_count(&state.stats, stop_counter)? >= limit,
-                None => false,
-            }
-        } else {
-            false
-        };
-        if state.stats.shots >= state.max_shots || reached_error_limit {
+        if task_is_complete(&state.stats, &state.completion_options, stop_counter)? {
             state.complete = true;
             state.completed_seconds = state.started.map(|started| started.elapsed().as_secs_f64());
             break;

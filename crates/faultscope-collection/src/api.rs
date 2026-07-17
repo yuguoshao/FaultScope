@@ -233,49 +233,43 @@ pub fn collect_dem_logical_error_stats(
     let mut errors = 0usize;
     let mut batch_ordinal = 0usize;
     let mut last_batch: Option<(usize, f64)> = None;
-    let count_options = CountOptions::default();
-    let prepared_plan = prepare_dem_count_plan(
-        sampler,
-        decoder.as_deref().map(NativeDecoderWorker::detector_ids),
-        &count_options,
-    )?;
+    if !collection_limits_reached(options, shots_done, errors) {
+        let count_options = CountOptions::default();
+        let prepared_plan = prepare_dem_count_plan(
+            sampler,
+            decoder.as_deref().map(NativeDecoderWorker::detector_ids),
+            &count_options,
+        )?;
 
-    while shots_done < options.max_shots
-        && !(shots_done >= options.min_shots
-            && options.max_errors.is_some_and(|limit| errors >= limit))
-    {
-        let batch_shots = next_batch_size(options, shots_done, last_batch);
-        let mut batch_rng = SmallRng::new(batch_seed(options.seed, 0, batch_ordinal));
-        let batch_started = Instant::now();
-        let batch_stats = match decoder.as_mut() {
-            Some(decoder) => sample_dem_logical_error_stats_with_rng(
-                sampler,
-                batch_shots,
-                &mut batch_rng,
-                Some(&mut **decoder),
-                None,
-                &count_options,
-                &prepared_plan,
-            )?,
-            None => sample_dem_logical_error_stats_with_rng(
-                sampler,
-                batch_shots,
-                &mut batch_rng,
-                None,
-                None,
-                &count_options,
-                &prepared_plan,
-            )?,
-        };
-        let elapsed = batch_started.elapsed().as_secs_f64();
-        shots_done += batch_stats.shots;
-        errors += batch_stats.errors;
-        last_batch = Some((batch_shots, elapsed));
-        batch_ordinal += 1;
-        if shots_done >= options.min_shots
-            && options.max_errors.is_some_and(|limit| errors >= limit)
-        {
-            break;
+        while !collection_limits_reached(options, shots_done, errors) {
+            let batch_shots = next_batch_size(options, shots_done, last_batch);
+            let mut batch_rng = SmallRng::new(batch_seed(options.seed, 0, batch_ordinal));
+            let batch_started = Instant::now();
+            let batch_stats = match decoder.as_mut() {
+                Some(decoder) => sample_dem_logical_error_stats_with_rng(
+                    sampler,
+                    batch_shots,
+                    &mut batch_rng,
+                    Some(&mut **decoder),
+                    None,
+                    &count_options,
+                    &prepared_plan,
+                )?,
+                None => sample_dem_logical_error_stats_with_rng(
+                    sampler,
+                    batch_shots,
+                    &mut batch_rng,
+                    None,
+                    None,
+                    &count_options,
+                    &prepared_plan,
+                )?,
+            };
+            let elapsed = batch_started.elapsed().as_secs_f64();
+            shots_done += batch_stats.shots;
+            errors += batch_stats.errors;
+            last_batch = Some((batch_shots, elapsed));
+            batch_ordinal += 1;
         }
     }
 
@@ -408,6 +402,16 @@ fn validate_collection_options(options: DemLogicalCollectionOptions) -> NpResult
     Ok(())
 }
 
+pub(crate) fn collection_limits_reached(
+    options: DemLogicalCollectionOptions,
+    shots: usize,
+    error_count: usize,
+) -> bool {
+    shots >= options.max_shots
+        || (shots >= options.min_shots
+            && options.max_errors.is_some_and(|limit| error_count >= limit))
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ValidatedStopCounter {
     Errors,
@@ -473,6 +477,25 @@ pub(crate) fn stop_error_count(
         ValidatedStopCounter::DetectionEvents => required_stop_count(stats, DETECTION_EVENTS_KEY),
         ValidatedStopCounter::DetectorsChecked => required_stop_count(stats, DETECTORS_CHECKED_KEY),
     }
+}
+
+pub(crate) fn task_is_complete(
+    stats: &DemLogicalCollectionStats,
+    options: &DemLogicalCollectionOptions,
+    stop_counter: &ValidatedStopCounter,
+) -> NpResult<bool> {
+    if stats.shots >= options.max_shots {
+        return Ok(collection_limits_reached(*options, stats.shots, 0));
+    }
+    if stats.shots < options.min_shots || options.max_errors.is_none() {
+        return Ok(collection_limits_reached(*options, stats.shots, 0));
+    }
+    let error_count = stop_error_count(stats, stop_counter)?;
+    Ok(collection_limits_reached(
+        *options,
+        stats.shots,
+        error_count,
+    ))
 }
 
 fn required_stop_count(stats: &DemLogicalCollectionStats, key: &str) -> NpResult<usize> {

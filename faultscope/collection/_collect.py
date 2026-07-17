@@ -330,7 +330,6 @@ def _merge_options(
     base: CollectionOptions,
     *overlays: CollectionOptions | None,
 ) -> CollectionOptions:
-    default_batch_size = CollectionOptions().batch_size
     max_shots = base.max_shots
     min_shots = base.min_shots
     max_errors = base.max_errors
@@ -341,20 +340,21 @@ def _merge_options(
     for overlay in overlays:
         if overlay is None:
             continue
-        if overlay.max_shots is not None:
+        explicit_mask = overlay._explicit_mask
+        if explicit_mask & CollectionOptions._MAX_SHOTS_EXPLICIT:
             max_shots = overlay.max_shots
-        if getattr(overlay, "_min_shots_explicit", False):
-            min_shots = overlay.min_shots
-        if overlay.max_errors is not None:
+        if explicit_mask & CollectionOptions._MAX_ERRORS_EXPLICIT:
             max_errors = overlay.max_errors
-        if overlay.batch_size != default_batch_size:
+        if explicit_mask & CollectionOptions._BATCH_SIZE_EXPLICIT:
             batch_size = overlay.batch_size
-        if overlay.start_batch_size is not None:
+        if explicit_mask & CollectionOptions._START_BATCH_SIZE_EXPLICIT:
             start_batch_size = overlay.start_batch_size
-        if overlay.max_batch_size is not None:
+        if explicit_mask & CollectionOptions._MAX_BATCH_SIZE_EXPLICIT:
             max_batch_size = overlay.max_batch_size
-        if overlay.max_batch_seconds is not None:
+        if explicit_mask & CollectionOptions._MAX_BATCH_SECONDS_EXPLICIT:
             max_batch_seconds = overlay.max_batch_seconds
+        if explicit_mask & CollectionOptions._MIN_SHOTS_EXPLICIT:
+            min_shots = overlay.min_shots
     return CollectionOptions(
         max_shots=max_shots,
         min_shots=min_shots,
@@ -400,7 +400,7 @@ def _native_task(
         "decoder": decoder,
         "decoder_name": decoder_name,
         "metadata_json": metadata_json,
-        "max_shots": int(options.max_shots),
+        "max_shots": options.max_shots,
         "min_shots": options.min_shots,
         "max_errors": options.max_errors,
         "batch_size": options.batch_size,

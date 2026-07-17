@@ -528,6 +528,14 @@ task's `collection_options`. The final batch is capped so collection never excee
 `max_shots`. `max_errors` stops only after both it and `min_shots` are reached;
 the returned error count can exceed the threshold by one committed batch.
 
+Task options override only fields explicitly passed to `CollectionOptions`.
+An empty `CollectionOptions()` inherits every Collector default. Explicit
+defaults such as `batch_size=10_000` and `min_shots=0` reset inherited values;
+explicit `None` clears nullable values, for example `max_errors=None` disables
+an inherited error limit and `max_batch_seconds=None` disables inherited
+adaptive batching. Collection count options reject booleans and fractional
+values, and adaptive batch seconds must be finite and positive.
+
 Use `collect_hotspots(...)` (or `Collector.collect_hotspots(...)`) when the same
 run must also return ordered per-batch `TaskStats` and shot-weighted DEM edge
 sensitivities. This path keeps edge-event masks, decoding, residual counting,

@@ -14,9 +14,10 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::api::{
-    stop_error_count, validate_observable_combo_mask_for_task, validate_stop_counter_for_tasks,
-    validate_task, DemLogicalCollectionOptions, DemLogicalCollectionRunOptions,
-    DemLogicalCollectionStats, DemLogicalCollectionTask, ValidatedStopCounter,
+    stop_error_count, task_is_complete, validate_observable_combo_mask_for_task,
+    validate_stop_counter_for_tasks, validate_task, DemLogicalCollectionOptions,
+    DemLogicalCollectionRunOptions, DemLogicalCollectionStats, DemLogicalCollectionTask,
+    ValidatedStopCounter,
 };
 use crate::counting::{
     prepare_dem_count_plan, sample_dem_logical_error_stats_with_rng, BatchStats, CountOptions,
@@ -91,9 +92,7 @@ struct TaskState {
     task: Arc<DemLogicalCollectionTask>,
     prepared_plan: Arc<PreparedDemCountPlan>,
     stats: DemLogicalCollectionStats,
-    target_shots: usize,
-    min_shots: usize,
-    stop_error_limit: Option<usize>,
+    completion_options: DemLogicalCollectionOptions,
     stop_counter: ValidatedStopCounter,
     specs: Vec<usize>,
     next_scheduled: usize,
@@ -317,20 +316,16 @@ fn make_task_state(
     run_options: &DemLogicalCollectionRunOptions,
     stop_counter: ValidatedStopCounter,
 ) -> NpResult<TaskState> {
-    let target_shots = task.options.max_shots;
-    let min_shots = task.options.min_shots;
-    let stop_error_limit = task.options.max_errors;
+    let completion_options = task.options;
     let resume_shots = stats.shots;
-    let remaining_shots = target_shots.saturating_sub(stats.shots);
+    let remaining_shots = completion_options.max_shots.saturating_sub(stats.shots);
     if remaining_shots == 0 {
         return Ok(TaskState {
             output_index,
             task: Arc::new(task),
             prepared_plan: Arc::new(PreparedDemCountPlan::Generic),
             stats,
-            target_shots,
-            min_shots,
-            stop_error_limit,
+            completion_options,
             stop_counter,
             specs: Vec::new(),
             next_scheduled: 0,
@@ -379,9 +374,7 @@ fn make_task_state(
         task: Arc::new(adjusted),
         prepared_plan,
         stats,
-        target_shots,
-        min_shots,
-        stop_error_limit,
+        completion_options,
         stop_counter,
         specs,
         next_scheduled: 0,
@@ -573,7 +566,10 @@ fn handle_work_result(
                 return mark_state_complete(state, results);
             }
 
-            let remaining_shots = state.target_shots.saturating_sub(state.stats.shots);
+            let remaining_shots = state
+                .completion_options
+                .max_shots
+                .saturating_sub(state.stats.shots);
             state.specs = fixed_batch_specs_for_size(remaining_shots, result.frozen_batch_size);
             state.next_scheduled = 0;
             state.next_committed = 0;
@@ -629,14 +625,7 @@ fn commit_ready_batches(
 }
 
 fn reached_task_limit(state: &TaskState) -> NpResult<bool> {
-    if state.stats.shots >= state.target_shots {
-        return Ok(true);
-    }
-    let Some(limit) = state.stop_error_limit else {
-        return Ok(false);
-    };
-    Ok(state.stats.shots >= state.min_shots
-        && stop_error_count(&state.stats, &state.stop_counter)? >= limit)
+    task_is_complete(&state.stats, &state.completion_options, &state.stop_counter)
 }
 
 fn mark_state_complete(
@@ -778,14 +767,7 @@ fn calibrate_adaptive_task(
         observations.push((batch_shots, elapsed));
         batch_ordinal += 1;
 
-        if shots_done >= task.options.min_shots {
-            if let Some(limit) = task.options.max_errors {
-                if stop_error_count(&stats, stop_counter)? >= limit {
-                    break;
-                }
-            }
-        }
-        if shots_done >= task.options.max_shots {
+        if task_is_complete(&stats, &task.options, stop_counter)? {
             break;
         }
 
@@ -967,20 +949,6 @@ fn validate_existing_stats_for_task(
         }
     }
     Ok(())
-}
-
-fn task_is_complete(
-    stats: &DemLogicalCollectionStats,
-    options: &DemLogicalCollectionOptions,
-    stop_counter: &ValidatedStopCounter,
-) -> NpResult<bool> {
-    if stats.shots >= options.max_shots {
-        return Ok(true);
-    }
-    let Some(limit) = options.max_errors else {
-        return Ok(false);
-    };
-    Ok(stats.shots >= options.min_shots && stop_error_count(stats, stop_counter)? >= limit)
 }
 
 fn collect_results(

@@ -61,6 +61,12 @@ patch releases may make breaking API changes.
 
 ### Fixed
 
+- Collection completion now uses one predicate across single-task, fixed,
+  adaptive, resumed, and hotspot runs. A zero error limit with zero minimum
+  shots returns empty statistics without starting workers. Task-level
+  `CollectionOptions` now distinguish omitted fields from explicit defaults and
+  `None`, and invalid boolean, fractional, or non-finite numeric options fail at
+  Python construction instead of being truncated or reaching native code.
 - Hotspot estimation now rejects batches without recorded event masks, batches
   from another compiled estimator, zero-shot states, and invalid loss-mask
   widths with `NpError`/`ValueError` instead of panicking or silently
