@@ -4,7 +4,7 @@ All notable changes to FaultScope are documented here. FaultScope is pre-1.0:
 unless a contract is explicitly versioned (such as the native decoder ABI),
 patch releases may make breaking API changes.
 
-## [0.2.4] - Unreleased
+## [0.2.5] - Unreleased
 
 ### Added
 
@@ -53,6 +53,9 @@ patch releases may make breaking API changes.
 - Forward/DEM compilation share the same integer-indexed observable type.
 - Stim text is always imported through the compact structured IR; the legacy
   line-by-line importer and its eager string-key operations were removed.
+- The compiler throughput benchmark now preserves explicit Stim `REPEAT`
+  blocks by default so it exercises the native Rust loop path; flattened input
+  remains available as an explicit stress-test mode.
 - Added `generate_dem_edges_from_event_plan`; the obsolete compatibility
   overload with an unused operations argument was removed.
 - Python forward decoders can bulk-select only their required packed
@@ -103,4 +106,4 @@ patch releases may make breaking API changes.
 - Generated type stubs now mark factory-only native classes, including
   `StabilizerState`, as unavailable for direct construction.
 
-[0.2.4]: https://github.com/yuguoshao/FaultScope/releases/tag/v0.2.4
+[0.2.5]: https://github.com/yuguoshao/FaultScope/releases/tag/v0.2.5
