@@ -58,6 +58,7 @@ class BenchmarkSmokeTests(unittest.TestCase):
             self.assertEqual(len(records), 1)
             self.assertEqual(records[0]["distance"], 2)
             self.assertEqual(records[0]["representation"], "m-plus-r")
+            self.assertEqual(records[0]["input_form"], "repeat")
             self.assertGreater(records[0]["parse_median_seconds"], 0)
             self.assertGreater(records[0]["compile_median_seconds"], 0)
             self.assertGreater(records[0]["sample_median_seconds"], 0)
