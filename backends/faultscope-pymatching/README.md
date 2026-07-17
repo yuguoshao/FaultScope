@@ -3,11 +3,17 @@
 Official optional FaultScope PyMatching backend.
 
 This package builds a native decoder from FaultScope graphlike detector error
-matrix problem views and exposes it through the FaultScope native decoder
-PyCapsule ABI v2. The public Python object is a factory handle; each private
-worker owns an exclusive native solver. It uses pinned
+problems. Current FaultScope problems cross the extension boundary through the
+zero-copy native graphlike construction PyCapsule ABI v1; older or third-party
+problem objects retain the Python attribute compatibility path. The resulting
+decoder is exposed through the separate FaultScope native decoder PyCapsule ABI
+v3. The public Python object is a factory handle; each private worker owns an
+exclusive native solver. It uses pinned
 PyMatching sparse-blossom C++ source internally; it does not call the Python
-`PyMatchingDecoder` hot path.
+`PyMatchingDecoder` hot path. Independent parallel edges are merged only when
+they have the same detector endpoints and logical-observable support. The
+adapter rejects conflicting logical effects because PyMatching cannot preserve
+both effects on one simple-graph edge.
 
 Dynamic native error views remain valid until the associated decoder state is
 dropped. The backend retains every dynamic error message in state-owned storage

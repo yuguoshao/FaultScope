@@ -4,7 +4,7 @@ import ctypes
 from concurrent.futures import ThreadPoolExecutor
 
 
-CAPSULE_NAME = b"faultscope.native_decoder_plugin.v2"
+CAPSULE_NAME = b"faultscope.native_decoder_plugin.v3"
 
 
 class StringView(ctypes.Structure):
@@ -75,7 +75,7 @@ class PackedObservableBatch(ctypes.Structure):
     ]
 
 
-class WorkerV2(ctypes.Structure):
+class WorkerV3(ctypes.Structure):
     _fields_ = [
         ("struct_size", ctypes.c_size_t),
         ("worker_state", ctypes.c_void_p),
@@ -86,7 +86,7 @@ class WorkerV2(ctypes.Structure):
     ]
 
 
-class FactoryV2(ctypes.Structure):
+class FactoryV3(ctypes.Structure):
     _fields_ = [
         ("abi_version", ctypes.c_uint32),
         ("struct_size", ctypes.c_size_t),
@@ -103,7 +103,7 @@ class FactoryV2(ctypes.Structure):
 CREATE_WORKER = ctypes.CFUNCTYPE(
     Status,
     ctypes.c_void_p,
-    ctypes.POINTER(WorkerV2),
+    ctypes.POINTER(WorkerV3),
     ctypes.c_size_t,
 )
 DROP_WORKER = ctypes.CFUNCTYPE(None, ctypes.c_void_p)
@@ -139,21 +139,21 @@ def _bytes(value: ctypes.Structure) -> bytes:
     return ctypes.string_at(ctypes.byref(value), ctypes.sizeof(value))
 
 
-def _filled_worker() -> WorkerV2:
-    worker = WorkerV2()
+def _filled_worker() -> WorkerV3:
+    worker = WorkerV3()
     ctypes.memset(ctypes.byref(worker), 0xA5, ctypes.sizeof(worker))
     return worker
 
 
-def assert_v2_worker_contract(test, decoder):
+def assert_v3_worker_contract(test, decoder):
     test_stats = decoder._inner._test_stats_for_test()
     capsule = decoder.__faultscope_native_decoder_capsule__()
     test.assertEqual(_py_capsule_get_name(capsule), CAPSULE_NAME)
     pointer = _py_capsule_get_pointer(capsule, CAPSULE_NAME)
     test.assertTrue(pointer)
-    factory = ctypes.cast(pointer, ctypes.POINTER(FactoryV2)).contents
-    test.assertEqual(factory.abi_version, 2)
-    test.assertEqual(factory.struct_size, ctypes.sizeof(FactoryV2))
+    factory = ctypes.cast(pointer, ctypes.POINTER(FactoryV3)).contents
+    test.assertEqual(factory.abi_version, 3)
+    test.assertEqual(factory.struct_size, ctypes.sizeof(FactoryV3))
     test.assertEqual(factory.flags, 1)
     test.assertTrue(factory.factory_state)
     test.assertTrue(factory.drop_factory_state)
@@ -168,22 +168,22 @@ def assert_v2_worker_contract(test, decoder):
     status = create_worker(
         factory.factory_state,
         ctypes.byref(sentinel),
-        ctypes.sizeof(WorkerV2) - 1,
+        ctypes.sizeof(WorkerV3) - 1,
     )
     test.assertNotEqual(status.code, 0)
     test.assertEqual(_bytes(sentinel), before)
 
-    status = create_worker(factory.factory_state, None, ctypes.sizeof(WorkerV2))
+    status = create_worker(factory.factory_state, None, ctypes.sizeof(WorkerV3))
     test.assertNotEqual(status.code, 0)
 
     null_factory_out = _filled_worker()
     before = _bytes(null_factory_out)
-    status = create_worker(None, ctypes.byref(null_factory_out), ctypes.sizeof(WorkerV2))
+    status = create_worker(None, ctypes.byref(null_factory_out), ctypes.sizeof(WorkerV3))
     test.assertNotEqual(status.code, 0)
     test.assertEqual(_bytes(null_factory_out), before)
 
-    first = WorkerV2()
-    second = WorkerV2()
+    first = WorkerV3()
+    second = WorkerV3()
     test.assertEqual(
         create_worker(factory.factory_state, ctypes.byref(first), ctypes.sizeof(first)).code,
         0,
@@ -193,8 +193,8 @@ def assert_v2_worker_contract(test, decoder):
         0,
     )
     try:
-        test.assertEqual(first.struct_size, ctypes.sizeof(WorkerV2))
-        test.assertEqual(second.struct_size, ctypes.sizeof(WorkerV2))
+        test.assertEqual(first.struct_size, ctypes.sizeof(WorkerV3))
+        test.assertEqual(second.struct_size, ctypes.sizeof(WorkerV3))
         test.assertTrue(first.worker_state)
         test.assertTrue(second.worker_state)
         test.assertNotEqual(first.worker_state, second.worker_state)
@@ -239,7 +239,7 @@ def assert_factory_failure_lifetimes(test, invalid_decoder_type) -> None:
         decoder = invalid_decoder_type(kind)
         capsule = decoder.__faultscope_native_decoder_capsule__()
         pointer = _py_capsule_get_pointer(capsule, CAPSULE_NAME)
-        factory = ctypes.cast(pointer, ctypes.POINTER(FactoryV2)).contents
+        factory = ctypes.cast(pointer, ctypes.POINTER(FactoryV3)).contents
         create_worker = CREATE_WORKER(factory.create_worker)
 
         def fail_once(_index):
@@ -277,7 +277,7 @@ def _ids(decoder):
     )
 
 
-def _decode_mask(worker: WorkerV2, decoder) -> int:
+def _decode_mask(worker: WorkerV3, decoder) -> int:
     detector_ids, observable_ids = _ids(decoder)
     detector_words = (ctypes.c_uint64 * 1)(1)
     observable_words = (ctypes.c_uint64 * 1)(0)
@@ -291,7 +291,7 @@ def _decode_mask(worker: WorkerV2, decoder) -> int:
     return observable_words[0]
 
 
-def _decode_packed(worker: WorkerV2, decoder) -> int:
+def _decode_packed(worker: WorkerV3, decoder) -> int:
     detector_ids, observable_ids = _ids(decoder)
     detector_data = (ctypes.c_uint8 * 1)(1)
     observable_data = (ctypes.c_uint8 * 1)(0)
@@ -303,7 +303,7 @@ def _decode_packed(worker: WorkerV2, decoder) -> int:
     return observable_data[0]
 
 
-def _decode_events(worker: WorkerV2, decoder) -> int:
+def _decode_events(worker: WorkerV3, decoder) -> int:
     detector_ids, observable_ids = _ids(decoder)
     offsets = (ctypes.c_size_t * 2)(0, 1)
     events = (ctypes.c_size_t * 1)(0)

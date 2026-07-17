@@ -17,7 +17,7 @@ pub(crate) fn parse_core_circuit_object(
 ) -> PyResult<faultscope_core::Circuit> {
     if let Ok(circuit) = value.extract::<PyRef<'_, PyCircuit>>() {
         if let Some(core_circuit) = &circuit.core_circuit {
-            return Ok((**core_circuit).clone());
+            return Ok(core_circuit.circuit().clone());
         }
         let py = value.py();
         let operations = circuit
@@ -37,27 +37,6 @@ pub(crate) fn parse_core_circuit_object(
     })
 }
 
-pub(crate) fn cached_core_event_plan(
-    value: &Bound<'_, PyAny>,
-) -> Option<std::sync::Arc<faultscope_core::DemEventPlan>> {
-    let circuit = value.extract::<PyRef<'_, PyCircuit>>().ok()?;
-    if let Some(event_plan) = circuit.core_event_plan.get() {
-        return Some(event_plan.clone());
-    }
-    let source = circuit.core_circuit.as_ref()?;
-    let event_plan =
-        std::sync::Arc::new(faultscope_core::collect_dem_event_plan(&source.operations).ok()?);
-    let _ = circuit.core_event_plan.set(event_plan.clone());
-    Some(event_plan)
-}
-
-pub(crate) fn cached_core_circuit(
-    value: &Bound<'_, PyAny>,
-) -> Option<std::sync::Arc<faultscope_core::Circuit>> {
-    let circuit = value.extract::<PyRef<'_, PyCircuit>>().ok()?;
-    circuit.core_circuit.clone()
-}
-
 pub(crate) fn parse_circuit_object(value: &Bound<'_, PyAny>) -> PyResult<(usize, Vec<Op>)> {
     let n_qubits = required_attr(value, "n_qubits", "Circuit")?.extract::<usize>()?;
     let operations = parse_operation_sequence(&required_attr(value, "operations", "Circuit")?)?;
@@ -72,9 +51,9 @@ pub(crate) fn parse_py_noise_locations(
     let locations = locations
         .downcast::<PyDict>()
         .map_err(|_| PyValueError::new_err("Circuit.noise_locations() must return a dict"))?;
-    let mut out = Vec::with_capacity(program.noise_locations.len());
-    for location in &program.noise_locations {
-        let label = program.location_catalog.label(location.location_id);
+    let mut out = Vec::with_capacity(program.noise_locations().len());
+    for location in program.noise_locations() {
+        let label = program.location_catalog().label(location.location_id);
         let value = locations.get_item(label)?.ok_or_else(|| {
             PyValueError::new_err(format!(
                 "Circuit.noise_locations() did not return compiled location {label:?}"
@@ -490,13 +469,18 @@ pub(crate) fn parse_noise_model_object(value: &Bound<'_, PyAny>) -> PyResult<Noi
     }
 
     let type_name = value.get_type().getattr("__name__")?.extract::<String>()?;
-    match type_name.as_str() {
+    let model = match type_name.as_str() {
         "BernoulliPauliNoise" => Ok(NoiseModel::BernoulliPauli(
             required_attr(value, "pauli", "BernoulliPauliNoise")?.extract::<String>()?,
         )),
         "MeasurementBitFlip" => Ok(NoiseModel::MeasurementBitFlip),
         "SingleQubitDepolarizing" => Ok(NoiseModel::SingleQubitDepolarizing),
-        "TwoQubitDepolarizing" => Ok(NoiseModel::TwoQubitDepolarizing),
+        "TwoQubitDepolarizing" => {
+            let events = required_attr(value, "_events", "TwoQubitDepolarizing")?
+                .extract::<Vec<String>>()?;
+            validate_two_qubit_events(&events)?;
+            Ok(NoiseModel::TwoQubitDepolarizing)
+        }
         "PauliChannel" => {
             let weights = required_attr(value, "weights", "PauliChannel")?;
             let weights = weights
@@ -511,7 +495,11 @@ pub(crate) fn parse_noise_model_object(value: &Bound<'_, PyAny>) -> PyResult<Noi
         _ => Err(PyValueError::new_err(format!(
             "unsupported native noise model {type_name:?}"
         ))),
-    }
+    }?;
+    model
+        .validate()
+        .map_err(|error| PyValueError::new_err(error.to_string()))?;
+    Ok(model)
 }
 
 fn cache_safe_native_noise_model(value: &Bound<'_, PyAny>) -> Option<NoiseModel> {

@@ -239,14 +239,14 @@ pub(crate) fn batch_trajectory_from_state(
     program: &faultscope_core::SamplerProgram,
 ) -> PyResult<PySampleBatch> {
     Ok(PySampleBatch {
-        shots: state.shots,
-        all_mask: mask_to_py(py, &state.all_mask)?,
+        shots: state.shots(),
+        all_mask: mask_to_py(py, state.all_mask())?,
         x_frame: mask_vec_to_tuple_py(py, &state.x_frame)?,
         z_frame: mask_vec_to_tuple_py(py, &state.z_frame)?,
         measurements: measurement_masks_to_py(py, program, &state.measurements)?,
         detectors: int_map_to_py(py, &state.detectors)?,
         observables: int_map_to_py(py, &state.observables)?,
-        noise_event_masks: noise_event_masks_to_py(py, program, &state.event_masks)?,
+        noise_event_masks: noise_event_masks_to_py(py, program, state.event_masks())?,
     })
 }
 
@@ -255,12 +255,12 @@ pub(crate) fn dem_batch_trajectory_from_batch(
     batch: &DemBatch,
 ) -> PyResult<PyDemSampleBatch> {
     let edge_masks = PyDict::new(py);
-    for (edge_index, mask) in batch.edge_event_masks.iter().enumerate() {
+    for (edge_index, mask) in batch.edge_event_masks().iter().enumerate() {
         edge_masks.set_item(edge_index, mask_to_py(py, mask)?)?;
     }
     Ok(PyDemSampleBatch {
-        shots: batch.shots,
-        all_mask: mask_to_py(py, &batch.all_mask)?,
+        shots: batch.shots(),
+        all_mask: mask_to_py(py, batch.all_mask())?,
         detectors: int_map_to_py(py, &batch.detectors)?,
         observables: int_map_to_py(py, &batch.observables)?,
         edge_event_masks: edge_masks.into(),
@@ -1382,7 +1382,7 @@ pub(crate) fn simulation_result_from_estimate(
     let top_rows = PyList::empty(py);
     for location_id in &estimate.top_locations {
         let compiled_location_id = program
-            .location_catalog
+            .location_catalog()
             .find_label(location_id)
             .ok_or_else(|| {
                 PyValueError::new_err(format!(
@@ -1407,9 +1407,9 @@ pub(crate) fn simulation_result_from_estimate(
     }
     let locations_dict = PyDict::new(py);
     for (noise_id, location) in locations.iter().enumerate() {
-        let compiled = &program.noise_locations[noise_id];
+        let compiled = &program.noise_locations()[noise_id];
         locations_dict.set_item(
-            program.location_catalog.label(compiled.location_id),
+            program.location_catalog().label(compiled.location_id),
             location.clone_ref(py),
         )?;
     }

@@ -26,7 +26,7 @@ fn indexed_measurement_mask<'a>(
     key: &str,
 ) -> PyResult<&'a Mask> {
     let measurement_id = program
-        .measurement_keys
+        .measurement_keys()
         .iter()
         .position(|candidate| candidate == key)
         .ok_or_else(|| PyValueError::new_err(format!("unknown measurement key {key:?}")))?;
@@ -64,22 +64,22 @@ impl NativePackedSampler {
 
     #[getter]
     pub(crate) fn n_qubits(&self) -> usize {
-        self.program.n_qubits
+        self.program.n_qubits()
     }
 
     #[getter]
     pub(crate) fn operation_count(&self) -> usize {
-        self.program.operations.len()
+        self.program.operations().len()
     }
 
     #[getter]
     pub(crate) fn stored_operation_count(&self) -> usize {
-        self.program.stored_operation_count
+        self.program.stored_operation_count()
     }
 
     #[getter]
     pub(crate) fn loop_kernel_count(&self) -> usize {
-        self.program.loop_kernel_count
+        self.program.loop_kernel_count()
     }
 
     #[pyo3(signature = (shots, seed=None, rng=None))]
@@ -95,7 +95,7 @@ impl NativePackedSampler {
             return Err(PyValueError::new_err("shots must be positive"));
         }
         let state = py.allow_threads(|| run_packed_sample(self, shots, seed, true))?;
-        validate_declared_observables(&state.observables, &self.program.observables)?;
+        validate_declared_observables(&state.observables, self.program.observables())?;
         batch_trajectory_from_state(py, &state, &self.program)
     }
 
@@ -162,14 +162,27 @@ impl NativePackedSampler {
             ));
         }
         let baseline = native_baseline_value(baseline)?;
+        let native_decoder = match decoder {
+            Some(decoder) => native_decoder_from_py(decoder)?,
+            None => None,
+        };
+        if let Some(native_decoder) = native_decoder.as_deref() {
+            let canonical_observable_ids = self
+                .program
+                .observables()
+                .iter()
+                .map(|observable| observable.id)
+                .collect::<Vec<_>>();
+            validate_native_decoder_observable_layout(native_decoder, &canonical_observable_ids)?;
+        }
         let state = py.allow_threads(|| run_packed_sample(self, shots, seed, true))?;
         if loss_mask_fn.is_none() && correction_mask_fn.is_none() {
             if decoder.is_none() {
-                let corrections = faultscope_core::CorrectionMaskBatch::empty(state.shots);
-                validate_declared_observables(&state.observables, &self.program.observables)?;
+                let corrections = faultscope_core::CorrectionMaskBatch::empty(state.shots());
+                validate_declared_observables(&state.observables, self.program.observables())?;
                 let observable_ids = self
                     .program
-                    .observables
+                    .observables()
                     .iter()
                     .map(|observable| observable.id)
                     .collect::<Vec<_>>();
@@ -177,9 +190,9 @@ impl NativePackedSampler {
                     &state.observables,
                     &corrections,
                     &observable_ids,
-                    &state.all_mask,
+                    state.all_mask(),
                 );
-                let estimate = compute_packed_estimate(self, &state, &loss_mask, baseline, top_k);
+                let estimate = compute_packed_estimate(self, &state, &loss_mask, baseline, top_k)?;
                 return simulation_result_from_estimate(
                     py,
                     &estimate,
@@ -187,27 +200,30 @@ impl NativePackedSampler {
                     &self.py_noise_locations,
                 );
             }
-            if let Some(decoder) = decoder {
-                if let Some(native_decoder) = native_decoder_from_py(decoder)? {
+            if decoder.is_some() {
+                if let Some(native_decoder) = native_decoder {
                     let detector_ids = native_decoder.detector_ids().to_vec();
                     let mut worker = native_decoder
                         .create_worker()
                         .map_err(|err| PyValueError::new_err(err.to_string()))?;
-                    let detector_masks =
-                        detector_mask_view_from_map(&state.detectors, &detector_ids, state.shots)?;
+                    let detector_masks = detector_mask_view_from_map(
+                        &state.detectors,
+                        &detector_ids,
+                        state.shots(),
+                    )?;
                     let view = faultscope_core::DetectorMaskBatchView::new(
                         &detector_ids,
                         &detector_masks,
-                        state.shots,
+                        state.shots(),
                     )
                     .map_err(|err| PyValueError::new_err(err.to_string()))?;
                     let corrections = worker
                         .decode_batch_checked(view)
                         .map_err(|err| PyValueError::new_err(err.to_string()))?;
-                    validate_declared_observables(&state.observables, &self.program.observables)?;
+                    validate_declared_observables(&state.observables, self.program.observables())?;
                     let observable_ids = self
                         .program
-                        .observables
+                        .observables()
                         .iter()
                         .map(|observable| observable.id)
                         .collect::<Vec<_>>();
@@ -215,10 +231,10 @@ impl NativePackedSampler {
                         &state.observables,
                         &corrections,
                         &observable_ids,
-                        &state.all_mask,
+                        state.all_mask(),
                     );
                     let estimate =
-                        compute_packed_estimate(self, &state, &loss_mask, baseline, top_k);
+                        compute_packed_estimate(self, &state, &loss_mask, baseline, top_k)?;
                     return simulation_result_from_estimate(
                         py,
                         &estimate,
@@ -240,10 +256,11 @@ impl NativePackedSampler {
             call_forward_loss_mask_fn(py, loss_mask_fn, &batch, &corrections)?
         } else {
             let batch_ref = batch.bind(py).borrow();
-            forward_default_loss_mask(py, &batch_ref, &corrections, &self.program.observables)?
+            forward_default_loss_mask(py, &batch_ref, &corrections, self.program.observables())?
         };
         let batch_ref = batch.bind(py).borrow();
-        let estimate = compute_packed_estimate(self, &batch_ref.state, &loss_mask, baseline, top_k);
+        let estimate =
+            compute_packed_estimate(self, &batch_ref.state, &loss_mask, baseline, top_k)?;
         simulation_result_from_estimate(py, &estimate, &self.program, &self.py_noise_locations)
     }
 
@@ -258,10 +275,10 @@ impl NativePackedSampler {
     ) -> PyResult<PyFailureEstimate> {
         let loss_mask = py_int_to_mask(
             loss_mask,
-            batch.state.all_mask.words.len(),
-            batch.state.shots,
+            batch.state.all_mask().words.len(),
+            batch.state.shots(),
         )?;
-        let estimate = compute_packed_estimate(self, &batch.state, &loss_mask, baseline, top_k);
+        let estimate = compute_packed_estimate(self, &batch.state, &loss_mask, baseline, top_k)?;
         simulation_result_from_estimate(py, &estimate, &self.program, &self.py_noise_locations)
     }
 }
@@ -294,11 +311,11 @@ impl PyFaultScopeSimulator {
     pub(crate) fn locations(&self, py: Python<'_>) -> PyResult<PyObject> {
         let out = PyDict::new(py);
         for (noise_id, location) in self.sampler.py_noise_locations.iter().enumerate() {
-            let compiled = &self.sampler.program.noise_locations[noise_id];
+            let compiled = &self.sampler.program.noise_locations()[noise_id];
             out.set_item(
                 self.sampler
                     .program
-                    .location_catalog
+                    .location_catalog()
                     .label(compiled.location_id),
                 location.clone_ref(py),
             )?;
@@ -535,12 +552,12 @@ impl PyDemFaultScopeSimulator {
 impl NativePackedBatch {
     #[getter]
     pub(crate) fn shots(&self) -> usize {
-        self.state.shots
+        self.state.shots()
     }
 
     #[getter]
     pub(crate) fn all_mask(&self, py: Python<'_>) -> PyResult<PyObject> {
-        mask_to_py(py, &self.state.all_mask)
+        mask_to_py(py, self.state.all_mask())
     }
 
     #[getter]
@@ -570,7 +587,7 @@ impl NativePackedBatch {
 
     #[getter]
     pub(crate) fn noise_event_masks(&self, py: Python<'_>) -> PyResult<PyObject> {
-        noise_event_masks_to_py(py, &self.program, &self.state.event_masks)
+        noise_event_masks_to_py(py, &self.program, self.state.event_masks())
     }
 
     pub(crate) fn x_mask(&self, py: Python<'_>, qubit: usize) -> PyResult<PyObject> {
@@ -765,7 +782,7 @@ impl NativeDemSampler {
             let mut rng = SmallRng::new(seed.unwrap_or(0x95f2_04dc_4291_a715));
             let batch = run_dem_batch(self, shots, &mut rng, true);
             compute_dem_estimate(self, &batch, &batch.loss_mask, baseline, top_k)
-        });
+        })?;
         dem_hotspot_result_from_estimate(py, self, &estimate)
     }
 
@@ -802,9 +819,19 @@ impl NativeDemSampler {
             ));
         }
         let baseline = native_baseline_value(baseline)?;
+        let native_decoder = match decoder {
+            Some(decoder) => native_decoder_from_py(decoder)?,
+            None => None,
+        };
+        if let Some(native_decoder) = native_decoder.as_deref() {
+            validate_native_decoder_observable_layout(
+                native_decoder,
+                self.simulator.observable_ids(),
+            )?;
+        }
         if correction_mask_fn.is_none() && loss_mask_fn.is_none() {
-            if let Some(decoder) = decoder {
-                if let Some(native_decoder) = native_decoder_from_py(decoder)? {
+            if decoder.is_some() {
+                if let Some(native_decoder) = native_decoder {
                     let detector_ids = native_decoder.detector_ids().to_vec();
                     let mut worker = native_decoder
                         .create_worker()
@@ -880,12 +907,12 @@ impl NativeDemSampler {
                         let detector_masks = detector_mask_view_from_map(
                             &batch.detectors,
                             &detector_ids,
-                            batch.shots,
+                            batch.shots(),
                         )?;
                         let view = faultscope_core::DetectorMaskBatchView::new(
                             &detector_ids,
                             &detector_masks,
-                            batch.shots,
+                            batch.shots(),
                         )
                         .map_err(|err| PyValueError::new_err(err.to_string()))?;
                         let corrections = worker
@@ -895,16 +922,16 @@ impl NativeDemSampler {
                             &batch.observables,
                             &corrections,
                             &self.observables,
-                            &batch.all_mask,
+                            batch.all_mask(),
                         );
-                        Ok::<DemEstimate, PyErr>(dem_estimate_from_loss_mask(
+                        dem_estimate_from_loss_mask(
                             self,
                             &batch,
                             &loss_mask,
                             baseline,
                             top_k,
                             aggregate_hotspots,
-                        ))
+                        )
                     })?;
                     return dem_hotspot_result_from_estimate(py, self, &estimate);
                 }
@@ -920,7 +947,7 @@ impl NativeDemSampler {
                         top_k,
                         aggregate_hotspots,
                     )
-                });
+                })?;
                 return dem_hotspot_result_from_estimate(py, self, &estimate);
             }
         }
@@ -936,8 +963,8 @@ impl NativeDemSampler {
             py_value_to_mask(
                 py,
                 &value,
-                batch_ref.batch.all_mask.words.len(),
-                batch_ref.batch.shots,
+                batch_ref.batch.all_mask().words.len(),
+                batch_ref.batch.shots(),
             )?
         } else {
             let batch_ref = batch.bind(py).borrow();
@@ -951,7 +978,7 @@ impl NativeDemSampler {
             baseline,
             top_k,
             aggregate_hotspots,
-        );
+        )?;
         dem_hotspot_result_from_estimate(py, self, &estimate)
     }
 
@@ -967,10 +994,10 @@ impl NativeDemSampler {
         self.require_dem_metadata()?;
         let loss_mask = py_int_to_mask(
             loss_mask,
-            batch.batch.all_mask.words.len(),
-            batch.batch.shots,
+            batch.batch.all_mask().words.len(),
+            batch.batch.shots(),
         )?;
-        let estimate = compute_dem_estimate(self, &batch.batch, &loss_mask, baseline, top_k);
+        let estimate = compute_dem_estimate(self, &batch.batch, &loss_mask, baseline, top_k)?;
         dem_hotspot_result_from_estimate(py, self, &estimate)
     }
 
@@ -1019,16 +1046,20 @@ fn dem_estimate_from_loss_mask(
     baseline: Option<f64>,
     top_k: usize,
     aggregate_hotspots: bool,
-) -> DemEstimate {
+) -> PyResult<DemEstimate> {
     if aggregate_hotspots {
         return compute_dem_estimate(sampler, batch, loss_mask, baseline, top_k);
     }
 
     let mut clipped_loss = loss_mask.clone();
-    clipped_loss.and_assign(&batch.all_mask);
+    clipped_loss.and_assign(batch.all_mask());
     let loss_count = clipped_loss.bit_count();
-    let mean_loss = loss_count as f64 / batch.shots as f64;
-    dem_estimate_from_mean_loss(batch.shots, mean_loss, baseline)
+    let mean_loss = loss_count as f64 / batch.shots() as f64;
+    Ok(dem_estimate_from_mean_loss(
+        batch.shots(),
+        mean_loss,
+        baseline,
+    ))
 }
 
 fn packed_residual_mean_loss_from_rows(
@@ -1150,12 +1181,12 @@ impl PyDemHotspotEstimator {
 impl NativeDemBatch {
     #[getter]
     pub(crate) fn shots(&self) -> usize {
-        self.batch.shots
+        self.batch.shots()
     }
 
     #[getter]
     pub(crate) fn all_mask(&self, py: Python<'_>) -> PyResult<PyObject> {
-        mask_to_py(py, &self.batch.all_mask)
+        mask_to_py(py, self.batch.all_mask())
     }
 
     #[getter]
@@ -1171,7 +1202,7 @@ impl NativeDemBatch {
     #[getter]
     pub(crate) fn edge_event_masks(&self, py: Python<'_>) -> PyResult<PyObject> {
         let edge_masks = PyDict::new(py);
-        for (edge_index, mask) in self.batch.edge_event_masks.iter().enumerate() {
+        for (edge_index, mask) in self.batch.edge_event_masks().iter().enumerate() {
             edge_masks.set_item(edge_index, mask_to_py(py, mask)?)?;
         }
         Ok(edge_masks.into())
@@ -1197,10 +1228,11 @@ impl NativeDemBatch {
     }
 
     pub(crate) fn edge_event_bit(&self, edge_index: usize, shot: usize) -> PyResult<u8> {
-        let mask =
-            self.batch.edge_event_masks.get(edge_index).ok_or_else(|| {
-                PyValueError::new_err(format!("unknown DEM edge index {edge_index}"))
-            })?;
+        let mask = self
+            .batch
+            .edge_event_masks()
+            .get(edge_index)
+            .ok_or_else(|| PyValueError::new_err(format!("unknown DEM edge index {edge_index}")))?;
         mask_bit(mask, shot)
     }
 }
@@ -1329,8 +1361,8 @@ fn call_forward_loss_mask_fn(
     py_value_to_mask(
         py,
         &value,
-        batch_ref.state.all_mask.words.len(),
-        batch_ref.state.shots,
+        batch_ref.state.all_mask().words.len(),
+        batch_ref.state.shots(),
     )
 }
 
@@ -1374,9 +1406,9 @@ fn forward_default_loss_mask(
         int_map_to_py(py, &batch.state.observables)?,
         corrections,
         observables.iter().map(|observable| observable.id).collect(),
-        mask_to_py(py, &batch.state.all_mask)?,
-        batch.state.all_mask.words.len(),
-        batch.state.shots,
+        mask_to_py(py, batch.state.all_mask())?,
+        batch.state.all_mask().words.len(),
+        batch.state.shots(),
     )
 }
 
@@ -1391,9 +1423,9 @@ fn dem_default_loss_mask(
         int_map_to_py(py, &batch.batch.observables)?,
         corrections,
         observable_ids.to_vec(),
-        mask_to_py(py, &batch.batch.all_mask)?,
-        batch.batch.all_mask.words.len(),
-        batch.batch.shots,
+        mask_to_py(py, batch.batch.all_mask())?,
+        batch.batch.all_mask().words.len(),
+        batch.batch.shots(),
     )
 }
 
@@ -1473,12 +1505,12 @@ fn native_packed_sampler_from_circuit(
         _ => Vec::new(),
     };
     let native_circuit = circuit.extract::<PyRef<'_, PyCircuit>>().ok();
-    let shared_core_circuit = native_circuit
+    let cached_core_circuit = native_circuit
         .as_ref()
-        .and_then(|circuit| circuit.core_circuit.clone());
+        .and_then(|circuit| circuit.core_circuit.as_ref());
     let fallback_core_circuit;
-    let core_circuit = match shared_core_circuit.as_deref() {
-        Some(core_circuit) => core_circuit,
+    let core_circuit = match cached_core_circuit {
+        Some(core_circuit) => core_circuit.circuit(),
         None => {
             fallback_core_circuit = parse_core_circuit_object(circuit)?;
             &fallback_core_circuit
@@ -1492,7 +1524,7 @@ fn native_packed_sampler_from_circuit(
         )
         .map_err(|err| PyValueError::new_err(err.to_string()))?,
     );
-    let py_noise_locations = if program.noise_locations.is_empty() {
+    let py_noise_locations = if program.noise_locations().is_empty() {
         Vec::new()
     } else {
         parse_py_noise_locations(circuit, &program)?
@@ -1587,31 +1619,25 @@ pub(crate) fn core_dem_generator_from_circuit(
     detectors: Option<&Bound<'_, PyAny>>,
     observables: Option<&Bound<'_, PyAny>>,
 ) -> PyResult<CoreDetectorErrorModelGenerator> {
-    if let (Some(event_plan), Some(core_circuit)) = (
-        cached_core_event_plan(circuit),
-        cached_core_circuit(circuit),
-    ) {
-        let detector_specs = match detectors {
-            Some(items) if !items.is_none() => Some(parse_dem_detector_sequence(items)?),
-            _ => None,
-        };
-        let observable_specs = match observables {
-            Some(items) if !items.is_none() => Some(parse_dem_observable_sequence(items)?),
-            _ => None,
-        };
-        let detector_specs = detector_specs.unwrap_or_else(|| event_plan.inferred_detectors());
-        let observable_specs =
-            observable_specs.unwrap_or_else(|| event_plan.inferred_observables());
-        return CoreDetectorErrorModelGenerator::new_with_shared_event_plan(
-            core_circuit,
-            detector_specs,
-            observable_specs,
-            event_plan,
-        )
-        .map_err(|err| PyValueError::new_err(err.to_string()));
+    if let Ok(native_circuit) = circuit.extract::<PyRef<'_, PyCircuit>>() {
+        if let Some(core_circuit) = native_circuit.core_circuit.as_ref() {
+            let detector_specs = match detectors {
+                Some(items) if !items.is_none() => Some(parse_dem_detector_sequence(items)?),
+                _ => None,
+            };
+            let observable_specs = match observables {
+                Some(items) if !items.is_none() => Some(parse_dem_observable_sequence(items)?),
+                _ => None,
+            };
+            return CoreDetectorErrorModelGenerator::new_with_validated_dem_circuit_options(
+                core_circuit,
+                detector_specs,
+                observable_specs,
+            )
+            .map_err(|err| PyValueError::new_err(err.to_string()));
+        }
     }
 
-    let cached_event_plan = cached_core_event_plan(circuit);
     let core_circuit = parse_core_circuit_object(circuit)?;
     let detector_specs = match detectors {
         Some(items) if !items.is_none() => Some(parse_dem_detector_sequence(items)?),
@@ -1621,18 +1647,8 @@ pub(crate) fn core_dem_generator_from_circuit(
         Some(items) if !items.is_none() => Some(parse_dem_observable_sequence(items)?),
         _ => None,
     };
-    match cached_event_plan {
-        Some(event_plan) => CoreDetectorErrorModelGenerator::new_with_shared_event_plan_options(
-            std::sync::Arc::new(core_circuit),
-            detector_specs,
-            observable_specs,
-            event_plan,
-        ),
-        None => {
-            CoreDetectorErrorModelGenerator::new(core_circuit, detector_specs, observable_specs)
-        }
-    }
-    .map_err(|err| PyValueError::new_err(err.to_string()))
+    CoreDetectorErrorModelGenerator::new(core_circuit, detector_specs, observable_specs)
+        .map_err(|err| PyValueError::new_err(err.to_string()))
 }
 
 fn native_dem_sampler_from_core_generator(
@@ -1640,11 +1656,6 @@ fn native_dem_sampler_from_core_generator(
     generator: &CoreDetectorErrorModelGenerator,
     materialize_dem: bool,
 ) -> PyResult<NativeDemSampler> {
-    let observable_ids: Vec<i64> = generator
-        .observables
-        .iter()
-        .map(|observable| observable.id)
-        .collect();
     let lazy_dem = generator
         .generate_lazy()
         .map_err(|err| PyValueError::new_err(err.to_string()))?;
@@ -1656,8 +1667,9 @@ fn native_dem_sampler_from_core_generator(
         (lazy_dem.into_sampling_estimator(), None)
     };
     let edge_count = simulator.edge_count();
+    let observables = simulator.observable_ids().to_vec();
     Ok(NativeDemSampler {
-        observables: observable_ids,
+        observables,
         edge_count,
         simulator,
         py_dem,
@@ -1717,11 +1729,12 @@ fn native_dem_sampler_from_parts(
 ) -> PyResult<NativeDemSampler> {
     let edge_count = edges.len();
     let simulator = if py_dem.is_some() {
-        CoreDemHotspotEstimator::from_parts(detectors, observables.clone(), edges)
+        CoreDemHotspotEstimator::from_parts(detectors, observables, edges)
     } else {
-        CoreDemHotspotEstimator::from_sampling_parts(detectors, observables.clone(), edges)
+        CoreDemHotspotEstimator::from_sampling_parts(detectors, observables, edges)
     }
     .map_err(|err| PyValueError::new_err(err.to_string()))?;
+    let observables = simulator.observable_ids().to_vec();
     Ok(NativeDemSampler {
         observables,
         edge_count,
@@ -1752,6 +1765,22 @@ pub(crate) fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add(
         "NATIVE_DECODER_PLUGIN_ENTRY_POINT_GROUP",
         faultscope_core::NATIVE_DECODER_PLUGIN_ENTRY_POINT_GROUP,
+    )?;
+    module.add(
+        "NATIVE_GRAPHLIKE_PROBLEM_ABI_VERSION",
+        faultscope_core::NATIVE_GRAPHLIKE_PROBLEM_ABI_VERSION,
+    )?;
+    module.add(
+        "NATIVE_GRAPHLIKE_PROBLEM_ABI",
+        faultscope_core::NATIVE_GRAPHLIKE_PROBLEM_ABI_NAME,
+    )?;
+    module.add(
+        "NATIVE_GRAPHLIKE_PROBLEM_CAPSULE_NAME",
+        faultscope_core::NATIVE_GRAPHLIKE_PROBLEM_CAPSULE_NAME,
+    )?;
+    module.add(
+        "NATIVE_GRAPHLIKE_PROBLEM_CAPSULE_METHOD",
+        faultscope_core::NATIVE_GRAPHLIKE_PROBLEM_CAPSULE_METHOD,
     )?;
     module.add_class::<PyBernoulliPauliNoise>()?;
     module.add_class::<PyPauliChannel>()?;

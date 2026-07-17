@@ -803,15 +803,18 @@ fn validate_lookbacks(lookbacks: &[usize]) -> PyResult<()> {
 pub(crate) struct PyCircuit {
     pub(crate) n_qubits: usize,
     pub(crate) operations: Vec<Py<PyAny>>,
-    pub(crate) core_circuit: Option<std::sync::Arc<faultscope_core::Circuit>>,
-    pub(crate) core_event_plan: std::sync::OnceLock<std::sync::Arc<faultscope_core::DemEventPlan>>,
+    pub(crate) core_circuit: Option<faultscope_core::ValidatedDemCircuit>,
 }
 
 #[pymethods]
 impl PyCircuit {
     #[new]
     #[pyo3(signature = (n_qubits, operations))]
-    pub(crate) fn new(py: Python<'_>, n_qubits: usize, operations: Vec<Py<PyAny>>) -> Self {
+    pub(crate) fn new(
+        py: Python<'_>,
+        n_qubits: usize,
+        operations: Vec<Py<PyAny>>,
+    ) -> PyResult<Self> {
         let core_operations = operations
             .iter()
             .map(|operation| {
@@ -822,13 +825,35 @@ impl PyCircuit {
                 operation.core_op.clone()
             })
             .collect::<Option<Vec<_>>>();
-        let core_circuit = core_operations.map(|operations| {
-            std::sync::Arc::new(faultscope_core::Circuit {
+
+        // Cache-safe native operations are cloned and validated exactly once.
+        // Preserve lazy handling for non-cache-safe Python objects while still
+        // rejecting any fully parseable invalid target at construction time;
+        // execution entry points parse and validate those objects again.
+        let core_circuit = if let Some(core_operations) = core_operations {
+            let circuit = faultscope_core::ValidatedDemCircuit::new(faultscope_core::Circuit {
                 n_qubits,
-                operations,
+                operations: core_operations,
             })
-        });
-        let initial_event_plan = core_circuit.as_ref().and_then(|circuit| {
+            .map_err(|err| PyValueError::new_err(err.to_string()))?;
+            Some(circuit)
+        } else {
+            let parsed_operations = operations
+                .iter()
+                .map(|operation| parse_operation_object(operation.bind(py)))
+                .collect::<PyResult<Vec<_>>>();
+            if let Ok(parsed_operations) = parsed_operations {
+                faultscope_core::Circuit {
+                    n_qubits,
+                    operations: parsed_operations,
+                }
+                .validate()
+                .map_err(|err| PyValueError::new_err(err.to_string()))?;
+            }
+            None
+        };
+        if let Some(validated_circuit) = &core_circuit {
+            let circuit = validated_circuit.circuit();
             let structured = circuit.operations.iter().any(|operation| {
                 matches!(
                     operation,
@@ -840,24 +865,17 @@ impl PyCircuit {
                         | faultscope_core::Operation::MeasureReset { .. }
                 )
             });
-            if structured {
-                None
-            } else {
-                faultscope_core::collect_dem_event_plan(&circuit.operations)
-                    .ok()
-                    .map(std::sync::Arc::new)
+            if !structured {
+                // Preserve eager plan construction for flat native circuits so
+                // DEM compile timing only measures generator construction.
+                let _ = validated_circuit.event_plan();
             }
-        });
-        let core_event_plan = std::sync::OnceLock::new();
-        if let Some(event_plan) = initial_event_plan {
-            let _ = core_event_plan.set(event_plan);
         }
-        Self {
+        Ok(Self {
             n_qubits,
             operations,
             core_circuit,
-            core_event_plan,
-        }
+        })
     }
 
     #[getter]
@@ -1214,6 +1232,8 @@ impl PyDetectorErrorEdge {
 #[pyclass(name = "DetectorErrorModel", module = "faultscope._native", frozen)]
 pub(crate) struct PyDetectorErrorModel {
     core_lazy_dem: Option<faultscope_core::LazyDetectorErrorModel>,
+    core_graphlike_problem:
+        std::sync::OnceLock<std::sync::Arc<faultscope_core::GraphlikeDecodingProblem>>,
     detectors: Vec<Py<PyAny>>,
     observables: Vec<Py<PyAny>>,
     edges: Vec<Py<PyAny>>,
@@ -1238,6 +1258,7 @@ impl PyDetectorErrorModel {
     ) -> Self {
         Self {
             core_lazy_dem: None,
+            core_graphlike_problem: std::sync::OnceLock::new(),
             detectors,
             observables,
             edges,
@@ -1521,11 +1542,27 @@ impl PyDetectorErrorModel {
         &self,
         py: Python<'_>,
     ) -> PyResult<PyGraphlikeDecodingProblem> {
-        let dem = self.to_core_dem(py)?;
-        let problem = dem
-            .compile_graphlike_problem()
-            .map_err(|err| PyValueError::new_err(err.to_string()))?;
-        Ok(PyGraphlikeDecodingProblem { problem })
+        let problem = if let Some(dem) = &self.core_lazy_dem {
+            if let Some(problem) = self.core_graphlike_problem.get() {
+                std::sync::Arc::clone(problem)
+            } else {
+                let compiled = std::sync::Arc::new(
+                    dem.compile_graphlike_problem()
+                        .map_err(|err| PyValueError::new_err(err.to_string()))?,
+                );
+                let _ = self
+                    .core_graphlike_problem
+                    .set(std::sync::Arc::clone(&compiled));
+                std::sync::Arc::clone(self.core_graphlike_problem.get().unwrap_or(&compiled))
+            }
+        } else {
+            let dem = self.to_core_dem(py)?;
+            std::sync::Arc::new(
+                dem.compile_graphlike_problem()
+                    .map_err(|err| PyValueError::new_err(err.to_string()))?,
+            )
+        };
+        Ok(PyGraphlikeDecodingProblem::new(problem))
     }
 
     pub(crate) fn compile_binary_linear_problem(
@@ -1540,6 +1577,9 @@ impl PyDetectorErrorModel {
     }
 
     pub(crate) fn is_graphlike(&self, py: Python<'_>) -> PyResult<bool> {
+        if let Some(dem) = &self.core_lazy_dem {
+            return Ok(dem.is_graphlike());
+        }
         Ok(self.to_core_dem(py)?.is_graphlike())
     }
 
@@ -1557,6 +1597,7 @@ impl PyDetectorErrorModel {
     pub(crate) fn from_core_lazy_dem(dem: faultscope_core::LazyDetectorErrorModel) -> Self {
         Self {
             core_lazy_dem: Some(dem),
+            core_graphlike_problem: std::sync::OnceLock::new(),
             detectors: Vec::new(),
             observables: Vec::new(),
             edges: Vec::new(),

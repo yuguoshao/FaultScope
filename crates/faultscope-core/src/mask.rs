@@ -20,18 +20,21 @@ impl Mask {
     }
 
     pub fn xor_assign(&mut self, other: &Mask) {
+        self.assert_same_width(other);
         for (left, right) in self.words.iter_mut().zip(&other.words) {
             *left ^= *right;
         }
     }
 
     pub fn or_assign(&mut self, other: &Mask) {
+        self.assert_same_width(other);
         for (left, right) in self.words.iter_mut().zip(&other.words) {
             *left |= *right;
         }
     }
 
     pub fn and_assign(&mut self, other: &Mask) {
+        self.assert_same_width(other);
         for (left, right) in self.words.iter_mut().zip(&other.words) {
             *left &= *right;
         }
@@ -45,6 +48,7 @@ impl Mask {
     }
 
     pub fn and_count(&self, other: &Mask) -> usize {
+        self.assert_same_width(other);
         self.words
             .iter()
             .zip(&other.words)
@@ -64,6 +68,14 @@ impl Mask {
                 *last &= keep;
             }
         }
+    }
+
+    fn assert_same_width(&self, other: &Mask) {
+        assert_eq!(
+            self.words.len(),
+            other.words.len(),
+            "mask word counts must match"
+        );
     }
 }
 
@@ -93,5 +105,29 @@ mod tests {
 
         assert_eq!(left.bit_count(), 3);
         assert_eq!(left.and_count(&right), 1);
+    }
+
+    #[test]
+    #[should_panic(expected = "mask word counts must match")]
+    fn xor_assign_rejects_mismatched_widths() {
+        Mask::zero(1).xor_assign(&Mask::zero(2));
+    }
+
+    #[test]
+    #[should_panic(expected = "mask word counts must match")]
+    fn or_assign_rejects_mismatched_widths() {
+        Mask::zero(1).or_assign(&Mask::zero(2));
+    }
+
+    #[test]
+    #[should_panic(expected = "mask word counts must match")]
+    fn and_assign_rejects_mismatched_widths() {
+        Mask::zero(1).and_assign(&Mask::zero(2));
+    }
+
+    #[test]
+    #[should_panic(expected = "mask word counts must match")]
+    fn and_count_rejects_mismatched_widths() {
+        let _ = Mask::zero(1).and_count(&Mask::zero(2));
     }
 }

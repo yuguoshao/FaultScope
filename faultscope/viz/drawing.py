@@ -51,9 +51,42 @@ def _draw_heatmap(
     highlight_color: str,
 ) -> None:
     rows = len(matrix)
-    cols = len(matrix[0])
-    max_value = max(max(row) for row in matrix) or 1.0
+    cols = len(matrix[0]) if matrix else 0
     draw.text((x0, y0 - 40), title, fill="#17202a", font=fonts["bold"])
+    for row in range(rows):
+        display_row = rows - 1 - row
+        _draw_centered_text(
+            draw,
+            str(display_row),
+            x0 + label_width - 25,
+            y0 + row * cell + cell // 2,
+            fonts["regular"],
+            fill="#34495e",
+        )
+    if cols == 0:
+        placeholder_width = 180
+        placeholder_height = max(cell, rows * cell)
+        draw.rectangle(
+            (
+                x0 + label_width,
+                y0,
+                x0 + label_width + placeholder_width,
+                y0 + placeholder_height - 3,
+            ),
+            fill="#eef1f4",
+            outline="#c4ccd6",
+        )
+        _draw_centered_text(
+            draw,
+            "No checks",
+            x0 + label_width + placeholder_width // 2,
+            y0 + placeholder_height // 2,
+            fonts["regular"],
+            fill="#53687d",
+        )
+        return
+
+    max_value = max((value for row in matrix for value in row), default=0.0) or 1.0
     for col in range(cols):
         _draw_centered_text(
             draw,
@@ -65,14 +98,6 @@ def _draw_heatmap(
         )
     for row in range(rows):
         display_row = rows - 1 - row
-        _draw_centered_text(
-            draw,
-            str(display_row),
-            x0 + label_width - 25,
-            y0 + row * cell + cell // 2,
-            fonts["regular"],
-            fill="#34495e",
-        )
         for col in range(cols):
             value = matrix[display_row][col]
             color = _ramp(value, max_value, palette)

@@ -192,6 +192,57 @@ class StabilizerStateTests(unittest.TestCase):
         self.assertEqual(state.measure_z(0, rng), 0)
         self.assertEqual(state.measure_z(1, rng), 1)
 
+    def test_pauli_frame_rejects_invalid_targets_without_mutation(self) -> None:
+        frame = PauliFrame([1], [1])
+        invalid_calls = (
+            ("apply_h", lambda: frame.apply_h(1)),
+            ("apply_s", lambda: frame.apply_s(1)),
+            ("apply_s_dag", lambda: frame.apply_s_dag(1)),
+            ("apply_cx_range", lambda: frame.apply_cx(0, 1)),
+            ("apply_cx_duplicate", lambda: frame.apply_cx(0, 0)),
+            ("apply_cz_duplicate", lambda: frame.apply_cz(0, 0)),
+            ("apply_swap_duplicate", lambda: frame.apply_swap(0, 0)),
+            ("apply_pauli", lambda: frame.apply_pauli(1, "X")),
+            ("apply_pauli_string", lambda: frame.apply_pauli_string((0, 0), "XZ")),
+            ("reset", lambda: frame.reset(1)),
+            ("measurement_flip", lambda: frame.measurement_flip((0, 0), "ZZ")),
+            ("pauli_on", lambda: frame.pauli_on((1,))),
+        )
+
+        for name, call in invalid_calls:
+            with self.subTest(name=name):
+                before = (frame.x, frame.z)
+                with self.assertRaises(ValueError):
+                    call()
+                self.assertEqual((frame.x, frame.z), before)
+
+    def test_stabilizer_state_rejects_invalid_targets_without_mutation(self) -> None:
+        state = StabilizerState.zero(1)
+        rng = random.Random(7)
+        invalid_calls = (
+            ("apply_h", lambda: state.apply_h(1)),
+            ("apply_s", lambda: state.apply_s(1)),
+            ("apply_s_dag", lambda: state.apply_s_dag(1)),
+            ("apply_cx_range", lambda: state.apply_cx(0, 1)),
+            ("apply_cx_duplicate", lambda: state.apply_cx(0, 0)),
+            ("apply_cz_duplicate", lambda: state.apply_cz(0, 0)),
+            ("apply_swap_duplicate", lambda: state.apply_swap(0, 0)),
+            ("apply_pauli", lambda: state.apply_pauli(1, "X")),
+            ("measure_z", lambda: state.measure_z(1, rng)),
+            ("measure_x", lambda: state.measure_x(1, rng)),
+            ("measure_y", lambda: state.measure_y(1, rng)),
+            ("reset_z", lambda: state.reset_z(1, rng)),
+            ("reset_x", lambda: state.reset_x(1, rng)),
+            ("reset_y", lambda: state.reset_y(1, rng)),
+        )
+
+        for name, call in invalid_calls:
+            with self.subTest(name=name):
+                before = (state.x, state.z, state.sign)
+                with self.assertRaises(ValueError):
+                    call()
+                self.assertEqual((state.x, state.z, state.sign), before)
+
 
 class NoiseAwareSimulatorTests(unittest.TestCase):
     def test_core_circuit_objects_are_extension_classes(self) -> None:
@@ -411,7 +462,7 @@ class NoiseAwareSimulatorTests(unittest.TestCase):
         self.assertEqual(catalog["mwpm"].package_name, "faultscope-mwpm")
         self.assertEqual(catalog["mwpm"].repo_url, "https://github.com/Quon-team/mwpm.rs.git")
         self.assertIn("ABI v1", catalog["mwpm"].description)
-        self.assertIn("FaultScope native decoder ABI v2", catalog["mwpm"].description)
+        self.assertIn("FaultScope native decoder ABI v3", catalog["mwpm"].description)
         self.assertIn("bpdecoder", catalog)
         self.assertEqual(catalog["bpdecoder"].problem_kind, "binary-linear")
         self.assertTrue(catalog["bpdecoder"].installable)
@@ -498,7 +549,7 @@ class NoiseAwareSimulatorTests(unittest.TestCase):
                 NativeMwpmDecoder.from_dem(dem)
             message = str(raised.exception)
             self.assertIn("ABI v1", message)
-            self.assertIn("FaultScope native decoder ABI v2", message)
+            self.assertIn("FaultScope native decoder ABI v3", message)
             self.assertNotIn("python -m faultscope.backends install mwpm", message)
         clear_native_decoder_plugin_cache()
 
@@ -579,7 +630,7 @@ class NoiseAwareSimulatorTests(unittest.TestCase):
                 "name": "fusion-blossom",
                 "version": "test",
                 "source": "unit-test",
-                "abi_version": "faultscope.native_decoder_plugin.v2",
+                "abi_version": "faultscope.native_decoder_plugin.v3",
                 "decoders": {"fusion-blossom": MockFusionBlossomDecoder},
             }
 
@@ -696,7 +747,7 @@ class NoiseAwareSimulatorTests(unittest.TestCase):
                     )
                 self.assertFalse(os.listdir(tmpdir))
             self.assertIn("ABI v1", stdout.getvalue())
-            self.assertIn("FaultScope native decoder ABI v2", stdout.getvalue())
+            self.assertIn("FaultScope native decoder ABI v3", stdout.getvalue())
             self.assertNotIn("FaultScope will install", stdout.getvalue())
             self.assertNotIn("python -m faultscope.backends install mwpm", stdout.getvalue())
             self.assertNotIn("pip install", stdout.getvalue())
@@ -721,9 +772,14 @@ class NoiseAwareSimulatorTests(unittest.TestCase):
             self.assertIn("faultscope-bposd", stdout.getvalue())
         clear_native_decoder_plugin_cache()
 
-    def test_post_install_plugin_manifest_abi_is_strict_v2(self) -> None:
-        expected = "faultscope.native_decoder_plugin.v2"
-        for observed in ("faultscope.native_decoder_plugin.v1", "wrong", None):
+    def test_post_install_plugin_manifest_abi_is_strict_v3(self) -> None:
+        expected = "faultscope.native_decoder_plugin.v3"
+        for observed in (
+            "faultscope.native_decoder_plugin.v2",
+            "faultscope.native_decoder_plugin.v1",
+            "wrong",
+            None,
+        ):
             with self.subTest(observed=observed):
                 manifest_data = {
                     "name": "fusion-blossom",
@@ -771,7 +827,7 @@ class NoiseAwareSimulatorTests(unittest.TestCase):
             self.assertTrue(status.installed)
             self.assertFalse(status.loadable)
             self.assertIn("faultscope.native_decoder_plugin.v1", status.error)
-            self.assertIn("faultscope.native_decoder_plugin.v2", status.error)
+            self.assertIn("faultscope.native_decoder_plugin.v3", status.error)
             self.assertNotIn("python -m faultscope.backends install mwpm", status.error)
         clear_native_decoder_plugin_cache()
 
@@ -781,7 +837,7 @@ class NoiseAwareSimulatorTests(unittest.TestCase):
                 "name": "backend-a",
                 "version": "test",
                 "source": "unit-test",
-                "abi_version": "faultscope.native_decoder_plugin.v2",
+                "abi_version": "faultscope.native_decoder_plugin.v3",
                 "decoders": {"fusion-blossom": object},
             }
 
@@ -790,7 +846,7 @@ class NoiseAwareSimulatorTests(unittest.TestCase):
                 "name": "backend-b",
                 "version": "test",
                 "source": "unit-test",
-                "abi_version": "faultscope.native_decoder_plugin.v2",
+                "abi_version": "faultscope.native_decoder_plugin.v3",
                 "decoders": {"fusion-blossom": object},
             }
 
@@ -816,7 +872,7 @@ class NoiseAwareSimulatorTests(unittest.TestCase):
                 "name": "missing-decoders",
                 "version": "test",
                 "source": "unit-test",
-                "abi_version": "faultscope.native_decoder_plugin.v2",
+                "abi_version": "faultscope.native_decoder_plugin.v3",
             }
 
         with mock.patch(
@@ -834,7 +890,7 @@ class NoiseAwareSimulatorTests(unittest.TestCase):
             return {
                 "name": "missing-version",
                 "source": "unit-test",
-                "abi_version": "faultscope.native_decoder_plugin.v2",
+                "abi_version": "faultscope.native_decoder_plugin.v3",
                 "decoders": {"missing-version": object},
             }
 
@@ -904,8 +960,129 @@ class NoiseAwareSimulatorTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             PauliChannel({"X": 1.0, "ZZ": 1.0})
 
+    def test_noise_model_constructors_reject_invalid_configurations(self) -> None:
+        for pauli in ("", "I", "II", "A", "x"):
+            with self.subTest(model="bernoulli", pauli=pauli):
+                with self.assertRaises(ValueError):
+                    BernoulliPauliNoise(pauli)
+
+        invalid_channels = (
+            {"": 1.0},
+            {"II": 1.0},
+            {"A": 1.0},
+            {"X": float("nan")},
+            {"X": float("inf")},
+            {"X": float("-inf")},
+            {
+                "X": float.fromhex("0x1.fffffffffffffp+1023"),
+                "Z": float.fromhex("0x1.fffffffffffffp+1023"),
+            },
+            {"X": 0.0, "Z": 0.0},
+        )
+        for weights in invalid_channels:
+            with self.subTest(model="channel", weights=weights):
+                with self.assertRaises(ValueError):
+                    PauliChannel(weights)
+
+    def test_two_qubit_depolarizing_accepts_only_canonical_events(self) -> None:
+        canonical = TwoQubitDepolarizing()._events
+        self.assertEqual(TwoQubitDepolarizing(canonical)._events, canonical)
+
+        duplicated = list(canonical)
+        duplicated[-1] = duplicated[0]
+        malformed = list(canonical)
+        malformed[-1] = "AA"
+        for events in ((), ("XX",), tuple(reversed(canonical)), duplicated, malformed):
+            with self.subTest(events=events):
+                with self.assertRaises(ValueError):
+                    TwoQubitDepolarizing(events)
+
+        DuckTwoQubit = type("TwoQubitDepolarizing", (), {})
+        duck_model = DuckTwoQubit()
+        duck_model._events = ("XX",)
+        location = NoiseLocation("duck", duck_model, 1.0, (0, 1))
+        circuit = Circuit(n_qubits=2, operations=(Operation.noise(location),))
+        with self.assertRaises(UnsupportedNativeCircuitError):
+            compile_native_sampler(circuit)
+
+    def test_pauli_channel_boundary_selection_matches_native_rule(self) -> None:
+        class BoundaryRng:
+            def __init__(self) -> None:
+                self._draws = iter((0.0, 0.5))
+
+            def random(self) -> float:
+                return next(self._draws)
+
+        channel = PauliChannel({"X": 1.0, "Z": 1.0})
+        self.assertEqual(channel.sample(BoundaryRng(), 1.0), "Z")
+
 
 class BatchNoiseAwareSimulatorTests(unittest.TestCase):
+    def test_repetition_decoder_strong_id_payload_tracks_parameters(self) -> None:
+        baseline = RepetitionCodeDecoder(
+            distance=3,
+            measurement_keys=("m0", "m1"),
+            observable_id=0,
+        )
+        equivalent = RepetitionCodeDecoder(
+            distance=3,
+            measurement_keys=("m0", "m1"),
+            observable_id=0,
+        )
+        changed = RepetitionCodeDecoder(
+            distance=5,
+            measurement_keys=("m0", "m1", "m2", "m3"),
+            observable_id=1,
+        )
+
+        self.assertEqual(baseline.strong_id_payload(), equivalent.strong_id_payload())
+        self.assertNotEqual(baseline.strong_id_payload(), changed.strong_id_payload())
+
+    def test_repetition_decoder_mapping_uses_declared_measurement_order(self) -> None:
+        decoder = RepetitionCodeDecoder(
+            distance=5,
+            measurement_keys=("b", "a", "c", "d"),
+        )
+        sequence = [1, 0, 0, 0]
+        mapping = {"a": 0, "b": 1, "c": 0, "d": 0}
+
+        self.assertEqual(decoder.decode(mapping, {}, None), decoder.decode(sequence, {}, None))
+
+    def test_repetition_decoder_rejects_invalid_mapping_keys_and_bits(self) -> None:
+        decoder = RepetitionCodeDecoder(
+            distance=3,
+            measurement_keys=("left", "right"),
+        )
+        invalid_records = (
+            {"left": 0},
+            {"left": 0, "right": 1, "extra": 0},
+            {"left": 0, "right": 2},
+            [0, 0.0],
+        )
+        for detector_record in invalid_records:
+            with self.subTest(detector_record=detector_record):
+                with self.assertRaisesRegex(ValueError, "keys|0 or 1"):
+                    decoder.decode(detector_record, {}, None)
+
+        with self.assertRaisesRegex(ValueError, "explicit measurement_keys"):
+            RepetitionCodeDecoder(distance=3).decode({"left": 0, "right": 1}, {}, None)
+
+    def test_repetition_decoder_rejects_invalid_configuration(self) -> None:
+        invalid_constructors = (
+            lambda: RepetitionCodeDecoder(distance=0),
+            lambda: RepetitionCodeDecoder(distance=-1),
+            lambda: RepetitionCodeDecoder(distance=True),
+            lambda: RepetitionCodeDecoder(distance=1.5),
+            lambda: RepetitionCodeDecoder(distance=3, measurement_keys=("a", "a")),
+            lambda: RepetitionCodeDecoder(distance=5, measurement_keys=("a", "b")),
+            lambda: RepetitionCodeDecoder(distance=3, observable_id=-1),
+            lambda: RepetitionCodeDecoder(distance=3, observable_id=True),
+        )
+        for constructor in invalid_constructors:
+            with self.subTest(constructor=constructor):
+                with self.assertRaises(ValueError):
+                    constructor()
+
     def test_repetition_decoder_packed_masks_match_scalar_decode(self) -> None:
         rng = random.Random(90210)
         shots = 129
@@ -1057,7 +1234,36 @@ class BatchNoiseAwareSimulatorTests(unittest.TestCase):
         self.assertEqual(native_result.mean_loss, default_result.mean_loss)
         self.assertEqual(native_result.hotspots, default_result.hotspots)
 
-    def test_native_decoder_invalid_correction_raises_value_error(self) -> None:
+    def test_native_decoder_forward_estimate_rejects_noncanonical_layout(self) -> None:
+        location = NoiseLocation(
+            id="x0",
+            model=BernoulliPauliNoise("X"),
+            rate=0.25,
+            qubits=(0,),
+        )
+        circuit = Circuit(
+            n_qubits=1,
+            operations=[
+                Operation.noise(location),
+                Operation.measure(0, key="m", basis="Z"),
+            ],
+        )
+        observables = (LogicalObservable(id=0, measurement_keys=("m",)),)
+        decoder = NativeNoCorrectionDecoder(observable_ids=(1,))
+
+        with self.assertRaisesRegex(
+            ValueError,
+            r"expected sampler canonical ids \[0\], got \[1\]",
+        ):
+            FaultScopeSimulator(circuit, observables=observables).estimate(
+                shots=128,
+                seed=114,
+                decoder=decoder,
+            )
+
+        self.assertEqual(decoder.python_decode_call_count, 0)
+
+    def test_native_decoder_duplicate_layout_raises_value_error_before_decode(self) -> None:
         location = NoiseLocation(
             id="x0",
             model=BernoulliPauliNoise("X"),
@@ -1074,7 +1280,10 @@ class BatchNoiseAwareSimulatorTests(unittest.TestCase):
         observables = (LogicalObservable(id=0, measurement_keys=("m",)),)
         decoder = NativeNoCorrectionDecoder(observable_ids=(0, 0))
 
-        with self.assertRaisesRegex(ValueError, "duplicate correction observable id 0"):
+        with self.assertRaisesRegex(
+            ValueError,
+            r"expected sampler canonical ids \[0\], got \[0, 0\]",
+        ):
             FaultScopeSimulator(
                 circuit,
                 observables=observables,
@@ -1290,6 +1499,49 @@ class NativePackedSamplerTests(unittest.TestCase):
         except ImportError as exc:
             self.skipTest(str(exc))
 
+    def test_circuit_constructor_rejects_invalid_targets(self) -> None:
+        out_of_range_noise = NoiseLocation(
+            id="bad",
+            model=BernoulliPauliNoise("X"),
+            rate=0.1,
+            qubits=(1,),
+        )
+        invalid_cases = (
+            ("range", Operation.h(1), "targets qubit 1"),
+            ("nested", Operation.repeat(2, (Operation.h(1),)), "operation path 0.0"),
+            ("cx", Operation.cx(0, 0), "duplicate qubit 0"),
+            ("cz", Operation.cz(0, 0), "duplicate qubit 0"),
+            ("swap", Operation.swap(0, 0), "duplicate qubit 0"),
+            (
+                "pauli",
+                Operation.pauli_gate((0, 0), "XZ"),
+                "duplicate qubit 0",
+            ),
+            ("noise", Operation.noise(out_of_range_noise), "targets qubit 1"),
+        )
+
+        for name, operation, message in invalid_cases:
+            with self.subTest(name=name):
+                with self.assertRaisesRegex(ValueError, message):
+                    Circuit(n_qubits=1, operations=(operation,))
+
+    def test_compile_boundaries_revalidate_duck_typed_circuit_and_observables(self) -> None:
+        invalid_circuit = SimpleNamespace(
+            n_qubits=1,
+            operations=(SimpleNamespace(kind="h", qubits=(1,)),),
+        )
+        with self.assertRaisesRegex(UnsupportedNativeCircuitError, "targets qubit 1"):
+            compile_native_sampler(invalid_circuit)
+        with self.assertRaisesRegex(UnsupportedNativeCircuitError, "targets qubit 1"):
+            compile_native_dem_generator(invalid_circuit)
+        with self.assertRaisesRegex(ValueError, "targets qubit 1"):
+            DetectorErrorModelGenerator(invalid_circuit)
+
+        circuit = Circuit(n_qubits=1, operations=())
+        observable = LogicalObservable(id=9, pauli_qubits=(1,), pauli="Z")
+        with self.assertRaisesRegex(UnsupportedNativeCircuitError, "logical observable 9"):
+            compile_native_sampler(circuit, observables=(observable,))
+
     def test_native_backend_matches_stim_batch_sampler_masks(self) -> None:
         location = NoiseLocation(
             id="x0",
@@ -1318,6 +1570,43 @@ class NativePackedSamplerTests(unittest.TestCase):
         self.assertEqual(native_batch.detectors, stim_batch.detectors)
         self.assertEqual(native_batch.observables, stim_batch.observables)
         self.assertEqual(native_batch.noise_event_masks["x0"], native_batch.all_mask)
+
+    def test_single_event_pauli_channel_matches_reference_at_extreme_rates(self) -> None:
+        model = PauliChannel({"X": 1.0})
+        for rate, reference_event in ((0.0, "I"), (1.0, "X")):
+            with self.subTest(rate=rate):
+                self.assertEqual(model.sample(random.Random(1), rate), reference_event)
+                location = NoiseLocation("pc", model, rate, (0,))
+                sampler = self._native_sampler_or_skip(
+                    Circuit(n_qubits=1, operations=(Operation.noise(location),)),
+                    observables=(LogicalObservable(id=0, pauli_qubits=(0,), pauli="Z"),),
+                )
+                batch = sampler.sample(shots=9, seed=123)
+                expected = batch.all_mask if rate == 1.0 else 0
+                self.assertEqual(batch.observables[0], expected)
+                self.assertEqual(batch.noise_event_masks["pc"], expected)
+
+    def test_measurement_free_frame_observable_preserves_batch_width(self) -> None:
+        location = NoiseLocation(
+            id="x0",
+            model=BernoulliPauliNoise("X"),
+            rate=1.0,
+            qubits=(0,),
+        )
+        sampler = self._native_sampler_or_skip(
+            Circuit(n_qubits=1, operations=[Operation.noise(location)]),
+            observables=(LogicalObservable(id=0, pauli_qubits=(0,), pauli="Z"),),
+        )
+
+        for shots in (1, 63, 64, 65, 129, 513):
+            with self.subTest(shots=shots):
+                batch = sampler.sample(shots=shots, seed=1)
+                self.assertEqual(batch.observables[0], batch.all_mask)
+                self.assertEqual(batch.observables[0].bit_count(), shots)
+                self.assertEqual(
+                    sampler.estimate(shots=shots, seed=1).mean_loss,
+                    1.0,
+                )
 
     def test_backend_keyword_is_not_accepted(self) -> None:
         circuit = Circuit(
@@ -1444,6 +1733,47 @@ class NativePackedSamplerTests(unittest.TestCase):
             native_batch.measurement_masks((1,))
         with self.assertRaisesRegex(ValueError, "unknown measurement key.*missing"):
             native_batch.measurement_masks(("missing",))
+
+    def test_forward_hotspot_rejects_native_batch_from_another_sampler(self) -> None:
+        location = NoiseLocation(
+            id="x0",
+            model=BernoulliPauliNoise("X"),
+            rate=0.25,
+            qubits=(0,),
+        )
+        circuit = Circuit(
+            n_qubits=1,
+            operations=[Operation.noise(location)],
+        )
+        source = self._native_sampler_or_skip(circuit)
+        foreign = self._native_sampler_or_skip(circuit)
+        batch = source.run_native_batch(17, 11)
+
+        source.estimate_hotspots(batch, batch.all_mask)
+        with self.assertRaisesRegex(ValueError, "layout does not match"):
+            foreign.estimate_hotspots(batch, batch.all_mask)
+
+    def test_dem_hotspot_rejects_native_batch_from_another_sampler(self) -> None:
+        dem = DetectorErrorModel(
+            detectors=(),
+            observables=(LogicalObservable(id=0),),
+            edges=(
+                DetectorErrorEdge(
+                    probability=0.25,
+                    detectors=(),
+                    observables=(0,),
+                    location_id="logical",
+                    event="L",
+                ),
+            ),
+        )
+        source = compile_native_dem_sampler(dem)
+        foreign = compile_native_dem_sampler(dem)
+        batch = source.run_native_batch(17, 11)
+
+        source.estimate_hotspots(batch, batch.all_mask)
+        with self.assertRaisesRegex(ValueError, "layout does not match"):
+            foreign.estimate_hotspots(batch, batch.all_mask)
 
     def test_batch_forward_simulator_is_native_and_exposes_metadata(self) -> None:
         location = NoiseLocation(
@@ -2133,6 +2463,11 @@ class NativeDetectorErrorModelTests(unittest.TestCase):
         self.assertEqual(graphlike.observable_count, 1)
         self.assertEqual(graphlike.edges[0].fault_observables, (0,))
         self.assertEqual(graphlike.edge_summary[0]["fault_observables"], (0,))
+        native_problem_capsule = graphlike.__faultscope_native_graphlike_problem_capsule__()
+        self.assertIs(
+            native_problem_capsule,
+            graphlike.__faultscope_native_graphlike_problem_capsule__(),
+        )
         self.assertIn("GraphlikeDecodingProblem(detector_count=3", repr(graphlike))
         self.assertIsInstance(binary.h, SparseBinaryMatrix)
         self.assertEqual(binary.detector_coords, indexed.detector_coords)
@@ -2155,6 +2490,37 @@ class NativeDetectorErrorModelTests(unittest.TestCase):
         self.assertFalse(bad.is_graphlike())
         with self.assertRaises(ValueError):
             bad.compile_graphlike_problem()
+
+    def test_native_dem_problem_views_canonicalize_ids_and_edge_parity(self) -> None:
+        self._require_native_dem()
+        dem = DetectorErrorModel(
+            detectors=(
+                Detector(id=5, measurement_keys=()),
+                Detector(id=2, measurement_keys=()),
+            ),
+            observables=(LogicalObservable(id=8),),
+            edges=(
+                DetectorErrorEdge(0.1, (7, 7), (9, 9), "cancelled", "X"),
+                DetectorErrorEdge(0.2, (4, 2, 4), (11, 11, 9), "odd", "Z"),
+            ),
+        )
+
+        indexed = dem.compile_indexed()
+        binary = dem.compile_binary_linear_problem()
+
+        self.assertEqual(indexed.detector_ids, (5, 2, 7, 4))
+        self.assertEqual(indexed.observable_ids, (8, 9, 11))
+        self.assertEqual(indexed.edges[0].detectors, ())
+        self.assertEqual(indexed.edges[0].observables, ())
+        self.assertEqual(indexed.edges[1].detectors, (1,))
+        self.assertEqual(indexed.edges[1].observables, (1,))
+        self.assertEqual(binary.h.entries, ((1, 1),))
+        self.assertEqual(binary.f.entries, ((1, 1),))
+        self.assertTrue(dem.is_graphlike())
+
+        decoder = create_native_decoder("no-correction", dem=dem)
+        self.assertEqual(decoder.detector_ids, indexed.detector_ids)
+        self.assertEqual(decoder.observable_ids, indexed.observable_ids)
 
     def test_native_dem_sampler_compiles_directly_from_circuit(self) -> None:
         self._require_native_dem()
@@ -2713,6 +3079,36 @@ class PyMatchingDecoderTests(unittest.TestCase):
             ),
         )
 
+    def test_strong_id_payload_tracks_effective_matching_graph(self) -> None:
+        class MatchingGraph:
+            num_detectors = 2
+            num_nodes = 2
+            num_fault_ids = 1
+            boundary = set()
+
+            def __init__(self, weight: float) -> None:
+                self.weight = weight
+
+            def edges(self):
+                return [
+                    (
+                        1,
+                        0,
+                        {
+                            "fault_ids": {0},
+                            "weight": self.weight,
+                            "error_probability": 0.1,
+                        },
+                    )
+                ]
+
+        first = PyMatchingDecoder(MatchingGraph(1.0), (0, 1), (0,), 1)
+        equivalent = PyMatchingDecoder(MatchingGraph(1.0), (0, 1), (0,), 1)
+        changed = PyMatchingDecoder(MatchingGraph(2.0), (0, 1), (0,), 1)
+
+        self.assertEqual(first.strong_id_payload(), equivalent.strong_id_payload())
+        self.assertNotEqual(first.strong_id_payload(), changed.strong_id_payload())
+
     def test_builds_pymatching_decoder_from_graphlike_dem(self) -> None:
         decoder = PyMatchingDecoder.from_dem(
             self._build_dem(),
@@ -2733,6 +3129,34 @@ class PyMatchingDecoderTests(unittest.TestCase):
         self.assertEqual(kwargs["faults_matrix"].args, ([1], ([0], [0])))
         self.assertEqual(kwargs["weights"], (2.1972245773362196, 1.3862943611198906))
         self.assertEqual(kwargs["error_probabilities"], (0.1, 0.2))
+
+    def test_build_uses_core_canonical_ids_and_parity(self) -> None:
+        dem = DetectorErrorModel(
+            detectors=(
+                Detector(id=5, measurement_keys=()),
+                Detector(id=2, measurement_keys=()),
+            ),
+            observables=(LogicalObservable(id=8),),
+            edges=(
+                DetectorErrorEdge(0.1, (7, 7), (9, 9), "cancelled", "X"),
+                DetectorErrorEdge(0.2, (4, 2, 4), (11, 11, 9), "odd", "Z"),
+            ),
+        )
+
+        decoder = PyMatchingDecoder.from_dem(
+            dem,
+            pymatching_module=_FakePyMatching,
+            numpy_module=_FakeNumpy,
+            scipy_sparse_module=_FakeSparse,
+        )
+
+        self.assertEqual(decoder.detector_ids, (5, 2, 7, 4))
+        self.assertEqual(decoder.observable_ids, (8, 9, 11))
+        h, kwargs = _FakePyMatching.calls[0]
+        self.assertEqual(h.shape, (4, 2))
+        self.assertEqual(h.args, ([1], ([1], [1])))
+        self.assertEqual(kwargs["faults_matrix"].shape, (3, 2))
+        self.assertEqual(kwargs["faults_matrix"].args, ([1], ([1], [1])))
 
     def test_decodes_single_and_batch_records(self) -> None:
         decoder = PyMatchingDecoder.from_dem(
@@ -2785,6 +3209,58 @@ class PyMatchingDecoderTests(unittest.TestCase):
                 scipy_sparse_module=_FakeSparse,
             )
 
+    def test_rejects_parallel_edges_with_different_logical_effects(self) -> None:
+        detector_pairs = (
+            ("boundary", (0,), (0,)),
+            ("graph", (0, 1), (1, 0)),
+        )
+        for endpoint_kind, first_detectors, second_detectors in detector_pairs:
+            dem = DetectorErrorModel(
+                detectors=(
+                    Detector(id=0, measurement_keys=()),
+                    Detector(id=1, measurement_keys=()),
+                ),
+                observables=(LogicalObservable(id=0), LogicalObservable(id=1)),
+                edges=(
+                    DetectorErrorEdge(0.1, first_detectors, (0,), "edge0", "X"),
+                    DetectorErrorEdge(0.4, second_detectors, (1,), "edge1", "Z"),
+                ),
+            )
+
+            with self.subTest(endpoint_kind=endpoint_kind):
+                with self.assertRaisesRegex(
+                    UnsupportedPyMatchingDemError,
+                    "ambiguous parallel endpoint",
+                ):
+                    PyMatchingDecoder.from_dem(
+                        dem,
+                        pymatching_module=_FakePyMatching,
+                        numpy_module=_FakeNumpy,
+                        scipy_sparse_module=_FakeSparse,
+                    )
+
+        self.assertEqual(_FakePyMatching.calls, [])
+
+    def test_accepts_parallel_edges_with_the_same_logical_effect(self) -> None:
+        dem = DetectorErrorModel(
+            detectors=(Detector(id=0, measurement_keys=()),),
+            observables=(LogicalObservable(id=0),),
+            edges=(
+                DetectorErrorEdge(0.1, (0,), (0,), "edge0", "X"),
+                DetectorErrorEdge(0.2, (0,), (0,), "edge1", "Z"),
+            ),
+        )
+
+        decoder = PyMatchingDecoder.from_dem(
+            dem,
+            pymatching_module=_FakePyMatching,
+            numpy_module=_FakeNumpy,
+            scipy_sparse_module=_FakeSparse,
+        )
+
+        self.assertEqual(decoder.edge_count, 2)
+        self.assertEqual(len(_FakePyMatching.calls), 1)
+
     def test_real_pymatching_decodes_boundary_logical_edge_when_installed(self) -> None:
         os.environ.setdefault(
             "MPLCONFIGDIR",
@@ -2818,6 +3294,36 @@ class PyMatchingDecoderTests(unittest.TestCase):
             [{0: 0}, {0: 1}],
         )
         self.assertEqual(decoder.decode_batch_masks({0: 0b1010}, shots=4), {0: 0b1010})
+
+    def test_real_pymatching_accepts_canonicalized_duplicate_targets(self) -> None:
+        os.environ.setdefault(
+            "MPLCONFIGDIR",
+            os.path.join(tempfile.gettempdir(), "faultscope-matplotlib-cache"),
+        )
+        try:
+            import pymatching  # noqa: F401
+            import numpy  # noqa: F401
+            from scipy import sparse  # noqa: F401
+        except ImportError as exc:
+            self.skipTest(f"optional PyMatching dependencies are not installed: {exc}")
+
+        dem = DetectorErrorModel(
+            detectors=(Detector(id=5, measurement_keys=()), Detector(id=2, measurement_keys=())),
+            observables=(LogicalObservable(id=8),),
+            edges=(
+                DetectorErrorEdge(0.1, (7, 7), (9, 9), "cancelled", "X"),
+                DetectorErrorEdge(0.2, (4, 2, 4), (11, 11, 9), "odd", "Z"),
+            ),
+        )
+
+        decoder = PyMatchingDecoder.from_dem(dem)
+
+        self.assertEqual(decoder.detector_ids, (5, 2, 7, 4))
+        self.assertEqual(decoder.observable_ids, (8, 9, 11))
+        self.assertEqual(
+            decoder.decode_detector_record({2: 1}),
+            {8: 0, 9: 1, 11: 0},
+        )
 
     def test_real_pymatching_decodes_bit_packed_masks_from_batch_objects(self) -> None:
         os.environ.setdefault(
@@ -2892,6 +3398,88 @@ class PyMatchingDecoderTests(unittest.TestCase):
 
 
 class HotspotVisualizationTests(unittest.TestCase):
+    def test_empty_heatmap_draws_no_checks_placeholder(self) -> None:
+        from faultscope.viz.drawing import _draw_heatmap
+
+        draw = mock.Mock()
+        fonts = {"bold": object(), "regular": object(), "small": object(), "tiny": object()}
+        with mock.patch("faultscope.viz.drawing._draw_centered_text") as centered_text:
+            _draw_heatmap(
+                draw,
+                [[]],
+                x0=10,
+                y0=20,
+                cell=30,
+                label_width=40,
+                title="Checks",
+                x_label="check",
+                palette=((0, 0, 0), (1, 1, 1), (2, 2, 2)),
+                fonts=fonts,
+                highlighted=None,
+                highlight_color="#ffffff",
+            )
+
+        self.assertIn("No checks", [call.args[1] for call in centered_text.call_args_list])
+
+    def test_repetition_visualizations_scale_for_minimum_and_large_layouts(self) -> None:
+        try:
+            from PIL import Image
+        except ImportError as exc:
+            self.skipTest(f"Pillow is not installed: {exc}")
+
+        result = SimpleNamespace(
+            hotspots={},
+            locations={},
+            shots=1,
+            logical_failure_rate=0.0,
+            top_hotspots=lambda top_k=8: [],
+        )
+        cases = ((1, 1), (3, 1), (9, 8))
+        with tempfile.TemporaryDirectory() as temp_dir:
+            for distance, rounds in cases:
+                with self.subTest(kind="heatmap", distance=distance, rounds=rounds):
+                    path = os.path.join(temp_dir, f"heatmap_d{distance}_r{rounds}.png")
+                    write_repetition_hotspot_heatmap(
+                        result,
+                        path,
+                        distance=distance,
+                        rounds=rounds,
+                        highlighted_data=(rounds - 1, distance - 1),
+                        highlighted_measurement=(rounds - 1, distance - 2)
+                        if distance > 1
+                        else None,
+                    )
+                    with Image.open(path) as image:
+                        width, height = image.size
+                    self.assertGreaterEqual(width, 1500)
+                    self.assertGreaterEqual(height, 860)
+                    if (distance, rounds) == (9, 8):
+                        self.assertGreaterEqual(width, 2202)
+                        self.assertGreaterEqual(height, 988)
+
+                with self.subTest(kind="gate", distance=distance, rounds=rounds):
+                    path = os.path.join(temp_dir, f"gate_d{distance}_r{rounds}.png")
+                    write_repetition_gate_structure_hotspot_map(
+                        result,
+                        path,
+                        distance=distance,
+                        rounds=rounds,
+                        highlighted_data=(rounds - 1, distance - 1),
+                        highlighted_measurement=(rounds - 1, distance - 2)
+                        if distance > 1
+                        else None,
+                        highlighted_cx=(rounds - 1, distance - 2, "right")
+                        if distance > 1
+                        else None,
+                    )
+                    with Image.open(path) as image:
+                        width, height = image.size
+                    self.assertGreaterEqual(width, 2100)
+                    self.assertGreaterEqual(height, 1160)
+                    if (distance, rounds) == (9, 8):
+                        self.assertGreaterEqual(width, 2832)
+                        self.assertGreaterEqual(height, 1914)
+
     def test_generates_repetition_hotspot_heatmap_png(self) -> None:
         distance = 3
         rounds = 3
@@ -3380,6 +3968,38 @@ class StimImportTests(unittest.TestCase):
         self.assertEqual(len(imported.circuit.noise_locations()), 2)
         self.assertEqual(imported.detectors[0].measurement_keys, ("m0",))
 
+    def test_imports_stim_empty_probability_slots_and_spaced_mpp_combiner(self) -> None:
+        imported = parse_stim_circuit(
+            """
+            PAULI_CHANNEL_1(0.1,,0.2) 0
+            MPP X0 * Y1
+            """
+        )
+
+        (location,) = imported.circuit.noise_locations().values()
+        self.assertAlmostEqual(location.rate, 0.3)
+        self.assertEqual(location.model.weights, {"X": 0.1, "Z": 0.2})
+        measurement = next(
+            operation
+            for operation in imported.circuit.operations
+            if operation.kind == "measure_pauli"
+        )
+        self.assertEqual(measurement.qubits, (0, 1))
+        self.assertEqual(measurement.pauli, "XY")
+
+    def test_invalid_stim_probabilities_and_mpp_combiners_raise_import_error(self) -> None:
+        for source in (
+            "PAULI_CHANNEL_1(-0.1,0.2,0) 0",
+            "PAULI_CHANNEL_1(0.7,0.4,0) 0",
+            "X_ERROR(nan) 0",
+            "M(1.1) 0",
+            "MPP X0**Y1",
+            "MPP X0*",
+        ):
+            with self.subTest(source=source):
+                with self.assertRaisesRegex(StimImportError, "line 1"):
+                    parse_stim_circuit(source)
+
     def test_imports_relative_measurement_record_references(self) -> None:
         imported = parse_stim_circuit(
             """
@@ -3413,6 +4033,35 @@ class StimImportTests(unittest.TestCase):
         self.assertEqual(len(imported.detectors), stim_circuit.num_detectors)
         self.assertEqual(len(imported.observables), stim_circuit.num_observables)
         self.assertIn("reset", [operation.kind for operation in imported.circuit.operations])
+
+    def test_flattened_input_preserves_instructions_between_similar_rounds(self) -> None:
+        imported = parse_stim_circuit(
+            """MR 0
+TICK
+MR 0
+M 0
+MR 0
+TICK
+MR 0
+M 0
+"""
+        )
+
+        self.assertEqual(imported.measurement_keys, ("m0", "m1", "m2", "m3", "m4", "m5"))
+        self.assertEqual(
+            [operation.kind for operation in imported.circuit.operations],
+            [
+                "measure_reset",
+                "tick",
+                "measure_reset",
+                "measure",
+                "measure_reset",
+                "tick",
+                "measure_reset",
+                "measure",
+            ],
+        )
+        self.assertNotIn("repeat", [operation.kind for operation in imported.circuit.operations])
 
     def test_imports_repeat_blocks(self) -> None:
         imported = parse_stim_circuit(
@@ -3468,14 +4117,33 @@ class StimImportTests(unittest.TestCase):
         compact_sampler = compile_native_sampler(compact.circuit)
         flattened_sampler = compile_native_sampler(flattened.circuit)
         self.assertLess(compact_sampler.stored_operation_count, compact_sampler.operation_count)
-        self.assertLess(flattened_sampler.stored_operation_count, flattened_sampler.operation_count)
+        self.assertNotIn("repeat", [operation.kind for operation in flattened.circuit.operations])
+        self.assertEqual(compact.measurement_keys, flattened.measurement_keys)
+        self.assertEqual(
+            tuple(
+                (detector.id, detector.measurement_keys, detector.coords)
+                for detector in compact.detectors
+            ),
+            tuple(
+                (detector.id, detector.measurement_keys, detector.coords)
+                for detector in flattened.detectors
+            ),
+        )
+        self.assertEqual(
+            tuple(
+                (observable.id, observable.measurement_keys) for observable in compact.observables
+            ),
+            tuple(
+                (observable.id, observable.measurement_keys) for observable in flattened.observables
+            ),
+        )
         self.assertEqual(compact_sampler.operation_count, flattened_sampler.operation_count)
         self.assertEqual(
             compact_sampler.sample_measurements(shots=257, seed=9123),
             flattened_sampler.sample_measurements(shots=257, seed=9123),
         )
 
-    def test_long_flattened_surface_code_keeps_warmup_outside_periodic_loop(self) -> None:
+    def test_long_flattened_surface_code_is_not_automatically_compacted(self) -> None:
         try:
             import stim
         except ImportError as exc:
@@ -3487,16 +4155,30 @@ class StimImportTests(unittest.TestCase):
         )
         compact = parse_stim_circuit(str(circuit))
         flattened = parse_stim_circuit(str(circuit.flattened()))
-        recovered_repeats = [
-            operation for operation in flattened.circuit.operations if operation.kind == "repeat"
-        ]
-
-        self.assertEqual(len(recovered_repeats), 1)
-        self.assertEqual(recovered_repeats[0].repeat_count, 9)
+        self.assertNotIn("repeat", [operation.kind for operation in flattened.circuit.operations])
         compact_sampler = compile_native_sampler(compact.circuit)
         flattened_sampler = compile_native_sampler(flattened.circuit)
         self.assertEqual(compact_sampler.loop_kernel_count, 1)
-        self.assertEqual(flattened_sampler.loop_kernel_count, 1)
+        self.assertEqual(flattened_sampler.loop_kernel_count, 0)
+        self.assertEqual(compact.measurement_keys, flattened.measurement_keys)
+        self.assertEqual(
+            tuple(
+                (detector.id, detector.measurement_keys, detector.coords)
+                for detector in compact.detectors
+            ),
+            tuple(
+                (detector.id, detector.measurement_keys, detector.coords)
+                for detector in flattened.detectors
+            ),
+        )
+        self.assertEqual(
+            tuple(
+                (observable.id, observable.measurement_keys) for observable in compact.observables
+            ),
+            tuple(
+                (observable.id, observable.measurement_keys) for observable in flattened.observables
+            ),
+        )
         self.assertEqual(
             compact_sampler.sample_measurements(shots=65, seed=441),
             flattened_sampler.sample_measurements(shots=65, seed=441),

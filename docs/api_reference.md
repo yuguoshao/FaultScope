@@ -10,12 +10,11 @@ sparse binary structure. User code should import from the public Python modules:
 `faultscope.collection`, `faultscope.decoders`, `faultscope.io`, and
 `faultscope.viz`.
 
-The package is pre-1.0. Within `0.2.x`, names listed in public Python module
-`__all__` values and the documented root APIs of `faultscope-core` and
-`faultscope-collection` are compatibility contracts. Compatible additions may
-land in patch releases. Removal or renaming requires deprecation before a later
-minor release. Private modules and names beginning with `_` are implementation
-details.
+The package is pre-1.0. Python and Rust API compatibility is not guaranteed
+between releases, including patch releases. Public module `__all__` values and
+documented crate-root exports describe the current supported surface, while
+private modules and names beginning with `_` are implementation details. The
+native decoder ABI is versioned separately.
 
 `faultscope.__version__` reports the installed distribution version. The Python
 package includes `py.typed` and a generated structural stub for the private
@@ -132,6 +131,11 @@ TwoQubitDepolarizing(_events=None)
 MeasurementBitFlip()
 ```
 
+`TwoQubitDepolarizing` always uses the canonical ordered set of 15 non-identity
+two-qubit Pauli events. The compatibility `_events` argument may be omitted or
+set to that exact sequence; custom subsets, duplicates, and reorderings are
+rejected.
+
 Common methods:
 
 - `sample(rng, rate)` samples an event from a Python RNG object.
@@ -155,14 +159,34 @@ Additional attributes and methods:
 pauli_to_xz(pauli)
 xz_to_pauli(x, z)
 pauli_string_to_xz(pauli_string, n_qubits=None)
-sparse_pauli_to_xz(n_qubits, qubits, paulis)
-symplectic_product(x1, z1, x2, z2)
-multiply_pauli_rows(left_x, left_z, left_sign, right_x, right_z, right_sign)
 ```
+
+`PauliFrame(x, z)` validates matching binary x/z vectors once and owns the
+validated data. `PauliFrame.zero(n_qubits)` constructs an empty frame.
+`StabilizerState` has no raw-tableau constructor; create it with
+`StabilizerState.zero(n_qubits)` and use its invariant-preserving operations.
+
+Dense x/z arguments must match the state's `n_qubits` and contain only binary
+integer values. Sparse Pauli and gate targets must be unique non-negative
+integers in `0 <= qubit < n_qubits`. Malformed calls raise `ValueError` before
+computation, RNG use, or state mutation. Zero-qubit empty supports and
+correctly-sized identity supports remain valid.
+
+Noise-model `apply(...)` requires a `StabilizerState` and `PauliFrame` with the
+same `n_qubits`; event validation completes before both objects are updated as
+one operation.
 
 `PauliFrame` and `StabilizerState` are helper classes exposed from
 `faultscope.core`. They are useful for tests and low-level workflows; the packed
 runtime APIs below are the normal product path.
+
+The Rust crate root exposes owning `PauliFrame` and zero-state-only
+`ConcreteStabilizer`. Their public gates and Pauli operations return `NpResult`;
+low-level conversion, symplectic, row/word, validator, and frame free functions
+are private implementation details. `ConcreteStabilizer::measure_pauli_with`
+validates first and calls its RNG closure only when the measurement is random.
+`ConcreteStabilizer::apply_pauli_event` validates a sparse event once and then
+atomically updates the state and matching `PauliFrame`.
 
 ## Forward Runtime
 
@@ -292,6 +316,10 @@ estimate(shots, loss_mask_fn=None, decoder=None, correction_mask_fn=None, seed=N
 estimate_hotspots(batch, loss_mask, baseline=None, top_k=10)
 ```
 
+`estimate_hotspots(...)` accepts only a native batch produced by the same
+compiled sampler. The batch must contain recorded per-location event masks;
+foreign batches and invalid loss-mask widths raise `ValueError`.
+
 `NativeDemGenerator` methods:
 
 ```text
@@ -339,6 +367,10 @@ estimate(
 ) -> DemHotspotEstimate
 estimate_hotspots(batch, loss_mask, baseline=None, top_k=10) -> DemHotspotEstimate
 ```
+
+DEM hotspot estimation likewise requires a native batch from the same compiled
+sampler with edge-event recording enabled. Missing events, incompatible batch
+identity, zero shots, or invalid loss-mask widths raise `ValueError`.
 
 `materialize_dem=False` uses the same light sampling path as
 `compile_native_dem_sampler_from_circuit(..., materialize_dem=False)`. In that
@@ -408,7 +440,7 @@ as `"pymatching"`, `"fusion-blossom"`, and `"bpdecoder"` through the
 uniform API. Friendly proxies such as `NativePyMatchingDecoder`,
 `NativeFusionBlossomDecoder`, `NativeMwpmDecoder`, and `NativeBposdDecoder` remain importable;
 construction raises a precise availability error when no compatible backend is
-available. `mwpm` is discoverable but unavailable pending its ABI v2 migration.
+available. `mwpm` is discoverable but unavailable pending its ABI v3 migration.
 `bposd` is a reserved, unimplemented, non-installable catalog/status entry. The
 generic `python -m faultscope.backends install bposd --dry-run` subcommand only
 reports that unavailability; it creates no install plan or steps and installs
@@ -453,6 +485,14 @@ Methods:
 `DetectorErrorModel(detectors, observables, edges)` stores a typed detector
 error model: detector declarations, logical observable declarations, and
 materialized detector error matrix columns with probabilities.
+
+Compilation and sampling use one canonical layout. Detector and observable ids
+are ordered as explicit declarations followed by ids first encountered in the
+raw edge sequence. Within each edge, repeated ids are reduced over GF(2): even
+multiplicity cancels and odd multiplicity leaves one target in first-occurrence
+order. The source `DetectorErrorModel` remains unchanged; compiled views and
+samplers expose the canonical interpretation. Duplicate explicit declarations
+are rejected.
 
 Methods:
 
@@ -603,10 +643,13 @@ threshold sweeps. The public Python API is:
 
 ```python
 from faultscope.collection import (
+    COLLECTION_COUNTER_SCHEMA_VERSION,
     COLLECTION_CSV_FIELDS,
     COLLECTION_CSV_HEADER,
+    CollectionCounterSchema,
     CollectionData,
     CollectionOptions,
+    CollectionRunOptions,
     CollectionTask,
     Progress,
     TaskStats,
@@ -625,9 +668,9 @@ from faultscope.collection import (
 ```
 
 The top-level `faultscope` collection exports are `Collector`,
-`CollectionOptions`, `CollectionRunOptions`, `CollectionTask`, `Progress`,
-`TaskStats`, `HotspotCollectionResult`, `collect`, `collect_hotspots`,
-`iter_collect`, and `iter_progress`.
+`CollectionCounterSchema`, `CollectionOptions`, `CollectionRunOptions`,
+`CollectionTask`, `Progress`, `TaskStats`, `HotspotCollectionResult`, `collect`,
+`collect_hotspots`, `iter_collect`, and `iter_progress`.
 Threshold analysis types and helpers are exported from `faultscope.collection`
 only, not from top-level `faultscope`.
 
@@ -650,7 +693,16 @@ CollectionOptions(
 `max_batch_seconds` must be positive when set. `max_errors` must be
 non-negative when set; `min_shots` must be non-negative and no larger than
 `max_shots`. Collection stops at `max_shots`, or when both `min_shots` and
-`max_errors` have been reached.
+`max_errors` have been reached. Shot, error, and batch counts must be integers;
+booleans and floating-point counts are rejected. `max_batch_seconds` must be a
+finite positive number.
+
+When used as `CollectionTask.collection_options`, only arguments explicitly
+passed to `CollectionOptions` override the Collector defaults. Passing a
+default value such as `batch_size=10_000` or `min_shots=0` restores that
+default, while an explicit `None` clears an inherited nullable value. Clearing
+`max_shots` is allowed during option merging but collection then fails with
+`max_shots is required` before compiling the task.
 
 `CollectionRunOptions` is a frozen dataclass:
 
@@ -667,8 +719,10 @@ CollectionRunOptions(
 )
 ```
 
-`num_workers` must be positive. The run seed is passed once to the Rust
-scheduler, which derives deterministic task-local streams from each strong id.
+`num_workers` must be a positive non-boolean integer. `seed`, when set, must be
+an integer in the unsigned 64-bit range. The run seed is passed once to the
+Rust scheduler, which derives deterministic task-local streams from each
+internal sampling id.
 
 `CollectionTask` is a frozen dataclass:
 
@@ -693,6 +747,40 @@ materialized native DEM sampler, using embedded declarations unless explicit
 `detectors` or `observables` are supplied. String decoders are resolved with
 `create_native_decoder(name, dem=dem, options=decoder_options)`. Object decoders
 must be native decoder handles; Python decoders are rejected by collection.
+Every decoder object must also implement
+`strong_id_payload() -> Mapping[str, object]` and return JSON-serializable stable
+identity data. Missing or invalid payloads fail before resume lookup or native
+scheduling.
+
+Collection identity uses the v3 resume contract and is split into two hashes.
+The internal sampling id uses its own schema and contains the canonical
+circuit/DEM source, resolved decoder payload, metadata, and both postselection
+masks. Rust derives task-local random streams from this id. The public v3
+`strong_id` hashes the sampling id together with the complete counter schema.
+Changing either count flag therefore creates a separate resume identity while
+preserving the same seeded random samples. `custom_error_count_key`, task id,
+seed, shot/error limits, batch sizing, and worker count are excluded from both
+identities. Decoder payloads still include effective normalized options and
+solver structure; canonical encoding preserves sequence order, sorts mapping
+keys, and never uses `repr(...)`.
+
+`CollectionCounterSchema` is a public frozen dataclass:
+
+```text
+CollectionCounterSchema(
+    count_observable_error_combos: bool = False,
+    count_detection_events: bool = False,
+)
+
+schema.schema_version == 1
+```
+
+`COLLECTION_COUNTER_SCHEMA_VERSION` is `1`. Native collection creates the
+schema from the two `CollectionRunOptions` count flags; callers do not pass a
+schema object into `collect`. Increment this schema version whenever counter
+meaning, key encoding, or per-shot coverage changes. A change to resume
+identity or CSV layout requires a new collection resume-contract version as
+well; no subset/superset counter backfill is inferred across versions.
 
 `TaskStats` is a frozen dataclass:
 
@@ -707,8 +795,16 @@ TaskStats(
     metadata: Mapping[str, object],
     strong_id: str = "",
     custom_counts: Mapping[str, int] = {},
+    counter_schema: CollectionCounterSchema | None = None,
 )
 ```
+
+Native collection totals and progress deltas always carry a non-`None`
+`counter_schema`. `None` is reserved for manually constructed analysis data;
+those values may contain arbitrary custom counters but cannot be passed back as
+resume data. Versioned stats must contain both fixed detection counters when
+detection counting is enabled, including explicit zero values, and must omit
+them when it is disabled.
 
 Properties:
 
@@ -725,7 +821,8 @@ return `nan`. If `shots` is zero, `raw_error_rate` returns `nan`.
 `to_csv_line()`, `from_csv_row(...)`, and `__add__` for validated merging by
 `strong_id`, decoder, and metadata. Normal `TaskStats` equality is the frozen
 dataclass field equality. `__add__` treats `task_id` as display-only: stats may
-merge with different display ids when `strong_id`, decoder, and metadata match.
+merge with different display ids when `strong_id`, decoder, metadata, and
+counter schema match exactly.
 
 `Progress` is a frozen dataclass used by streaming collection:
 
@@ -792,21 +889,35 @@ are resolved through `create_native_decoder(...)`.
 header:
 
 ```text
-shots,errors,discards,seconds,decoder,strong_id,json_metadata,custom_counts
+shots,errors,discards,seconds,decoder,strong_id,json_metadata,json_counter_schema,custom_counts
 ```
 
 CSV/resume orchestration is Python-owned and outside the native sampling hot
-path. Existing rows are merged by `strong_id`; mismatched decoder or metadata
-for the same `strong_id` raises `ValueError`. A completed resume task is not
+path. `json_counter_schema` stores the complete canonical schema object.
+Existing rows are merged by `strong_id`; mismatched decoder, metadata, or
+counter schema for the same `strong_id` raises `ValueError`. Resume accepts only
+the exact current v3 schema and rejects missing/unsupported schemas or missing
+fixed counters before native workers start. A completed resume task is not
 sampled again, and only newly collected deltas are appended. CSV rows do not
 persist a display `task_id`, so `TaskStats.from_csv_row(...)` reconstructs
-`task_id` from `strong_id`.
+`task_id` from `strong_id`. When those rows are used for collection resume,
+validated historical stats are rebound to the current task identity before
+completion checks, so returned stats use the current task's display `task_id`
+even when no additional sampling is needed.
+
+The v3 header is deliberately incompatible with v2 CSV. Reading a v2 file or
+attempting to append to it raises `ValueError`; append validates the existing
+header before opening it for writes. There is no in-place migration or
+compatibility adapter. Archive the old file or convert it with tooling outside
+this API before starting a v3 resume run.
 
 Public CSV utilities:
 
 ```text
 COLLECTION_CSV_FIELDS
 COLLECTION_CSV_HEADER
+COLLECTION_COUNTER_SCHEMA_VERSION
+CollectionCounterSchema(...)
 CollectionData(stats=())
 read_stats_from_csv_files(*filepaths) -> list[TaskStats]
 write_stats_to_csv_file(filepath, stats, *, append=False) -> None
@@ -882,8 +993,21 @@ Custom counts:
   combinations under keys such as `obs_mistake_mask=E_E__`.
 - `count_detection_events=True` records `detection_events` and
   `detectors_checked`.
-- `custom_error_count_key="..."` makes `max_errors` use that custom count
-  instead of `errors`.
+- `custom_error_count_key=None` makes `max_errors` use the main `errors` count.
+- `custom_error_count_key="detection_events"` or `"detectors_checked"`
+  requires `count_detection_events=True`. A missing fixed key is invalid, not
+  zero.
+- `custom_error_count_key="obs_mistake_mask=<mask>"` requires
+  `count_observable_error_combos=True`. For every expanded task, `<mask>` must
+  have exactly one `E`/`_` character per observable, include at least one `E`
+  on a non-postselected observable, and never put `E` on a postselected
+  observable. A valid combo that is absent from `custom_counts` is a true zero.
+
+Every non-`None` stop key is validated for every expanded task even when
+`max_errors` is unset or the task is already complete. Serial, parallel,
+adaptive, streaming, and hotspot collection use the same validation and
+batch-commit stopping rules; invalid keys fail before sampling, resume writes,
+or collection worker creation.
 
 ## Callback Contracts
 
@@ -983,7 +1107,8 @@ Core data types include:
 - `LogicalObservable`
 - `DetectorErrorEdge`
 - `DetectorErrorModel`
-- `SamplerProgram` and `RuntimeState` (integer-indexed forward-sampler IR and batch state)
+- `SamplerProgram` and `RuntimeState` (immutable integer-indexed forward-sampler
+  IR with read-only getters, and batch state)
 - `DemBatch`
 - `HotspotEstimate`
 - `DemHotspotEstimate`
@@ -1021,8 +1146,20 @@ let circuit = Circuit {
 
 let simulator = FaultScopeSimulator::new(circuit, Vec::new())?;
 let batch = simulator.run_batch(1024, Some(1), true)?;
-let estimate = simulator.estimate_from_loss(&batch, &batch.measurements["m0"], None, 10);
+let estimate = simulator.estimate_from_loss(&batch, &batch.measurements["m0"], None, 10)?;
 ```
 
 Validation failures return `NpError` in Rust and usually become `ValueError` or
 `UnsupportedNativeCircuitError` through the public Python wrappers.
+Both Rust `estimate_from_loss` methods and the low-level
+`compute_packed_estimate` return `NpResult`. Runtime states and DEM batches are
+bound to their compiled layout; clones preserve that identity, while a
+separately compiled estimator is intentionally incompatible even if its source
+model is equal. Their hotspot-layout fields are private. Read them through
+methods such as `noise_locations()`, `shots()`, `all_mask()`, `event_masks()`,
+and `edge_event_masks()`. Unrelated public result fields such as detector,
+observable, and loss masks remain directly accessible. This prevents callers
+from invalidating an already validated event layout; public estimate methods
+validate once and dispatch to a trusted internal aggregation loop. The
+standalone low-level `compute_packed_estimate` remains a checked boundary for
+callers that pair a `RuntimeState` with raw locations and a catalog.

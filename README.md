@@ -32,6 +32,9 @@ FaultScope `0.2.x` 支持 CPython 3.10–3.14。预构建 wheels 的目标平台
 manylinux x86_64/aarch64、macOS 11+ x86_64/arm64 和 Windows x86_64；源码构建需要
 Rust 1.85 或更新版本。
 
+当前 workspace 版本为 `0.2.5`。项目仍处于 pre-1.0，补丁版本也可能收口或重命名 Python/Rust
+API；native decoder ABI 则使用独立版本号管理。
+
 从源码 checkout 直接安装：
 
 ```bash
@@ -111,6 +114,9 @@ print(result.hotspot_table(top_k=5))
 
 - `Operation.pauli_gate(...)` 是 Pauli gate 构造器；`Operation.pauli` 是只读属性。
 - `PauliFrame` 和 `StabilizerState` 从 `faultscope.core` 导入，不是顶层 `faultscope` export。
+- `PauliFrame(x, z)` 在构造边界校验并持有 binary x/z 不变量；`StabilizerState` 只能通过
+  `StabilizerState.zero(n_qubits)` 构造。无效 dense/sparse Pauli 输入会在计算、RNG 调用和
+  state mutation 前抛出 `ValueError`。
 - `FaultScopeSimulator` 是前向 packed batch runtime 的主要入口。
 - `DemFaultScopeSimulator` 是同形的 DEM runtime 入口：从 circuit 直接生成 DEM sampler，
   再按 DEM edge 概率采样 detector syndrome / logical observable flips。它不会逐门执行
@@ -136,7 +142,7 @@ print(result.hotspot_table(top_k=5))
   `python -m faultscope.backends install pymatching --dry-run` 查看安装步骤；FaultScope 不会在
   `import` 或 `estimate(...)` 时隐式联网、clone 或编译。
 - `mwpm` 仍可在 catalog/status 中发现，但外部 `faultscope-mwpm` 包还是 ABI v1，尚未迁移到
-  FaultScope native decoder ABI v2，因此目前不可安装；`bposd` 是 catalog/status 中不可安装、
+  FaultScope native decoder ABI v3，因此目前不可安装；`bposd` 是 catalog/status 中不可安装、
   未实现的预留项。通用 `install bposd --dry-run` 子命令会报告它不可用，但不会生成安装计划或
   步骤，也不会执行安装。
 - 开发中的 PyMatching 和 fusion-blossom backend 可在激活 venv 后通过
@@ -156,7 +162,7 @@ print(result.hotspot_table(top_k=5))
 | 查看原始 measurement/noise masks | Forward sampling |
 | 自定义 measurement-history loss | Forward estimate + `loss_mask_fn` |
 | detector-syndrome decoder | Forward 或 DEM estimate + decoder |
-| graphlike matching decoder | 原型用 `PyMatchingDecoder`；高性能路径安装 `faultscope-pymatching` 后使用 `NativePyMatchingDecoder`，或使用 `faultscope-fusion-blossom`；`mwpm` 等待 ABI v2 迁移 |
+| graphlike matching decoder | 原型用 `PyMatchingDecoder`；高性能路径安装 `faultscope-pymatching` 后使用 `NativePyMatchingDecoder`，或使用 `faultscope-fusion-blossom`；`mwpm` 等待 ABI v3 迁移 |
 | circuit 入口的 DEM 采样 | `DemFaultScopeSimulator(circuit)` |
 | DEM edge 级热点排序 | `DemFaultScopeSimulator` 或 `DemHotspotEstimator(dem)` |
 | 重复 detector syndrome sampling | `DemFaultScopeSimulator(circuit)` 或生成 DEM 后复用 DEM sampler |
@@ -190,7 +196,7 @@ FaultScope 当前产品路径是 packed batch engine，不暴露通用的 per-sh
 然后从仓库根目录运行：
 
 ```bash
-.venv/bin/python benchmarks/compiler_throughput.py --distances 5 10 15 20 --representation m-plus-r --json-out compiler-throughput.json
+.venv/bin/python benchmarks/compiler_throughput.py --distances 5 10 15 20 --input-form repeat --representation m-plus-r --json-out compiler-throughput.json
 .venv/bin/python benchmarks/sampling_throughput.py --distances 15 21 31 --rounds 3
 .venv/bin/python benchmarks/sampling_throughput.py --family random-clifford --qubits 128 256 512 --depth 20
 .venv/bin/python benchmarks/dem_throughput.py --distances 9 13 21 --rounds 3

@@ -1,31 +1,31 @@
-# Native decoder ABI v2
+# Native decoder ABI v3
 
 FaultScope native decoder plugins use one strict runtime contract:
 
 ```text
-numeric ABI: 2
-manifest and capsule name: faultscope.native_decoder_plugin.v2
+numeric ABI: 3
+manifest and capsule name: faultscope.native_decoder_plugin.v3
 entry-point group: faultscope.native_decoders
 capsule method: __faultscope_native_decoder_capsule__
 thread-safe factory flag: NATIVE_DECODER_FACTORY_FLAG_THREAD_SAFE = 1 << 0
 ```
 
-The entry-point group and capsule method names are unchanged from ABI v1, but
-there is no runtime compatibility with ABI v1. A v1 manifest, capsule, or
-numeric ABI is rejected with the observed value and the expected v2 value.
+The entry-point group and capsule method names are unchanged from ABI v2, but
+there is no runtime compatibility with ABI v2. A v2 manifest, capsule, or
+numeric ABI is rejected with the observed value and the expected v3 value.
 
 ## Pure factory/worker model
 
-The capsule contains a `FaultScopeNativeDecoderFactoryV2`. The factory owns
+The capsule contains a `FaultScopeNativeDecoderFactoryV3`. The factory owns
 immutable construction data and metadata, and a factory cannot decode. Its
 only hot-path role is to create an exclusive worker. Every decode callback is
-on `FaultScopeNativeDecoderWorkerV2`, whose mutable state is private to that
+on `FaultScopeNativeDecoderWorkerV3`, whose mutable state is private to that
 worker.
 
 On 64-bit targets the exact C layouts are:
 
 ```c
-typedef struct FaultScopeNativeDecoderFactoryV2 {
+typedef struct FaultScopeNativeDecoderFactoryV3 {
     uint32_t abi_version;                 /* offset 0 */
     size_t struct_size;                   /* offset 8 */
     uint64_t flags;                       /* offset 16 */
@@ -42,12 +42,12 @@ typedef struct FaultScopeNativeDecoderFactoryV2 {
     );                                        /* offset 56 */
     FaultScopeNativeDecoderStatusV1 (*create_worker)(
         const void *factory_state,
-        FaultScopeNativeDecoderWorkerV2 *out_worker,
+        FaultScopeNativeDecoderWorkerV3 *out_worker,
         size_t out_worker_capacity
     );                                        /* offset 64 */
-} FaultScopeNativeDecoderFactoryV2;            /* 72 bytes, align 8 */
+} FaultScopeNativeDecoderFactoryV3;            /* 72 bytes, align 8 */
 
-typedef struct FaultScopeNativeDecoderWorkerV2 {
+typedef struct FaultScopeNativeDecoderWorkerV3 {
     size_t struct_size;                     /* offset 0 */
     void *worker_state;                     /* offset 8 */
     void (*drop_worker_state)(void *);      /* offset 16 */
@@ -66,23 +66,46 @@ typedef struct FaultScopeNativeDecoderWorkerV2 {
         const FaultScopeNativeDetectorEventShotBatchViewV1 *,
         FaultScopeNativePackedObservableShotBatchMutViewV1 *
     );                                          /* offset 40 */
-} FaultScopeNativeDecoderWorkerV2;             /* 48 bytes, align 8 */
+} FaultScopeNativeDecoderWorkerV3;             /* 48 bytes, align 8 */
 ```
 
-The stable v1-named view structs used inside v2 retain their 64-bit sizes:
+The stable v1-named view structs used inside v3 retain their 64-bit sizes:
 `FaultScopeNativeDecoderStringViewV1` is 16 bytes,
 `FaultScopeNativeDetectorMaskBatchViewV1` is 40 bytes,
 `FaultScopeNativeCorrectionMaskBatchMutViewV1` is 40 bytes,
 `FaultScopeNativePackedDetectorShotBatchViewV1` is 40 bytes,
 `FaultScopeNativeDetectorEventShotBatchViewV1` is 56 bytes, and
 `FaultScopeNativeDecoderStatusV1` is 24 bytes. Their names identify frozen
-layouts; they do not provide ABI v1 decoder compatibility.
+layouts; they do not provide compatibility with an older decoder ABI.
 
 `create_worker` receives a host-provided capacity for `out_worker`. A producer
 must not write beyond that capacity and must set `out_worker.struct_size` to
 the bytes it actually initializes. FaultScope validates the required prefix
 and reads optional callback fields only when covered by both the producer's
 `struct_size` and the host-provided capacity.
+
+## Canonical observable layout
+
+ABI v3 has one observable-output layout. When a native decoder is bound to a
+sampler, the factory's complete `observable_ids` sequence must equal the
+sampler's canonical observable ids. Missing ids, extra ids, and reordered ids
+are rejected before sampling and before `create_worker` or a decode callback is
+called. Detector ids remain decoder-defined and may use a different order.
+
+The host allocates every correction output using that canonical sequence and
+passes the same ids to all three decode callbacks. A callback must not replace
+the output pointers, dimensions, or ids:
+
+- `decode_batch` writes one correction mask for every canonical observable;
+- `decode_packed_batch` and `decode_detector_event_batch` use bit `k` for
+  canonical observable `k`; and
+- unused high bits in the final packed byte of every shot must remain zero.
+
+Output buffers are zero-initialized, so a zero correction does not require an
+explicit write. FaultScope validates the full layout and packed padding after
+each callback. It never realigns ids or treats a missing native correction as
+an implicit zero correction. The no-decoder path remains a separate explicit
+all-zero correction case.
 
 ## Threading and worker selection
 
@@ -128,9 +151,9 @@ the boundary. Report failures through `FaultScopeNativeDecoderStatusV1`.
 
 ## Backend availability
 
-`pymatching`, `fusion-blossom`, and `bpdecoder` are ABI v2 packages. `mwpm` is
+`pymatching`, `fusion-blossom`, and `bpdecoder` are ABI v3 packages. `mwpm` is
 discoverable but unavailable: its package is ABI v1 and
-not yet migrated to FaultScope native decoder ABI v2. `bposd` is a reserved,
+not yet migrated to FaultScope native decoder ABI v3. `bposd` is a reserved,
 unimplemented, non-installable catalog/status entry. The generic install
 subcommand accepts these unavailable catalog names but only reports why they are
 unavailable; it returns no install plan or steps and installs nothing.
@@ -138,22 +161,24 @@ unavailable; it returns no install plan or steps and installs nothing.
 Public Python decoder class names do not change. The public Python decoder classes are factory handles; workers are private implementation objects and
 are never returned through the Python API.
 
-## Migrating a third-party ABI v1 backend
+## Migrating a third-party ABI v2 backend
 
 This section is migration guidance, not a compatibility promise.
 
 1. Change the manifest and capsule names to
-   `faultscope.native_decoder_plugin.v2` and numeric ABI to `2`.
-2. Split immutable construction data into `FaultScopeNativeDecoderFactoryV2`
-   and mutable decode state into `FaultScopeNativeDecoderWorkerV2`.
-3. Move all decode callbacks to the worker and implement `create_worker` with
-   host capacity and partial-failure cleanup rules.
-4. Set `NATIVE_DECODER_FACTORY_FLAG_THREAD_SAFE` only when metadata and worker
+   `faultscope.native_decoder_plugin.v3` and numeric ABI to `3`.
+2. Rebuild the descriptor as `FaultScopeNativeDecoderFactoryV3` and workers as
+   `FaultScopeNativeDecoderWorkerV3`; there are no V2 aliases.
+3. Return the sampler's complete canonical observable-id sequence and write all
+   correction outputs in exactly that order with zero packed padding.
+4. Keep `create_worker` host-capacity and partial-failure cleanup rules.
+5. Set `NATIVE_DECODER_FACTORY_FLAG_THREAD_SAFE` only when metadata and worker
    creation are safe concurrently.
-5. Keep `faultscope.native_decoders` and
+6. Keep `faultscope.native_decoders` and
    `__faultscope_native_decoder_capsule__()` unchanged.
-6. Test distinct worker state, one-worker collection, concurrent creation,
-   drops, error-string lifetime, and panic/exception containment.
+7. Test distinct worker state, all three canonical output forms, layout and
+   padding rejection, concurrent creation, drops, error-string lifetime, and
+   panic/exception containment.
 
-FaultScope deliberately does not adapt an ABI v1 descriptor at runtime. The
-backend must be rebuilt and republished for ABI v2.
+FaultScope deliberately does not adapt an ABI v2 descriptor at runtime. The
+backend must be rebuilt and republished for ABI v3.

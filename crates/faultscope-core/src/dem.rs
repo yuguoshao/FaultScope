@@ -1,5 +1,5 @@
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 mod assembly;
 mod bitset;
@@ -21,11 +21,13 @@ use product_path::{
     generate_indexed_product_dem_flip_masks_from_plan, supports_product_reference_fast_path,
 };
 
+use crate::dem_canonical::parity_support_len;
+use crate::dem_problem::{compile_graphlike_problem_from_edge_views, GraphlikeSourceEdge};
 use crate::dem_sampling::{DemHotspotEstimator, DemProgramEdge, DemProgramEdgeMetadata};
 use crate::program::{ExpandedOperation, ExpandedProgram, ExpansionMode};
 use crate::{
-    Circuit, Detector, DetectorErrorEdge, DetectorErrorModel, LogicalObservable, NpError, NpResult,
-    Operation,
+    Circuit, Detector, DetectorErrorEdge, DetectorErrorModel, GraphlikeDecodingProblem,
+    LogicalObservable, NpError, NpResult, Operation,
 };
 
 /// Detector error model generator based on single-error propagation.
@@ -40,6 +42,58 @@ pub struct DetectorErrorModelGenerator {
     pub observables: Vec<LogicalObservable>,
     event_plan: Arc<DemEventPlan>,
     measurement_plan: DemMeasurementPlan,
+}
+
+/// A circuit whose targets have been validated and whose DEM event plan is
+/// guaranteed to be derived from that exact circuit.
+///
+/// This type is intentionally opaque.  It lets trusted adapters carry the
+/// validation result across API boundaries without allowing callers to pair a
+/// circuit with an unrelated event plan.
+#[doc(hidden)]
+#[derive(Debug)]
+pub struct ValidatedDemCircuit {
+    circuit: Arc<Circuit>,
+    event_plan: OnceLock<Arc<DemEventPlan>>,
+}
+
+impl ValidatedDemCircuit {
+    /// Validate a circuit once and retain it for DEM compilation.
+    #[doc(hidden)]
+    pub fn new(circuit: Circuit) -> NpResult<Self> {
+        circuit.validate()?;
+        Ok(Self {
+            circuit: Arc::new(circuit),
+            event_plan: OnceLock::new(),
+        })
+    }
+
+    /// Borrow the validated circuit.
+    #[doc(hidden)]
+    pub fn circuit(&self) -> &Circuit {
+        &self.circuit
+    }
+
+    /// Return shared ownership of the validated circuit.
+    fn shared_circuit(&self) -> Arc<Circuit> {
+        Arc::clone(&self.circuit)
+    }
+
+    /// Return the event plan derived from this circuit, compiling it once.
+    #[doc(hidden)]
+    pub fn event_plan(&self) -> NpResult<Arc<DemEventPlan>> {
+        if let Some(event_plan) = self.event_plan.get() {
+            return Ok(Arc::clone(event_plan));
+        }
+
+        let event_plan = Arc::new(collect_dem_event_plan(&self.circuit.operations)?);
+        let _ = self.event_plan.set(event_plan);
+        Ok(Arc::clone(
+            self.event_plan
+                .get()
+                .expect("DEM event plan must be initialized after set"),
+        ))
+    }
 }
 
 impl DemEventPlan {
@@ -67,6 +121,7 @@ impl DetectorErrorModelGenerator {
         detectors: Option<Vec<Detector>>,
         observables: Option<Vec<LogicalObservable>>,
     ) -> NpResult<Self> {
+        circuit.validate()?;
         let (circuit, program) = crate::program::expand_circuit(&circuit)?;
         let measurement_plan = compile_dem_measurement_plan_with_optional_declarations(
             &program,
@@ -77,9 +132,7 @@ impl DetectorErrorModelGenerator {
         let observables = observables.unwrap_or_else(|| observables_from_program(&program));
         validate_detector_ids(&detectors)?;
         validate_observable_ids(&observables)?;
-        for observable in &observables {
-            observable.validate()?;
-        }
+        validate_observables_for_n_qubits(circuit.n_qubits, &observables)?;
         let event_plan = collect_dem_event_plan_from_program(program)?;
         Ok(Self {
             circuit: Arc::new(circuit),
@@ -129,6 +182,39 @@ impl DetectorErrorModelGenerator {
         observables: Option<Vec<LogicalObservable>>,
         event_plan: Arc<DemEventPlan>,
     ) -> NpResult<Self> {
+        circuit.validate()?;
+        crate::program::validate_expanded_program_targets(circuit.n_qubits, &event_plan.program)?;
+        Self::new_with_prevalidated_shared_event_plan_options(
+            circuit,
+            detectors,
+            observables,
+            event_plan,
+        )
+    }
+
+    /// Create a generator from a circuit carrying proof that validation and
+    /// event-plan binding have already been performed.
+    #[doc(hidden)]
+    pub fn new_with_validated_dem_circuit_options(
+        circuit: &ValidatedDemCircuit,
+        detectors: Option<Vec<Detector>>,
+        observables: Option<Vec<LogicalObservable>>,
+    ) -> NpResult<Self> {
+        let event_plan = circuit.event_plan()?;
+        Self::new_with_prevalidated_shared_event_plan_options(
+            circuit.shared_circuit(),
+            detectors,
+            observables,
+            event_plan,
+        )
+    }
+
+    fn new_with_prevalidated_shared_event_plan_options(
+        circuit: Arc<Circuit>,
+        detectors: Option<Vec<Detector>>,
+        observables: Option<Vec<LogicalObservable>>,
+        event_plan: Arc<DemEventPlan>,
+    ) -> NpResult<Self> {
         let measurement_plan = compile_dem_measurement_plan_with_optional_declarations(
             &event_plan.program,
             detectors.as_deref(),
@@ -139,9 +225,7 @@ impl DetectorErrorModelGenerator {
             observables.unwrap_or_else(|| observables_from_program(&event_plan.program));
         validate_detector_ids(&detectors)?;
         validate_observable_ids(&observables)?;
-        for observable in &observables {
-            observable.validate()?;
-        }
+        validate_observables_for_n_qubits(circuit.n_qubits, &observables)?;
         Ok(Self {
             circuit,
             detectors,
@@ -168,6 +252,9 @@ impl DetectorErrorModelGenerator {
     }
 
     fn generate_edge_refs(&self) -> NpResult<Vec<GeneratedDemEdgeRef>> {
+        // Constructors validate the circuit, compiled plan, and observables.
+        // Keep repeated generation scan-free so validation remains a boundary
+        // cost instead of scaling with every generated model.
         generate_dem_edge_refs_from_compiled_plan(
             self.circuit.n_qubits,
             &self.event_plan.program,
@@ -183,6 +270,8 @@ pub fn generate_dem_edges(
     detectors: &[Detector],
     observables: &[LogicalObservable],
 ) -> NpResult<Vec<DetectorErrorEdge>> {
+    crate::model::validate_operations(n_qubits, operations)?;
+    validate_observables_for_n_qubits(n_qubits, observables)?;
     let program = crate::program::expand_operations(operations, ExpansionMode::Dem)?;
     let event_plan = collect_dem_event_plan_from_program(program)?;
     let measurement_plan =
@@ -202,6 +291,8 @@ pub fn generate_dem_edges_from_event_plan(
     observables: &[LogicalObservable],
     event_plan: &DemEventPlan,
 ) -> NpResult<Vec<DetectorErrorEdge>> {
+    crate::program::validate_expanded_program_targets(n_qubits, &event_plan.program)?;
+    validate_observables_for_n_qubits(n_qubits, observables)?;
     let measurement_plan =
         compile_dem_measurement_plan(&event_plan.program, detectors, observables)?;
     generate_dem_edges_from_compiled_plan(
@@ -360,6 +451,16 @@ fn validate_observable_ids(observables: &[LogicalObservable]) -> NpResult<()> {
     Ok(())
 }
 
+fn validate_observables_for_n_qubits(
+    n_qubits: usize,
+    observables: &[LogicalObservable],
+) -> NpResult<()> {
+    for observable in observables {
+        observable.validate_for_n_qubits(n_qubits)?;
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, PartialEq)]
 struct GeneratedDemEdgeRef {
     event_index: usize,
@@ -376,6 +477,36 @@ pub struct LazyDetectorErrorModel {
 }
 
 impl LazyDetectorErrorModel {
+    /// Test whether parity-reduced lazy DEM edges satisfy graphlike constraints.
+    pub fn is_graphlike(&self) -> bool {
+        self.edges.iter().all(|edge| {
+            let detector_count = parity_support_len(&edge.detectors);
+            detector_count <= 2
+                && (detector_count != 0 || parity_support_len(&edge.observables) == 0)
+        })
+    }
+
+    /// Compile directly into the compact graphlike representation without
+    /// materializing location labels, events, or tag dictionaries.
+    pub fn compile_graphlike_problem(&self) -> NpResult<GraphlikeDecodingProblem> {
+        compile_graphlike_problem_from_edge_views(
+            &self.detectors,
+            &self.observables,
+            self.edges.len(),
+            || {
+                self.edges
+                    .iter()
+                    .enumerate()
+                    .map(|(edge_index, edge)| GraphlikeSourceEdge {
+                        probability: self.event_plan.fault_events[edge.event_index].probability,
+                        detectors: &edge.detectors,
+                        observables: &edge.observables,
+                        original_edge_index: edge_index,
+                    })
+            },
+        )
+    }
+
     /// Consume a lazy DEM into the metadata-free sampling representation.
     #[doc(hidden)]
     pub fn into_sampling_estimator(self) -> DemHotspotEstimator {

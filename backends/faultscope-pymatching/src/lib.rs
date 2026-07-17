@@ -1,12 +1,14 @@
 use faultscope_core::{
     log_likelihood_ratio, FaultScopeNativeCorrectionMaskBatchMutViewV1,
-    FaultScopeNativeDecoderFactoryV2, FaultScopeNativeDecoderI64SliceV1,
+    FaultScopeNativeDecoderFactoryV3, FaultScopeNativeDecoderI64SliceV1,
     FaultScopeNativeDecoderStatusV1, FaultScopeNativeDecoderStringViewV1,
-    FaultScopeNativeDecoderWorkerV2, FaultScopeNativeDetectorEventShotBatchViewV1,
-    FaultScopeNativeDetectorMaskBatchViewV1, FaultScopeNativePackedDetectorShotBatchViewV1,
+    FaultScopeNativeDecoderWorkerV3, FaultScopeNativeDetectorEventShotBatchViewV1,
+    FaultScopeNativeDetectorMaskBatchViewV1, FaultScopeNativeGraphlikeEdgeV1,
+    FaultScopeNativeGraphlikeProblemV1, FaultScopeNativePackedDetectorShotBatchViewV1,
     FaultScopeNativePackedObservableShotBatchMutViewV1, NATIVE_DECODER_FACTORY_FLAG_THREAD_SAFE,
     NATIVE_DECODER_PLUGIN_ABI_VERSION, NATIVE_DECODER_PLUGIN_STATUS_ERROR,
-    NATIVE_DECODER_PLUGIN_STATUS_OK,
+    NATIVE_DECODER_PLUGIN_STATUS_OK, NATIVE_GRAPHLIKE_PROBLEM_ABI_VERSION,
+    NATIVE_GRAPHLIKE_PROBLEM_CAPSULE_METHOD, NATIVE_GRAPHLIKE_PROBLEM_CAPSULE_NAME,
 };
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
@@ -22,7 +24,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 const BACKEND_NAME: &str = "pymatching";
-const CAPSULE_NAME: &[u8] = b"faultscope.native_decoder_plugin.v2\0";
+const CAPSULE_NAME: &[u8] = b"faultscope.native_decoder_plugin.v3\0";
 const NUM_DISTINCT_WEIGHTS: f64 = (1u64 << 24) as f64;
 const MAX_USER_EDGE_WEIGHT: f64 = NUM_DISTINCT_WEIGHTS - 1.0;
 
@@ -103,7 +105,8 @@ struct PyNativePyMatchingNativeDecoder {
 impl PyNativePyMatchingNativeDecoder {
     #[staticmethod]
     fn from_dem(py: Python<'_>, dem: &Bound<'_, PyAny>) -> PyResult<Self> {
-        let builder = PyMatchingProblemBuilder::from_dem_object(dem)?;
+        let problem = dem.call_method0("compile_graphlike_problem")?;
+        let builder = PyMatchingProblemBuilder::from_graphlike_problem(&problem)?;
         build_py_native_decoder(py, builder)
     }
 
@@ -281,9 +284,9 @@ impl PyInvalidNativeDecoderCapsule {
                 )))
             }
         };
-        let descriptor = Box::new(FaultScopeNativeDecoderFactoryV2 {
+        let descriptor = Box::new(FaultScopeNativeDecoderFactoryV3 {
             abi_version: NATIVE_DECODER_PLUGIN_ABI_VERSION,
-            struct_size: mem::size_of::<FaultScopeNativeDecoderFactoryV2>(),
+            struct_size: mem::size_of::<FaultScopeNativeDecoderFactoryV3>(),
             flags: NATIVE_DECODER_FACTORY_FLAG_THREAD_SAFE,
             factory_state: Box::into_raw(Box::new(state)).cast::<c_void>(),
             drop_factory_state: Some(drop_factory_state),
@@ -337,9 +340,9 @@ fn build_py_native_decoder(
         merged_parallel_edge_count: built.merged_parallel_edge_count,
         edges: built.edges,
     };
-    let descriptor = Box::new(FaultScopeNativeDecoderFactoryV2 {
+    let descriptor = Box::new(FaultScopeNativeDecoderFactoryV3 {
         abi_version: NATIVE_DECODER_PLUGIN_ABI_VERSION,
-        struct_size: mem::size_of::<FaultScopeNativeDecoderFactoryV2>(),
+        struct_size: mem::size_of::<FaultScopeNativeDecoderFactoryV3>(),
         flags: NATIVE_DECODER_FACTORY_FLAG_THREAD_SAFE,
         factory_state: Box::into_raw(state).cast::<c_void>(),
         drop_factory_state: Some(drop_factory_state),
@@ -559,7 +562,7 @@ impl PyNativeDecoderTestStats {
 }
 
 struct TemporaryWorker {
-    descriptor: FaultScopeNativeDecoderWorkerV2,
+    descriptor: FaultScopeNativeDecoderWorkerV3,
 }
 
 impl Drop for TemporaryWorker {
@@ -576,7 +579,7 @@ impl Drop for TemporaryWorker {
 unsafe fn create_temporary_worker(capsule: &Py<PyAny>) -> Result<TemporaryWorker, String> {
     let factory =
         pyo3::ffi::PyCapsule_GetPointer(capsule.as_ptr(), CAPSULE_NAME.as_ptr().cast::<c_char>())
-            .cast::<FaultScopeNativeDecoderFactoryV2>();
+            .cast::<FaultScopeNativeDecoderFactoryV3>();
     if factory.is_null() {
         return Err("pymatching capsule contained a null factory descriptor".to_string());
     }
@@ -584,8 +587,8 @@ unsafe fn create_temporary_worker(capsule: &Py<PyAny>) -> Result<TemporaryWorker
     let create_worker = factory
         .create_worker
         .ok_or_else(|| "pymatching factory is missing create_worker".to_string())?;
-    let mut descriptor = FaultScopeNativeDecoderWorkerV2 {
-        struct_size: mem::size_of::<FaultScopeNativeDecoderWorkerV2>(),
+    let mut descriptor = FaultScopeNativeDecoderWorkerV3 {
+        struct_size: mem::size_of::<FaultScopeNativeDecoderWorkerV3>(),
         worker_state: std::ptr::null_mut(),
         drop_worker_state: None,
         decode_batch: None,
@@ -595,7 +598,7 @@ unsafe fn create_temporary_worker(capsule: &Py<PyAny>) -> Result<TemporaryWorker
     let status = create_worker(
         factory.factory_state.cast_const(),
         &mut descriptor,
-        mem::size_of::<FaultScopeNativeDecoderWorkerV2>(),
+        mem::size_of::<FaultScopeNativeDecoderWorkerV3>(),
     );
     let worker = TemporaryWorker { descriptor };
     if status.code != NATIVE_DECODER_PLUGIN_STATUS_OK {
@@ -605,8 +608,8 @@ unsafe fn create_temporary_worker(capsule: &Py<PyAny>) -> Result<TemporaryWorker
         ));
     }
     if worker.descriptor.struct_size
-        < mem::offset_of!(FaultScopeNativeDecoderWorkerV2, decode_packed_batch)
-        || worker.descriptor.struct_size > mem::size_of::<FaultScopeNativeDecoderWorkerV2>()
+        < mem::offset_of!(FaultScopeNativeDecoderWorkerV3, decode_packed_batch)
+        || worker.descriptor.struct_size > mem::size_of::<FaultScopeNativeDecoderWorkerV3>()
         || worker.descriptor.worker_state.is_null()
         || worker.descriptor.drop_worker_state.is_none()
         || worker.descriptor.decode_batch.is_none()
@@ -808,73 +811,18 @@ struct BuiltPyMatchingProblem {
 }
 
 impl PyMatchingProblemBuilder {
-    fn from_dem_object(dem: &Bound<'_, PyAny>) -> PyResult<Self> {
-        let detector_ids = extract_ids(dem.getattr("detectors")?, "detector")?;
-        let observable_ids = extract_ids(dem.getattr("observables")?, "observable")?;
-        let detector_index = detector_ids
-            .iter()
-            .copied()
-            .enumerate()
-            .map(|(index, id)| (id, index))
-            .collect::<HashMap<_, _>>();
-        let observable_index = observable_ids
-            .iter()
-            .copied()
-            .enumerate()
-            .map(|(index, id)| (id, index))
-            .collect::<HashMap<_, _>>();
-        let mut builder = Self {
-            detector_ids,
-            observable_ids,
-            dem_edge_count: 0,
-            groups: Vec::new(),
-            group_by_endpoint: HashMap::new(),
-        };
-        let edges = dem.getattr("edges")?;
-        for (fallback_index, edge) in PyIterator::from_object(&edges)?.enumerate() {
-            let edge = edge?;
-            let probability = edge.getattr("probability")?.extract::<f64>()?;
-            let detector_ids = edge.getattr("detectors")?.extract::<Vec<i64>>()?;
-            let observable_ids = edge.getattr("observables")?.extract::<Vec<i64>>()?;
-            let dem_edge_index = edge
-                .getattr("original_edge_index")
-                .and_then(|value| value.extract::<usize>())
-                .unwrap_or(fallback_index);
-            let detectors = detector_ids
-                .iter()
-                .map(|detector_id| {
-                    detector_index.get(detector_id).copied().ok_or_else(|| {
-                        PyValueError::new_err(format!(
-                            "pymatching edge {dem_edge_index} references unknown detector id {detector_id}"
-                        ))
-                    })
-                })
-                .collect::<PyResult<Vec<_>>>()?;
-            let fault_observables = observable_ids
-                .iter()
-                .map(|observable_id| {
-                    observable_index.get(observable_id).copied().ok_or_else(|| {
-                        PyValueError::new_err(format!(
-                            "pymatching edge {dem_edge_index} references unknown observable id {observable_id}"
-                        ))
-                    })
-                })
-                .collect::<PyResult<Vec<_>>>()?;
-            builder.push_edge(dem_edge_index, detectors, fault_observables, probability)?;
+    fn from_graphlike_problem(problem: &Bound<'_, PyAny>) -> PyResult<Self> {
+        if problem.hasattr(NATIVE_GRAPHLIKE_PROBLEM_CAPSULE_METHOD)? {
+            let capsule = problem.call_method0(NATIVE_GRAPHLIKE_PROBLEM_CAPSULE_METHOD)?;
+            return unsafe { Self::from_native_graphlike_capsule(&capsule) };
         }
-        Ok(builder)
+        Self::from_python_graphlike_problem(problem)
     }
 
-    fn from_graphlike_problem(problem: &Bound<'_, PyAny>) -> PyResult<Self> {
+    fn from_python_graphlike_problem(problem: &Bound<'_, PyAny>) -> PyResult<Self> {
         let detector_ids = problem.getattr("detector_ids")?.extract::<Vec<i64>>()?;
         let observable_ids = problem.getattr("observable_ids")?.extract::<Vec<i64>>()?;
-        let mut builder = Self {
-            detector_ids,
-            observable_ids,
-            dem_edge_count: 0,
-            groups: Vec::new(),
-            group_by_endpoint: HashMap::new(),
-        };
+        let mut builder = Self::new(detector_ids, observable_ids);
         let edges = problem.getattr("edges")?;
         for edge in PyIterator::from_object(&edges)? {
             let edge = edge?;
@@ -886,6 +834,103 @@ impl PyMatchingProblemBuilder {
             )?;
         }
         Ok(builder)
+    }
+
+    unsafe fn from_native_graphlike_capsule(capsule: &Bound<'_, PyAny>) -> PyResult<Self> {
+        let capsule_name = CString::new(NATIVE_GRAPHLIKE_PROBLEM_CAPSULE_NAME)
+            .expect("native graphlike capsule name must not contain NUL");
+        if pyo3::ffi::PyCapsule_IsValid(capsule.as_ptr(), capsule_name.as_ptr()) != 1 {
+            return Err(PyValueError::new_err(format!(
+                "native graphlike problem capsule must be named {NATIVE_GRAPHLIKE_PROBLEM_CAPSULE_NAME:?}"
+            )));
+        }
+        let pointer = pyo3::ffi::PyCapsule_GetPointer(capsule.as_ptr(), capsule_name.as_ptr());
+        if pointer.is_null() {
+            return Err(PyValueError::new_err(
+                "native graphlike problem capsule contained a null descriptor pointer",
+            ));
+        }
+        let descriptor = &*pointer.cast::<FaultScopeNativeGraphlikeProblemV1>();
+        if descriptor.abi_version != NATIVE_GRAPHLIKE_PROBLEM_ABI_VERSION {
+            return Err(PyValueError::new_err(format!(
+                "native graphlike problem ABI version {} is incompatible with expected version {}",
+                descriptor.abi_version, NATIVE_GRAPHLIKE_PROBLEM_ABI_VERSION
+            )));
+        }
+        if descriptor.struct_size != mem::size_of::<FaultScopeNativeGraphlikeProblemV1>() {
+            return Err(PyValueError::new_err(format!(
+                "native graphlike problem descriptor size {} does not match expected size {}",
+                descriptor.struct_size,
+                mem::size_of::<FaultScopeNativeGraphlikeProblemV1>()
+            )));
+        }
+        if descriptor.edge_struct_size != mem::size_of::<FaultScopeNativeGraphlikeEdgeV1>() {
+            return Err(PyValueError::new_err(format!(
+                "native graphlike edge size {} does not match expected size {}",
+                descriptor.edge_struct_size,
+                mem::size_of::<FaultScopeNativeGraphlikeEdgeV1>()
+            )));
+        }
+
+        let detector_ids = checked_native_slice(
+            descriptor.detector_ids,
+            descriptor.detector_count,
+            "detector ids",
+        )?;
+        let observable_ids = checked_native_slice(
+            descriptor.observable_ids,
+            descriptor.observable_count,
+            "observable ids",
+        )?;
+        let edges = checked_native_slice(descriptor.edges, descriptor.edge_count, "edges")?;
+        let fault_observables = checked_native_slice(
+            descriptor.fault_observables,
+            descriptor.fault_observable_count,
+            "fault observables",
+        )?;
+        let mut builder = Self::new(detector_ids.to_vec(), observable_ids.to_vec());
+        for edge in edges {
+            if edge.reserved != 0 {
+                return Err(PyValueError::new_err(format!(
+                    "native graphlike edge {} has non-zero reserved flags {}",
+                    edge.dem_edge_index, edge.reserved
+                )));
+            }
+            let observable_start = edge.fault_observable_offset as usize;
+            let observable_count = edge.fault_observable_count as usize;
+            let observable_end =
+                observable_start
+                    .checked_add(observable_count)
+                    .ok_or_else(|| {
+                        PyValueError::new_err(format!(
+                            "native graphlike edge {} observable range overflow",
+                            edge.dem_edge_index
+                        ))
+                    })?;
+            let edge_observables = fault_observables
+                .get(observable_start..observable_end)
+                .ok_or_else(|| {
+                    PyValueError::new_err(format!(
+                        "native graphlike edge {} observable range {}..{} exceeds pool length {}",
+                        edge.dem_edge_index,
+                        observable_start,
+                        observable_end,
+                        fault_observables.len()
+                    ))
+                })?;
+            builder.push_native_edge(edge, edge_observables)?;
+        }
+        Ok(builder)
+    }
+
+    fn new(detector_ids: Vec<i64>, observable_ids: Vec<i64>) -> Self {
+        Self {
+            detector_ids,
+            observable_ids,
+            dem_edge_count: 0,
+            groups: Vec::new(),
+            group_by_endpoint: HashMap::new(),
+        }
     }
 
     fn push_edge(
@@ -941,8 +986,101 @@ impl PyMatchingProblemBuilder {
             }
         };
 
+        self.push_grouped_edge(dem_edge_index, endpoint, fault_observables, probability)
+    }
+
+    fn push_native_edge(
+        &mut self,
+        edge: &FaultScopeNativeGraphlikeEdgeV1,
+        native_fault_observables: &[u32],
+    ) -> PyResult<()> {
+        let dem_edge_index = edge.dem_edge_index;
+        let probability = edge.probability;
+        self.dem_edge_count += 1;
+        validate_probability(probability, dem_edge_index)?;
+        let fault_observables = canonical_fault_observables(
+            native_fault_observables
+                .iter()
+                .map(|index| *index as usize)
+                .collect(),
+        );
+        for &observable_index in &fault_observables {
+            if observable_index >= self.observable_ids.len() {
+                return Err(PyValueError::new_err(format!(
+                    "pymatching edge {dem_edge_index} references observable index {observable_index} but only {} observables exist",
+                    self.observable_ids.len()
+                )));
+            }
+        }
+        let endpoint = match edge.detector_count {
+            0 => {
+                if fault_observables.is_empty() {
+                    return Ok(());
+                }
+                return Err(PyValueError::new_err(format!(
+                    "pymatching edge {dem_edge_index} flips observables but has no detectors; pure logical edges are unsupported"
+                )));
+            }
+            1 => {
+                let detector = edge.detector0 as usize;
+                self.validate_native_detector_index(dem_edge_index, detector)?;
+                (detector, None)
+            }
+            2 => {
+                let left = edge.detector0 as usize;
+                let right = edge.detector1 as usize;
+                self.validate_native_detector_index(dem_edge_index, left)?;
+                self.validate_native_detector_index(dem_edge_index, right)?;
+                if left == right {
+                    return Err(PyValueError::new_err(format!(
+                        "pymatching edge {dem_edge_index} has identical endpoints {left}"
+                    )));
+                }
+                normalized_endpoint(left, right)
+            }
+            detector_count => {
+                return Err(PyValueError::new_err(format!(
+                    "pymatching edge {dem_edge_index} has {detector_count} detectors; expected one boundary detector or two graph detectors"
+                )));
+            }
+        };
+
+        self.push_grouped_edge(dem_edge_index, endpoint, fault_observables, probability)
+    }
+
+    fn validate_native_detector_index(
+        &self,
+        dem_edge_index: usize,
+        detector_index: usize,
+    ) -> PyResult<()> {
+        if detector_index >= self.detector_ids.len() {
+            return Err(PyValueError::new_err(format!(
+                "pymatching edge {dem_edge_index} references detector index {detector_index} but only {} detectors exist",
+                self.detector_ids.len()
+            )));
+        }
+        Ok(())
+    }
+
+    fn push_grouped_edge(
+        &mut self,
+        dem_edge_index: usize,
+        endpoint: (usize, Option<usize>),
+        fault_observables: Vec<usize>,
+        probability: f64,
+    ) -> PyResult<()> {
         if let Some(group_index) = self.group_by_endpoint.get(&endpoint).copied() {
             let group = &mut self.groups[group_index];
+            if group.fault_observables != fault_observables {
+                return Err(PyValueError::new_err(format!(
+                    "pymatching found ambiguous parallel endpoint {:?}: DEM edge {} fault_observables {:?} conflicts with DEM edge(s) {:?} fault_observables {:?}",
+                    endpoint,
+                    dem_edge_index,
+                    fault_observables,
+                    group.dem_edge_indices,
+                    group.fault_observables
+                )));
+            }
             group.dem_edge_indices.push(dem_edge_index);
             group.probabilities.push(probability);
         } else {
@@ -986,18 +1124,25 @@ impl PyMatchingProblemBuilder {
     }
 }
 
-fn extract_ids(sequence: Bound<'_, PyAny>, kind: &str) -> PyResult<Vec<i64>> {
-    PyIterator::from_object(&sequence)?
-        .enumerate()
-        .map(|(index, item)| {
-            let item = item?;
-            item.getattr("id")?.extract::<i64>().map_err(|err| {
-                PyValueError::new_err(format!(
-                    "pymatching {kind} at index {index} does not expose integer id: {err}"
-                ))
-            })
-        })
-        .collect()
+unsafe fn checked_native_slice<'a, T>(
+    pointer: *const T,
+    len: usize,
+    label: &str,
+) -> PyResult<&'a [T]> {
+    if len == 0 {
+        return Ok(&[]);
+    }
+    if pointer.is_null() {
+        return Err(PyValueError::new_err(format!(
+            "native graphlike problem {label} pointer is null for length {len}"
+        )));
+    }
+    if len > isize::MAX as usize / mem::size_of::<T>() {
+        return Err(PyValueError::new_err(format!(
+            "native graphlike problem {label} length {len} exceeds addressable memory"
+        )));
+    }
+    Ok(slice::from_raw_parts(pointer, len))
 }
 
 fn scale_weights(edges: &mut [BuiltPyMatchingEdge]) -> PyResult<()> {
@@ -1092,7 +1237,7 @@ unsafe extern "C" fn drop_worker_state(state: *mut c_void) {
 
 unsafe extern "C" fn create_worker(
     factory_state: *const c_void,
-    out: *mut FaultScopeNativeDecoderWorkerV2,
+    out: *mut FaultScopeNativeDecoderWorkerV3,
     capacity: usize,
 ) -> FaultScopeNativeDecoderStatusV1 {
     if out.is_null() {
@@ -1101,7 +1246,7 @@ unsafe extern "C" fn create_worker(
     if factory_state.is_null() {
         return static_error("pymatching worker factory received null factory state");
     }
-    if capacity < mem::size_of::<FaultScopeNativeDecoderWorkerV2>() {
+    if capacity < mem::size_of::<FaultScopeNativeDecoderWorkerV3>() {
         return static_error("pymatching worker descriptor capacity is too small");
     }
     let factory = &*factory_state.cast::<FactoryState>();
@@ -1112,8 +1257,8 @@ unsafe extern "C" fn create_worker(
             factory
                 .test_stats
                 .record_worker_create(worker_state as usize);
-            let mut descriptor = FaultScopeNativeDecoderWorkerV2 {
-                struct_size: mem::size_of::<FaultScopeNativeDecoderWorkerV2>(),
+            let mut descriptor = FaultScopeNativeDecoderWorkerV3 {
+                struct_size: mem::size_of::<FaultScopeNativeDecoderWorkerV3>(),
                 worker_state,
                 drop_worker_state: Some(drop_worker_state),
                 decode_batch: Some(decoder_decode_batch),
@@ -1662,7 +1807,7 @@ fn build_summary_to_py(py: Python<'_>, summary: &BuildSummary) -> PyResult<PyObj
 
 unsafe fn create_decoder_capsule(
     py: Python<'_>,
-    descriptor: *mut FaultScopeNativeDecoderFactoryV2,
+    descriptor: *mut FaultScopeNativeDecoderFactoryV3,
 ) -> PyResult<Py<PyAny>> {
     let ptr = pyo3::ffi::PyCapsule_New(
         descriptor.cast::<c_void>(),
@@ -1679,11 +1824,11 @@ unsafe fn create_decoder_capsule(
 unsafe extern "C" fn capsule_destructor(capsule: *mut pyo3::ffi::PyObject) {
     let pointer = pyo3::ffi::PyCapsule_GetPointer(capsule, CAPSULE_NAME.as_ptr().cast::<c_char>());
     if !pointer.is_null() {
-        drop_descriptor(pointer.cast::<FaultScopeNativeDecoderFactoryV2>());
+        drop_descriptor(pointer.cast::<FaultScopeNativeDecoderFactoryV3>());
     }
 }
 
-unsafe fn drop_descriptor(descriptor: *mut FaultScopeNativeDecoderFactoryV2) {
+unsafe fn drop_descriptor(descriptor: *mut FaultScopeNativeDecoderFactoryV3) {
     if descriptor.is_null() {
         return;
     }

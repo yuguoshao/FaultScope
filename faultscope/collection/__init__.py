@@ -8,8 +8,10 @@ from faultscope.collection._collect import (
     iter_progress,
 )
 from faultscope.collection._types import (
+    COLLECTION_COUNTER_SCHEMA_VERSION,
     COLLECTION_CSV_FIELDS,
     COLLECTION_CSV_HEADER,
+    CollectionCounterSchema,
     CollectionData,
     CollectionOptions,
     CollectionRunOptions,
@@ -31,8 +33,10 @@ from faultscope.collection.threshold import (
 )
 
 __all__ = [
+    "COLLECTION_COUNTER_SCHEMA_VERSION",
     "COLLECTION_CSV_FIELDS",
     "COLLECTION_CSV_HEADER",
+    "CollectionCounterSchema",
     "CollectionData",
     "Collector",
     "CollectionOptions",

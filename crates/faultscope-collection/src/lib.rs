@@ -11,6 +11,6 @@ pub use api::{
     collect_dem_logical_error_stats, collect_dem_logical_error_tasks,
     collect_dem_logical_error_tasks_with_progress, sample_dem_logical_error_stats,
     DemLogicalCollectionOptions, DemLogicalCollectionRunOptions, DemLogicalCollectionStats,
-    DemLogicalCollectionTask,
+    DemLogicalCollectionTask, DemLogicalCounterSchema, DEM_LOGICAL_COUNTER_SCHEMA_VERSION,
 };
 pub use hotspot::{collect_dem_hotspot_tasks, DemHotspotCollectionResult};

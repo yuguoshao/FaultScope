@@ -21,9 +21,9 @@ from faultscope.runtime import (
     compile_native_dem_sampler,
     generate_native_dem,
 )
-from tests.native_backend_v2_helpers import (
+from tests.native_backend_v3_helpers import (
     assert_factory_failure_lifetimes,
-    assert_v2_worker_contract,
+    assert_v3_worker_contract,
 )
 
 BACKEND_SRC = Path(__file__).resolve().parents[1] / "backends" / "faultscope-fusion-blossom" / "src"
@@ -61,6 +61,35 @@ class _FakeEntryPoint:
         return faultscope_fusion_blossom.backend_manifest
 
 
+class _CapsuleOnlyGraphlikeProblem:
+    def __init__(self, problem):
+        self._problem = problem
+        self.detector_coords = problem.detector_coords
+
+    def __faultscope_native_graphlike_problem_capsule__(self):
+        return self._problem.__faultscope_native_graphlike_problem_capsule__()
+
+    @property
+    def detector_ids(self):  # pragma: no cover - a fast-path regression trips this.
+        raise AssertionError("native graphlike path must not read Python detector_ids")
+
+    @property
+    def observable_ids(self):  # pragma: no cover - a fast-path regression trips this.
+        raise AssertionError("native graphlike path must not read Python observable_ids")
+
+    @property
+    def edges(self):  # pragma: no cover - a fast-path regression trips this.
+        raise AssertionError("native graphlike path must not materialize Python edges")
+
+
+class _PythonGraphlikeProblem:
+    def __init__(self, problem):
+        self.detector_ids = problem.detector_ids
+        self.detector_coords = problem.detector_coords
+        self.observable_ids = problem.observable_ids
+        self.edges = problem.edges
+
+
 class FusionBlossomBackendPackageTests(unittest.TestCase):
     def tearDown(self) -> None:
         clear_native_decoder_plugin_cache()
@@ -79,6 +108,29 @@ class FusionBlossomBackendPackageTests(unittest.TestCase):
             manifest["decoders"]["fusion-blossom"],
             faultscope_fusion_blossom.NativeFusionBlossomDecoder,
         )
+
+    def test_strong_id_payload_tracks_normalized_backend_options(self) -> None:
+        class Inner:
+            name = "fusion-blossom"
+            detector_ids = (0,)
+            observable_ids = (0,)
+            build_summary = {"solver_edge_count": 1}
+
+        first = faultscope_fusion_blossom.NativeFusionBlossomDecoder(
+            Inner(),
+            options={"weight_scale": 10_000.0},
+        )
+        equivalent = faultscope_fusion_blossom.NativeFusionBlossomDecoder(
+            Inner(),
+            options={"weight_scale": 10_000.0},
+        )
+        changed = faultscope_fusion_blossom.NativeFusionBlossomDecoder(
+            Inner(),
+            options={"weight_scale": 20_000.0},
+        )
+
+        self.assertEqual(first.strong_id_payload(), equivalent.strong_id_payload())
+        self.assertNotEqual(first.strong_id_payload(), changed.strong_id_payload())
 
     @requires_native_backend
     def test_backend_from_dem_returns_external_native_solver_decoder(self) -> None:
@@ -112,7 +164,74 @@ class FusionBlossomBackendPackageTests(unittest.TestCase):
         self.assertIsNotNone(decoder.__faultscope_native_decoder_capsule__())
 
     @requires_native_backend
-    def test_exact_v2_factory_creates_distinct_workers_and_fast_paths(self) -> None:
+    def test_backend_consumes_native_graphlike_capsule_without_python_edge_objects(self) -> None:
+        dem = DetectorErrorModel(
+            detectors=(Detector(id=0, measurement_keys=(), coords=(1.0, 2.0)),),
+            observables=(LogicalObservable(id=0),),
+            edges=(DetectorErrorEdge(0.2, (0,), (0,), "edge0", "X"),),
+        )
+        problem = dem.compile_graphlike_problem()
+
+        decoder = fusion_native.NativeFusionBlossomNativeDecoder.from_graphlike_problem(
+            _CapsuleOnlyGraphlikeProblem(problem)
+        )
+
+        self.assertEqual(decoder.detector_ids, (0,))
+        self.assertEqual(decoder.detector_coords, ((1.0, 2.0),))
+        self.assertEqual(decoder.observable_ids, (0,))
+        self.assertEqual(decoder.edge_count, 1)
+        self.assertEqual(decoder.solver_edge_count, 1)
+
+    @requires_native_backend
+    def test_backend_retains_python_graphlike_compatibility_fallback(self) -> None:
+        dem = DetectorErrorModel(
+            detectors=(Detector(id=0, measurement_keys=(), coords=(1.0, 2.0)),),
+            observables=(LogicalObservable(id=0),),
+            edges=(DetectorErrorEdge(0.2, (0,), (0,), "edge0", "X"),),
+        )
+        problem = dem.compile_graphlike_problem()
+
+        decoder = fusion_native.NativeFusionBlossomNativeDecoder.from_graphlike_problem(
+            _PythonGraphlikeProblem(problem)
+        )
+
+        self.assertEqual(decoder.detector_ids, (0,))
+        self.assertEqual(decoder.detector_coords, ((1.0, 2.0),))
+        self.assertEqual(decoder.observable_ids, (0,))
+        self.assertEqual(decoder.edge_count, 1)
+        self.assertEqual(decoder.solver_edge_count, 1)
+
+    @requires_native_backend
+    def test_backend_ignores_parity_cancelled_no_op_edges(self) -> None:
+        dem = DetectorErrorModel(
+            detectors=(
+                Detector(id=5, measurement_keys=()),
+                Detector(id=2, measurement_keys=()),
+            ),
+            observables=(LogicalObservable(id=8),),
+            edges=(
+                DetectorErrorEdge(0.37, (7, 7), (9, 9), "cancelled", "X"),
+                DetectorErrorEdge(0.2, (2,), (9,), "active", "Z"),
+            ),
+        )
+
+        decoder = faultscope_fusion_blossom.NativeFusionBlossomDecoder.from_dem(dem)
+
+        self.assertEqual(decoder.detector_ids, (5, 2, 7))
+        self.assertEqual(decoder.observable_ids, (8, 9))
+        self.assertEqual(decoder.edge_count, 2)
+        self.assertEqual(decoder.solver_edge_count, 1)
+        self.assertEqual(decoder.build_summary["dem_edge_count"], 2)
+        self.assertEqual(decoder.build_summary["solver_edge_count"], 1)
+
+        class Batch:
+            shots = 1
+            detectors = {5: 0, 2: 1, 7: 0}
+
+        self.assertEqual(decoder.decode_batch_masks(Batch()), {8: 0, 9: 1})
+
+    @requires_native_backend
+    def test_exact_v3_factory_creates_distinct_workers_and_fast_paths(self) -> None:
         dem = DetectorErrorModel(
             detectors=(Detector(id=0, measurement_keys=()),),
             observables=(LogicalObservable(id=0),),
@@ -120,7 +239,7 @@ class FusionBlossomBackendPackageTests(unittest.TestCase):
         )
         decoder = faultscope_fusion_blossom.NativeFusionBlossomDecoder.from_dem(dem)
 
-        test_stats = assert_v2_worker_contract(self, decoder)
+        test_stats = assert_v3_worker_contract(self, decoder)
         self.assertEqual(test_stats.factory_drops, 0)
         del decoder
         gc.collect()
@@ -140,8 +259,9 @@ class FusionBlossomBackendPackageTests(unittest.TestCase):
         test_stats.enable_decode_overlap()
         tasks = (
             {
-                "task_id": "fusion-v2-workers",
-                "strong_id": "fusion-v2-workers-strong",
+                "task_id": "fusion-v3-workers",
+                "strong_id": "fusion-v3-workers-strong",
+                "sampling_id": "fusion-v3-workers-sampling",
                 "sampler": compile_native_dem_sampler(dem),
                 "decoder": decoder,
                 "metadata_json": "{}",
@@ -684,7 +804,10 @@ class FusionBlossomBackendPackageTests(unittest.TestCase):
                 Operation.detector(("m",), detector_id=0),
             ],
         )
-        simulator = FaultScopeSimulator(circuit)
+        simulator = FaultScopeSimulator(
+            circuit,
+            observables=(LogicalObservable(id=0, measurement_keys=("m",)),),
+        )
         decoder = fusion_native.InvalidNativeDecoderCapsule("decode-error")
 
         with self.assertRaisesRegex(ValueError, "forced native decoder decode failure"):

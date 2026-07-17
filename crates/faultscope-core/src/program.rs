@@ -1,7 +1,11 @@
 use std::collections::{HashMap, HashSet};
+use std::fmt;
 use std::ops::Range;
 
 use crate::labels::LocationCatalogBuilder;
+use crate::model::{
+    validate_noise_parts, validate_pauli_targets, validate_qubit_index, validate_qubit_pair,
+};
 use crate::{
     Circuit, IndexedNoiseLocation, LocationCatalog, NoiseLocation, NpError, NpResult, Operation,
     PauliBasis,
@@ -81,6 +85,91 @@ pub(crate) enum ExpandedOperation {
         observable_id: i64,
         measurement_ids: Vec<usize>,
     },
+}
+
+pub(crate) fn validate_expanded_program_targets(
+    n_qubits: usize,
+    program: &ExpandedProgram,
+) -> NpResult<()> {
+    for (index, operation) in program.operations.iter().enumerate() {
+        let context = ExpandedOperationContext {
+            kind: expanded_operation_kind(operation),
+            index,
+        };
+        match operation {
+            ExpandedOperation::H(qubit)
+            | ExpandedOperation::S(qubit)
+            | ExpandedOperation::SDag(qubit)
+            | ExpandedOperation::MeasureSingle { qubit, .. }
+            | ExpandedOperation::Reset { qubit, .. } => {
+                validate_qubit_index(n_qubits, *qubit, &context)?;
+            }
+            ExpandedOperation::Cx(left, right)
+            | ExpandedOperation::Cz(left, right)
+            | ExpandedOperation::Swap(left, right) => {
+                validate_qubit_pair(n_qubits, *left, *right, &context)?;
+            }
+            ExpandedOperation::Pauli { qubits, pauli }
+            | ExpandedOperation::MeasurePauli { qubits, pauli, .. } => {
+                validate_pauli_targets(n_qubits, qubits, pauli, &context)?;
+            }
+            ExpandedOperation::Noise(_)
+            | ExpandedOperation::Detector { .. }
+            | ExpandedOperation::ObservableInclude { .. } => {}
+        }
+    }
+    for location in &program.noise_locations {
+        let context = ExpandedNoiseContext {
+            location_id: program.location_catalog.label(location.location_id),
+        };
+        validate_noise_parts(
+            n_qubits,
+            &location.model,
+            location.rate,
+            &location.qubits,
+            &context,
+        )?;
+    }
+    Ok(())
+}
+
+struct ExpandedOperationContext {
+    kind: &'static str,
+    index: usize,
+}
+
+impl fmt::Display for ExpandedOperationContext {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{} at expanded operation {}", self.kind, self.index)
+    }
+}
+
+struct ExpandedNoiseContext<'a> {
+    location_id: &'a str,
+}
+
+impl fmt::Display for ExpandedNoiseContext<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "noise location {:?}", self.location_id)
+    }
+}
+
+fn expanded_operation_kind(operation: &ExpandedOperation) -> &'static str {
+    match operation {
+        ExpandedOperation::H(_) => "H",
+        ExpandedOperation::S(_) => "S",
+        ExpandedOperation::SDag(_) => "SDag",
+        ExpandedOperation::Cx(_, _) => "CX",
+        ExpandedOperation::Cz(_, _) => "CZ",
+        ExpandedOperation::Swap(_, _) => "SWAP",
+        ExpandedOperation::Pauli { .. } => "Pauli",
+        ExpandedOperation::Noise(_) => "Noise",
+        ExpandedOperation::MeasureSingle { .. } => "Measure",
+        ExpandedOperation::MeasurePauli { .. } => "MeasurePauli",
+        ExpandedOperation::Reset { .. } => "Reset",
+        ExpandedOperation::Detector { .. } => "Detector",
+        ExpandedOperation::ObservableInclude { .. } => "ObservableInclude",
+    }
 }
 
 /// Expand a structured operation tree into the single integer-indexed IR used

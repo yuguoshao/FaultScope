@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-import math
+import importlib
+import json
 from dataclasses import dataclass
 from typing import Any, Mapping, Sequence
 
@@ -26,6 +27,29 @@ class PyMatchingDecoder:
     observable_ids: tuple[int, ...]
     edge_count: int
 
+    def strong_id_payload(self) -> Mapping[str, object]:
+        """Return the effective PyMatching graph used by this decoder."""
+
+        module_name = type(self.matching).__module__.split(".", 1)[0]
+        try:
+            backend_module = importlib.import_module(module_name)
+        except ImportError:
+            backend_version = None
+        else:
+            backend_version = getattr(backend_module, "__version__", None)
+        return {
+            "backend": "pymatching-python",
+            "backend_module": module_name,
+            "backend_version": (None if backend_version is None else str(backend_version)),
+            "decoder": "pymatching",
+            "implementation_version": 1,
+            "detector_ids": list(self.detector_ids),
+            "observable_ids": list(self.observable_ids),
+            "parameters": {},
+            "source_edge_count": self.edge_count,
+            "matching_graph": _matching_graph_identity_payload(self.matching),
+        }
+
     @classmethod
     def from_dem(
         cls,
@@ -39,6 +63,9 @@ class PyMatchingDecoder:
 
         The DEM must be graphlike: every edge may touch at most two detectors.
         Logical flips are passed through PyMatching's ``faults_matrix``.
+        Parallel edges with the same endpoints must have identical logical
+        effects because PyMatching cannot preserve conflicting fault IDs when
+        it merges those edges.
         """
 
         pymatching, np, sparse = _load_optional_modules(
@@ -46,11 +73,11 @@ class PyMatchingDecoder:
             numpy_module,
             scipy_sparse_module,
         )
-        detector_ids, observable_ids = _dem_ids(dem)
-        _validate_graphlike_dem(dem)
-
-        detector_index = {detector_id: idx for idx, detector_id in enumerate(detector_ids)}
-        observable_index = {observable_id: idx for idx, observable_id in enumerate(observable_ids)}
+        problem = _compile_graphlike_problem(dem)
+        detector_ids = tuple(int(detector_id) for detector_id in problem.detector_ids)
+        observable_ids = tuple(int(observable_id) for observable_id in problem.observable_ids)
+        edges = tuple(problem.edges)
+        _validate_parallel_logical_effects(edges)
 
         h_rows: list[int] = []
         h_cols: list[int] = []
@@ -61,27 +88,27 @@ class PyMatchingDecoder:
         weights: list[float] = []
         probabilities: list[float] = []
 
-        for col, edge in enumerate(dem.edges):
-            probability = _clamped_probability(edge.probability)
+        for col, edge in enumerate(edges):
+            probability = float(edge.probability)
             probabilities.append(probability)
-            weights.append(math.log((1.0 - probability) / probability))
-            for detector_id in edge.detectors:
-                h_rows.append(detector_index[detector_id])
+            weights.append(float(edge.weight))
+            for detector_index in edge.detectors:
+                h_rows.append(int(detector_index))
                 h_cols.append(col)
                 h_data.append(1)
-            for observable_id in edge.observables:
-                f_rows.append(observable_index[observable_id])
+            for observable_index in edge.fault_observables:
+                f_rows.append(int(observable_index))
                 f_cols.append(col)
                 f_data.append(1)
 
         h = sparse.csc_matrix(
             (h_data, (h_rows, h_cols)),
-            shape=(len(detector_ids), len(dem.edges)),
+            shape=(len(detector_ids), len(edges)),
             dtype=np.uint8,
         )
         faults_matrix = sparse.csc_matrix(
             (f_data, (f_rows, f_cols)),
-            shape=(len(observable_ids), len(dem.edges)),
+            shape=(len(observable_ids), len(edges)),
             dtype=np.uint8,
         )
         weights_array = np.array(weights, dtype=float)
@@ -98,7 +125,7 @@ class PyMatchingDecoder:
             matching=matching,
             detector_ids=detector_ids,
             observable_ids=observable_ids,
-            edge_count=len(dem.edges),
+            edge_count=len(edges),
         )
 
     def decode_detector_record(
@@ -209,6 +236,43 @@ def _matching_from_check_matrix(
         return pymatching.Matching.from_check_matrix(h, **kwargs)
 
 
+def _matching_graph_identity_payload(matching: Any) -> dict[str, object]:
+    edges_method = getattr(matching, "edges", None)
+    if not callable(edges_method):
+        raise TypeError("PyMatchingDecoder matching object does not expose stable edges()")
+
+    edges: list[dict[str, object]] = []
+    for raw_edge in edges_method():
+        if len(raw_edge) != 3:
+            raise TypeError("PyMatchingDecoder matching edge must contain two endpoints and data")
+        left, right, raw_data = raw_edge
+        if not isinstance(raw_data, Mapping):
+            raise TypeError("PyMatchingDecoder matching edge data must be a mapping")
+        left = int(left)
+        right = None if right is None else int(right)
+        if right is not None and right < left:
+            left, right = right, left
+        fault_ids = raw_data.get("fault_ids", ())
+        edges.append(
+            {
+                "left": left,
+                "right": right,
+                "fault_ids": sorted(int(value) for value in fault_ids),
+                "weight": float(raw_data.get("weight", 1.0)),
+                "error_probability": float(raw_data.get("error_probability", -1.0)),
+            }
+        )
+    edges.sort(key=lambda edge: json.dumps(edge, sort_keys=True, separators=(",", ":")))
+    boundary = getattr(matching, "boundary", ())
+    return {
+        "num_detectors": int(getattr(matching, "num_detectors")),
+        "num_nodes": int(getattr(matching, "num_nodes")),
+        "num_fault_ids": int(getattr(matching, "num_fault_ids")),
+        "boundary": sorted(int(value) for value in boundary),
+        "edges": edges,
+    }
+
+
 def _load_optional_modules(
     pymatching_module: Any | None,
     numpy_module: Any | None,
@@ -238,32 +302,51 @@ def _load_optional_modules(
     return pymatching_module, numpy_module, scipy_sparse_module
 
 
-def _dem_ids(dem: DetectorErrorModel) -> tuple[tuple[int, ...], tuple[int, ...]]:
-    detector_ids = {detector.id for detector in dem.detectors}
-    observable_ids = {observable.id for observable in dem.observables}
-    for edge in dem.edges:
-        detector_ids.update(edge.detectors)
-        observable_ids.update(edge.observables)
-    return tuple(sorted(detector_ids)), tuple(sorted(observable_ids))
+def _compile_graphlike_problem(dem: DetectorErrorModel) -> Any:
+    try:
+        return dem.compile_graphlike_problem()
+    except ValueError as exc:
+        if not dem.is_graphlike():
+            raise UnsupportedPyMatchingDemError(str(exc)) from exc
+        raise
 
 
-def _validate_graphlike_dem(dem: DetectorErrorModel) -> None:
-    for edge_index, edge in enumerate(dem.edges):
-        if len(edge.detectors) > 2:
+def _validate_parallel_logical_effects(edges: Sequence[Any]) -> None:
+    groups: dict[
+        tuple[int, int | None],
+        tuple[tuple[int, ...], list[int]],
+    ] = {}
+    for edge in edges:
+        detectors = tuple(int(detector) for detector in edge.detectors)
+        if not detectors:
+            continue
+        endpoint: tuple[int, int | None]
+        if len(detectors) == 1:
+            endpoint = (detectors[0], None)
+        elif len(detectors) == 2:
+            endpoint = (min(detectors), max(detectors))
+        else:  # pragma: no cover - compile_graphlike_problem rejects this first.
             raise UnsupportedPyMatchingDemError(
-                "PyMatching graph construction requires graphlike DEM edges "
-                f"with at most two detectors; edge {edge_index} has {edge.detectors}"
+                f"pymatching edge {edge.dem_edge_index} has {len(detectors)} detectors; "
+                "expected one boundary detector or two graph detectors"
             )
-        if not edge.detectors and edge.observables:
+
+        fault_observables = tuple(int(index) for index in edge.fault_observables)
+        dem_edge_index = int(edge.dem_edge_index)
+        existing = groups.get(endpoint)
+        if existing is None:
+            groups[endpoint] = (fault_observables, [dem_edge_index])
+            continue
+
+        existing_observables, existing_edge_indices = existing
+        if existing_observables != fault_observables:
             raise UnsupportedPyMatchingDemError(
-                "DEM contains an undetectable logical edge with no detectors; "
-                f"edge {edge_index} has observables {edge.observables}"
+                f"pymatching found ambiguous parallel endpoint {endpoint}: "
+                f"DEM edge {dem_edge_index} fault_observables {fault_observables} "
+                f"conflicts with DEM edge(s) {tuple(existing_edge_indices)} "
+                f"fault_observables {existing_observables}"
             )
-
-
-def _clamped_probability(probability: float) -> float:
-    eps = 1e-15
-    return min(1.0 - eps, max(eps, float(probability)))
+        existing_edge_indices.append(dem_edge_index)
 
 
 def _rows(predictions: Any) -> list[Any]:

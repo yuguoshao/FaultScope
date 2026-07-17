@@ -174,6 +174,7 @@ fn py_collection_task_to_rust(
     Ok(faultscope_collection::DemLogicalCollectionTask {
         task_id: required_string(dict, "task_id")?,
         strong_id: required_string(dict, "strong_id")?,
+        sampling_id: required_string(dict, "sampling_id")?,
         sampler,
         decoder,
         decoder_name,
@@ -224,6 +225,7 @@ fn py_existing_stats_to_rust(
 fn py_collection_stats_to_rust(
     dict: &Bound<'_, PyDict>,
 ) -> PyResult<faultscope_collection::DemLogicalCollectionStats> {
+    let counter_schema = py_counter_schema_to_rust(&required_item(dict, "counter_schema")?)?;
     let custom_counts = required_item(dict, "custom_counts")?;
     let custom_counts = custom_counts
         .downcast::<PyDict>()
@@ -241,6 +243,7 @@ fn py_collection_stats_to_rust(
         errors: required_item(dict, "errors")?.extract::<usize>()?,
         discards: required_item(dict, "discards")?.extract::<usize>()?,
         seconds: required_item(dict, "seconds")?.extract::<f64>()?,
+        counter_schema,
         custom_counts: counts,
     })
 }
@@ -258,11 +261,52 @@ fn collection_stats_to_py(
     out.set_item("errors", stats.errors)?;
     out.set_item("discards", stats.discards)?;
     out.set_item("seconds", stats.seconds)?;
+    out.set_item(
+        "counter_schema",
+        counter_schema_to_py(py, stats.counter_schema)?,
+    )?;
     let counts = PyDict::new(py);
     for (key, value) in &stats.custom_counts {
         counts.set_item(key, value)?;
     }
     out.set_item("custom_counts", counts)?;
+    Ok(out.into())
+}
+
+fn py_counter_schema_to_rust(
+    value: &Bound<'_, PyAny>,
+) -> PyResult<faultscope_collection::DemLogicalCounterSchema> {
+    let dict = value
+        .downcast::<PyDict>()
+        .map_err(|_| PyTypeError::new_err("counter_schema must be a dict"))?;
+    if dict.len() != 3 {
+        return Err(PyValueError::new_err(
+            "counter_schema fields do not match the v3 collection contract",
+        ));
+    }
+    let schema = faultscope_collection::DemLogicalCounterSchema {
+        schema_version: required_item(dict, "schema_version")?.extract::<u32>()?,
+        count_observable_error_combos: required_item(dict, "count_observable_error_combos")?
+            .extract::<bool>()?,
+        count_detection_events: required_item(dict, "count_detection_events")?.extract::<bool>()?,
+    };
+    schema
+        .validate()
+        .map_err(|err| PyValueError::new_err(err.to_string()))?;
+    Ok(schema)
+}
+
+fn counter_schema_to_py(
+    py: Python<'_>,
+    schema: faultscope_collection::DemLogicalCounterSchema,
+) -> PyResult<PyObject> {
+    let out = PyDict::new(py);
+    out.set_item("schema_version", schema.schema_version)?;
+    out.set_item(
+        "count_observable_error_combos",
+        schema.count_observable_error_combos,
+    )?;
+    out.set_item("count_detection_events", schema.count_detection_events)?;
     Ok(out.into())
 }
 

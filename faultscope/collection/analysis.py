@@ -23,8 +23,8 @@ def error_rate_points(
         metadata = dict(stat.metadata)
         x = metadata[x_key]
         group = metadata[group_key] if group_key is not None else None
-        errors = int(stat.custom_counts.get(count_key, 0)) if count_key is not None else stat.errors
         shots = stat.accepted_shots
+        errors = _read_binomial_error_count(stat, count_key=count_key, shots=shots)
         rate = errors / shots if shots else math.nan
         points.append(
             {
@@ -129,6 +129,25 @@ def _binomial_stderr(rate: float, shots: int) -> float:
     if shots == 0 or not math.isfinite(rate):
         return math.nan
     return math.sqrt(rate * (1.0 - rate) / shots)
+
+
+def _read_binomial_error_count(
+    stat: TaskStats,
+    *,
+    count_key: str | None,
+    shots: int,
+) -> int:
+    if count_key is None:
+        value = stat.errors
+    else:
+        if count_key not in stat.custom_counts:
+            raise ValueError(f"missing custom count {count_key!r}")
+        value = stat.custom_counts[count_key]
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError("count must be an integer")
+    if value < 0 or value > shots:
+        raise ValueError("count must be between 0 and accepted shots")
+    return value
 
 
 def _import_matplotlib() -> Any:

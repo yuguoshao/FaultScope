@@ -20,8 +20,10 @@ import faultscope.viz
 
 from faultscope import DetectorErrorEdge, DetectorErrorModel, LogicalObservable
 from faultscope.collection import (
+    COLLECTION_COUNTER_SCHEMA_VERSION,
     COLLECTION_CSV_HEADER,
     Collector,
+    CollectionCounterSchema,
     CollectionData,
     CollectionOptions,
     CollectionRunOptions,
@@ -46,22 +48,29 @@ from faultscope.collection import (
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-API_SNAPSHOT = REPO_ROOT / "tests" / "api_contract_v0_1.json"
+API_SNAPSHOT = REPO_ROOT / "tests" / "public_api_contract.json"
 
 
 class ReleaseContractTests(unittest.TestCase):
     def test_python_distribution_version_is_v0_2(self) -> None:
-        self.assertEqual(faultscope.__version__, "0.2.1")
-        self.assertEqual(importlib.metadata.version("faultscope"), "0.2.1")
+        self.assertEqual(faultscope.__version__, "0.2.5")
+        self.assertEqual(importlib.metadata.version("faultscope"), "0.2.5")
 
     def test_package_contains_pep561_marker_and_native_stub(self) -> None:
         package_root = Path(faultscope.__file__).resolve().parent
         self.assertTrue((package_root / "py.typed").is_file())
         native_stub = package_root / "_native.pyi"
         self.assertTrue(native_stub.is_file())
-        self.assertIn("class NativeDemSampler", native_stub.read_text())
+        stub = native_stub.read_text()
+        self.assertIn("class NativeDemSampler", stub)
+        self.assertIn("from typing_extensions import Never, Self", stub)
+        stabilizer_block = stub.split("class StabilizerState:", 1)[1].split("\n@final", 1)[0]
+        self.assertIn(
+            "def __new__(cls, _no_direct_construction: Never, /) -> Self",
+            stabilizer_block,
+        )
 
-    def test_public_exports_match_v0_1_snapshot(self) -> None:
+    def test_public_exports_match_contract(self) -> None:
         modules = {
             "faultscope": faultscope,
             "faultscope.backends": faultscope.backends,
@@ -78,13 +87,15 @@ class ReleaseContractTests(unittest.TestCase):
         actual = {name: sorted(module.__all__) for name, module in modules.items()}
         self.assertEqual(actual, expected)
 
-    def test_collection_csv_header_is_frozen_for_v0_1(self) -> None:
+    def test_collection_csv_header_matches_contract(self) -> None:
         self.assertEqual(
             COLLECTION_CSV_HEADER,
-            "shots,errors,discards,seconds,decoder,strong_id,json_metadata,custom_counts",
+            "shots,errors,discards,seconds,decoder,strong_id,json_metadata,"
+            "json_counter_schema,custom_counts",
         )
+        self.assertEqual(COLLECTION_COUNTER_SCHEMA_VERSION, 1)
 
-    def test_public_python_function_signatures_are_frozen_for_v0_1(self) -> None:
+    def test_public_python_function_signatures_match_contract(self) -> None:
         expected_parameters = {
             collect: ("tasks", "options", "run_options"),
             collect_hotspots: ("tasks", "options", "run_options"),
@@ -121,8 +132,13 @@ class ReleaseContractTests(unittest.TestCase):
         }
         self.assertEqual(actual, expected_parameters)
 
-    def test_public_dataclass_fields_and_class_methods_are_frozen_for_v0_1(self) -> None:
+    def test_public_dataclass_fields_and_class_methods_match_contract(self) -> None:
         expected_fields = {
+            CollectionCounterSchema: (
+                "schema_version",
+                "count_observable_error_combos",
+                "count_detection_events",
+            ),
             CollectionOptions: (
                 "max_shots",
                 "max_errors",
@@ -166,6 +182,7 @@ class ReleaseContractTests(unittest.TestCase):
                 "metadata",
                 "strong_id",
                 "custom_counts",
+                "counter_schema",
             ),
             HotspotCollectionResult: (
                 "stats",
@@ -219,6 +236,7 @@ class ReleaseContractTests(unittest.TestCase):
                 "accepted_error_rate",
                 "accepted_error_rate_stderr",
                 "accepted_shots",
+                "counter_schema",
                 "from_csv_row",
                 "logical_error_rate",
                 "logical_error_rate_stderr",
@@ -238,7 +256,7 @@ class ReleaseContractTests(unittest.TestCase):
             ["to_dict"],
         )
 
-    def test_collection_cli_subcommands_are_frozen_for_v0_1(self) -> None:
+    def test_collection_cli_subcommands_match_contract(self) -> None:
         result = subprocess.run(
             [sys.executable, "-m", "faultscope.collection", "--help"],
             cwd=REPO_ROOT,
@@ -257,7 +275,7 @@ class ReleaseContractTests(unittest.TestCase):
         ]
         self.assertEqual(undocumented, [])
 
-    def test_collection_strong_id_is_frozen_for_v0_1(self) -> None:
+    def test_collection_strong_id_schema_v3_is_frozen(self) -> None:
         dem = DetectorErrorModel(
             detectors=(),
             observables=(LogicalObservable(id=0),),
@@ -278,7 +296,7 @@ class ReleaseContractTests(unittest.TestCase):
         )
         self.assertEqual(
             stats.strong_id,
-            "4875ec4d3a1fbc3fc3bbc4a769d7b56c14ea84583af5cab01860c6d4b8793bd4",
+            "4122c57d8371d4edd3ef8ffaec67a4fc3a017456f8cf27afe6915a8cf2607113",
         )
 
 

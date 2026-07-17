@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -46,7 +47,12 @@ def parse_stim_circuit(text: str) -> StimImportResult:
     """Parse supported Stim syntax into a FaultScope circuit and declarations."""
 
     importer = _StructuredStimImporter()
-    return importer.parse(text)
+    try:
+        return importer.parse(text)
+    except StimImportError:
+        raise
+    except (TypeError, ValueError) as exc:
+        raise StimImportError(f"invalid Stim circuit: {exc}") from exc
 
 
 @dataclass(frozen=True)
@@ -62,7 +68,6 @@ class _RepeatNode:
     count: int
     body: tuple["_StimNode", ...]
     line_no: int
-    recovered: bool = False
 
 
 _StimNode = _InstructionNode | _RepeatNode
@@ -81,7 +86,6 @@ class _StructuredStimImporter:
 
     def parse(self, text: str) -> StimImportResult:
         nodes = _parse_stim_nodes(text)
-        nodes = _recover_flattened_repeats(nodes)
         operations = self._build_nodes(nodes)
         self._scan_nodes(nodes)
         observables = tuple(
@@ -188,7 +192,7 @@ class _StructuredStimImporter:
         if name == "MPP":
             rate = _optional_single_arg(args, name, line_no)
             out = []
-            for product in _split_mpp_products(targets):
+            for product in _split_mpp_products(targets, line_no):
                 product_qubits: list[int] = []
                 paulis: list[str] = []
                 for factor in product:
@@ -338,6 +342,12 @@ class _StructuredStimImporter:
         )
         if len(node.args) != len(events):
             raise StimImportError(f"{node.name} requires {len(events)} args on line {node.line_no}")
+        for probability in node.args:
+            _validate_probability(probability, node.name, node.line_no)
+        if sum(node.args) > 1.0:
+            raise StimImportError(
+                f"{node.name} probabilities must sum to at most 1 on line {node.line_no}"
+            )
         weights = {
             event: probability for event, probability in zip(events, node.args) if probability > 0
         }
@@ -381,7 +391,7 @@ class _StructuredStimImporter:
                 for _ in node.targets:
                     self._next_measurement_key()
             elif name == "MPP":
-                for _ in _split_mpp_products(node.targets):
+                for _ in _split_mpp_products(node.targets, node.line_no):
                     self._next_measurement_key()
             elif name == "DETECTOR":
                 keys = self._keys_for_lookbacks(_parse_rec_lookbacks(node.targets, node.line_no))
@@ -472,7 +482,7 @@ def _parse_stim_nodes(text: str) -> tuple[_StimNode, ...]:
         current.append(
             _InstructionNode(
                 name=match.group(1).upper(),
-                args=_parse_args(match.group(2)),
+                args=_parse_args(match.group(2), line_no),
                 targets=tuple(match.group(3).split()) if match.group(3) else (),
                 line_no=line_no,
             )
@@ -481,174 +491,6 @@ def _parse_stim_nodes(text: str) -> tuple[_StimNode, ...]:
         _, _, repeat_line = stack[-1]
         raise StimImportError(f"unterminated REPEAT block starting on line {repeat_line}")
     return tuple(root)
-
-
-def _recover_flattened_repeats(nodes: tuple[_StimNode, ...]) -> tuple[_StimNode, ...]:
-    if any(isinstance(node, _RepeatNode) for node in nodes):
-        return nodes
-    instructions = tuple(node for node in nodes if isinstance(node, _InstructionNode))
-    if len(instructions) != len(nodes):
-        return nodes
-    starts = [
-        index
-        for index, node in enumerate(instructions)
-        if node.name == "TICK"
-        and index > 0
-        and instructions[index - 1].name in {"R", "RX", "RY", "MR", "MRX", "MRY", "DETECTOR"}
-    ]
-    if len(starts) < 2:
-        return nodes
-    blocks: list[tuple[int, int]] = []
-    for block_index, start in enumerate(starts):
-        end = starts[block_index + 1] if block_index + 1 < len(starts) else len(instructions)
-        terminal = next(
-            (
-                index
-                for index in range(start, end)
-                if instructions[index].name == "OBSERVABLE_INCLUDE"
-                or (
-                    instructions[index].name in {"M", "MX", "MY"}
-                    and not _is_measure_then_reset_pair(instructions, index, end)
-                )
-            ),
-            end,
-        )
-        end = terminal
-        if any(
-            instructions[index].name in {"MR", "MRX", "MRY"}
-            or _is_measure_then_reset_pair(instructions, index, end)
-            for index in range(start, end)
-        ):
-            blocks.append((start, end))
-    if len(blocks) < 2:
-        return nodes
-    signatures = [_round_signature(instructions[start:end]) for start, end in blocks]
-    best_start = 0
-    best_count = 1
-    run_start = 0
-    for index in range(1, len(signatures) + 1):
-        if index < len(signatures) and signatures[index] == signatures[run_start]:
-            continue
-        count = index - run_start
-        if count > best_count:
-            best_start, best_count = run_start, count
-        run_start = index
-    if best_count < 2:
-        return nodes
-    first_start, first_end = blocks[best_start]
-    last_end = blocks[best_start + best_count - 1][1]
-    body = list(instructions[first_start:first_end])
-    delta = _round_coordinate_delta(
-        instructions[first_start:first_end],
-        instructions[blocks[best_start + 1][0] : blocks[best_start + 1][1]],
-    )
-    synthetic_line = instructions[first_start].line_no
-    if delta:
-        body.append(
-            _InstructionNode(
-                name="SHIFT_COORDS",
-                args=tuple(delta),
-                targets=(),
-                line_no=synthetic_line,
-            )
-        )
-    split_warmup = best_start == 0 and _should_split_recovered_warmup(
-        instructions[first_start:first_end], best_count
-    )
-    replacement: list[_StimNode] = []
-    repeat_count = best_count
-    if split_warmup:
-        replacement.extend(instructions[first_start:first_end])
-        repeat_count -= 1
-        if delta:
-            replacement.append(
-                _InstructionNode(
-                    name="SHIFT_COORDS",
-                    args=tuple(delta),
-                    targets=(),
-                    line_no=synthetic_line,
-                )
-            )
-    replacement.append(
-        _RepeatNode(
-            count=repeat_count,
-            body=tuple(body),
-            line_no=synthetic_line,
-            recovered=True,
-        )
-    )
-    if delta:
-        replacement.append(
-            _InstructionNode(
-                name="SHIFT_COORDS",
-                args=tuple(-best_count * value for value in delta),
-                targets=(),
-                line_no=synthetic_line,
-            )
-        )
-    return tuple(instructions[:first_start]) + tuple(replacement) + tuple(instructions[last_end:])
-
-
-def _should_split_recovered_warmup(block: Sequence[_InstructionNode], count: int) -> bool:
-    if count < 8:
-        return False
-    clifford_names = {"H", "S", "S_DAG", "CX", "CNOT", "CZ", "SWAP"}
-    if not any(node.name in clifford_names for node in block):
-        return False
-    for node in block:
-        if (
-            node.name.endswith("_ERROR")
-            or node.name.startswith("DEPOLARIZE")
-            or node.name.startswith("PAULI_CHANNEL")
-            or (node.name in {"M", "MX", "MY", "MR", "MRX", "MRY"} and node.args)
-        ):
-            return False
-    return True
-
-
-def _is_measure_then_reset_pair(
-    instructions: Sequence[_InstructionNode],
-    index: int,
-    end: int,
-) -> bool:
-    if index + 1 >= end:
-        return False
-    measurement = instructions[index]
-    reset = instructions[index + 1]
-    expected_reset = {"M": "R", "MX": "RX", "MY": "RY"}.get(measurement.name)
-    return expected_reset == reset.name and measurement.targets == reset.targets
-
-
-def _round_signature(block: Sequence[_InstructionNode]) -> tuple[object, ...]:
-    detector_origin = next((node.args for node in block if node.name == "DETECTOR"), ())
-    signature: list[object] = []
-    for node in block:
-        args = node.args
-        if node.name == "DETECTOR" and detector_origin:
-            width = max(len(args), len(detector_origin))
-            args = tuple(
-                (args[index] if index < len(args) else 0.0)
-                - (detector_origin[index] if index < len(detector_origin) else 0.0)
-                for index in range(width)
-            )
-        signature.append((node.name, args, node.targets))
-    return tuple(signature)
-
-
-def _round_coordinate_delta(
-    left: Sequence[_InstructionNode],
-    right: Sequence[_InstructionNode],
-) -> tuple[float, ...]:
-    left_args = next((node.args for node in left if node.name == "DETECTOR"), ())
-    right_args = next((node.args for node in right if node.name == "DETECTOR"), ())
-    if not left_args and not right_args:
-        return ()
-    width = max(len(left_args), len(right_args))
-    return tuple(
-        (right_args[index] if index < len(right_args) else 0.0)
-        - (left_args[index] if index < len(left_args) else 0.0)
-        for index in range(width)
-    )
 
 
 def _parse_rec_lookbacks(targets: Sequence[str], line_no: int) -> tuple[int, ...]:
@@ -691,16 +533,29 @@ def _strip_comment(line: str) -> str:
     return line.split("#", 1)[0]
 
 
-def _parse_args(raw: str | None) -> tuple[float, ...]:
-    if raw is None or not raw.strip():
+def _parse_args(raw: str | None, line_no: int) -> tuple[float, ...]:
+    if raw is None:
         return ()
-    return tuple(float(part.strip()) for part in raw.split(",") if part.strip())
+    parsed: list[float] = []
+    for part in raw.split(","):
+        token = part.strip()
+        if not token:
+            parsed.append(0.0)
+            continue
+        try:
+            value = float(token)
+        except ValueError as exc:
+            raise StimImportError(f"invalid numeric argument {token!r} on line {line_no}") from exc
+        if not math.isfinite(value):
+            raise StimImportError(f"numeric arguments must be finite on line {line_no}")
+        parsed.append(value)
+    return tuple(parsed)
 
 
 def _required_single_arg(args: tuple[float, ...], name: str, line_no: int) -> float:
     if len(args) != 1:
         raise StimImportError(f"{name} requires exactly one arg on line {line_no}")
-    return args[0]
+    return _validate_probability(args[0], name, line_no)
 
 
 def _optional_single_arg(
@@ -712,7 +567,13 @@ def _optional_single_arg(
         return None
     if len(args) != 1:
         raise StimImportError(f"{name} accepts at most one arg on line {line_no}")
-    return args[0]
+    return _validate_probability(args[0], name, line_no)
+
+
+def _validate_probability(value: float, name: str, line_no: int) -> float:
+    if not math.isfinite(value) or value < 0.0 or value > 1.0:
+        raise StimImportError(f"{name} probability must be in [0, 1] on line {line_no}")
+    return value
 
 
 def _parse_qubit_targets(targets: Sequence[str], line_no: int) -> tuple[int, ...]:
@@ -730,11 +591,40 @@ def _parse_qubit_targets(targets: Sequence[str], line_no: int) -> tuple[int, ...
     return tuple(qubits)
 
 
-def _split_mpp_products(targets: Sequence[str]) -> list[list[str]]:
-    products: list[list[str]] = []
+def _split_mpp_products(targets: Sequence[str], line_no: int) -> list[list[str]]:
+    pieces: list[str] = []
     for target in targets:
-        factors = [factor for factor in target.split("*") if factor]
-        if not factors:
+        start = 0
+        for index, char in enumerate(target):
+            if char != "*":
+                continue
+            if index > start:
+                pieces.append(target[start:index])
+            pieces.append("*")
+            start = index + 1
+        if start < len(target):
+            pieces.append(target[start:])
+
+    products: list[list[str]] = []
+    current: list[str] = []
+    after_combiner = False
+    for piece in pieces:
+        if piece == "*":
+            if not current or after_combiner:
+                raise StimImportError(f"invalid MPP combiner on line {line_no}")
+            after_combiner = True
             continue
-        products.append(factors)
+        if not _MPP_TARGET_RE.match(piece):
+            raise StimImportError(f"unsupported MPP target {piece!r} on line {line_no}")
+        if current and not after_combiner:
+            products.append(current)
+            current = []
+        current.append(piece)
+        after_combiner = False
+    if after_combiner:
+        raise StimImportError(f"invalid trailing MPP combiner on line {line_no}")
+    if current:
+        products.append(current)
+    if not products:
+        raise StimImportError(f"MPP requires at least one Pauli product on line {line_no}")
     return products

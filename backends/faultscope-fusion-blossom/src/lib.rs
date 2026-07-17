@@ -1,11 +1,14 @@
 use faultscope_core::{
     log_likelihood_ratio, FaultScopeNativeCorrectionMaskBatchMutViewV1,
-    FaultScopeNativeDecoderFactoryV2, FaultScopeNativeDecoderI64SliceV1,
+    FaultScopeNativeDecoderFactoryV3, FaultScopeNativeDecoderI64SliceV1,
     FaultScopeNativeDecoderStatusV1, FaultScopeNativeDecoderStringViewV1,
-    FaultScopeNativeDecoderWorkerV2, FaultScopeNativeDetectorEventShotBatchViewV1,
-    FaultScopeNativeDetectorMaskBatchViewV1, FaultScopeNativePackedDetectorShotBatchViewV1,
+    FaultScopeNativeDecoderWorkerV3, FaultScopeNativeDetectorEventShotBatchViewV1,
+    FaultScopeNativeDetectorMaskBatchViewV1, FaultScopeNativeGraphlikeEdgeV1,
+    FaultScopeNativeGraphlikeProblemV1, FaultScopeNativePackedDetectorShotBatchViewV1,
     FaultScopeNativePackedObservableShotBatchMutViewV1, NATIVE_DECODER_FACTORY_FLAG_THREAD_SAFE,
     NATIVE_DECODER_PLUGIN_ABI_VERSION, NATIVE_DECODER_PLUGIN_STATUS_ERROR,
+    NATIVE_GRAPHLIKE_PROBLEM_ABI_VERSION, NATIVE_GRAPHLIKE_PROBLEM_CAPSULE_METHOD,
+    NATIVE_GRAPHLIKE_PROBLEM_CAPSULE_NAME,
 };
 use fusion_blossom::complete_graph::CompleteGraph;
 use fusion_blossom::dual_module::{DualNodeClass, DualNodePtr};
@@ -30,7 +33,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 const BACKEND_NAME: &str = "fusion-blossom";
-const CAPSULE_NAME: &[u8] = b"faultscope.native_decoder_plugin.v2\0";
+const CAPSULE_NAME: &[u8] = b"faultscope.native_decoder_plugin.v3\0";
 const DEFAULT_WEIGHT_SCALE: f64 = 10_000.0;
 
 #[pyclass(name = "NativeFusionBlossomNativeDecoder")]
@@ -74,9 +77,9 @@ impl PyNativeFusionBlossomNativeDecoder {
         .map_err(PyValueError::new_err)?;
         let test_stats = Arc::clone(&state.test_stats);
         let state = Box::new(state);
-        let descriptor = Box::new(FaultScopeNativeDecoderFactoryV2 {
+        let descriptor = Box::new(FaultScopeNativeDecoderFactoryV3 {
             abi_version: NATIVE_DECODER_PLUGIN_ABI_VERSION,
-            struct_size: mem::size_of::<FaultScopeNativeDecoderFactoryV2>(),
+            struct_size: mem::size_of::<FaultScopeNativeDecoderFactoryV3>(),
             flags: NATIVE_DECODER_FACTORY_FLAG_THREAD_SAFE,
             factory_state: Box::into_raw(state).cast::<c_void>(),
             drop_factory_state: Some(drop_factory_state),
@@ -282,9 +285,9 @@ impl PyInvalidNativeDecoderCapsule {
         .map_err(PyValueError::new_err)?;
         let worker_drops = Arc::new(AtomicUsize::new(0));
         state.worker_drop_counter = Some(Arc::clone(&worker_drops));
-        let mut descriptor = FaultScopeNativeDecoderFactoryV2 {
+        let mut descriptor = FaultScopeNativeDecoderFactoryV3 {
             abi_version: NATIVE_DECODER_PLUGIN_ABI_VERSION,
-            struct_size: mem::size_of::<FaultScopeNativeDecoderFactoryV2>(),
+            struct_size: mem::size_of::<FaultScopeNativeDecoderFactoryV3>(),
             flags: NATIVE_DECODER_FACTORY_FLAG_THREAD_SAFE,
             factory_state: std::ptr::null_mut(),
             drop_factory_state: Some(drop_factory_state),
@@ -559,7 +562,7 @@ impl PyNativeDecoderTestStats {
 }
 
 struct TemporaryWorker {
-    descriptor: FaultScopeNativeDecoderWorkerV2,
+    descriptor: FaultScopeNativeDecoderWorkerV3,
 }
 
 impl Drop for TemporaryWorker {
@@ -576,7 +579,7 @@ impl Drop for TemporaryWorker {
 unsafe fn create_temporary_worker(capsule: &Py<PyAny>) -> Result<TemporaryWorker, String> {
     let factory =
         pyo3::ffi::PyCapsule_GetPointer(capsule.as_ptr(), CAPSULE_NAME.as_ptr().cast::<c_char>())
-            .cast::<FaultScopeNativeDecoderFactoryV2>();
+            .cast::<FaultScopeNativeDecoderFactoryV3>();
     if factory.is_null() {
         return Err("fusion-blossom capsule contained a null factory descriptor".to_string());
     }
@@ -584,8 +587,8 @@ unsafe fn create_temporary_worker(capsule: &Py<PyAny>) -> Result<TemporaryWorker
     let create_worker = factory
         .create_worker
         .ok_or_else(|| "fusion-blossom factory is missing create_worker".to_string())?;
-    let mut descriptor = FaultScopeNativeDecoderWorkerV2 {
-        struct_size: mem::size_of::<FaultScopeNativeDecoderWorkerV2>(),
+    let mut descriptor = FaultScopeNativeDecoderWorkerV3 {
+        struct_size: mem::size_of::<FaultScopeNativeDecoderWorkerV3>(),
         worker_state: std::ptr::null_mut(),
         drop_worker_state: None,
         decode_batch: None,
@@ -595,7 +598,7 @@ unsafe fn create_temporary_worker(capsule: &Py<PyAny>) -> Result<TemporaryWorker
     let status = create_worker(
         factory.factory_state.cast_const(),
         &mut descriptor,
-        mem::size_of::<FaultScopeNativeDecoderWorkerV2>(),
+        mem::size_of::<FaultScopeNativeDecoderWorkerV3>(),
     );
     let worker = TemporaryWorker { descriptor };
     if status.code != faultscope_core::NATIVE_DECODER_PLUGIN_STATUS_OK {
@@ -605,8 +608,8 @@ unsafe fn create_temporary_worker(capsule: &Py<PyAny>) -> Result<TemporaryWorker
         ));
     }
     if worker.descriptor.struct_size
-        < mem::offset_of!(FaultScopeNativeDecoderWorkerV2, decode_packed_batch)
-        || worker.descriptor.struct_size > mem::size_of::<FaultScopeNativeDecoderWorkerV2>()
+        < mem::offset_of!(FaultScopeNativeDecoderWorkerV3, decode_packed_batch)
+        || worker.descriptor.struct_size > mem::size_of::<FaultScopeNativeDecoderWorkerV3>()
         || worker.descriptor.worker_state.is_null()
         || worker.descriptor.drop_worker_state.is_none()
         || worker.descriptor.decode_batch.is_none()
@@ -764,30 +767,21 @@ impl SolverVertexLayout {
 
 impl FusionBlossomProblemBuilder {
     fn from_graphlike_problem(problem: &Bound<'_, PyAny>, weight_scale: f64) -> PyResult<Self> {
-        let detector_ids = problem.getattr("detector_ids")?.extract::<Vec<i64>>()?;
-        let detector_coords = problem
-            .getattr("detector_coords")
-            .and_then(|coords| coords.extract::<Vec<Vec<f64>>>())
-            .unwrap_or_else(|_| vec![Vec::new(); detector_ids.len()]);
-        if detector_coords.len() != detector_ids.len() {
-            return Err(PyValueError::new_err(format!(
-                "fusion-blossom graphlike problem has {} detector coords entries but {} detector ids",
-                detector_coords.len(),
-                detector_ids.len()
-            )));
+        if problem.hasattr(NATIVE_GRAPHLIKE_PROBLEM_CAPSULE_METHOD)? {
+            let capsule = problem.call_method0(NATIVE_GRAPHLIKE_PROBLEM_CAPSULE_METHOD)?;
+            return unsafe { Self::from_native_graphlike_capsule(problem, &capsule, weight_scale) };
         }
+        Self::from_python_graphlike_problem(problem, weight_scale)
+    }
+
+    fn from_python_graphlike_problem(
+        problem: &Bound<'_, PyAny>,
+        weight_scale: f64,
+    ) -> PyResult<Self> {
+        let detector_ids = problem.getattr("detector_ids")?.extract::<Vec<i64>>()?;
+        let detector_coords = detector_coords_from_problem(problem, detector_ids.len())?;
         let observable_ids = problem.getattr("observable_ids")?.extract::<Vec<i64>>()?;
-        let mut builder = Self {
-            detector_ids,
-            detector_coords,
-            observable_ids,
-            weight_scale,
-            dem_edge_count: 0,
-            boundary_groups: Vec::new(),
-            boundary_group_by_key: HashMap::new(),
-            graph_groups: Vec::new(),
-            graph_group_by_endpoint: HashMap::new(),
-        };
+        let mut builder = Self::new(detector_ids, detector_coords, observable_ids, weight_scale);
 
         let edges = problem.getattr("edges")?;
         for edge in PyIterator::from_object(&edges)? {
@@ -802,6 +796,141 @@ impl FusionBlossomProblemBuilder {
         }
 
         Ok(builder)
+    }
+
+    unsafe fn from_native_graphlike_capsule(
+        problem: &Bound<'_, PyAny>,
+        capsule: &Bound<'_, PyAny>,
+        weight_scale: f64,
+    ) -> PyResult<Self> {
+        let capsule_name = CString::new(NATIVE_GRAPHLIKE_PROBLEM_CAPSULE_NAME)
+            .expect("native graphlike capsule name must not contain NUL");
+        if pyo3::ffi::PyCapsule_IsValid(capsule.as_ptr(), capsule_name.as_ptr()) != 1 {
+            return Err(PyValueError::new_err(format!(
+                "native graphlike problem capsule must be named {NATIVE_GRAPHLIKE_PROBLEM_CAPSULE_NAME:?}"
+            )));
+        }
+        let pointer = pyo3::ffi::PyCapsule_GetPointer(capsule.as_ptr(), capsule_name.as_ptr());
+        if pointer.is_null() {
+            return Err(PyValueError::new_err(
+                "native graphlike problem capsule contained a null descriptor pointer",
+            ));
+        }
+        let descriptor = &*pointer.cast::<FaultScopeNativeGraphlikeProblemV1>();
+        if descriptor.abi_version != NATIVE_GRAPHLIKE_PROBLEM_ABI_VERSION {
+            return Err(PyValueError::new_err(format!(
+                "native graphlike problem ABI version {} is incompatible with expected version {}",
+                descriptor.abi_version, NATIVE_GRAPHLIKE_PROBLEM_ABI_VERSION
+            )));
+        }
+        if descriptor.struct_size != mem::size_of::<FaultScopeNativeGraphlikeProblemV1>() {
+            return Err(PyValueError::new_err(format!(
+                "native graphlike problem descriptor size {} does not match expected size {}",
+                descriptor.struct_size,
+                mem::size_of::<FaultScopeNativeGraphlikeProblemV1>()
+            )));
+        }
+        if descriptor.edge_struct_size != mem::size_of::<FaultScopeNativeGraphlikeEdgeV1>() {
+            return Err(PyValueError::new_err(format!(
+                "native graphlike edge size {} does not match expected size {}",
+                descriptor.edge_struct_size,
+                mem::size_of::<FaultScopeNativeGraphlikeEdgeV1>()
+            )));
+        }
+
+        let detector_ids = checked_native_graphlike_slice(
+            descriptor.detector_ids,
+            descriptor.detector_count,
+            "detector ids",
+        )?;
+        let observable_ids = checked_native_graphlike_slice(
+            descriptor.observable_ids,
+            descriptor.observable_count,
+            "observable ids",
+        )?;
+        let edges =
+            checked_native_graphlike_slice(descriptor.edges, descriptor.edge_count, "edges")?;
+        let fault_observables = checked_native_graphlike_slice(
+            descriptor.fault_observables,
+            descriptor.fault_observable_count,
+            "fault observables",
+        )?;
+        let detector_coords = detector_coords_from_problem(problem, detector_ids.len())?;
+        let mut builder = Self::new(
+            detector_ids.to_vec(),
+            detector_coords,
+            observable_ids.to_vec(),
+            weight_scale,
+        );
+        for edge in edges {
+            if edge.reserved != 0 {
+                return Err(PyValueError::new_err(format!(
+                    "native graphlike edge {} has non-zero reserved flags {}",
+                    edge.dem_edge_index, edge.reserved
+                )));
+            }
+            let observable_start = edge.fault_observable_offset as usize;
+            let observable_end = observable_start
+                .checked_add(edge.fault_observable_count as usize)
+                .ok_or_else(|| {
+                    PyValueError::new_err(format!(
+                        "native graphlike edge {} observable range overflow",
+                        edge.dem_edge_index
+                    ))
+                })?;
+            let edge_observables = fault_observables
+                .get(observable_start..observable_end)
+                .ok_or_else(|| {
+                    PyValueError::new_err(format!(
+                        "native graphlike edge {} observable range {}..{} exceeds pool length {}",
+                        edge.dem_edge_index,
+                        observable_start,
+                        observable_end,
+                        fault_observables.len()
+                    ))
+                })?;
+            let detectors = match edge.detector_count {
+                0 => Vec::new(),
+                1 => vec![edge.detector0 as usize],
+                2 => vec![edge.detector0 as usize, edge.detector1 as usize],
+                detector_count => {
+                    return Err(PyValueError::new_err(format!(
+                        "fusion-blossom edge {} has {detector_count} detectors; expected one boundary detector or two graph detectors",
+                        edge.dem_edge_index
+                    )));
+                }
+            };
+            builder.push_edge(
+                edge.dem_edge_index,
+                detectors,
+                edge_observables
+                    .iter()
+                    .map(|observable| *observable as usize)
+                    .collect(),
+                edge.probability,
+                edge.weight,
+            )?;
+        }
+        Ok(builder)
+    }
+
+    fn new(
+        detector_ids: Vec<i64>,
+        detector_coords: Vec<Vec<f64>>,
+        observable_ids: Vec<i64>,
+        weight_scale: f64,
+    ) -> Self {
+        Self {
+            detector_ids,
+            detector_coords,
+            observable_ids,
+            weight_scale,
+            dem_edge_count: 0,
+            boundary_groups: Vec::new(),
+            boundary_group_by_key: HashMap::new(),
+            graph_groups: Vec::new(),
+            graph_group_by_endpoint: HashMap::new(),
+        }
     }
 
     fn push_edge(
@@ -833,6 +962,14 @@ impl FusionBlossomProblemBuilder {
         }
 
         match detectors.as_slice() {
+            [] => {
+                if fault_observables.is_empty() {
+                    return Ok(());
+                }
+                return Err(PyValueError::new_err(format!(
+                    "fusion-blossom edge {dem_edge_index} flips observables but has no detectors; pure logical edges are unsupported"
+                )));
+            }
             [detector] => {
                 let key = (*detector, fault_observables.clone());
                 if let Some(group_index) = self.boundary_group_by_key.get(&key).copied() {
@@ -994,6 +1131,45 @@ impl FusionBlossomProblemBuilder {
             summary,
         })
     }
+}
+
+fn detector_coords_from_problem(
+    problem: &Bound<'_, PyAny>,
+    detector_count: usize,
+) -> PyResult<Vec<Vec<f64>>> {
+    let detector_coords = problem
+        .getattr("detector_coords")
+        .and_then(|coords| coords.extract::<Vec<Vec<f64>>>())
+        .unwrap_or_else(|_| vec![Vec::new(); detector_count]);
+    if detector_coords.len() != detector_count {
+        return Err(PyValueError::new_err(format!(
+            "fusion-blossom graphlike problem has {} detector coords entries but {} detector ids",
+            detector_coords.len(),
+            detector_count
+        )));
+    }
+    Ok(detector_coords)
+}
+
+unsafe fn checked_native_graphlike_slice<'a, T>(
+    pointer: *const T,
+    len: usize,
+    label: &str,
+) -> PyResult<&'a [T]> {
+    if len == 0 {
+        return Ok(&[]);
+    }
+    if pointer.is_null() {
+        return Err(PyValueError::new_err(format!(
+            "native graphlike problem {label} pointer is null for length {len}"
+        )));
+    }
+    if len > isize::MAX as usize / mem::size_of::<T>() {
+        return Err(PyValueError::new_err(format!(
+            "native graphlike problem {label} length {len} exceeds addressable memory"
+        )));
+    }
+    Ok(slice::from_raw_parts(pointer, len))
 }
 
 impl SolverEdgeEffect {
@@ -1352,7 +1528,7 @@ unsafe extern "C" fn drop_worker_state(state: *mut c_void) {
 
 unsafe extern "C" fn create_worker(
     factory_state: *const c_void,
-    out: *mut FaultScopeNativeDecoderWorkerV2,
+    out: *mut FaultScopeNativeDecoderWorkerV3,
     capacity: usize,
 ) -> FaultScopeNativeDecoderStatusV1 {
     if out.is_null() {
@@ -1361,7 +1537,7 @@ unsafe extern "C" fn create_worker(
     if factory_state.is_null() {
         return static_error("fusion-blossom worker factory received null factory state");
     }
-    if capacity < mem::size_of::<FaultScopeNativeDecoderWorkerV2>() {
+    if capacity < mem::size_of::<FaultScopeNativeDecoderWorkerV3>() {
         return static_error("fusion-blossom worker descriptor capacity is too small");
     }
     let factory = &*factory_state.cast::<FactoryState>();
@@ -1372,8 +1548,8 @@ unsafe extern "C" fn create_worker(
             factory
                 .test_stats
                 .record_worker_create(worker_state as usize);
-            let mut descriptor = FaultScopeNativeDecoderWorkerV2 {
-                struct_size: mem::size_of::<FaultScopeNativeDecoderWorkerV2>(),
+            let mut descriptor = FaultScopeNativeDecoderWorkerV3 {
+                struct_size: mem::size_of::<FaultScopeNativeDecoderWorkerV3>(),
                 worker_state,
                 drop_worker_state: Some(drop_worker_state),
                 decode_batch: Some(decoder_decode_batch),
@@ -1408,7 +1584,7 @@ unsafe extern "C" fn create_worker(
 
 unsafe extern "C" fn create_forced_error_worker(
     factory_state: *const c_void,
-    out: *mut FaultScopeNativeDecoderWorkerV2,
+    out: *mut FaultScopeNativeDecoderWorkerV3,
     capacity: usize,
 ) -> FaultScopeNativeDecoderStatusV1 {
     let status = create_worker(factory_state, out, capacity);
@@ -2331,7 +2507,7 @@ fn build_summary_to_py(py: Python<'_>, summary: &BuildSummary) -> PyResult<PyObj
 
 unsafe fn create_decoder_capsule(
     py: Python<'_>,
-    descriptor: *mut FaultScopeNativeDecoderFactoryV2,
+    descriptor: *mut FaultScopeNativeDecoderFactoryV3,
 ) -> PyResult<Py<PyAny>> {
     let ptr = pyo3::ffi::PyCapsule_New(
         descriptor.cast::<c_void>(),
@@ -2348,11 +2524,11 @@ unsafe fn create_decoder_capsule(
 unsafe extern "C" fn capsule_destructor(capsule: *mut pyo3::ffi::PyObject) {
     let pointer = pyo3::ffi::PyCapsule_GetPointer(capsule, CAPSULE_NAME.as_ptr().cast::<c_char>());
     if !pointer.is_null() {
-        drop_descriptor(pointer.cast::<FaultScopeNativeDecoderFactoryV2>());
+        drop_descriptor(pointer.cast::<FaultScopeNativeDecoderFactoryV3>());
     }
 }
 
-unsafe fn drop_descriptor(descriptor: *mut FaultScopeNativeDecoderFactoryV2) {
+unsafe fn drop_descriptor(descriptor: *mut FaultScopeNativeDecoderFactoryV3) {
     if descriptor.is_null() {
         return;
     }
@@ -2419,6 +2595,29 @@ fn string_view_to_string(view: FaultScopeNativeDecoderStringViewV1) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn accepts_no_op_edges_without_creating_solver_groups() {
+        let mut builder = FusionBlossomProblemBuilder {
+            detector_ids: vec![1, 2],
+            detector_coords: vec![Vec::new(), Vec::new()],
+            observable_ids: vec![9],
+            weight_scale: 10_000.0,
+            dem_edge_count: 0,
+            boundary_groups: Vec::new(),
+            boundary_group_by_key: HashMap::new(),
+            graph_groups: Vec::new(),
+            graph_group_by_endpoint: HashMap::new(),
+        };
+
+        builder
+            .push_edge(4, Vec::new(), Vec::new(), 0.37, 0.0)
+            .unwrap();
+
+        assert_eq!(builder.dem_edge_count, 1);
+        assert!(builder.boundary_groups.is_empty());
+        assert!(builder.graph_groups.is_empty());
+    }
 
     #[test]
     fn normalizes_weighted_edges_without_creating_odd_weights() {
