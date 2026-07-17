@@ -3,14 +3,17 @@ use std::collections::HashMap;
 use crate::dem_sampling::{DemProgramEdge, DemProgramEdgeMetadata, DemProgramLocationGroup};
 use crate::labels::HotspotTagKind;
 use crate::{
-    DemBatch, DemHotspotEstimate, DetectorGraphEstimate, DetectorGraphKey, HotspotEstimate,
-    IndexedNoiseLocation, LocationCatalog, LocationId, Mask, RuntimeState, TagValue,
+    word_count, DemBatch, DemHotspotEstimate, DetectorGraphEstimate, DetectorGraphKey,
+    HotspotEstimate, IndexedNoiseLocation, LocationCatalog, LocationId, Mask, NpError, NpResult,
+    RuntimeState, TagValue,
 };
 
 /// Compute forward-sampler hotspots using dense location ids throughout.
 ///
 /// User-facing strings are materialized from `catalog` only when constructing
 /// the returned boundary object.
+/// Returns an error when event recording is disabled, the state does not match
+/// the supplied location count, or the loss mask/catalog layout is invalid.
 pub fn compute_packed_estimate(
     locations: &[IndexedNoiseLocation],
     catalog: &LocationCatalog,
@@ -18,28 +21,73 @@ pub fn compute_packed_estimate(
     loss_mask: &Mask,
     baseline: Option<f64>,
     top_k: usize,
+) -> NpResult<HotspotEstimate> {
+    if state.shots() == 0 {
+        return Err(NpError::new(
+            "forward hotspot estimation requires shots to be positive",
+        ));
+    }
+    if !state.records_events() {
+        return Err(NpError::new(
+            "forward hotspot estimation requires recorded event masks",
+        ));
+    }
+    if state.event_masks().len() != locations.len() {
+        return Err(NpError::new(format!(
+            "forward hotspot expected {} event masks, got {}",
+            locations.len(),
+            state.event_masks().len()
+        )));
+    }
+    validate_loss_mask_width("forward hotspot", state.shots(), loss_mask)?;
+    for (noise_id, location) in locations.iter().enumerate() {
+        if location.location_id.index() >= catalog.len() {
+            return Err(NpError::new(format!(
+                "forward hotspot noise location {noise_id} references out-of-range catalog id {}",
+                location.location_id.index()
+            )));
+        }
+    }
+    Ok(compute_packed_estimate_trusted(
+        locations, catalog, state, loss_mask, baseline, top_k,
+    ))
+}
+
+pub(crate) fn compute_packed_estimate_trusted(
+    locations: &[IndexedNoiseLocation],
+    catalog: &LocationCatalog,
+    state: &RuntimeState,
+    loss_mask: &Mask,
+    baseline: Option<f64>,
+    top_k: usize,
 ) -> HotspotEstimate {
+    let shots = state.shots();
+    let all_mask = state.all_mask();
+    let event_masks = state.event_masks();
+    debug_assert!(shots > 0);
+    debug_assert!(state.records_events());
+    debug_assert_eq!(event_masks.len(), locations.len());
+    debug_assert_eq!(loss_mask.words.len(), all_mask.words.len());
     let mut clipped_loss = loss_mask.clone();
-    clipped_loss.and_assign(&state.all_mask);
+    clipped_loss.and_assign(all_mask);
     let loss_count = clipped_loss.bit_count();
-    let mean_loss = loss_count as f64 / state.shots as f64;
+    let mean_loss = loss_count as f64 / shots as f64;
     let baseline_value = baseline.unwrap_or(mean_loss);
     let mut sensitivities = vec![0.0; catalog.len()];
     let mut hotspots = vec![0.0; catalog.len()];
     let mut by_qubit = HashMap::new();
-    let zero_mask = Mask::zero(state.all_mask.words.len());
 
     for (noise_id, location) in locations.iter().enumerate() {
-        let event_mask = state.event_masks.get(noise_id).unwrap_or(&zero_mask);
+        let event_mask = &event_masks[noise_id];
         let event_count = event_mask.bit_count();
-        let no_event_count = state.shots - event_count;
+        let no_event_count = shots - event_count;
         let loss_event_count = clipped_loss.and_count(event_mask);
         let loss_no_event_count = loss_count - loss_event_count;
         let (event_score, no_event_score) = score_pair(location.rate);
         let sum_loss_score =
             loss_event_count as f64 * event_score + loss_no_event_count as f64 * no_event_score;
         let sum_score = event_count as f64 * event_score + no_event_count as f64 * no_event_score;
-        let sensitivity = (sum_loss_score - baseline_value * sum_score) / state.shots as f64;
+        let sensitivity = (sum_loss_score - baseline_value * sum_score) / shots as f64;
         let hotspot = sensitivity.abs();
         sensitivities[location.location_id.index()] = sensitivity;
         hotspots[location.location_id.index()] = hotspot;
@@ -55,7 +103,7 @@ pub fn compute_packed_estimate(
     let top_locations = top_location_ids(catalog, &hotspots, top_k);
 
     HotspotEstimate {
-        shots: state.shots,
+        shots,
         mean_loss,
         baseline: baseline_value,
         sensitivities: materialize_location_values(catalog, &sensitivities),
@@ -88,23 +136,30 @@ pub(crate) fn compute_dem_estimate(
         location_groups,
         catalog,
     } = program;
+    let shots = batch.shots();
+    let all_mask = batch.all_mask();
+    let event_masks = batch.edge_event_masks();
+    debug_assert!(shots > 0);
+    debug_assert!(batch.records_edge_events());
+    debug_assert_eq!(event_masks.len(), edges.len());
+    debug_assert_eq!(loss_mask.words.len(), all_mask.words.len());
     let mut clipped_loss = loss_mask.clone();
-    clipped_loss.and_assign(&batch.all_mask);
+    clipped_loss.and_assign(all_mask);
     let loss_count = clipped_loss.bit_count();
-    let mean_loss = loss_count as f64 / batch.shots as f64;
+    let mean_loss = loss_count as f64 / shots as f64;
     let baseline_value = baseline.unwrap_or(mean_loss);
     let mut edge_sensitivities = Vec::with_capacity(edges.len());
     for (edge_index, edge) in edges.iter().enumerate() {
-        let event_mask = &batch.edge_event_masks[edge_index];
+        let event_mask = &event_masks[edge_index];
         let event_count = event_mask.bit_count();
-        let no_event_count = batch.shots - event_count;
+        let no_event_count = shots - event_count;
         let loss_event_count = clipped_loss.and_count(event_mask);
         let loss_no_event_count = loss_count - loss_event_count;
         let (event_score, no_event_score) = score_pair(edge.probability);
         let sum_loss_score =
             loss_event_count as f64 * event_score + loss_no_event_count as f64 * no_event_score;
         let sum_score = event_count as f64 * event_score + no_event_count as f64 * no_event_score;
-        edge_sensitivities.push((sum_loss_score - baseline_value * sum_score) / batch.shots as f64);
+        edge_sensitivities.push((sum_loss_score - baseline_value * sum_score) / shots as f64);
     }
 
     let location_sensitivities =
@@ -130,7 +185,7 @@ pub(crate) fn compute_dem_estimate(
     let top_locations = top_optional_location_ids(catalog, &location_hotspots, top_k);
 
     DemHotspotEstimate {
-        shots: batch.shots,
+        shots,
         mean_loss,
         baseline: baseline_value,
         edge_sensitivities,
@@ -148,6 +203,21 @@ pub(crate) fn compute_dem_estimate(
         top_edges,
         top_locations,
     }
+}
+
+pub(crate) fn validate_loss_mask_width(
+    context: &str,
+    shots: usize,
+    loss_mask: &Mask,
+) -> NpResult<()> {
+    let expected_words = word_count(shots);
+    if loss_mask.words.len() != expected_words {
+        return Err(NpError::new(format!(
+            "{context} loss_mask has {} words; expected {expected_words}",
+            loss_mask.words.len()
+        )));
+    }
+    Ok(())
 }
 
 fn aggregate_dem_location_sensitivities(
@@ -429,7 +499,8 @@ mod tests {
         state.event_masks[0] = Mask { words: vec![0b01] };
         let loss = Mask { words: vec![0b01] };
 
-        let estimate = compute_packed_estimate(&locations, &catalog, &state, &loss, None, 1);
+        let estimate =
+            compute_packed_estimate(&locations, &catalog, &state, &loss, None, 1).unwrap();
 
         assert_eq!(estimate.top_locations, vec!["n"]);
         assert!(estimate.hotspots["n"] > 0.0);
@@ -455,8 +526,45 @@ mod tests {
         state.event_masks.fill(Mask { words: vec![0b01] });
         let loss = Mask { words: vec![0b01] };
 
-        let estimate = compute_packed_estimate(&locations, &catalog, &state, &loss, None, 2);
+        let estimate =
+            compute_packed_estimate(&locations, &catalog, &state, &loss, None, 2).unwrap();
 
         assert_eq!(estimate.top_locations, vec!["a", "z"]);
+    }
+
+    #[test]
+    fn packed_estimate_rejects_invalid_public_inputs() {
+        let input = NoiseLocation {
+            id: "n".to_string(),
+            model: NoiseModel::BernoulliPauli("X".to_string()),
+            rate: 0.5,
+            qubits: vec![0],
+            tags: HashMap::new(),
+        };
+        let mut builder = LocationCatalogBuilder::with_capacity(1);
+        let location_id = builder.intern(input.id.clone(), input.tags.clone());
+        let locations = vec![IndexedNoiseLocation::from_input(location_id, input)];
+        let catalog = builder.finish();
+        let loss = Mask { words: vec![1] };
+
+        let state = RuntimeState::new(1, 2, 0, 1, false);
+        let err =
+            compute_packed_estimate(&locations, &catalog, &state, &loss, None, 1).unwrap_err();
+        assert!(err.to_string().contains("recorded event masks"));
+
+        let state = RuntimeState::new(1, 2, 0, 0, true);
+        let err =
+            compute_packed_estimate(&locations, &catalog, &state, &loss, None, 1).unwrap_err();
+        assert!(err.to_string().contains("expected 1 event masks"));
+
+        let state = RuntimeState::new(1, 2, 0, 1, true);
+        let err = compute_packed_estimate(&locations, &catalog, &state, &Mask::zero(2), None, 1)
+            .unwrap_err();
+        assert!(err.to_string().contains("loss_mask has 2 words"));
+
+        let state = RuntimeState::new(1, 0, 0, 1, true);
+        let err = compute_packed_estimate(&locations, &catalog, &state, &Mask::zero(0), None, 1)
+            .unwrap_err();
+        assert!(err.to_string().contains("shots to be positive"));
     }
 }

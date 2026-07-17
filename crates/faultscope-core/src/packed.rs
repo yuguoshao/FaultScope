@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use crate::pauli::pauli_to_xz;
 use crate::{
@@ -9,19 +10,149 @@ use crate::{
 };
 
 /// Integer-indexed program used by the native forward sampler.
+///
+/// The program is an immutable, compiler-validated representation. Its
+/// collections are exposed as read-only slices so downstream safe Rust code
+/// cannot invalidate the indices trusted by the packed runtime.
+///
+/// ```compile_fail
+/// use faultscope_core::{compile_sampler_program_ref, SamplerOperation};
+///
+/// let mut program = compile_sampler_program_ref(1, &[], Vec::new()).unwrap();
+/// program.operations.push(SamplerOperation::H(usize::MAX));
+/// ```
 #[derive(Debug, Clone, PartialEq)]
 pub struct SamplerProgram {
-    pub n_qubits: usize,
-    pub operations: Vec<SamplerOperation>,
-    pub observables: Vec<LogicalObservable>,
-    pub compiled_observables: Vec<SamplerObservable>,
-    pub measurement_keys: Vec<String>,
-    pub noise_locations: Vec<IndexedNoiseLocation>,
-    pub location_catalog: LocationCatalog,
-    pub capacities: RuntimeCapacities,
-    pub stored_operation_count: usize,
-    pub logical_operation_count: usize,
-    pub loop_kernel_count: usize,
+    n_qubits: usize,
+    operations: Vec<SamplerOperation>,
+    observables: Vec<LogicalObservable>,
+    compiled_observables: Vec<SamplerObservable>,
+    measurement_keys: Vec<String>,
+    noise_locations: Vec<IndexedNoiseLocation>,
+    location_catalog: LocationCatalog,
+    capacities: RuntimeCapacities,
+    stored_operation_count: usize,
+    logical_operation_count: usize,
+    loop_kernel_count: usize,
+    hotspot_layout_identity: Arc<()>,
+}
+
+impl SamplerProgram {
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn from_compiled_parts(
+        n_qubits: usize,
+        operations: Vec<SamplerOperation>,
+        observables: Vec<LogicalObservable>,
+        compiled_observables: Vec<SamplerObservable>,
+        measurement_keys: Vec<String>,
+        noise_locations: Vec<IndexedNoiseLocation>,
+        location_catalog: LocationCatalog,
+        capacities: RuntimeCapacities,
+        stored_operation_count: usize,
+        logical_operation_count: usize,
+        loop_kernel_count: usize,
+    ) -> Self {
+        Self {
+            n_qubits,
+            operations,
+            observables,
+            compiled_observables,
+            measurement_keys,
+            noise_locations,
+            location_catalog,
+            capacities,
+            stored_operation_count,
+            logical_operation_count,
+            loop_kernel_count,
+            hotspot_layout_identity: Arc::new(()),
+        }
+    }
+
+    pub fn n_qubits(&self) -> usize {
+        self.n_qubits
+    }
+
+    pub fn operations(&self) -> &[SamplerOperation] {
+        &self.operations
+    }
+
+    pub fn observables(&self) -> &[LogicalObservable] {
+        &self.observables
+    }
+
+    pub fn compiled_observables(&self) -> &[SamplerObservable] {
+        &self.compiled_observables
+    }
+
+    pub fn measurement_keys(&self) -> &[String] {
+        &self.measurement_keys
+    }
+
+    pub fn noise_locations(&self) -> &[IndexedNoiseLocation] {
+        &self.noise_locations
+    }
+
+    pub fn location_catalog(&self) -> &LocationCatalog {
+        &self.location_catalog
+    }
+
+    pub fn capacities(&self) -> &RuntimeCapacities {
+        &self.capacities
+    }
+
+    pub fn stored_operation_count(&self) -> usize {
+        self.stored_operation_count
+    }
+
+    pub fn logical_operation_count(&self) -> usize {
+        self.logical_operation_count
+    }
+
+    pub fn loop_kernel_count(&self) -> usize {
+        self.loop_kernel_count
+    }
+
+    fn validate_hotspot_state(&self, state: &RuntimeState) -> NpResult<()> {
+        let state_layout = state.hotspot_layout_identity.as_ref().ok_or_else(|| {
+            NpError::new("hotspot state is not bound to a compiled sampler program")
+        })?;
+        if !Arc::ptr_eq(state_layout, &self.hotspot_layout_identity) {
+            return Err(NpError::new(
+                "hotspot state layout does not match the current simulator",
+            ));
+        }
+        if state.shots == 0 {
+            return Err(NpError::new(
+                "forward hotspot estimation requires shots to be positive",
+            ));
+        }
+        if !state.record_events {
+            return Err(NpError::new(
+                "forward hotspot estimation requires recorded event masks",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Estimate hotspots from a state produced by this program or one of its clones.
+    pub fn estimate_from_loss(
+        &self,
+        state: &RuntimeState,
+        loss_mask: &Mask,
+        baseline: Option<f64>,
+        top_k: usize,
+    ) -> NpResult<HotspotEstimate> {
+        self.validate_hotspot_state(state)?;
+        crate::hotspot::validate_loss_mask_width("forward hotspot", state.shots, loss_mask)?;
+        Ok(crate::hotspot::compute_packed_estimate_trusted(
+            &self.noise_locations,
+            &self.location_catalog,
+            state,
+            loss_mask,
+            baseline,
+            top_k,
+        ))
+    }
 }
 
 /// Integer-indexed logical observable compiled against a sampler program.
@@ -110,7 +241,7 @@ pub enum SamplerOperation {
 /// decoder and loss callback integration remains in the Python binding crate.
 #[derive(Debug, Clone, PartialEq)]
 pub struct FaultScopeSimulator {
-    pub program: SamplerProgram,
+    program: SamplerProgram,
 }
 
 impl FaultScopeSimulator {
@@ -127,6 +258,11 @@ impl FaultScopeSimulator {
         let program =
             crate::compile_sampler_program_ref(circuit.n_qubits, &circuit.operations, observables)?;
         Ok(Self { program })
+    }
+
+    /// Return the immutable compiled sampler program.
+    pub fn program(&self) -> &SamplerProgram {
+        &self.program
     }
 
     /// Run a batch of forward trajectories.
@@ -149,39 +285,51 @@ impl FaultScopeSimulator {
     ///
     /// This method is useful when a decoder or loss function is implemented
     /// outside of the core crate. The returned estimate is fully aggregated in
-    /// Rust.
+    /// Rust. The state must come from this compiled program (or one of its
+    /// clones) and must have event recording enabled.
     pub fn estimate_from_loss(
         &self,
         state: &RuntimeState,
         loss_mask: &Mask,
         baseline: Option<f64>,
         top_k: usize,
-    ) -> HotspotEstimate {
-        crate::compute_packed_estimate(
-            &self.program.noise_locations,
-            &self.program.location_catalog,
-            state,
-            loss_mask,
-            baseline,
-            top_k,
-        )
+    ) -> NpResult<HotspotEstimate> {
+        self.program
+            .estimate_from_loss(state, loss_mask, baseline, top_k)
     }
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct RuntimeState {
-    pub shots: usize,
-    pub all_mask: Mask,
+    pub(crate) shots: usize,
+    pub(crate) all_mask: Mask,
     pub x_frame: Vec<Mask>,
     pub z_frame: Vec<Mask>,
     pub measurements: Vec<Option<Mask>>,
     pub detectors: HashMap<i64, Mask>,
     pub observables: HashMap<i64, Mask>,
-    pub event_masks: Vec<Mask>,
-    pub record_events: bool,
+    pub(crate) event_masks: Vec<Mask>,
+    pub(crate) record_events: bool,
+    hotspot_layout_identity: Option<Arc<()>>,
 }
 
 impl RuntimeState {
+    pub fn shots(&self) -> usize {
+        self.shots
+    }
+
+    pub fn all_mask(&self) -> &Mask {
+        &self.all_mask
+    }
+
+    pub fn event_masks(&self) -> &[Mask] {
+        &self.event_masks
+    }
+
+    pub fn records_events(&self) -> bool {
+        self.record_events
+    }
+
     pub fn new(
         n_qubits: usize,
         shots: usize,
@@ -226,6 +374,7 @@ impl RuntimeState {
             observables: HashMap::with_capacity(observable_capacity),
             event_masks,
             record_events,
+            hotspot_layout_identity: None,
         }
     }
 }
@@ -250,6 +399,7 @@ pub fn run_sampler_program(
             .observables
             .max(program.compiled_observables.len()),
     );
+    state.hotspot_layout_identity = Some(program.hotspot_layout_identity.clone());
     let random_masks = random_masks_flat(
         &mut rng,
         program.capacities.random_sources,
@@ -755,6 +905,7 @@ mod tests {
             stored_operation_count: 0,
             logical_operation_count: 0,
             loop_kernel_count: 0,
+            hotspot_layout_identity: Arc::new(()),
         }
     }
 
@@ -990,7 +1141,6 @@ mod tests {
                 ideal: Expr::constant(false),
                 noise: Some(0),
             });
-
             let state = run_sampler_program(&program, shots, Some(1234), true).unwrap();
             assert_eq!(state.measurements[0].as_ref(), Some(&expected));
             assert_eq!(state.event_masks[0], expected);
@@ -1125,11 +1275,52 @@ mod tests {
 
         let state = simulator.run_batch(8, Some(1), true).unwrap();
         let measurement = state.measurements[0].as_ref().unwrap();
-        let estimate = simulator.estimate_from_loss(&state, measurement, None, 1);
+        let estimate = simulator
+            .estimate_from_loss(&state, measurement, None, 1)
+            .unwrap();
 
         assert_eq!(measurement, &state.all_mask);
         assert_eq!(estimate.mean_loss, 1.0);
         assert_eq!(estimate.top_locations, vec!["x0"]);
+    }
+
+    #[test]
+    fn simulator_hotspot_rejects_unrecorded_foreign_and_unbound_states() {
+        let circuit = Circuit {
+            n_qubits: 1,
+            operations: vec![Operation::Noise(NoiseLocation {
+                id: "x0".to_string(),
+                model: NoiseModel::BernoulliPauli("X".to_string()),
+                rate: 0.25,
+                qubits: vec![0],
+                tags: HashMap::new(),
+            })],
+        };
+        let simulator = FaultScopeSimulator::new(circuit.clone(), Vec::new()).unwrap();
+        let foreign = FaultScopeSimulator::new(circuit, Vec::new()).unwrap();
+        let state = simulator.run_batch(8, Some(1), true).unwrap();
+        let loss = state.event_masks[0].clone();
+
+        let err = foreign
+            .estimate_from_loss(&state, &loss, None, 1)
+            .unwrap_err();
+        assert!(err.to_string().contains("layout does not match"));
+        simulator
+            .clone()
+            .estimate_from_loss(&state, &loss, None, 1)
+            .unwrap();
+
+        let state = simulator.run_batch(8, Some(1), false).unwrap();
+        let err = simulator
+            .estimate_from_loss(&state, &Mask::zero(1), None, 1)
+            .unwrap_err();
+        assert!(err.to_string().contains("recorded event masks"));
+
+        let unbound = RuntimeState::new(1, 8, 0, 1, true);
+        let err = simulator
+            .estimate_from_loss(&unbound, &Mask::zero(1), None, 1)
+            .unwrap_err();
+        assert!(err.to_string().contains("not bound"));
     }
 
     #[test]

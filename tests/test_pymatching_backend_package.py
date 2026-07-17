@@ -241,6 +241,7 @@ class PyMatchingBackendPackageTests(unittest.TestCase):
             {
                 "task_id": "pymatching-v3-workers",
                 "strong_id": "pymatching-v3-workers-strong",
+                "sampling_id": "pymatching-v3-workers-sampling",
                 "sampler": compile_native_dem_sampler(dem),
                 "decoder": decoder,
                 "metadata_json": "{}",

@@ -32,7 +32,7 @@ FaultScope `0.2.x` 支持 CPython 3.10–3.14。预构建 wheels 的目标平台
 manylinux x86_64/aarch64、macOS 11+ x86_64/arm64 和 Windows x86_64；源码构建需要
 Rust 1.85 或更新版本。
 
-当前 workspace 版本为 `0.2.4`。项目仍处于 pre-1.0，补丁版本也可能收口或重命名 Python/Rust
+当前 workspace 版本为 `0.2.5`。项目仍处于 pre-1.0，补丁版本也可能收口或重命名 Python/Rust
 API；native decoder ABI 则使用独立版本号管理。
 
 从源码 checkout 直接安装：
@@ -196,7 +196,7 @@ FaultScope 当前产品路径是 packed batch engine，不暴露通用的 per-sh
 然后从仓库根目录运行：
 
 ```bash
-.venv/bin/python benchmarks/compiler_throughput.py --distances 5 10 15 20 --representation m-plus-r --json-out compiler-throughput.json
+.venv/bin/python benchmarks/compiler_throughput.py --distances 5 10 15 20 --input-form repeat --representation m-plus-r --json-out compiler-throughput.json
 .venv/bin/python benchmarks/sampling_throughput.py --distances 15 21 31 --rounds 3
 .venv/bin/python benchmarks/sampling_throughput.py --family random-clifford --qubits 128 256 512 --depth 20
 .venv/bin/python benchmarks/dem_throughput.py --distances 9 13 21 --rounds 3

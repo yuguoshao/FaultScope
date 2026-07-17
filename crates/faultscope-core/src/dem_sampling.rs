@@ -59,6 +59,7 @@ pub struct DemHotspotEstimator {
     edge_metadata: Option<Vec<DemProgramEdgeMetadata>>,
     location_catalog: LocationCatalog,
     location_groups: Vec<DemProgramLocationGroup>,
+    hotspot_layout_identity: Arc<()>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -135,6 +136,7 @@ impl DemHotspotEstimator {
             edge_metadata: None,
             location_catalog: LocationCatalog::default(),
             location_groups: Vec::new(),
+            hotspot_layout_identity: Arc::new(()),
         }
     }
 
@@ -160,6 +162,7 @@ impl DemHotspotEstimator {
             edge_metadata: Some(edge_metadata),
             location_catalog,
             location_groups,
+            hotspot_layout_identity: Arc::new(()),
         }
     }
 
@@ -192,6 +195,7 @@ impl DemHotspotEstimator {
             edge_metadata: compiled.metadata,
             location_catalog: compiled.catalog,
             location_groups: compiled.location_groups,
+            hotspot_layout_identity: Arc::new(()),
         })
     }
 
@@ -215,6 +219,7 @@ impl DemHotspotEstimator {
             edge_metadata: None,
             location_catalog: LocationCatalog::default(),
             location_groups: Vec::new(),
+            hotspot_layout_identity: Arc::new(()),
         })
     }
 
@@ -303,6 +308,7 @@ impl DemHotspotEstimator {
             shots,
             rng,
             return_edge_events,
+            &self.hotspot_layout_identity,
         )
     }
 
@@ -366,18 +372,37 @@ impl DemHotspotEstimator {
         top_k: usize,
     ) -> NpResult<DemHotspotEstimate> {
         let batch = self.run_batch(shots, seed, true)?;
-        Ok(self.estimate_from_loss(&batch, &batch.loss_mask, baseline, top_k))
+        self.estimate_from_loss(&batch, &batch.loss_mask, baseline, top_k)
     }
 
     /// Estimate hotspots from an externally supplied loss mask.
+    ///
+    /// The batch must come from this estimator (or one of its clones) and must
+    /// have edge-event recording enabled.
     pub fn estimate_from_loss(
         &self,
         batch: &DemBatch,
         loss_mask: &Mask,
         baseline: Option<f64>,
         top_k: usize,
-    ) -> DemHotspotEstimate {
-        crate::hotspot::compute_dem_estimate(
+    ) -> NpResult<DemHotspotEstimate> {
+        if !batch.matches_hotspot_layout(&self.hotspot_layout_identity) {
+            return Err(NpError::new(
+                "hotspot batch layout does not match the current DEM estimator",
+            ));
+        }
+        if batch.shots() == 0 {
+            return Err(NpError::new(
+                "DEM hotspot estimation requires shots to be positive",
+            ));
+        }
+        if !batch.records_edge_events() {
+            return Err(NpError::new(
+                "DEM hotspot estimation requires recorded event masks",
+            ));
+        }
+        crate::hotspot::validate_loss_mask_width("DEM hotspot", batch.shots(), loss_mask)?;
+        Ok(crate::hotspot::compute_dem_estimate(
             crate::hotspot::DemEstimateProgram {
                 edges: &self.edges,
                 edge_metadata: self.edge_metadata.as_deref().unwrap_or(&[]),
@@ -388,7 +413,7 @@ impl DemHotspotEstimator {
             loss_mask,
             baseline,
             top_k,
-        )
+        ))
     }
 }
 
@@ -757,6 +782,7 @@ fn run_dem_program_batch(
     shots: usize,
     rng: &mut SmallRng,
     return_edge_events: bool,
+    hotspot_layout_identity: &Arc<()>,
 ) -> DemBatch {
     let words = word_count(shots);
     let all_mask = Mask::all(shots);
@@ -768,11 +794,7 @@ fn run_dem_program_batch(
     for observable_id in observable_ids {
         observables.insert(*observable_id, Mask::zero(words));
     }
-    let mut edge_event_masks = if return_edge_events {
-        Vec::with_capacity(edges.len())
-    } else {
-        Vec::new()
-    };
+    let mut edge_event_masks = return_edge_events.then(|| Vec::with_capacity(edges.len()));
 
     for edge in edges {
         let event_mask = bernoulli_mask(rng, shots, edge.probability);
@@ -790,7 +812,7 @@ fn run_dem_program_batch(
                     .xor_assign(&event_mask);
             }
         }
-        if return_edge_events {
+        if let Some(edge_event_masks) = &mut edge_event_masks {
             edge_event_masks.push(event_mask);
         }
     }
@@ -801,14 +823,15 @@ fn run_dem_program_batch(
     }
     loss_mask.and_assign(&all_mask);
 
-    DemBatch {
+    DemBatch::new(
         shots,
         all_mask,
         detectors,
         observables,
         edge_event_masks,
         loss_mask,
-    }
+        hotspot_layout_identity.clone(),
+    )
 }
 
 fn canonicalize_program_parts(
@@ -979,9 +1002,9 @@ mod tests {
     ) -> (Vec<u8>, Vec<u8>) {
         let detector_bytes = detector_ids.len().div_ceil(8);
         let observable_bytes = observable_ids.len().div_ceil(8);
-        let mut detectors = vec![0u8; batch.shots * detector_bytes];
-        let mut observables = vec![0u8; batch.shots * observable_bytes];
-        for shot in 0..batch.shots {
+        let mut detectors = vec![0u8; batch.shots() * detector_bytes];
+        let mut observables = vec![0u8; batch.shots() * observable_bytes];
+        for shot in 0..batch.shots() {
             for (column, detector_id) in detector_ids.iter().enumerate() {
                 if batch.detectors[detector_id].words[shot / 64] & (1u64 << (shot % 64)) != 0 {
                     detectors[shot * detector_bytes + column / 8] |= 1u8 << (column % 8);
@@ -1067,8 +1090,8 @@ mod tests {
         let generic = simulator.run_batch_with_rng(4, &mut generic_rng, true);
         assert_eq!(generic.detectors[&1].bit_count(), 0);
         assert_eq!(generic.observables[&9].bit_count(), 0);
-        assert_eq!(generic.edge_event_masks.len(), 1);
-        assert_eq!(generic.edge_event_masks[0].bit_count(), 4);
+        assert_eq!(generic.edge_event_masks().len(), 1);
+        assert_eq!(generic.edge_event_masks()[0].bit_count(), 4);
 
         let plan = simulator.compile_sampling_plan(&[1], &[9]).unwrap();
         let mut packed_rng = SmallRng::new(13);
@@ -1100,7 +1123,7 @@ mod tests {
             let generic = simulator.run_batch_with_rng(129, &mut generic_rng, true);
             let expected = packed_reference(&generic, detector_ids, observable_ids);
             let generic_next = generic_rng.next_u64();
-            assert_eq!(generic.edge_event_masks.len(), 2);
+            assert_eq!(generic.edge_event_masks().len(), 2);
             assert_eq!(generic.detectors[&1].bit_count(), 0);
             assert_eq!(generic.observables[&9].bit_count(), 0);
 
@@ -1319,6 +1342,48 @@ mod tests {
         assert_eq!(estimate.mean_loss, 1.0);
         assert_eq!(estimate.top_edges, vec![0]);
         assert_eq!(estimate.top_locations, vec!["logical"]);
+    }
+
+    #[test]
+    fn simulator_hotspot_rejects_unrecorded_foreign_and_invalid_loss_batches() {
+        let make_simulator = || {
+            DemHotspotEstimator::from_parts(
+                Vec::new(),
+                vec![0],
+                vec![edge(0.25, Vec::new(), vec![0])],
+            )
+            .unwrap()
+        };
+        let simulator = make_simulator();
+
+        let batch = simulator.run_batch(8, Some(1), false).unwrap();
+        let err = simulator
+            .estimate_from_loss(&batch, &batch.loss_mask, None, 1)
+            .unwrap_err();
+        assert!(err.to_string().contains("recorded event masks"));
+
+        let batch = simulator.run_batch(8, Some(1), true).unwrap();
+        let foreign = make_simulator();
+        let err = foreign
+            .estimate_from_loss(&batch, &batch.loss_mask, None, 1)
+            .unwrap_err();
+        assert!(err.to_string().contains("layout does not match"));
+        simulator
+            .clone()
+            .estimate_from_loss(&batch, &batch.loss_mask, None, 1)
+            .unwrap();
+
+        let err = simulator
+            .estimate_from_loss(&batch, &Mask::zero(2), None, 1)
+            .unwrap_err();
+        assert!(err.to_string().contains("loss_mask has 2 words"));
+
+        let mut rng = SmallRng::new(1);
+        let zero_shot_batch = simulator.run_batch_with_rng(0, &mut rng, true);
+        let err = simulator
+            .estimate_from_loss(&zero_shot_batch, &zero_shot_batch.loss_mask, None, 1)
+            .unwrap_err();
+        assert!(err.to_string().contains("shots to be positive"));
     }
 
     #[test]

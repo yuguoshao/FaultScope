@@ -51,9 +51,9 @@ pub(crate) fn parse_py_noise_locations(
     let locations = locations
         .downcast::<PyDict>()
         .map_err(|_| PyValueError::new_err("Circuit.noise_locations() must return a dict"))?;
-    let mut out = Vec::with_capacity(program.noise_locations.len());
-    for location in &program.noise_locations {
-        let label = program.location_catalog.label(location.location_id);
+    let mut out = Vec::with_capacity(program.noise_locations().len());
+    for location in program.noise_locations() {
+        let label = program.location_catalog().label(location.location_id);
         let value = locations.get_item(label)?.ok_or_else(|| {
             PyValueError::new_err(format!(
                 "Circuit.noise_locations() did not return compiled location {label:?}"

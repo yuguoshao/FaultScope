@@ -472,19 +472,19 @@ fn emit_sampler_program(
             pauli: observable.pauli.clone(),
         })
         .collect();
-    Ok(SamplerProgram {
+    Ok(SamplerProgram::from_compiled_parts(
         n_qubits,
-        operations: sampler_operations,
+        sampler_operations,
         observables,
         compiled_observables,
         measurement_keys,
-        noise_locations: compiled.noise_locations,
-        location_catalog: compiled.location_catalog,
+        compiled.noise_locations,
+        compiled.location_catalog,
         capacities,
-        stored_operation_count: compiled.stored_operation_count,
-        logical_operation_count: compiled.logical_operation_count,
-        loop_kernel_count: compiled.loop_kernel_count,
-    })
+        compiled.stored_operation_count,
+        compiled.logical_operation_count,
+        compiled.loop_kernel_count,
+    ))
 }
 
 fn resolve_declared_measurement_key(key: &str, measurement_keys: &mut Vec<String>) -> usize {
@@ -603,9 +603,9 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(compiled.capacities.random_sources, 1);
+        assert_eq!(compiled.capacities().random_sources, 1);
         assert!(matches!(
-            compiled.operations.as_slice(),
+            compiled.operations(),
             [SamplerOperation::MeasureSingle { .. }]
         ));
     }
@@ -745,8 +745,8 @@ mod tests {
         let repeated = compile_sampler(1, repeated).unwrap();
         let expanded = compile_sampler(1, expanded).unwrap();
         assert_eq!(
-            repeated.capacities.random_sources,
-            expanded.capacities.random_sources
+            repeated.capacities().random_sources,
+            expanded.capacities().random_sources
         );
         let repeated_batch = crate::run_sampler_program(&repeated, 129, Some(123), false).unwrap();
         let expanded_batch = crate::run_sampler_program(&expanded, 129, Some(123), false).unwrap();
@@ -785,8 +785,8 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(repeated.loop_kernel_count, 1);
-        assert_eq!(repeated.operations, expanded.operations);
+        assert_eq!(repeated.loop_kernel_count(), 1);
+        assert_eq!(repeated.operations(), expanded.operations());
     }
 
     #[test]
@@ -822,7 +822,7 @@ mod tests {
         let repeated_batch = crate::run_sampler_program(&repeated, 129, Some(19), false).unwrap();
         let expanded_batch = crate::run_sampler_program(&expanded, 129, Some(19), false).unwrap();
 
-        assert_eq!(repeated.loop_kernel_count, 0);
+        assert_eq!(repeated.loop_kernel_count(), 0);
         assert_eq!(repeated_batch.measurements, expanded_batch.measurements);
     }
 
@@ -845,10 +845,10 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(repeated_h.loop_kernel_count, 0);
-        assert_eq!(repeated_cx.loop_kernel_count, 0);
-        assert_eq!(repeated_h.operations.len(), 500);
-        assert_eq!(repeated_cx.operations.len(), 500);
+        assert_eq!(repeated_h.loop_kernel_count(), 0);
+        assert_eq!(repeated_cx.loop_kernel_count(), 0);
+        assert_eq!(repeated_h.operations().len(), 500);
+        assert_eq!(repeated_cx.operations().len(), 500);
     }
 
     #[test]
@@ -872,9 +872,9 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(repeated.loop_kernel_count, 1);
+        assert_eq!(repeated.loop_kernel_count(), 1);
         assert_eq!(simulated, body.len());
-        assert_eq!(repeated.operations, expanded.operations);
+        assert_eq!(repeated.operations(), expanded.operations());
     }
 
     #[test]
@@ -904,9 +904,9 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(repeated.loop_kernel_count, 1);
+        assert_eq!(repeated.loop_kernel_count(), 1);
         assert_eq!(simulated, body.len() * 2);
-        assert_eq!(repeated.operations, expanded.operations);
+        assert_eq!(repeated.operations(), expanded.operations());
     }
 
     #[test]
@@ -930,9 +930,9 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(repeated.loop_kernel_count, 0);
+        assert_eq!(repeated.loop_kernel_count(), 0);
         assert_eq!(simulated, body.len() * 8);
-        assert_eq!(repeated.operations, expanded.operations);
+        assert_eq!(repeated.operations(), expanded.operations());
     }
 
     #[test]
@@ -988,10 +988,10 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(compiled.operations.len(), 3);
-        assert_eq!(compiled.capacities.random_sources, 1);
+        assert_eq!(compiled.operations().len(), 3);
+        assert_eq!(compiled.capacities().random_sources, 1);
         assert!(matches!(
-            compiled.operations.as_slice(),
+            compiled.operations(),
             [
                 SamplerOperation::H(0),
                 SamplerOperation::MeasureSingle { ideal, .. },
@@ -1036,9 +1036,9 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(compiled.operations.len(), 6);
-        assert_eq!(compiled.capacities.random_sources, 2);
-        assert!(compiled.operations[4..].iter().all(|operation| {
+        assert_eq!(compiled.operations().len(), 6);
+        assert_eq!(compiled.capacities().random_sources, 2);
+        assert!(compiled.operations()[4..].iter().all(|operation| {
             matches!(operation, SamplerOperation::Reset { ideal, .. } if ideal.terms().is_empty())
         }));
     }
@@ -1082,8 +1082,8 @@ mod tests {
         let expanded = compile_sampler(1, expanded).unwrap();
         let combined = compile_sampler(1, combined).unwrap();
         assert_eq!(
-            expanded.capacities.random_sources,
-            combined.capacities.random_sources
+            expanded.capacities().random_sources,
+            combined.capacities().random_sources
         );
         let expanded_state =
             crate::run_sampler_program(&expanded, 130, Some(12345), false).unwrap();
@@ -1114,9 +1114,9 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(compiled.operations.len(), 4);
+        assert_eq!(compiled.operations().len(), 4);
         assert!(matches!(
-            compiled.operations.last(),
+            compiled.operations().last(),
             Some(SamplerOperation::Reset { ideal, .. }) if !ideal.terms().is_empty()
         ));
     }
@@ -1151,7 +1151,7 @@ mod tests {
         .unwrap();
 
         assert!(matches!(
-            compiled.operations.last(),
+            compiled.operations().last(),
             Some(SamplerOperation::Reset { ideal, .. }) if !ideal.terms().is_empty()
         ));
     }

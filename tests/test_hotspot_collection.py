@@ -4,6 +4,7 @@ import tempfile
 import unittest
 
 from faultscope import (
+    CollectionCounterSchema,
     CollectionOptions,
     CollectionRunOptions,
     CollectionTask,
@@ -176,6 +177,38 @@ class HotspotCollectionTests(unittest.TestCase):
         self.assertEqual(result.stats.shots, 0)
         self.assertEqual(result.batch_stats, ())
         self.assertEqual(result.edge_sensitivities, (0.0,))
+
+    def test_hotspot_validates_stop_key_before_zero_limit_completion(self) -> None:
+        with self.assertRaisesRegex(ValueError, "unsupported custom_error_count_key"):
+            collect_hotspots(
+                [CollectionTask(dem=logical_dem(0.5))],
+                options=CollectionOptions(max_shots=8, max_errors=0, batch_size=4),
+                run_options=CollectionRunOptions(
+                    seed=3,
+                    num_workers=4,
+                    custom_error_count_key="detection_event",
+                ),
+            )
+
+    def test_hotspot_uses_versioned_detection_schema_and_shared_stop_counter(self) -> None:
+        (result,) = collect_hotspots(
+            [CollectionTask(dem=detected_logical_dem(1.0))],
+            options=CollectionOptions(max_shots=10, max_errors=3, batch_size=2),
+            run_options=CollectionRunOptions(
+                seed=4,
+                num_workers=4,
+                count_detection_events=True,
+                custom_error_count_key="detectors_checked",
+            ),
+        )
+
+        expected_schema = CollectionCounterSchema(count_detection_events=True)
+        self.assertEqual(result.stats.shots, 4)
+        self.assertEqual(result.stats.custom_counts["detectors_checked"], 4)
+        self.assertEqual(result.stats.counter_schema, expected_schema)
+        self.assertTrue(
+            all(batch.counter_schema == expected_schema for batch in result.batch_stats)
+        )
 
 
 if __name__ == "__main__":

@@ -1415,7 +1415,7 @@ impl PyGraphlikeEdge {
 
     #[getter]
     pub(crate) fn weight(&self) -> f64 {
-        self.edge.weight
+        self.edge.weight()
     }
 
     #[getter]

@@ -4,6 +4,10 @@ Run from the repository root after building the native extension in release mode
 
     .venv/bin/python benchmarks/compiler_throughput.py --distances 5 10 15 20
 
+The default preserves Stim ``REPEAT`` blocks so the Rust compiler can use its
+native loop path. Pass ``--input-form flattened`` only when intentionally
+measuring already-expanded input, or ``--input-form both`` to compare them.
+
 The ``mr`` representation keeps Stim's combined measure-reset instructions.
 The ``m-plus-r`` representation expands each one into a measurement block and
 an equivalent reset block, matching the Figure-1 comparison circuit shape.
@@ -69,7 +73,11 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--input-form",
         choices=("repeat", "flattened", "both"),
-        default="flattened",
+        default="repeat",
+        help=(
+            "preserve Stim REPEAT blocks (default), flatten them for an expanded-input "
+            "stress test, or benchmark both"
+        ),
     )
     parser.add_argument("--json-out", type=Path)
     parser.add_argument("--seed", type=int, default=12345)

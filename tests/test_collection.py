@@ -35,9 +35,11 @@ from faultscope import (
     NoiseLocation,
 )
 from faultscope.collection import (
+    COLLECTION_COUNTER_SCHEMA_VERSION,
     COLLECTION_CSV_FIELDS,
     COLLECTION_CSV_HEADER,
     Collector,
+    CollectionCounterSchema,
     CollectionData,
     CollectionOptions,
     CollectionRunOptions,
@@ -89,6 +91,34 @@ def _graphlike_dem(probability: float = 1.0) -> DetectorErrorModel:
             ),
         ),
     )
+
+
+def _two_observable_dem(probability: float = 1.0) -> DetectorErrorModel:
+    return DetectorErrorModel(
+        detectors=(),
+        observables=(LogicalObservable(id=0), LogicalObservable(id=1)),
+        edges=(
+            DetectorErrorEdge(
+                probability=probability,
+                detectors=(),
+                observables=(0,),
+                location_id="logical_edge_0",
+                event="L0",
+            ),
+        ),
+    )
+
+
+def _native_counter_schema(
+    *,
+    count_observable_error_combos: bool = False,
+    count_detection_events: bool = False,
+) -> dict[str, object]:
+    return {
+        "schema_version": COLLECTION_COUNTER_SCHEMA_VERSION,
+        "count_observable_error_combos": count_observable_error_combos,
+        "count_detection_events": count_detection_events,
+    }
 
 
 def _collect(
@@ -387,6 +417,31 @@ class CollectionTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "max_batch_seconds"):
             CollectionOptions(max_batch_seconds=0)
 
+    def test_collection_numeric_options_reject_bool_float_and_non_finite_values(self) -> None:
+        integer_fields = (
+            "max_shots",
+            "max_errors",
+            "batch_size",
+            "start_batch_size",
+            "max_batch_size",
+            "min_shots",
+        )
+        for field_name in integer_fields:
+            for value in (True, 1.5):
+                with self.subTest(field_name=field_name, value=value):
+                    with self.assertRaisesRegex(TypeError, field_name):
+                        CollectionOptions(**{field_name: value})
+
+        self.assertEqual(CollectionOptions(max_batch_seconds=1).max_batch_seconds, 1.0)
+        for value in (True, "1"):
+            with self.subTest(max_batch_seconds=value):
+                with self.assertRaisesRegex(TypeError, "max_batch_seconds"):
+                    CollectionOptions(max_batch_seconds=value)
+        for value in (math.nan, math.inf, -math.inf):
+            with self.subTest(max_batch_seconds=value):
+                with self.assertRaisesRegex(ValueError, "finite and positive"):
+                    CollectionOptions(max_batch_seconds=value)
+
     def test_collection_run_options_validate_workers(self) -> None:
         options = CollectionRunOptions(seed=5, num_workers=2, decoders=("mwpm",))
 
@@ -396,6 +451,43 @@ class CollectionTests(unittest.TestCase):
         self.assertNotIn("seed", {field.name for field in fields(CollectionOptions)})
         with self.assertRaisesRegex(ValueError, "num_workers must be positive"):
             CollectionRunOptions(num_workers=0)
+
+        for value in (True, 1.5):
+            with self.subTest(num_workers=value):
+                with self.assertRaisesRegex(TypeError, "num_workers"):
+                    CollectionRunOptions(num_workers=value)
+            with self.subTest(seed=value):
+                with self.assertRaisesRegex(TypeError, "seed"):
+                    CollectionRunOptions(seed=value)
+        CollectionRunOptions(seed=0)
+        CollectionRunOptions(seed=(1 << 64) - 1)
+        for value in (-1, 1 << 64):
+            with self.subTest(seed=value):
+                with self.assertRaisesRegex(ValueError, "seed must be between"):
+                    CollectionRunOptions(seed=value)
+
+    def test_collection_options_preserve_public_signature_and_fields(self) -> None:
+        parameters = inspect.signature(CollectionOptions).parameters
+
+        self.assertEqual(
+            tuple(parameters),
+            (
+                "max_shots",
+                "max_errors",
+                "batch_size",
+                "start_batch_size",
+                "max_batch_size",
+                "max_batch_seconds",
+                "min_shots",
+            ),
+        )
+        self.assertEqual(
+            tuple(repr(parameter.default) for parameter in parameters.values()),
+            ("None", "None", "10000", "None", "None", "None", "0"),
+        )
+        self.assertEqual(
+            tuple(field.name for field in fields(CollectionOptions)), tuple(parameters)
+        )
 
     def test_task_requires_exactly_one_source(self) -> None:
         dem = _logical_edge_dem()
@@ -528,6 +620,59 @@ class CollectionTests(unittest.TestCase):
         self.assertEqual(merged.custom_counts["detectors_checked"], 10)
         with self.assertRaisesRegex(ValueError, "same strong_id"):
             _ = stats + stats.with_edits(metadata={"d": 5})
+
+    def test_versioned_counter_schema_round_trips_and_must_match_when_merging(self) -> None:
+        detection_schema = CollectionCounterSchema(count_detection_events=True)
+        stats = TaskStats(
+            task_id="versioned",
+            strong_id="versioned-strong",
+            shots=0,
+            errors=0,
+            discards=0,
+            seconds=0.0,
+            decoder=None,
+            metadata={},
+            custom_counts={"detection_events": 0, "detectors_checked": 0},
+            counter_schema=detection_schema,
+        )
+        row = next(csv.DictReader(io.StringIO(COLLECTION_CSV_HEADER + "\n" + stats.to_csv_line())))
+
+        self.assertEqual(TaskStats.from_csv_row(row), stats.with_edits(task_id=stats.strong_id))
+        with self.assertRaisesRegex(ValueError, "counter schemas"):
+            _ = stats + stats.with_edits(
+                counter_schema=CollectionCounterSchema(),
+                custom_counts={},
+            )
+
+    def test_v2_csv_read_and_append_are_rejected_without_modifying_the_file(self) -> None:
+        v2_header = "shots,errors,discards,seconds,decoder,strong_id,json_metadata,custom_counts\n"
+        v2_row = "1,0,0,0,,legacy,{},{}\n"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "legacy-v2.csv"
+            original = v2_header + v2_row
+            path.write_text(original)
+
+            with self.assertRaisesRegex(ValueError, "header does not match"):
+                read_stats_from_csv_files(path)
+            with self.assertRaisesRegex(ValueError, "header does not match"):
+                write_stats_to_csv_file(
+                    path,
+                    [
+                        TaskStats(
+                            task_id="new",
+                            strong_id="new",
+                            shots=1,
+                            errors=0,
+                            discards=0,
+                            seconds=0.0,
+                            decoder=None,
+                            metadata={},
+                        )
+                    ],
+                    append=True,
+                )
+
+            self.assertEqual(path.read_text(), original)
 
     def test_read_stats_from_csv_files_rejects_invalid_content(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -722,6 +867,58 @@ class CollectionTests(unittest.TestCase):
         self.assertEqual(stats[0].discards, 0)
         self.assertEqual(stats[0].raw_error_rate, 1.0)
         self.assertTrue(stats[0].strong_id)
+
+    def test_counter_flags_change_strong_id_but_not_sampling_identity_or_samples(self) -> None:
+        task = CollectionTask(dem=_logical_edge_dem(0.375), task_id="schema-identity")
+        options = CollectionOptions(max_shots=256, batch_size=32)
+        schemas = [
+            CollectionCounterSchema(
+                count_observable_error_combos=count_combos,
+                count_detection_events=count_detection,
+            )
+            for count_combos in (False, True)
+            for count_detection in (False, True)
+        ]
+        native_tasks = [
+            collection_collect_module._native_task(task, 0, options, schema) for schema in schemas
+        ]
+        stats = [
+            _collect(
+                [task],
+                options=options,
+                seed=1234,
+                count_observable_error_combos=schema.count_observable_error_combos,
+                count_detection_events=schema.count_detection_events,
+            )[0]
+            for schema in schemas
+        ]
+
+        self.assertEqual(len({item["sampling_id"] for item in native_tasks}), 1)
+        self.assertEqual(len({item["strong_id"] for item in native_tasks}), 4)
+        self.assertEqual(len({stat.strong_id for stat in stats}), 4)
+        self.assertEqual(
+            {(stat.shots, stat.errors, stat.discards) for stat in stats},
+            {(256, stats[0].errors, 0)},
+        )
+        self.assertEqual([stat.counter_schema for stat in stats], schemas)
+
+    def test_custom_stop_key_does_not_change_strong_id(self) -> None:
+        task = CollectionTask(dem=_graphlike_dem(0.25), task_id="stop-key-identity")
+        common = dict(
+            max_shots=32,
+            batch_size=8,
+            seed=91,
+            count_detection_events=True,
+        )
+        default_stop = _collect([task], **common)[0]
+        detection_stop = _collect(
+            [task],
+            custom_error_count_key="detection_events",
+            **common,
+        )[0]
+
+        self.assertEqual(default_stop.strong_id, detection_stop.strong_id)
+        self.assertEqual(default_stop.custom_counts, detection_stop.custom_counts)
 
     def test_native_graphlike_decoder_can_remove_all_failures(self) -> None:
         dem = _graphlike_dem()
@@ -943,6 +1140,82 @@ class CollectionTests(unittest.TestCase):
         self.assertEqual(stats.shots, 4)
         self.assertEqual(stats.errors, 4)
 
+    def test_task_option_overlay_distinguishes_omitted_default_and_none(self) -> None:
+        base = CollectionOptions(
+            max_shots=100,
+            min_shots=7,
+            max_errors=3,
+            batch_size=4,
+            start_batch_size=2,
+            max_batch_size=8,
+            max_batch_seconds=0.5,
+        )
+
+        self.assertEqual(
+            collection_collect_module._merge_options(base, CollectionOptions()),
+            base,
+        )
+        restored = collection_collect_module._merge_options(
+            base,
+            CollectionOptions(
+                min_shots=0,
+                max_errors=None,
+                batch_size=10_000,
+                start_batch_size=None,
+                max_batch_size=None,
+                max_batch_seconds=None,
+            ),
+        )
+        self.assertEqual(restored.max_shots, 100)
+        self.assertEqual(restored.min_shots, 0)
+        self.assertIsNone(restored.max_errors)
+        self.assertEqual(restored.batch_size, 10_000)
+        self.assertIsNone(restored.start_batch_size)
+        self.assertIsNone(restored.max_batch_size)
+        self.assertIsNone(restored.max_batch_seconds)
+
+        cleared_cap = collection_collect_module._merge_options(
+            base,
+            CollectionOptions(max_shots=None),
+        )
+        self.assertIsNone(cleared_cap.max_shots)
+
+        last_overlay_wins = collection_collect_module._merge_options(
+            base,
+            CollectionOptions(batch_size=20, max_errors=1),
+            CollectionOptions(batch_size=10_000, max_errors=None),
+        )
+        self.assertEqual(last_overlay_wins.batch_size, 10_000)
+        self.assertIsNone(last_overlay_wins.max_errors)
+
+    def test_explicit_none_clears_task_error_limit(self) -> None:
+        stats = public_collect(
+            [
+                CollectionTask(
+                    dem=_logical_edge_dem(),
+                    collection_options=CollectionOptions(max_errors=None),
+                )
+            ],
+            options=CollectionOptions(max_shots=4, max_errors=0, batch_size=2),
+            run_options=CollectionRunOptions(seed=34),
+        )[0]
+
+        self.assertEqual(stats.shots, 4)
+        self.assertEqual(stats.errors, 4)
+
+    def test_explicit_none_max_shots_fails_before_task_compilation(self) -> None:
+        task = CollectionTask(
+            dem=_logical_edge_dem(),
+            collection_options=CollectionOptions(max_shots=None),
+        )
+        with mock.patch("faultscope.collection._collect._compile_task_sampler") as compile_task:
+            with self.assertRaisesRegex(ValueError, "max_shots is required"):
+                public_collect(
+                    [task],
+                    options=CollectionOptions(max_shots=4),
+                )
+        compile_task.assert_not_called()
+
     def test_native_collection_delegates_loop_to_sampler(self) -> None:
         dem = _logical_edge_dem()
 
@@ -967,6 +1240,7 @@ class CollectionTests(unittest.TestCase):
                         "seconds": 0.25,
                         "decoder": None,
                         "metadata": {},
+                        "counter_schema": _native_counter_schema(),
                         "custom_counts": {},
                     }
                 ],
@@ -1204,6 +1478,131 @@ class CollectionTests(unittest.TestCase):
         self.assertEqual(stats.custom_counts["detection_events"], 4)
         self.assertEqual(stats.custom_counts["detectors_checked"], 4)
 
+    def test_detection_schema_preserves_fixed_zero_counters(self) -> None:
+        stats = _collect(
+            [CollectionTask(dem=_logical_edge_dem(0.0), task_id="zero-detection")],
+            max_shots=4,
+            batch_size=2,
+            seed=10,
+            count_detection_events=True,
+        )[0]
+
+        self.assertEqual(
+            stats.custom_counts,
+            {"detection_events": 0, "detectors_checked": 0},
+        )
+        self.assertEqual(
+            stats.counter_schema,
+            CollectionCounterSchema(count_detection_events=True),
+        )
+
+    def test_zero_error_limit_returns_and_persists_schema_complete_empty_stats(self) -> None:
+        task = CollectionTask(dem=_graphlike_dem(), task_id="zero-limit")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "zero-limit.csv"
+            fixed = _collect(
+                [task],
+                max_shots=8,
+                max_errors=0,
+                batch_size=4,
+                seed=16,
+                num_workers=4,
+                save_resume_filepath=path,
+                count_detection_events=True,
+            )[0]
+            adaptive = _collect(
+                [task],
+                max_shots=8,
+                max_errors=0,
+                batch_size=4,
+                start_batch_size=1,
+                max_batch_size=4,
+                max_batch_seconds=0.01,
+                seed=16,
+                num_workers=4,
+                count_detection_events=True,
+            )[0]
+            persisted = read_stats_from_csv_files(path)[0]
+
+        for stats in (fixed, adaptive, persisted):
+            self.assertEqual(stats.shots, 0)
+            self.assertEqual(
+                stats.custom_counts,
+                {"detection_events": 0, "detectors_checked": 0},
+            )
+            self.assertEqual(
+                stats.counter_schema,
+                CollectionCounterSchema(count_detection_events=True),
+            )
+
+    def test_invalid_custom_stop_keys_fail_before_resume_write_even_without_max_errors(
+        self,
+    ) -> None:
+        base = CollectionTask(dem=_two_observable_dem(), task_id="invalid-stop")
+        cases = (
+            ("typo", base, "detection_event", False, False),
+            ("detection-disabled", base, "detection_events", False, False),
+            ("combo-disabled", base, "obs_mistake_mask=E_", False, False),
+            ("bad-prefix", base, "mistake_mask=E_", True, False),
+            ("bad-width", base, "obs_mistake_mask=E", True, False),
+            ("bad-character", base, "obs_mistake_mask=EX", True, False),
+            ("empty", base, "obs_mistake_mask=", True, False),
+            ("all-underscores", base, "obs_mistake_mask=__", True, False),
+            (
+                "postselected-error",
+                CollectionTask(
+                    dem=_two_observable_dem(),
+                    task_id="postselected-stop",
+                    postselected_observables_mask=b"\x01",
+                ),
+                "obs_mistake_mask=E_",
+                True,
+                False,
+            ),
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            for name, task, key, count_combos, count_detection in cases:
+                path = Path(temp_dir) / f"{name}.csv"
+                with self.subTest(name=name):
+                    with self.assertRaises(ValueError):
+                        _collect(
+                            [task],
+                            max_shots=4,
+                            batch_size=2,
+                            seed=17,
+                            num_workers=4,
+                            save_resume_filepath=path,
+                            count_observable_error_combos=count_combos,
+                            count_detection_events=count_detection,
+                            custom_error_count_key=key,
+                        )
+                    self.assertFalse(path.exists())
+
+    def test_valid_absent_combo_is_zero_and_fixed_detection_keys_can_stop(self) -> None:
+        combo_stats = _collect(
+            [CollectionTask(dem=_two_observable_dem(), task_id="zero-combo")],
+            max_shots=5,
+            max_errors=1,
+            batch_size=2,
+            seed=18,
+            count_observable_error_combos=True,
+            custom_error_count_key="obs_mistake_mask=_E",
+        )[0]
+        detector_stats = _collect(
+            [CollectionTask(dem=_graphlike_dem(), task_id="detector-stop")],
+            max_shots=10,
+            max_errors=3,
+            batch_size=2,
+            seed=18,
+            count_detection_events=True,
+            custom_error_count_key="detectors_checked",
+        )[0]
+
+        self.assertEqual(combo_stats.shots, 5)
+        self.assertNotIn("obs_mistake_mask=_E", combo_stats.custom_counts)
+        self.assertEqual(detector_stats.shots, 4)
+        self.assertEqual(detector_stats.custom_counts["detectors_checked"], 4)
+
     def test_implicit_dem_ids_match_fast_detailed_and_postselection_paths(self) -> None:
         dem = DetectorErrorModel(
             detectors=(),
@@ -1270,6 +1669,160 @@ class CollectionTests(unittest.TestCase):
         self.assertEqual(second.shots, 6)
         self.assertEqual(second.errors, 6)
 
+    def test_csv_resume_rebinds_partial_and_completed_stats_to_current_task_id(self) -> None:
+        dem = _graphlike_dem()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "identity-resume.csv"
+            first = _collect(
+                [CollectionTask(dem=dem, task_id="first-label")],
+                max_shots=2,
+                batch_size=2,
+                seed=46,
+                save_resume_filepath=path,
+                count_observable_error_combos=True,
+                count_detection_events=True,
+            )[0]
+            partial = _collect(
+                [CollectionTask(dem=dem, task_id="renamed-label")],
+                max_shots=4,
+                batch_size=2,
+                seed=46,
+                save_resume_filepath=path,
+                count_observable_error_combos=True,
+                count_detection_events=True,
+            )[0]
+            before_completed_resume = path.read_bytes()
+            completed = _collect(
+                [CollectionTask(dem=dem, task_id="completed-label")],
+                max_shots=4,
+                batch_size=2,
+                seed=46,
+                save_resume_filepath=path,
+                count_observable_error_combos=True,
+                count_detection_events=True,
+            )[0]
+            after_completed_resume = path.read_bytes()
+
+        self.assertEqual(
+            [first.task_id, partial.task_id, completed.task_id],
+            ["first-label", "renamed-label", "completed-label"],
+        )
+        self.assertEqual(first.strong_id, partial.strong_id)
+        self.assertEqual(partial.strong_id, completed.strong_id)
+        self.assertEqual(
+            [
+                (first.shots, first.errors),
+                (partial.shots, partial.errors),
+                (completed.shots, completed.errors),
+            ],
+            [(2, 2), (4, 4), (4, 4)],
+        )
+        self.assertEqual(partial.custom_counts, completed.custom_counts)
+        self.assertEqual(completed.custom_counts["obs_mistake_mask=E"], 4)
+        self.assertEqual(completed.custom_counts["detection_events"], 4)
+        self.assertEqual(completed.custom_counts["detectors_checked"], 4)
+        self.assertEqual(after_completed_resume, before_completed_resume)
+
+    def test_switching_counter_schema_collects_a_fresh_full_sample(self) -> None:
+        task = CollectionTask(dem=_graphlike_dem(0.5), task_id="schema-switch")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "schema-switch.csv"
+            plain = _collect(
+                [task],
+                max_shots=12,
+                batch_size=4,
+                seed=44,
+                save_resume_filepath=path,
+            )[0]
+            detection = _collect(
+                [task],
+                max_shots=12,
+                batch_size=4,
+                seed=44,
+                save_resume_filepath=path,
+                count_detection_events=True,
+            )[0]
+            persisted = read_stats_from_csv_files(path)
+
+        self.assertNotEqual(plain.strong_id, detection.strong_id)
+        self.assertEqual((plain.shots, detection.shots), (12, 12))
+        self.assertEqual(plain.errors, detection.errors)
+        self.assertEqual(len(persisted), 2)
+        self.assertEqual(
+            detection.counter_schema,
+            CollectionCounterSchema(count_detection_events=True),
+        )
+
+    def test_matching_resume_identity_rejects_missing_schema_before_native_collection(self) -> None:
+        task = CollectionTask(dem=_logical_edge_dem(), task_id="missing-schema")
+        collected = _collect([task], max_shots=4, batch_size=4, seed=45)[0]
+        forged = collected.with_edits(counter_schema=None)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "missing-schema.csv"
+            write_stats_to_csv_file(path, [forged])
+            with mock.patch.object(
+                collection_collect_module,
+                "_collect_dem_logical_error_stats_many",
+            ) as native_collect:
+                with self.assertRaisesRegex(ValueError, "counter schema"):
+                    _collect(
+                        [task],
+                        max_shots=4,
+                        batch_size=4,
+                        seed=45,
+                        existing_data_filepaths=(path,),
+                    )
+                native_collect.assert_not_called()
+
+    def test_csv_rejects_wrong_schema_version_missing_fixed_counter_and_mixed_schema(self) -> None:
+        plain_schema = CollectionCounterSchema()
+        detection_schema = CollectionCounterSchema(count_detection_events=True)
+        plain = TaskStats(
+            task_id="plain",
+            strong_id="shared",
+            shots=1,
+            errors=0,
+            discards=0,
+            seconds=0.0,
+            decoder=None,
+            metadata={},
+            custom_counts={},
+            counter_schema=plain_schema,
+        )
+        detection = plain.with_edits(
+            custom_counts={"detection_events": 0, "detectors_checked": 0},
+            counter_schema=detection_schema,
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            base = Path(temp_dir)
+            wrong_version = base / "wrong-version.csv"
+            wrong_version_row = detection.to_csv_row()
+            schema_payload = json.loads(wrong_version_row["json_counter_schema"])
+            schema_payload["schema_version"] = 999
+            wrong_version_row["json_counter_schema"] = json.dumps(schema_payload)
+            with wrong_version.open("w", newline="") as f:
+                writer = csv.DictWriter(f, fieldnames=COLLECTION_CSV_FIELDS)
+                writer.writeheader()
+                writer.writerow(wrong_version_row)
+
+            missing_fixed = base / "missing-fixed.csv"
+            missing_fixed_row = detection.to_csv_row()
+            missing_fixed_row["custom_counts"] = "{}"
+            with missing_fixed.open("w", newline="") as f:
+                writer = csv.DictWriter(f, fieldnames=COLLECTION_CSV_FIELDS)
+                writer.writeheader()
+                writer.writerow(missing_fixed_row)
+
+            mixed = base / "mixed.csv"
+            write_stats_to_csv_file(mixed, [plain, detection])
+
+            with self.assertRaisesRegex(ValueError, "unsupported collection counter schema"):
+                read_stats_from_csv_files(wrong_version)
+            with self.assertRaisesRegex(ValueError, "must contain"):
+                read_stats_from_csv_files(missing_fixed)
+            with self.assertRaisesRegex(ValueError, "counter schemas"):
+                read_stats_from_csv_files(mixed)
+
     def test_resume_file_header_and_second_run_appends_no_duplicate_rows(self) -> None:
         task = CollectionTask(dem=_logical_edge_dem(), task_id="resume-header")
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -1304,6 +1857,7 @@ class CollectionTests(unittest.TestCase):
                 "decoder",
                 "strong_id",
                 "json_metadata",
+                "json_counter_schema",
                 "custom_counts",
             ],
         )
@@ -1453,6 +2007,45 @@ class CollectionTests(unittest.TestCase):
         self.assertEqual(stats.shots, 9)
         self.assertEqual(stats.custom_counts["detection_events"], 9)
 
+    def test_invalid_stop_key_is_consistent_for_serial_parallel_adaptive_and_progress(self) -> None:
+        task = CollectionTask(dem=_graphlike_dem(), task_id="invalid-paths")
+        fixed = CollectionOptions(max_shots=4, batch_size=2)
+        adaptive = CollectionOptions(
+            max_shots=4,
+            batch_size=2,
+            start_batch_size=1,
+            max_batch_size=2,
+            max_batch_seconds=0.01,
+        )
+        for name, options, workers in (
+            ("serial", fixed, 1),
+            ("parallel", fixed, 4),
+            ("adaptive", adaptive, 4),
+        ):
+            with self.subTest(name=name):
+                with self.assertRaisesRegex(ValueError, "requires count_detection_events"):
+                    public_collect(
+                        [task],
+                        options=options,
+                        run_options=CollectionRunOptions(
+                            seed=19,
+                            num_workers=workers,
+                            custom_error_count_key="detectors_checked",
+                        ),
+                    )
+
+        with self.assertRaisesRegex(ValueError, "requires count_detection_events"):
+            list(
+                public_iter_progress(
+                    [task],
+                    options=fixed,
+                    run_options=CollectionRunOptions(
+                        seed=19,
+                        custom_error_count_key="detectors_checked",
+                    ),
+                )
+            )
+
     def test_iter_progress_receives_incremental_stats(self) -> None:
         progress = list(
             public_iter_progress(
@@ -1498,6 +2091,26 @@ class CollectionTests(unittest.TestCase):
         self.assertEqual([item.new_stats[0].errors for item in progress], [4, 4, 2])
         self.assertEqual(rows[0], list(COLLECTION_CSV_FIELDS))
         self.assertEqual(len(rows), 4)
+
+    def test_stream_detection_deltas_keep_fixed_zero_counters(self) -> None:
+        progress = list(
+            public_iter_progress(
+                [CollectionTask(dem=_logical_edge_dem(0.0), task_id="stream-zero")],
+                options=CollectionOptions(max_shots=3, batch_size=2),
+                run_options=CollectionRunOptions(
+                    seed=22,
+                    count_detection_events=True,
+                ),
+            )
+        )
+
+        self.assertEqual([item.new_stats[0].shots for item in progress], [2, 1])
+        self.assertTrue(
+            all(
+                item.new_stats[0].custom_counts == {"detection_events": 0, "detectors_checked": 0}
+                for item in progress
+            )
+        )
 
     def test_stream_persists_before_yield(self) -> None:
         task = CollectionTask(dem=_logical_edge_dem(), task_id="ordered-stream")
@@ -1565,6 +2178,7 @@ class CollectionTests(unittest.TestCase):
                 "seconds": 0.0,
                 "decoder": None,
                 "metadata": {},
+                "counter_schema": _native_counter_schema(),
                 "custom_counts": {},
             }
 
@@ -1609,6 +2223,7 @@ class CollectionTests(unittest.TestCase):
                 "seconds": 0.0,
                 "decoder": None,
                 "metadata": {},
+                "counter_schema": _native_counter_schema(),
                 "custom_counts": {},
             }
 
@@ -1684,6 +2299,7 @@ class CollectionTests(unittest.TestCase):
                 "seconds": 0.0,
                 "decoder": None,
                 "metadata": {},
+                "counter_schema": _native_counter_schema(),
                 "custom_counts": {},
             }
 

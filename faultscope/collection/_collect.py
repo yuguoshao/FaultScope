@@ -19,6 +19,7 @@ from faultscope.runtime import (
 
 from faultscope.collection._types import (
     CollectionData,
+    CollectionCounterSchema,
     CollectionOptions,
     CollectionRunOptions,
     CollectionTask,
@@ -29,6 +30,7 @@ from faultscope.collection._types import (
     write_stats_to_csv_file,
 )
 from faultscope.collection._identity import (
+    SAMPLING_ID_SCHEMA_VERSION,
     STRONG_ID_SCHEMA_VERSION,
     canonical_json as _identity_canonical_json,
     decoder_identity_payload,
@@ -140,18 +142,28 @@ def _run_collect(
     *,
     progress_sink: Callable[[Progress], object] | None = None,
 ) -> list[TaskStats]:
+    counter_schema = _counter_schema_from_run_options(run_options)
     task_list = _expand_tasks_for_decoders(list(tasks), run_options.decoders)
     native_tasks = []
     for index, task in enumerate(task_list):
         effective = _merge_options(options, task.collection_options)
         if effective.max_shots is None:
             raise ValueError("max_shots is required")
-        native_tasks.append(_native_task(task, index, effective))
+        native_tasks.append(_native_task(task, index, effective, counter_schema))
 
     existing = _read_existing_stats(
         run_options.existing_data_filepaths,
         run_options.save_resume_filepath,
     )
+    current_strong_ids = {str(task["strong_id"]) for task in native_tasks}
+    existing = {
+        strong_id: stat for strong_id, stat in existing.items() if strong_id in current_strong_ids
+    }
+    for stat in existing.values():
+        if stat.counter_schema != counter_schema:
+            raise ValueError(
+                "existing stats strong_id matched but counter schema differs or is missing"
+            )
     resume_path = (
         Path(run_options.save_resume_filepath)
         if run_options.save_resume_filepath is not None
@@ -197,13 +209,14 @@ def _run_collect_hotspots(
 ) -> list[HotspotCollectionResult]:
     if run_options.existing_data_filepaths or run_options.save_resume_filepath is not None:
         raise ValueError("hotspot collection does not support CSV partial resume")
+    counter_schema = _counter_schema_from_run_options(run_options)
     task_list = _expand_tasks_for_decoders(list(tasks), run_options.decoders)
     native_tasks = []
     for index, task in enumerate(task_list):
         effective = _merge_options(options, task.collection_options)
         if effective.max_shots is None:
             raise ValueError("max_shots is required")
-        native_tasks.append(_native_task(task, index, effective))
+        native_tasks.append(_native_task(task, index, effective, counter_schema))
     native_results = _collect_dem_hotspots_many(
         native_tasks,
         num_workers=run_options.num_workers,
@@ -317,7 +330,6 @@ def _merge_options(
     base: CollectionOptions,
     *overlays: CollectionOptions | None,
 ) -> CollectionOptions:
-    default_batch_size = CollectionOptions().batch_size
     max_shots = base.max_shots
     min_shots = base.min_shots
     max_errors = base.max_errors
@@ -328,20 +340,21 @@ def _merge_options(
     for overlay in overlays:
         if overlay is None:
             continue
-        if overlay.max_shots is not None:
+        explicit_mask = overlay._explicit_mask
+        if explicit_mask & CollectionOptions._MAX_SHOTS_EXPLICIT:
             max_shots = overlay.max_shots
-        if getattr(overlay, "_min_shots_explicit", False):
-            min_shots = overlay.min_shots
-        if overlay.max_errors is not None:
+        if explicit_mask & CollectionOptions._MAX_ERRORS_EXPLICIT:
             max_errors = overlay.max_errors
-        if overlay.batch_size != default_batch_size:
+        if explicit_mask & CollectionOptions._BATCH_SIZE_EXPLICIT:
             batch_size = overlay.batch_size
-        if overlay.start_batch_size is not None:
+        if explicit_mask & CollectionOptions._START_BATCH_SIZE_EXPLICIT:
             start_batch_size = overlay.start_batch_size
-        if overlay.max_batch_size is not None:
+        if explicit_mask & CollectionOptions._MAX_BATCH_SIZE_EXPLICIT:
             max_batch_size = overlay.max_batch_size
-        if overlay.max_batch_seconds is not None:
+        if explicit_mask & CollectionOptions._MAX_BATCH_SECONDS_EXPLICIT:
             max_batch_seconds = overlay.max_batch_seconds
+        if explicit_mask & CollectionOptions._MIN_SHOTS_EXPLICIT:
+            min_shots = overlay.min_shots
     return CollectionOptions(
         max_shots=max_shots,
         min_shots=min_shots,
@@ -357,6 +370,7 @@ def _native_task(
     task: CollectionTask,
     index: int,
     options: CollectionOptions,
+    counter_schema: CollectionCounterSchema,
 ) -> dict[str, object]:
     if options.max_shots is None:
         raise ValueError("max_shots is required")
@@ -368,7 +382,7 @@ def _native_task(
     task_id = task.task_id or f"task-{index}"
     postselection_mask = _bytes_or_none(task.postselection_mask)
     postselected_observables_mask = _bytes_or_none(task.postselected_observables_mask)
-    strong_id = _strong_id(
+    sampling_id, strong_id = _task_identities(
         task=task,
         dem=dem,
         decoder=decoder,
@@ -376,15 +390,17 @@ def _native_task(
         metadata=metadata,
         postselection_mask=postselection_mask,
         postselected_observables_mask=postselected_observables_mask,
+        counter_schema=counter_schema,
     )
     return {
         "task_id": task_id,
         "strong_id": strong_id,
+        "sampling_id": sampling_id,
         "sampler": sampler,
         "decoder": decoder,
         "decoder_name": decoder_name,
         "metadata_json": metadata_json,
-        "max_shots": int(options.max_shots),
+        "max_shots": options.max_shots,
         "min_shots": options.min_shots,
         "max_errors": options.max_errors,
         "batch_size": options.batch_size,
@@ -434,7 +450,7 @@ def _decoder_name(decoder: object | str | None) -> str | None:
     return type(decoder).__name__
 
 
-def _strong_id(
+def _task_identities(
     *,
     task: CollectionTask,
     dem: Any,
@@ -443,10 +459,11 @@ def _strong_id(
     metadata: Mapping[str, object],
     postselection_mask: bytes | None,
     postselected_observables_mask: bytes | None,
-) -> str:
-    payload = {
-        "schema": "faultscope.collection.strong_id",
-        "schema_version": STRONG_ID_SCHEMA_VERSION,
+    counter_schema: CollectionCounterSchema,
+) -> tuple[str, str]:
+    sampling_payload = {
+        "schema": "faultscope.collection.sampling_id",
+        "schema_version": SAMPLING_ID_SCHEMA_VERSION,
         "source": source_identity_payload(circuit=task.circuit, dem=dem),
         "decoder": decoder_identity_payload(decoder, decoder_name=decoder_name),
         "metadata": dict(metadata),
@@ -455,7 +472,17 @@ def _strong_id(
             None if postselected_observables_mask is None else postselected_observables_mask.hex()
         ),
     }
-    return hashlib.sha256(_identity_canonical_json(payload).encode("utf-8")).hexdigest()
+    sampling_id = hashlib.sha256(
+        _identity_canonical_json(sampling_payload).encode("utf-8")
+    ).hexdigest()
+    strong_payload = {
+        "schema": "faultscope.collection.strong_id",
+        "schema_version": STRONG_ID_SCHEMA_VERSION,
+        "sampling_id": sampling_id,
+        "counter_schema": counter_schema._to_payload(),
+    }
+    strong_id = hashlib.sha256(_identity_canonical_json(strong_payload).encode("utf-8")).hexdigest()
+    return sampling_id, strong_id
 
 
 def _canonical_json(value: object) -> str:
@@ -478,6 +505,7 @@ def _task_stats_from_native(item: Mapping[str, object]) -> TaskStats:
     if not isinstance(raw_custom_counts, Mapping):
         raise TypeError("native custom_counts must be a mapping")
     custom_counts = {str(key): int(str(value)) for key, value in raw_custom_counts.items()}
+    counter_schema = CollectionCounterSchema._from_payload(item.get("counter_schema"))
     return TaskStats(
         task_id=str(item["task_id"]),
         strong_id=str(item["strong_id"]),
@@ -488,6 +516,7 @@ def _task_stats_from_native(item: Mapping[str, object]) -> TaskStats:
         decoder=item["decoder"] if isinstance(item["decoder"], str) else None,
         metadata=dict(metadata),
         custom_counts=custom_counts,
+        counter_schema=counter_schema,
     )
 
 
@@ -504,6 +533,8 @@ def _read_existing_stats(
 
 
 def _native_stats_from_task_stats(stat: TaskStats) -> dict[str, object]:
+    if stat.counter_schema is None:
+        raise ValueError("unversioned TaskStats cannot be used for collection resume")
     return {
         "task_id": stat.task_id,
         "strong_id": stat.strong_id,
@@ -513,8 +544,18 @@ def _native_stats_from_task_stats(stat: TaskStats) -> dict[str, object]:
         "errors": int(stat.errors),
         "discards": int(stat.discards),
         "seconds": float(stat.seconds),
+        "counter_schema": stat.counter_schema._to_payload(),
         "custom_counts": {str(key): int(value) for key, value in stat.custom_counts.items()},
     }
+
+
+def _counter_schema_from_run_options(
+    run_options: CollectionRunOptions,
+) -> CollectionCounterSchema:
+    return CollectionCounterSchema(
+        count_observable_error_combos=run_options.count_observable_error_combos,
+        count_detection_events=run_options.count_detection_events,
+    )
 
 
 def _stats_delta(total: TaskStats, existing: TaskStats | None) -> TaskStats | None:
@@ -523,7 +564,11 @@ def _stats_delta(total: TaskStats, existing: TaskStats | None) -> TaskStats | No
     custom_counts: dict[str, int] = {}
     for key, value in total.custom_counts.items():
         count_delta = int(value) - int(existing.custom_counts.get(key, 0))
-        if count_delta:
+        if count_delta or (
+            total.counter_schema is not None
+            and total.counter_schema.count_detection_events
+            and key in {"detection_events", "detectors_checked"}
+        ):
             custom_counts[key] = count_delta
     stats_delta = total.with_edits(
         shots=total.shots - existing.shots,
@@ -536,7 +581,7 @@ def _stats_delta(total: TaskStats, existing: TaskStats | None) -> TaskStats | No
         stats_delta.shots == 0
         and stats_delta.errors == 0
         and stats_delta.discards == 0
-        and not custom_counts
+        and not any(custom_counts.values())
     ):
         return None
     return stats_delta

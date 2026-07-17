@@ -1369,14 +1369,12 @@ mod tests {
                 detectors: vec![1],
                 fault_observables: vec![0],
                 probability: 0.1,
-                weight: 2.0,
                 dem_edge_index: 0,
             },
             GraphlikeEdge {
                 detectors: vec![0, 1],
                 fault_observables: vec![1],
                 probability: 0.2,
-                weight: 1.0,
                 dem_edge_index: 1,
             },
         ]
@@ -2043,7 +2041,6 @@ mod tests {
             detectors: vec![0],
             fault_observables: vec![0],
             probability: 0.3,
-            weight: 0.8,
             dem_edge_index: 2,
         });
         let problem = GraphlikeDecodingProblem::new(

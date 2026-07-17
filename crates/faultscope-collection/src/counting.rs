@@ -143,7 +143,7 @@ pub(crate) fn count_detailed_batch(
     decoder: Option<&mut dyn NativeDecoderWorker>,
     count_options: &CountOptions<'_>,
 ) -> NpResult<DetailedBatchResult> {
-    let shots = batch.shots;
+    let shots = batch.shots();
     if let Some(decoder) = decoder.as_deref() {
         validate_decoder_observable_layout(
             sampler.observable_ids(),
@@ -347,7 +347,7 @@ fn sample_dem_logical_error_count_with_decoder(
         &batch.observables,
         &corrections,
         sampler.observable_ids(),
-        &batch.all_mask,
+        batch.all_mask(),
     );
     Ok(loss_mask.bit_count())
 }

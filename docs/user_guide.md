@@ -385,6 +385,12 @@ print(result.top_edges(1)[0].edge_index)
 edge-event masks, but no measurement record or Pauli-frame masks. Internally, it
 uses the same Rust path as `compile_native_dem_sampler_from_circuit(...)`.
 
+Hotspot estimation requires the per-location or per-edge event masks used to
+correlate noise events with failed shots. A native batch may be passed only to
+the same compiled sampler that produced it; missing event recording, a foreign
+sampler batch, zero shots, or an invalid loss-mask width raises `ValueError`
+instead of producing an estimate.
+
 If you already have a `DetectorErrorModel`, use `DemHotspotEstimator(dem)`:
 
 ```python
@@ -522,6 +528,14 @@ task's `collection_options`. The final batch is capped so collection never excee
 `max_shots`. `max_errors` stops only after both it and `min_shots` are reached;
 the returned error count can exceed the threshold by one committed batch.
 
+Task options override only fields explicitly passed to `CollectionOptions`.
+An empty `CollectionOptions()` inherits every Collector default. Explicit
+defaults such as `batch_size=10_000` and `min_shots=0` reset inherited values;
+explicit `None` clears nullable values, for example `max_errors=None` disables
+an inherited error limit and `max_batch_seconds=None` disables inherited
+adaptive batching. Collection count options reject booleans and fractional
+values, and adaptive batch seconds must be finite and positive.
+
 Use `collect_hotspots(...)` (or `Collector.collect_hotspots(...)`) when the same
 run must also return ordered per-batch `TaskStats` and shot-weighted DEM edge
 sensitivities. This path keeps edge-event masks, decoding, residual counting,
@@ -585,8 +599,18 @@ stats = collect(
 The CSV header is:
 
 ```text
-shots,errors,discards,seconds,decoder,strong_id,json_metadata,custom_counts
+shots,errors,discards,seconds,decoder,strong_id,json_metadata,json_counter_schema,custom_counts
 ```
+
+This is the collection v3 CSV contract. `json_counter_schema` records the full
+versioned counter schema for every total and batch delta. Collection rejects a
+v2 header when reading or appending; it does not migrate or append v3 rows to an
+old file. Archive v2 files or convert them separately before choosing a v3
+resume path. CSV rows do not store the display-only `task_id`, so direct CSV
+reads temporarily expose `strong_id` as the task id. A collection resume
+rebinds validated history to the current `CollectionTask.task_id` before stop
+checks and returns the current label even when the saved task is already
+complete.
 
 `iter_collect(...)` yields only final `TaskStats`. Use `iter_progress(...)` to
 receive committed batch deltas. Resume CSV rows are appended and flushed before
@@ -627,12 +651,17 @@ data = CollectionData(stats)
 write_stats_to_csv_file("merged.csv", data.values())
 ```
 
-`strong_id` uses the version-2 collection identity schema. It hashes canonical
-structured circuit and effective DEM data, the resolved decoder fingerprint,
-metadata, and postselection masks. Mapping keys are sorted, so insertion order
-in tags, metadata, and decoder parameters does not affect identity. Runtime
-limits such as `max_shots`, `batch_size`, seed, and worker count remain excluded.
-Task metadata must be JSON serializable when using strong-id and CSV paths.
+Collection v3 separates an internal `sampling_id` from the public `strong_id`.
+The sampling id hashes canonical circuit/effective DEM data, the resolved
+decoder fingerprint, metadata, and postselection masks; Rust uses it to derive
+task-local random streams. The strong id hashes that sampling id plus the full
+counter schema. Consequently, changing either count flag starts a separate
+resume identity but replays the same seeded random samples. Changing a legal
+`custom_error_count_key` does not change the strong id, so the same schema's
+history remains reusable. Mapping keys are sorted, so insertion order in tags,
+metadata, and decoder parameters does not affect identity. Task id, seed,
+`max_shots`, `max_errors`, batch sizing, and worker count remain excluded. Task
+metadata must be JSON serializable when using identity and CSV paths.
 
 Decoder objects must provide `strong_id_payload()` returning a JSON-serializable
 mapping. Bundled native decoders and official backend packages implement this
@@ -641,10 +670,21 @@ version, normalized parameters, detector/observable layout, solver problem, and
 all composite children. Collection rejects opaque decoder objects before
 sampling because their results cannot be resumed, merged, or seeded safely.
 
-Version-1 strong ids cannot be migrated safely because they omitted decoder
-state. After upgrading, archive an old resume CSV and start a new file. Old rows
-will not match version-2 tasks; appending new rows to the old file would leave
-both identity generations visible to later summarize or merge commands.
+The collection counter schema is exposed as the frozen
+`CollectionCounterSchema` type. Its current `schema_version` is `1`, and its two
+boolean fields mirror `count_observable_error_combos` and
+`count_detection_events`. Native `TaskStats` always carries this schema.
+`counter_schema=None` is allowed only for manually constructed analysis data;
+such stats can retain arbitrary custom counters but cannot be resumed. Counter
+schema versions increase whenever counter meaning, key encoding, or coverage
+changes. Resume identity/CSV contract versions increase when identity or file
+layout changes.
+
+Pre-v3 collection resume files cannot be migrated safely in place. After
+upgrading, archive an old CSV and start a new file. Resume requires an exact v3
+schema match and rejects a missing or unsupported schema, a mixed schema under
+one strong id, or a missing fixed detection counter. It does not backfill a
+counter subset or superset.
 
 Postselection masks are bytes-like bit-packed masks over the sampler's canonical
 detector or observable order: explicit declaration order followed by ids first
@@ -678,8 +718,24 @@ print(stats.custom_counts)
 
 `count_observable_error_combos=True` records accepted residual observable masks
 with keys such as `obs_mistake_mask=E_E__`. `count_detection_events=True`
-records total detection events and detector checks. `custom_error_count_key`
-can use one custom count as the `max_errors` stop counter.
+records total detection events and detector checks. When enabled, every native
+stat and progress delta includes both `detection_events` and
+`detectors_checked`, even when either value is zero.
+
+`custom_error_count_key` selects the `max_errors` stop counter:
+
+- `None` uses the main logical `errors` count.
+- `detection_events` and `detectors_checked` require
+  `count_detection_events=True`; missing fixed keys are errors.
+- `obs_mistake_mask=<mask>` requires
+  `count_observable_error_combos=True`. The mask must match every expanded
+  task's observable width, contain only `E` and `_`, include at least one
+  non-postselected `E`, and never mark a postselected observable with `E`.
+  A legal combo absent from `custom_counts` means zero occurrences.
+
+Every nonempty key is validated even when `max_errors` is not set. Invalid keys
+fail before sampling, CSV writes, or native worker startup. Fixed, parallel,
+adaptive, streaming, and hotspot collection share these rules.
 
 Decoder fanout expands tasks that do not already specify a decoder:
 
@@ -1134,7 +1190,7 @@ Run performance benchmarks with a release build of the native extension:
 Then run benchmarks from the repository root:
 
 ```bash
-.venv/bin/python benchmarks/compiler_throughput.py --distances 5 10 15 20 --representation m-plus-r --json-out compiler-throughput.json
+.venv/bin/python benchmarks/compiler_throughput.py --distances 5 10 15 20 --input-form repeat --representation m-plus-r --json-out compiler-throughput.json
 .venv/bin/python benchmarks/sampling_throughput.py --distances 15 21 31 --rounds 3
 .venv/bin/python benchmarks/sampling_throughput.py --family random-clifford --qubits 128 256 512 --depth 20
 .venv/bin/python benchmarks/dem_throughput.py --distances 9 13 21 --rounds 3

@@ -1,7 +1,7 @@
 # Release And Compatibility
 
 FaultScope uses one workspace version for the Python distribution and the
-published Rust libraries. The current workspace version is `0.2.4`.
+published Rust libraries. The current workspace version is `0.2.5`.
 
 ## Compatibility Contract
 

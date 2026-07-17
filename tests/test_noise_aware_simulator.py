@@ -1734,6 +1734,47 @@ class NativePackedSamplerTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "unknown measurement key.*missing"):
             native_batch.measurement_masks(("missing",))
 
+    def test_forward_hotspot_rejects_native_batch_from_another_sampler(self) -> None:
+        location = NoiseLocation(
+            id="x0",
+            model=BernoulliPauliNoise("X"),
+            rate=0.25,
+            qubits=(0,),
+        )
+        circuit = Circuit(
+            n_qubits=1,
+            operations=[Operation.noise(location)],
+        )
+        source = self._native_sampler_or_skip(circuit)
+        foreign = self._native_sampler_or_skip(circuit)
+        batch = source.run_native_batch(17, 11)
+
+        source.estimate_hotspots(batch, batch.all_mask)
+        with self.assertRaisesRegex(ValueError, "layout does not match"):
+            foreign.estimate_hotspots(batch, batch.all_mask)
+
+    def test_dem_hotspot_rejects_native_batch_from_another_sampler(self) -> None:
+        dem = DetectorErrorModel(
+            detectors=(),
+            observables=(LogicalObservable(id=0),),
+            edges=(
+                DetectorErrorEdge(
+                    probability=0.25,
+                    detectors=(),
+                    observables=(0,),
+                    location_id="logical",
+                    event="L",
+                ),
+            ),
+        )
+        source = compile_native_dem_sampler(dem)
+        foreign = compile_native_dem_sampler(dem)
+        batch = source.run_native_batch(17, 11)
+
+        source.estimate_hotspots(batch, batch.all_mask)
+        with self.assertRaisesRegex(ValueError, "layout does not match"):
+            foreign.estimate_hotspots(batch, batch.all_mask)
+
     def test_batch_forward_simulator_is_native_and_exposes_metadata(self) -> None:
         location = NoiseLocation(
             id="x0",
@@ -3993,6 +4034,35 @@ class StimImportTests(unittest.TestCase):
         self.assertEqual(len(imported.observables), stim_circuit.num_observables)
         self.assertIn("reset", [operation.kind for operation in imported.circuit.operations])
 
+    def test_flattened_input_preserves_instructions_between_similar_rounds(self) -> None:
+        imported = parse_stim_circuit(
+            """MR 0
+TICK
+MR 0
+M 0
+MR 0
+TICK
+MR 0
+M 0
+"""
+        )
+
+        self.assertEqual(imported.measurement_keys, ("m0", "m1", "m2", "m3", "m4", "m5"))
+        self.assertEqual(
+            [operation.kind for operation in imported.circuit.operations],
+            [
+                "measure_reset",
+                "tick",
+                "measure_reset",
+                "measure",
+                "measure_reset",
+                "tick",
+                "measure_reset",
+                "measure",
+            ],
+        )
+        self.assertNotIn("repeat", [operation.kind for operation in imported.circuit.operations])
+
     def test_imports_repeat_blocks(self) -> None:
         imported = parse_stim_circuit(
             """
@@ -4047,14 +4117,33 @@ class StimImportTests(unittest.TestCase):
         compact_sampler = compile_native_sampler(compact.circuit)
         flattened_sampler = compile_native_sampler(flattened.circuit)
         self.assertLess(compact_sampler.stored_operation_count, compact_sampler.operation_count)
-        self.assertLess(flattened_sampler.stored_operation_count, flattened_sampler.operation_count)
+        self.assertNotIn("repeat", [operation.kind for operation in flattened.circuit.operations])
+        self.assertEqual(compact.measurement_keys, flattened.measurement_keys)
+        self.assertEqual(
+            tuple(
+                (detector.id, detector.measurement_keys, detector.coords)
+                for detector in compact.detectors
+            ),
+            tuple(
+                (detector.id, detector.measurement_keys, detector.coords)
+                for detector in flattened.detectors
+            ),
+        )
+        self.assertEqual(
+            tuple(
+                (observable.id, observable.measurement_keys) for observable in compact.observables
+            ),
+            tuple(
+                (observable.id, observable.measurement_keys) for observable in flattened.observables
+            ),
+        )
         self.assertEqual(compact_sampler.operation_count, flattened_sampler.operation_count)
         self.assertEqual(
             compact_sampler.sample_measurements(shots=257, seed=9123),
             flattened_sampler.sample_measurements(shots=257, seed=9123),
         )
 
-    def test_long_flattened_surface_code_keeps_warmup_outside_periodic_loop(self) -> None:
+    def test_long_flattened_surface_code_is_not_automatically_compacted(self) -> None:
         try:
             import stim
         except ImportError as exc:
@@ -4066,16 +4155,30 @@ class StimImportTests(unittest.TestCase):
         )
         compact = parse_stim_circuit(str(circuit))
         flattened = parse_stim_circuit(str(circuit.flattened()))
-        recovered_repeats = [
-            operation for operation in flattened.circuit.operations if operation.kind == "repeat"
-        ]
-
-        self.assertEqual(len(recovered_repeats), 1)
-        self.assertEqual(recovered_repeats[0].repeat_count, 9)
+        self.assertNotIn("repeat", [operation.kind for operation in flattened.circuit.operations])
         compact_sampler = compile_native_sampler(compact.circuit)
         flattened_sampler = compile_native_sampler(flattened.circuit)
         self.assertEqual(compact_sampler.loop_kernel_count, 1)
-        self.assertEqual(flattened_sampler.loop_kernel_count, 1)
+        self.assertEqual(flattened_sampler.loop_kernel_count, 0)
+        self.assertEqual(compact.measurement_keys, flattened.measurement_keys)
+        self.assertEqual(
+            tuple(
+                (detector.id, detector.measurement_keys, detector.coords)
+                for detector in compact.detectors
+            ),
+            tuple(
+                (detector.id, detector.measurement_keys, detector.coords)
+                for detector in flattened.detectors
+            ),
+        )
+        self.assertEqual(
+            tuple(
+                (observable.id, observable.measurement_keys) for observable in compact.observables
+            ),
+            tuple(
+                (observable.id, observable.measurement_keys) for observable in flattened.observables
+            ),
+        )
         self.assertEqual(
             compact_sampler.sample_measurements(shots=65, seed=441),
             flattened_sampler.sample_measurements(shots=65, seed=441),

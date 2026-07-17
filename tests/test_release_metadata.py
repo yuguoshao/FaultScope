@@ -65,7 +65,7 @@ class ReleaseMetadataTests(unittest.TestCase):
     def test_workspace_owns_version_and_msrv(self) -> None:
         workspace = _toml("Cargo.toml")["workspace"]
         package = workspace["package"]
-        self.assertEqual(package["version"], "0.2.4")
+        self.assertEqual(package["version"], "0.2.5")
         self.assertEqual(package["rust-version"], "1.85")
 
     def test_faultscope_workspace_packages_and_internal_dependencies_are_v0_2(self) -> None:
@@ -88,7 +88,7 @@ class ReleaseMetadataTests(unittest.TestCase):
             self.assertIs(manifest["package"]["version"]["workspace"], True, path)
             for dependency_name, dependency in manifest.get("dependencies", {}).items():
                 if dependency_name.startswith("faultscope-"):
-                    self.assertEqual(dependency["version"], "0.2.4", path)
+                    self.assertEqual(dependency["version"], "0.2.5", path)
 
         locked = _toml("Cargo.lock")["package"]
         locked_versions = {
@@ -97,7 +97,7 @@ class ReleaseMetadataTests(unittest.TestCase):
             if package["name"] in internal_packages
         }
         self.assertEqual(set(locked_versions), internal_packages)
-        self.assertEqual(set(locked_versions.values()), {"0.2.4"})
+        self.assertEqual(set(locked_versions.values()), {"0.2.5"})
 
     def test_python_metadata_uses_maturin_dynamic_version(self) -> None:
         project = _toml("pyproject.toml")["project"]
@@ -169,7 +169,7 @@ class ReleaseMetadataTests(unittest.TestCase):
     def test_published_path_dependencies_have_registry_versions(self) -> None:
         collection = _toml("crates/faultscope-collection/Cargo.toml")
         dependency = collection["dependencies"]["faultscope-core"]
-        self.assertEqual(dependency["version"], "0.2.4")
+        self.assertEqual(dependency["version"], "0.2.5")
         self.assertEqual(dependency["path"], "../faultscope-core")
 
     def test_all_python_extensions_use_abi3_py310(self) -> None:

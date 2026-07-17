@@ -27,8 +27,14 @@ pub struct GraphlikeEdge {
     pub detectors: Vec<usize>,
     pub fault_observables: Vec<usize>,
     pub probability: f64,
-    pub weight: f64,
     pub dem_edge_index: usize,
+}
+
+impl GraphlikeEdge {
+    /// Return the canonical log-likelihood ratio derived from `probability`.
+    pub fn weight(&self) -> f64 {
+        log_likelihood_ratio(self.probability)
+    }
 }
 
 pub const NATIVE_GRAPHLIKE_PROBLEM_ABI_VERSION: u32 = 1;
@@ -47,6 +53,7 @@ pub const NATIVE_GRAPHLIKE_PROBLEM_CAPSULE_METHOD: &str =
 pub struct FaultScopeNativeGraphlikeEdgeV1 {
     pub dem_edge_index: usize,
     pub probability: f64,
+    /// Canonical log-likelihood ratio derived from `probability` by the core.
     pub weight: f64,
     pub fault_observable_offset: u32,
     pub fault_observable_count: u32,
@@ -119,7 +126,6 @@ impl GraphlikeEdgeRef<'_> {
             detectors: self.detectors().collect(),
             fault_observables: self.fault_observables().collect(),
             probability: self.probability(),
-            weight: self.weight(),
             dem_edge_index: self.dem_edge_index(),
         }
     }
@@ -165,14 +171,12 @@ impl GraphlikeDecodingProblem {
             edges.len(),
         )?;
         for mut edge in edges {
-            validate_graphlike_probability(edge.probability)?;
             parity_canonicalize(&mut edge.detectors);
             parity_canonicalize(&mut edge.fault_observables);
             builder.push_edge(
                 &edge.detectors,
                 &edge.fault_observables,
                 edge.probability,
-                edge.weight,
                 edge.dem_edge_index,
             )?;
         }
@@ -288,9 +292,10 @@ impl GraphlikeProblemBuilder {
         detectors: &[usize],
         fault_observables: &[usize],
         probability: f64,
-        weight: f64,
         dem_edge_index: usize,
     ) -> NpResult<()> {
+        validate_graphlike_probability(probability)?;
+        let weight = log_likelihood_ratio(probability);
         if detectors.len() > 2 {
             return Err(NpError::new(format!(
                 "graphlike decoder requires at most two detectors per edge; edge {dem_edge_index} has {}",
@@ -461,7 +466,6 @@ where
             &detector_indices,
             &observable_indices,
             edge.probability,
-            log_likelihood_ratio(edge.probability),
             edge.original_edge_index,
         )?;
     }
@@ -875,7 +879,6 @@ mod tests {
                 detectors: vec![1, 0, 1],
                 fault_observables: vec![1, 0, 1],
                 probability: 0.25,
-                weight: log_likelihood_ratio(0.25),
                 dem_edge_index: 7,
             }],
         )
@@ -883,9 +886,24 @@ mod tests {
         let edge = problem.edge(0).unwrap();
         assert_eq!(edge.detectors().collect::<Vec<_>>(), vec![0]);
         assert_eq!(edge.fault_observables().collect::<Vec<_>>(), vec![0]);
+        assert_eq!(edge.weight(), log_likelihood_ratio(0.25));
 
         let err = GraphlikeDecodingProblem::new(vec![10], vec![], vec![], vec![]).unwrap_err();
         assert!(err.message().contains("coordinate count"));
+
+        let err = GraphlikeDecodingProblem::new(
+            vec![10],
+            vec![vec![]],
+            vec![],
+            vec![GraphlikeEdge {
+                detectors: vec![0],
+                fault_observables: vec![],
+                probability: f64::NAN,
+                dem_edge_index: 9,
+            }],
+        )
+        .unwrap_err();
+        assert!(err.message().contains("probability must be in [0, 1]"));
     }
 
     #[test]
