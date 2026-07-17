@@ -20,8 +20,10 @@ import faultscope.viz
 
 from faultscope import DetectorErrorEdge, DetectorErrorModel, LogicalObservable
 from faultscope.collection import (
+    COLLECTION_COUNTER_SCHEMA_VERSION,
     COLLECTION_CSV_HEADER,
     Collector,
+    CollectionCounterSchema,
     CollectionData,
     CollectionOptions,
     CollectionRunOptions,
@@ -88,8 +90,10 @@ class ReleaseContractTests(unittest.TestCase):
     def test_collection_csv_header_matches_contract(self) -> None:
         self.assertEqual(
             COLLECTION_CSV_HEADER,
-            "shots,errors,discards,seconds,decoder,strong_id,json_metadata,custom_counts",
+            "shots,errors,discards,seconds,decoder,strong_id,json_metadata,"
+            "json_counter_schema,custom_counts",
         )
+        self.assertEqual(COLLECTION_COUNTER_SCHEMA_VERSION, 1)
 
     def test_public_python_function_signatures_match_contract(self) -> None:
         expected_parameters = {
@@ -130,6 +134,11 @@ class ReleaseContractTests(unittest.TestCase):
 
     def test_public_dataclass_fields_and_class_methods_match_contract(self) -> None:
         expected_fields = {
+            CollectionCounterSchema: (
+                "schema_version",
+                "count_observable_error_combos",
+                "count_detection_events",
+            ),
             CollectionOptions: (
                 "max_shots",
                 "max_errors",
@@ -173,6 +182,7 @@ class ReleaseContractTests(unittest.TestCase):
                 "metadata",
                 "strong_id",
                 "custom_counts",
+                "counter_schema",
             ),
             HotspotCollectionResult: (
                 "stats",
@@ -226,6 +236,7 @@ class ReleaseContractTests(unittest.TestCase):
                 "accepted_error_rate",
                 "accepted_error_rate_stderr",
                 "accepted_shots",
+                "counter_schema",
                 "from_csv_row",
                 "logical_error_rate",
                 "logical_error_rate_stderr",
@@ -264,7 +275,7 @@ class ReleaseContractTests(unittest.TestCase):
         ]
         self.assertEqual(undocumented, [])
 
-    def test_collection_strong_id_schema_v2_is_frozen(self) -> None:
+    def test_collection_strong_id_schema_v3_is_frozen(self) -> None:
         dem = DetectorErrorModel(
             detectors=(),
             observables=(LogicalObservable(id=0),),
@@ -285,7 +296,7 @@ class ReleaseContractTests(unittest.TestCase):
         )
         self.assertEqual(
             stats.strong_id,
-            "372f4320007288494205f1f808fbbc70d1743fd90c65ea06799350c52e2feba3",
+            "4122c57d8371d4edd3ef8ffaec67a4fc3a017456f8cf27afe6915a8cf2607113",
         )
 
 

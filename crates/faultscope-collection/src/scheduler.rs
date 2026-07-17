@@ -14,8 +14,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::api::{
-    stop_error_count, validate_task, DemLogicalCollectionOptions, DemLogicalCollectionRunOptions,
-    DemLogicalCollectionStats, DemLogicalCollectionTask,
+    stop_error_count, validate_observable_combo_mask_for_task, validate_stop_counter_for_tasks,
+    validate_task, DemLogicalCollectionOptions, DemLogicalCollectionRunOptions,
+    DemLogicalCollectionStats, DemLogicalCollectionTask, ValidatedStopCounter,
 };
 use crate::counting::{
     prepare_dem_count_plan, sample_dem_logical_error_stats_with_rng, BatchStats, CountOptions,
@@ -42,6 +43,7 @@ struct AdaptiveCalibrationWork {
     state_index: usize,
     task: Arc<DemLogicalCollectionTask>,
     run_options: Arc<DemLogicalCollectionRunOptions>,
+    stop_counter: ValidatedStopCounter,
     seed_stream: usize,
     prepared_plan: Arc<PreparedDemCountPlan>,
 }
@@ -92,6 +94,7 @@ struct TaskState {
     target_shots: usize,
     min_shots: usize,
     stop_error_limit: Option<usize>,
+    stop_counter: ValidatedStopCounter,
     specs: Vec<usize>,
     next_scheduled: usize,
     next_committed: usize,
@@ -154,28 +157,34 @@ fn collect_task_set_inner(
     if run_options.num_workers == 0 {
         return Err(NpError::new("num_workers must be positive"));
     }
+    let counter_schema = run_options.counter_schema();
+    counter_schema.validate()?;
     for task in &tasks {
         validate_task(task)?;
     }
+    let stop_counter = validate_stop_counter_for_tasks(&tasks, &run_options)?;
 
     let mut results = vec![None; tasks.len()];
     let mut states = Vec::new();
     for (output_index, task) in tasks.into_iter().enumerate() {
         let existing = existing_data.get(&task.strong_id).cloned();
         if let Some(existing_stats) = &existing {
-            validate_existing_stats_for_task(existing_stats, &task)?;
-            if task_is_complete(
-                existing_stats,
-                &task.options,
-                &run_options.custom_error_count_key,
-            ) {
-                results[output_index] = Some(existing_stats.clone());
-                continue;
-            }
+            validate_existing_stats_for_task(existing_stats, &task, counter_schema)?;
         }
 
-        let stats = existing.unwrap_or_else(|| DemLogicalCollectionStats::empty_for_task(&task));
-        let state = make_task_state(output_index, task, stats, &run_options)?;
+        let stats = existing
+            .unwrap_or_else(|| DemLogicalCollectionStats::empty_for_task(&task, counter_schema));
+        if task_is_complete(&stats, &task.options, &stop_counter)? {
+            results[output_index] = Some(stats);
+            continue;
+        }
+        let state = make_task_state(
+            output_index,
+            task,
+            stats,
+            &run_options,
+            stop_counter.clone(),
+        )?;
         if state.is_complete() {
             results[output_index] = Some(state.stats);
         } else {
@@ -306,6 +315,7 @@ fn make_task_state(
     task: DemLogicalCollectionTask,
     stats: DemLogicalCollectionStats,
     run_options: &DemLogicalCollectionRunOptions,
+    stop_counter: ValidatedStopCounter,
 ) -> NpResult<TaskState> {
     let target_shots = task.options.max_shots;
     let min_shots = task.options.min_shots;
@@ -321,6 +331,7 @@ fn make_task_state(
             target_shots,
             min_shots,
             stop_error_limit,
+            stop_counter,
             specs: Vec::new(),
             next_scheduled: 0,
             next_committed: 0,
@@ -334,7 +345,7 @@ fn make_task_state(
         });
     }
 
-    let adjusted = adjusted_task_for_remaining(task, &stats, run_options)?;
+    let adjusted = adjusted_task_for_remaining(task, &stats, &stop_counter)?;
     let adaptive = adjusted.options.max_batch_seconds.is_some();
     let specs = if adaptive {
         Vec::new()
@@ -371,6 +382,7 @@ fn make_task_state(
         target_shots,
         min_shots,
         stop_error_limit,
+        stop_counter,
         specs,
         next_scheduled: 0,
         next_committed: 0,
@@ -387,13 +399,13 @@ fn make_task_state(
 fn adjusted_task_for_remaining(
     mut task: DemLogicalCollectionTask,
     stats: &DemLogicalCollectionStats,
-    run_options: &DemLogicalCollectionRunOptions,
+    stop_counter: &ValidatedStopCounter,
 ) -> NpResult<DemLogicalCollectionTask> {
     let remaining_shots = task.options.max_shots.saturating_sub(stats.shots);
     task.options.max_shots = remaining_shots;
     task.options.min_shots = task.options.min_shots.saturating_sub(stats.shots);
     if let Some(max_errors) = task.options.max_errors {
-        let current = stop_error_count(stats, &run_options.custom_error_count_key);
+        let current = stop_error_count(stats, stop_counter)?;
         if current >= max_errors {
             task.options.max_errors = Some(0);
         } else {
@@ -482,6 +494,7 @@ fn next_work_for_state(
             state_index,
             task: state.task.clone(),
             run_options: run_options.clone(),
+            stop_counter: state.stop_counter.clone(),
             seed_stream: task_seed_stream(state.resume_shots, 0),
             prepared_plan: state.prepared_plan.clone(),
         }));
@@ -556,7 +569,7 @@ fn handle_work_result(
                 return Ok(());
             }
             state.stats.add_assign_checked(&result.stats)?;
-            if reached_task_limit(state, run_options) {
+            if reached_task_limit(state)? {
                 return mark_state_complete(state, results);
             }
 
@@ -594,12 +607,17 @@ fn commit_ready_batches(
             .unwrap_or(Duration::ZERO)
             .as_secs_f64();
         state.committed_elapsed = elapsed;
-        let delta = stats_delta_from_batch(state.task.as_ref(), batch_stats, delta_seconds);
+        let delta = stats_delta_from_batch(
+            state.task.as_ref(),
+            batch_stats,
+            delta_seconds,
+            run_options.counter_schema(),
+        );
         state.stats.add_assign_checked(&delta)?;
         state.next_committed += 1;
         emit_progress(progress_callback, &delta)?;
 
-        if reached_task_limit(state, run_options) {
+        if reached_task_limit(state)? {
             return mark_state_complete(state, results);
         }
     }
@@ -610,12 +628,15 @@ fn commit_ready_batches(
     Ok(())
 }
 
-fn reached_task_limit(state: &TaskState, run_options: &DemLogicalCollectionRunOptions) -> bool {
-    state.stats.shots >= state.target_shots
-        || (state.stats.shots >= state.min_shots
-            && state.stop_error_limit.is_some_and(|limit| {
-                stop_error_count(&state.stats, &run_options.custom_error_count_key) >= limit
-            }))
+fn reached_task_limit(state: &TaskState) -> NpResult<bool> {
+    if state.stats.shots >= state.target_shots {
+        return Ok(true);
+    }
+    let Some(limit) = state.stop_error_limit else {
+        return Ok(false);
+    };
+    Ok(state.stats.shots >= state.min_shots
+        && stop_error_count(&state.stats, &state.stop_counter)? >= limit)
 }
 
 fn mark_state_complete(
@@ -668,9 +689,9 @@ fn run_adaptive_calibration_work(
         work.task.as_ref(),
         decoder,
         &work.run_options,
+        &work.stop_counter,
         work.seed_stream,
         &work.prepared_plan,
-        Some(work.state_index),
         Some(result_tx),
     )?;
     Ok(WorkResult::AdaptiveCalibrated {
@@ -683,13 +704,13 @@ fn calibrate_adaptive_task(
     task: &DemLogicalCollectionTask,
     mut decoder: Option<&mut dyn NativeDecoderWorker>,
     run_options: &DemLogicalCollectionRunOptions,
+    stop_counter: &ValidatedStopCounter,
     seed_stream: usize,
     prepared_plan: &PreparedDemCountPlan,
-    state_index: Option<usize>,
     delta_tx: Option<&mpsc::Sender<NpResult<WorkResult>>>,
 ) -> NpResult<AdaptiveCalibrationResult> {
     validate_task(task)?;
-    let mut stats = DemLogicalCollectionStats::empty_for_task(task);
+    let mut stats = DemLogicalCollectionStats::empty_for_task(task, run_options.counter_schema());
     let mut shots_done = 0usize;
     let mut batch_ordinal = 0usize;
     let mut observations = Vec::with_capacity(3);
@@ -738,9 +759,10 @@ fn calibrate_adaptive_task(
             )?,
         };
         let elapsed = batch_stats.seconds;
-        let delta = stats_delta_from_batch(task, batch_stats, elapsed);
+        let delta =
+            stats_delta_from_batch(task, batch_stats, elapsed, run_options.counter_schema());
         stats.add_assign_checked(&delta)?;
-        if let (Some(_state_index), Some(delta_tx)) = (state_index, delta_tx) {
+        if let Some(delta_tx) = delta_tx {
             let (ack_tx, ack_rx) = mpsc::channel();
             delta_tx
                 .send(Ok(WorkResult::AdaptiveDelta {
@@ -756,12 +778,12 @@ fn calibrate_adaptive_task(
         observations.push((batch_shots, elapsed));
         batch_ordinal += 1;
 
-        if shots_done >= task.options.min_shots
-            && task.options.max_errors.is_some_and(|limit| {
-                stop_error_count(&stats, &run_options.custom_error_count_key) >= limit
-            })
-        {
-            break;
+        if shots_done >= task.options.min_shots {
+            if let Some(limit) = task.options.max_errors {
+                if stop_error_count(&stats, stop_counter)? >= limit {
+                    break;
+                }
+            }
         }
         if shots_done >= task.options.max_shots {
             break;
@@ -784,6 +806,7 @@ fn stats_delta_from_batch(
     task: &DemLogicalCollectionTask,
     batch_stats: BatchStats,
     seconds: f64,
+    counter_schema: crate::api::DemLogicalCounterSchema,
 ) -> DemLogicalCollectionStats {
     DemLogicalCollectionStats {
         task_id: task.task_id.clone(),
@@ -794,6 +817,7 @@ fn stats_delta_from_batch(
         errors: batch_stats.errors,
         discards: batch_stats.discards,
         seconds,
+        counter_schema,
         custom_counts: batch_stats.custom_counts,
     }
 }
@@ -895,7 +919,7 @@ pub(crate) fn task_run_seed(
     task.options.seed.or_else(|| {
         run_options
             .seed
-            .map(|seed| mix_seed(seed, stable_string_hash(&task.strong_id)))
+            .map(|seed| mix_seed(seed, stable_string_hash(&task.sampling_id)))
     })
 }
 
@@ -924,11 +948,23 @@ fn fixed_batch_specs_for_size(shots: usize, batch_size: usize) -> Vec<usize> {
 fn validate_existing_stats_for_task(
     stats: &DemLogicalCollectionStats,
     task: &DemLogicalCollectionTask,
+    counter_schema: crate::api::DemLogicalCounterSchema,
 ) -> NpResult<()> {
+    stats.validate_counter_schema()?;
     if stats.decoder != task.decoder_name || stats.metadata_json != task.metadata_json {
         return Err(NpError::new(
             "existing stats strong_id matched but decoder or metadata differs",
         ));
+    }
+    if stats.counter_schema != counter_schema {
+        return Err(NpError::new(
+            "existing stats strong_id matched but counter schema differs",
+        ));
+    }
+    for key in stats.custom_counts.keys() {
+        if let Some(mask) = key.strip_prefix(crate::api::OBSERVABLE_COMBO_PREFIX) {
+            validate_observable_combo_mask_for_task(mask, task)?;
+        }
     }
     Ok(())
 }
@@ -936,13 +972,15 @@ fn validate_existing_stats_for_task(
 fn task_is_complete(
     stats: &DemLogicalCollectionStats,
     options: &DemLogicalCollectionOptions,
-    custom_error_count_key: &Option<String>,
-) -> bool {
-    stats.shots >= options.max_shots
-        || (stats.shots >= options.min_shots
-            && options
-                .max_errors
-                .is_some_and(|limit| stop_error_count(stats, custom_error_count_key) >= limit))
+    stop_counter: &ValidatedStopCounter,
+) -> NpResult<bool> {
+    if stats.shots >= options.max_shots {
+        return Ok(true);
+    }
+    let Some(limit) = options.max_errors else {
+        return Ok(false);
+    };
+    Ok(stats.shots >= options.min_shots && stop_error_count(stats, stop_counter)? >= limit)
 }
 
 fn collect_results(

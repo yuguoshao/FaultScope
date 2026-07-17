@@ -13,6 +13,58 @@ use faultscope_core::{
     DemHotspotEstimator, NativeDecoderFactory, NativeDecoderWorker, NpError, NpResult, SmallRng,
 };
 
+pub const DEM_LOGICAL_COUNTER_SCHEMA_VERSION: u32 = 1;
+
+pub(crate) const DETECTION_EVENTS_KEY: &str = "detection_events";
+pub(crate) const DETECTORS_CHECKED_KEY: &str = "detectors_checked";
+pub(crate) const OBSERVABLE_COMBO_PREFIX: &str = "obs_mistake_mask=";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DemLogicalCounterSchema {
+    pub schema_version: u32,
+    pub count_observable_error_combos: bool,
+    pub count_detection_events: bool,
+}
+
+impl Default for DemLogicalCounterSchema {
+    fn default() -> Self {
+        Self {
+            schema_version: DEM_LOGICAL_COUNTER_SCHEMA_VERSION,
+            count_observable_error_combos: false,
+            count_detection_events: false,
+        }
+    }
+}
+
+impl DemLogicalCounterSchema {
+    pub fn new(count_observable_error_combos: bool, count_detection_events: bool) -> Self {
+        Self {
+            schema_version: DEM_LOGICAL_COUNTER_SCHEMA_VERSION,
+            count_observable_error_combos,
+            count_detection_events,
+        }
+    }
+
+    pub fn validate(self) -> NpResult<()> {
+        if self.schema_version != DEM_LOGICAL_COUNTER_SCHEMA_VERSION {
+            return Err(NpError::new(format!(
+                "unsupported collection counter schema version {}; expected {}",
+                self.schema_version, DEM_LOGICAL_COUNTER_SCHEMA_VERSION
+            )));
+        }
+        Ok(())
+    }
+
+    fn empty_custom_counts(self) -> HashMap<String, usize> {
+        let mut counts = HashMap::new();
+        if self.count_detection_events {
+            counts.insert(DETECTION_EVENTS_KEY.to_string(), 0);
+            counts.insert(DETECTORS_CHECKED_KEY.to_string(), 0);
+        }
+        counts
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct DemLogicalCollectionOptions {
     pub max_shots: usize,
@@ -35,11 +87,15 @@ pub struct DemLogicalCollectionStats {
     pub errors: usize,
     pub discards: usize,
     pub seconds: f64,
+    pub counter_schema: DemLogicalCounterSchema,
     pub custom_counts: HashMap<String, usize>,
 }
 
 impl DemLogicalCollectionStats {
-    pub fn empty_for_task(task: &DemLogicalCollectionTask) -> Self {
+    pub fn empty_for_task(
+        task: &DemLogicalCollectionTask,
+        counter_schema: DemLogicalCounterSchema,
+    ) -> Self {
         Self {
             task_id: task.task_id.clone(),
             strong_id: task.strong_id.clone(),
@@ -49,7 +105,8 @@ impl DemLogicalCollectionStats {
             errors: 0,
             discards: 0,
             seconds: 0.0,
-            custom_counts: HashMap::new(),
+            counter_schema,
+            custom_counts: counter_schema.empty_custom_counts(),
         }
     }
 
@@ -68,6 +125,8 @@ impl DemLogicalCollectionStats {
     }
 
     pub fn add_assign_checked(&mut self, other: &Self) -> NpResult<()> {
+        self.validate_counter_schema()?;
+        other.validate_counter_schema()?;
         if self.strong_id != other.strong_id {
             return Err(NpError::new(format!(
                 "cannot merge stats with different strong_id values: {:?} != {:?}",
@@ -79,6 +138,11 @@ impl DemLogicalCollectionStats {
                 "stats with the same strong_id have different decoder or metadata",
             ));
         }
+        if self.counter_schema != other.counter_schema {
+            return Err(NpError::new(
+                "stats with the same strong_id have different counter schemas",
+            ));
+        }
         self.shots += other.shots;
         self.errors += other.errors;
         self.discards += other.discards;
@@ -88,12 +152,47 @@ impl DemLogicalCollectionStats {
         }
         Ok(())
     }
+
+    pub fn validate_counter_schema(&self) -> NpResult<()> {
+        self.counter_schema.validate()?;
+        for fixed_key in [DETECTION_EVENTS_KEY, DETECTORS_CHECKED_KEY] {
+            let present = self.custom_counts.contains_key(fixed_key);
+            if self.counter_schema.count_detection_events != present {
+                let expectation = if self.counter_schema.count_detection_events {
+                    "must contain"
+                } else {
+                    "must not contain"
+                };
+                return Err(NpError::new(format!(
+                    "collection stats {expectation} counter {fixed_key:?} for their counter schema"
+                )));
+            }
+        }
+        for key in self.custom_counts.keys() {
+            if key == DETECTION_EVENTS_KEY || key == DETECTORS_CHECKED_KEY {
+                continue;
+            }
+            let Some(mask) = key.strip_prefix(OBSERVABLE_COMBO_PREFIX) else {
+                return Err(NpError::new(format!(
+                    "collection stats contain unsupported custom counter {key:?}"
+                )));
+            };
+            if !self.counter_schema.count_observable_error_combos {
+                return Err(NpError::new(format!(
+                    "collection stats contain observable combo counter {key:?} but their counter schema disables observable combos"
+                )));
+            }
+            validate_observable_combo_mask_syntax(mask)?;
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone)]
 pub struct DemLogicalCollectionTask {
     pub task_id: String,
     pub strong_id: String,
+    pub sampling_id: String,
     pub sampler: Arc<DemHotspotEstimator>,
     pub decoder: Option<Arc<dyn NativeDecoderFactory>>,
     pub decoder_name: Option<String>,
@@ -110,6 +209,15 @@ pub struct DemLogicalCollectionRunOptions {
     pub count_observable_error_combos: bool,
     pub count_detection_events: bool,
     pub custom_error_count_key: Option<String>,
+}
+
+impl DemLogicalCollectionRunOptions {
+    pub fn counter_schema(&self) -> DemLogicalCounterSchema {
+        DemLogicalCounterSchema::new(
+            self.count_observable_error_combos,
+            self.count_detection_events,
+        )
+    }
 }
 
 pub fn collect_dem_logical_error_stats(
@@ -180,6 +288,7 @@ pub fn collect_dem_logical_error_stats(
         errors,
         discards: 0,
         seconds: started.elapsed().as_secs_f64(),
+        counter_schema: DemLogicalCounterSchema::default(),
         custom_counts: HashMap::new(),
     })
 }
@@ -220,6 +329,7 @@ pub fn sample_dem_logical_error_stats(
         errors: batch.errors,
         discards: batch.discards,
         seconds: batch.seconds,
+        counter_schema: DemLogicalCounterSchema::default(),
         custom_counts: batch.custom_counts,
     })
 }
@@ -267,6 +377,9 @@ pub(crate) fn validate_task(task: &DemLogicalCollectionTask) -> NpResult<()> {
     if task.strong_id.is_empty() {
         return Err(NpError::new("strong_id must not be empty"));
     }
+    if task.sampling_id.is_empty() {
+        return Err(NpError::new("sampling_id must not be empty"));
+    }
     Ok(())
 }
 
@@ -295,12 +408,116 @@ fn validate_collection_options(options: DemLogicalCollectionOptions) -> NpResult
     Ok(())
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ValidatedStopCounter {
+    Errors,
+    DetectionEvents,
+    DetectorsChecked,
+    ObservableCombo(String),
+}
+
+pub(crate) fn validate_stop_counter_for_tasks(
+    tasks: &[DemLogicalCollectionTask],
+    run_options: &DemLogicalCollectionRunOptions,
+) -> NpResult<ValidatedStopCounter> {
+    let schema = run_options.counter_schema();
+    schema.validate()?;
+    let Some(key) = run_options.custom_error_count_key.as_deref() else {
+        return Ok(ValidatedStopCounter::Errors);
+    };
+
+    if key == DETECTION_EVENTS_KEY {
+        if !schema.count_detection_events {
+            return Err(NpError::new(format!(
+                "custom_error_count_key {key:?} requires count_detection_events=True"
+            )));
+        }
+        return Ok(ValidatedStopCounter::DetectionEvents);
+    }
+    if key == DETECTORS_CHECKED_KEY {
+        if !schema.count_detection_events {
+            return Err(NpError::new(format!(
+                "custom_error_count_key {key:?} requires count_detection_events=True"
+            )));
+        }
+        return Ok(ValidatedStopCounter::DetectorsChecked);
+    }
+
+    let Some(mask) = key.strip_prefix(OBSERVABLE_COMBO_PREFIX) else {
+        return Err(NpError::new(format!(
+            "unsupported custom_error_count_key {key:?}; use None for logical errors, {DETECTION_EVENTS_KEY:?}, {DETECTORS_CHECKED_KEY:?}, or {OBSERVABLE_COMBO_PREFIX}<mask>"
+        )));
+    };
+    if !schema.count_observable_error_combos {
+        return Err(NpError::new(format!(
+            "custom_error_count_key {key:?} requires count_observable_error_combos=True"
+        )));
+    }
+    validate_observable_combo_mask_syntax(mask)?;
+    for task in tasks {
+        validate_observable_combo_mask_for_task(mask, task)?;
+    }
+    Ok(ValidatedStopCounter::ObservableCombo(key.to_string()))
+}
+
 pub(crate) fn stop_error_count(
     stats: &DemLogicalCollectionStats,
-    custom_error_count_key: &Option<String>,
-) -> usize {
-    match custom_error_count_key {
-        Some(key) => stats.custom_counts.get(key).copied().unwrap_or(0),
-        None => stats.errors,
+    stop_counter: &ValidatedStopCounter,
+) -> NpResult<usize> {
+    stats.counter_schema.validate()?;
+    match stop_counter {
+        ValidatedStopCounter::Errors => Ok(stats.errors),
+        ValidatedStopCounter::ObservableCombo(key) => {
+            Ok(stats.custom_counts.get(key).copied().unwrap_or(0))
+        }
+        ValidatedStopCounter::DetectionEvents => required_stop_count(stats, DETECTION_EVENTS_KEY),
+        ValidatedStopCounter::DetectorsChecked => required_stop_count(stats, DETECTORS_CHECKED_KEY),
     }
+}
+
+fn required_stop_count(stats: &DemLogicalCollectionStats, key: &str) -> NpResult<usize> {
+    stats.custom_counts.get(key).copied().ok_or_else(|| {
+        NpError::new(format!(
+            "collection stats are missing configured stop counter {key:?}"
+        ))
+    })
+}
+
+fn validate_observable_combo_mask_syntax(mask: &str) -> NpResult<()> {
+    if mask.is_empty()
+        || !mask.bytes().all(|value| matches!(value, b'E' | b'_'))
+        || !mask.as_bytes().contains(&b'E')
+    {
+        return Err(NpError::new(format!(
+            "observable combo mask {mask:?} must be non-empty, contain only 'E' and '_', and include at least one 'E'"
+        )));
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_observable_combo_mask_for_task(
+    mask: &str,
+    task: &DemLogicalCollectionTask,
+) -> NpResult<()> {
+    let observable_count = task.sampler.observable_ids().len();
+    if mask.len() != observable_count {
+        return Err(NpError::new(format!(
+            "custom observable combo mask {mask:?} has width {}, but task {:?} has {observable_count} observables",
+            mask.len(), task.task_id
+        )));
+    }
+    for (index, value) in mask.bytes().enumerate() {
+        if value == b'E' && packed_mask_bit(task.postselected_observables_mask.as_deref(), index) {
+            return Err(NpError::new(format!(
+                "custom observable combo mask {mask:?} marks postselected observable index {index} as an error for task {:?}",
+                task.task_id
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn packed_mask_bit(mask: Option<&[u8]>, index: usize) -> bool {
+    mask.and_then(|bytes| bytes.get(index / 8))
+        .is_some_and(|byte| byte & (1 << (index % 8)) != 0)
 }

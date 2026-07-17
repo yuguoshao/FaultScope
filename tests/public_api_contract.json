@@ -3,6 +3,7 @@
     "BernoulliPauliNoise",
     "BinaryLinearDecodingProblem",
     "Circuit",
+    "CollectionCounterSchema",
     "CollectionOptions",
     "CollectionRunOptions",
     "CollectionTask",
@@ -97,8 +98,10 @@
     "official_native_decoder_backend_catalog"
   ],
   "faultscope.collection": [
+    "COLLECTION_COUNTER_SCHEMA_VERSION",
     "COLLECTION_CSV_FIELDS",
     "COLLECTION_CSV_HEADER",
+    "CollectionCounterSchema",
     "CollectionData",
     "CollectionOptions",
     "CollectionRunOptions",

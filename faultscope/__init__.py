@@ -77,6 +77,7 @@ from faultscope.viz import (
 )
 from faultscope.collection import (
     Collector,
+    CollectionCounterSchema,
     CollectionOptions,
     CollectionRunOptions,
     CollectionTask,
@@ -106,6 +107,7 @@ __all__ = [
     "__version__",
     "BernoulliPauliNoise",
     "CollectionOptions",
+    "CollectionCounterSchema",
     "CollectionRunOptions",
     "CollectionTask",
     "HotspotCollectionResult",

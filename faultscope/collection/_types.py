@@ -12,6 +12,11 @@ from collections.abc import Iterable, Iterator
 from typing import Any, Mapping
 
 
+COLLECTION_COUNTER_SCHEMA_VERSION = 1
+OBSERVABLE_COMBO_PREFIX = "obs_mistake_mask="
+DETECTION_EVENTS_KEY = "detection_events"
+DETECTORS_CHECKED_KEY = "detectors_checked"
+
 COLLECTION_CSV_FIELDS = (
     "shots",
     "errors",
@@ -20,6 +25,7 @@ COLLECTION_CSV_FIELDS = (
     "decoder",
     "strong_id",
     "json_metadata",
+    "json_counter_schema",
     "custom_counts",
 )
 COLLECTION_CSV_HEADER = ",".join(COLLECTION_CSV_FIELDS)
@@ -31,6 +37,60 @@ class _UnsetMinShots:
 
 
 _UNSET_MIN_SHOTS = _UnsetMinShots()
+
+
+@dataclass(frozen=True)
+class CollectionCounterSchema:
+    """Versioned definition of the custom counters collected for every shot."""
+
+    schema_version: int = field(default=COLLECTION_COUNTER_SCHEMA_VERSION, init=False)
+    count_observable_error_combos: bool = False
+    count_detection_events: bool = False
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.count_observable_error_combos, bool):
+            raise TypeError("count_observable_error_combos must be a bool")
+        if not isinstance(self.count_detection_events, bool):
+            raise TypeError("count_detection_events must be a bool")
+
+    def _to_payload(self) -> dict[str, object]:
+        return {
+            "schema_version": self.schema_version,
+            "count_observable_error_combos": self.count_observable_error_combos,
+            "count_detection_events": self.count_detection_events,
+        }
+
+    @classmethod
+    def _from_payload(cls, value: object) -> "CollectionCounterSchema":
+        if not isinstance(value, Mapping):
+            raise ValueError("collection counter schema must be a JSON object")
+        raw_version = value.get("schema_version")
+        if (
+            isinstance(raw_version, bool)
+            or not isinstance(raw_version, int)
+            or raw_version != COLLECTION_COUNTER_SCHEMA_VERSION
+        ):
+            raise ValueError(
+                "unsupported collection counter schema version "
+                f"{raw_version!r}; expected {COLLECTION_COUNTER_SCHEMA_VERSION}"
+            )
+        expected = {
+            "schema_version",
+            "count_observable_error_combos",
+            "count_detection_events",
+        }
+        if set(value) != expected:
+            raise ValueError("collection counter schema fields do not match the v3 contract")
+        return cls(
+            count_observable_error_combos=_require_bool(
+                value["count_observable_error_combos"],
+                field_name="count_observable_error_combos",
+            ),
+            count_detection_events=_require_bool(
+                value["count_detection_events"],
+                field_name="count_detection_events",
+            ),
+        )
 
 
 @dataclass(frozen=True, init=False)
@@ -137,6 +197,7 @@ class TaskStats:
     metadata: Mapping[str, object]
     strong_id: str = ""
     custom_counts: Mapping[str, int] = field(default_factory=dict)
+    counter_schema: CollectionCounterSchema | None = None
 
     def __post_init__(self) -> None:
         for field_name, value in (
@@ -166,6 +227,34 @@ class TaskStats:
                 raise ValueError("custom_counts values must be integers")
             if value < 0:
                 raise ValueError("custom_counts values must be non-negative")
+        if self.counter_schema is not None and not isinstance(
+            self.counter_schema, CollectionCounterSchema
+        ):
+            raise TypeError("counter_schema must be a CollectionCounterSchema or None")
+        self._validate_custom_counts_against_schema()
+
+    def _validate_custom_counts_against_schema(self) -> None:
+        schema = self.counter_schema
+        if schema is None:
+            return
+        for fixed_key in (DETECTION_EVENTS_KEY, DETECTORS_CHECKED_KEY):
+            present = fixed_key in self.custom_counts
+            if present != schema.count_detection_events:
+                expectation = "contain" if schema.count_detection_events else "not contain"
+                raise ValueError(
+                    f"custom_counts must {expectation} {fixed_key!r} for their counter schema"
+                )
+        for raw_key in self.custom_counts:
+            key = str(raw_key)
+            if key in {DETECTION_EVENTS_KEY, DETECTORS_CHECKED_KEY}:
+                continue
+            if not key.startswith(OBSERVABLE_COMBO_PREFIX):
+                raise ValueError(f"unsupported versioned custom counter {key!r}")
+            if not schema.count_observable_error_combos:
+                raise ValueError(
+                    f"observable combo counter {key!r} is disabled by the counter schema"
+                )
+            _validate_observable_combo_key_syntax(key)
 
     @property
     def raw_error_rate(self) -> float:
@@ -210,6 +299,9 @@ class TaskStats:
             "decoder": self.decoder or "",
             "strong_id": self.strong_id,
             "json_metadata": _canonical_json(dict(self.metadata)),
+            "json_counter_schema": _canonical_json(
+                None if self.counter_schema is None else self.counter_schema._to_payload()
+            ),
             "custom_counts": _canonical_json(
                 {str(key): int(value) for key, value in self.custom_counts.items()}
             ),
@@ -234,6 +326,12 @@ class TaskStats:
         if not isinstance(custom_counts, Mapping):
             raise ValueError("collection CSV custom_counts must be a JSON object")
         strong_id = row.get("strong_id", "")
+        raw_counter_schema = json.loads(row.get("json_counter_schema") or "null")
+        counter_schema = (
+            None
+            if raw_counter_schema is None
+            else CollectionCounterSchema._from_payload(raw_counter_schema)
+        )
         return cls(
             task_id=strong_id,
             strong_id=strong_id,
@@ -244,6 +342,7 @@ class TaskStats:
             decoder=row.get("decoder") or None,
             metadata=dict(metadata),
             custom_counts=_parse_custom_counts(custom_counts),
+            counter_schema=counter_schema,
         )
 
     def __add__(self, other: "TaskStats") -> "TaskStats":
@@ -255,6 +354,8 @@ class TaskStats:
             dict(other.metadata)
         ):
             raise ValueError("stats with the same strong_id have different decoder or metadata")
+        if self.counter_schema != other.counter_schema:
+            raise ValueError("stats with the same strong_id have different counter schemas")
         custom_counts = {str(key): int(value) for key, value in self.custom_counts.items()}
         for key, value in other.custom_counts.items():
             custom_counts[str(key)] = int(custom_counts.get(str(key), 0)) + int(value)
@@ -268,6 +369,7 @@ class TaskStats:
             decoder=self.decoder,
             metadata=dict(self.metadata),
             custom_counts=custom_counts,
+            counter_schema=self.counter_schema,
         )
 
 
@@ -331,6 +433,11 @@ def write_stats_to_csv_file(
     path = Path(filepath)
     path.parent.mkdir(parents=True, exist_ok=True)
     write_header = not append or not path.exists() or path.stat().st_size == 0
+    if append and not write_header:
+        with path.open(newline="") as existing_file:
+            existing_header = tuple(next(csv.reader(existing_file), ()))
+        if existing_header != COLLECTION_CSV_FIELDS:
+            raise ValueError(f"collection CSV header does not match in {path}")
     with path.open("a" if append else "w", newline="") as f:
         writer = csv.DictWriter(
             f,
@@ -370,6 +477,20 @@ def _parse_custom_counts(custom_counts: Mapping[str, object]) -> dict[str, int]:
             raise ValueError("collection CSV custom_counts values must be non-negative")
         parsed[str(key)] = value
     return parsed
+
+
+def _require_bool(value: object, *, field_name: str) -> bool:
+    if not isinstance(value, bool):
+        raise ValueError(f"collection counter schema {field_name} must be a bool")
+    return value
+
+
+def _validate_observable_combo_key_syntax(key: str) -> None:
+    mask = key.removeprefix(OBSERVABLE_COMBO_PREFIX)
+    if not mask or set(mask) - {"E", "_"} or "E" not in mask:
+        raise ValueError(
+            f"observable combo key {key!r} must contain a non-empty E/_ mask with at least one E"
+        )
 
 
 def _flatten_filepaths(

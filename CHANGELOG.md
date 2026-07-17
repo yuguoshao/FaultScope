@@ -61,6 +61,10 @@ patch releases may make breaking API changes.
 
 ### Fixed
 
+- Collection counter schemas are now explicit and versioned. The v3 strong-id
+  and CSV resume contract isolates all count-flag combinations, rejects v2 CSV
+  reads/appends, preserves fixed zero counters, and validates custom stop keys
+  before sampling or worker startup.
 - Collection strong ids now use a versioned canonical source encoding and
   configuration-aware decoder fingerprints, preventing resume and aggregation
   from merging statistics produced by different same-named decoders.

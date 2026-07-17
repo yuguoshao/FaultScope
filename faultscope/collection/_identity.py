@@ -7,7 +7,8 @@ import json
 from typing import Any
 
 
-STRONG_ID_SCHEMA_VERSION = 2
+SAMPLING_ID_SCHEMA_VERSION = 1
+STRONG_ID_SCHEMA_VERSION = 3
 
 
 def canonical_json(value: object) -> str:

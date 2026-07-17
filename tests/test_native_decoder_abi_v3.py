@@ -366,6 +366,7 @@ class NativeDecoderAbiV3Tests(unittest.TestCase):
             {
                 "task_id": "abi-v3",
                 "strong_id": "abi-v3-strong",
+                "sampling_id": "abi-v3-sampling",
                 "sampler": sampler,
                 "decoder": fixture,
                 "metadata_json": "{}",

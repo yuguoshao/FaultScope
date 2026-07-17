@@ -8,7 +8,7 @@ use faultscope_collection::{
     collect_dem_hotspot_tasks, collect_dem_logical_error_stats, collect_dem_logical_error_tasks,
     collect_dem_logical_error_tasks_with_progress, sample_dem_logical_error_stats,
     DemLogicalCollectionOptions, DemLogicalCollectionRunOptions, DemLogicalCollectionStats,
-    DemLogicalCollectionTask,
+    DemLogicalCollectionTask, DemLogicalCounterSchema,
 };
 use faultscope_core::{
     CorrectionMaskBatch, DemEvent, DemHotspotEstimator, Detector, DetectorErrorEdge,
@@ -1202,6 +1202,7 @@ fn decoder_collection_task(
     DemLogicalCollectionTask {
         task_id: task_name.to_string(),
         strong_id: format!("{task_name}-strong"),
+        sampling_id: format!("{task_name}-strong"),
         sampler: Arc::new(DemHotspotEstimator::new(graphlike_dem(1.0)).unwrap()),
         decoder_name: Some(NativeDecoderFactory::name(decoder.as_ref()).to_string()),
         decoder: Some(decoder),
@@ -1872,6 +1873,7 @@ fn parallel_task_collection_is_seed_order_stable() {
     let task_a = DemLogicalCollectionTask {
         task_id: "a".to_string(),
         strong_id: "a-strong".to_string(),
+        sampling_id: "a-strong".to_string(),
         sampler: Arc::new(DemHotspotEstimator::new(logical_edge_dem(0.375)).unwrap()),
         decoder: None,
         decoder_name: None,
@@ -1892,6 +1894,7 @@ fn parallel_task_collection_is_seed_order_stable() {
     let task_b = DemLogicalCollectionTask {
         task_id: "b".to_string(),
         strong_id: "b-strong".to_string(),
+        sampling_id: "b-strong".to_string(),
         sampler: Arc::new(DemHotspotEstimator::new(logical_edge_dem(0.125)).unwrap()),
         decoder: None,
         decoder_name: None,
@@ -1970,6 +1973,7 @@ fn single_fixed_batch_task_uses_multiple_workers() {
     let task = DemLogicalCollectionTask {
         task_id: "single-parallel".to_string(),
         strong_id: "single-parallel-strong".to_string(),
+        sampling_id: "single-parallel-strong".to_string(),
         sampler: Arc::new(DemHotspotEstimator::new(graphlike_dem(1.0)).unwrap()),
         decoder: Some(decoder.clone()),
         decoder_name: Some(NativeDecoderFactory::name(decoder.as_ref()).to_string()),
@@ -2014,6 +2018,7 @@ fn multiple_fixed_batch_tasks_share_global_worker_pool() {
     let make_task = |index: usize| DemLogicalCollectionTask {
         task_id: format!("global-{index}"),
         strong_id: format!("global-{index}-strong"),
+        sampling_id: format!("global-{index}-strong"),
         sampler: Arc::new(DemHotspotEstimator::new(graphlike_dem(1.0)).unwrap()),
         decoder: Some(decoder.clone()),
         decoder_name: Some(NativeDecoderFactory::name(decoder.as_ref()).to_string()),
@@ -2063,6 +2068,7 @@ fn single_fixed_batch_task_matches_serial_stats() {
     let task = DemLogicalCollectionTask {
         task_id: "single-repeatable".to_string(),
         strong_id: "single-repeatable-strong".to_string(),
+        sampling_id: "single-repeatable-strong".to_string(),
         sampler: Arc::new(DemHotspotEstimator::new(logical_edge_dem(0.375)).unwrap()),
         decoder: None,
         decoder_name: None,
@@ -2119,6 +2125,7 @@ fn fixed_batch_scheduler_preserves_committed_order_with_custom_counts() {
     let make_task = |name: &str, probability: f64, seed: u64| DemLogicalCollectionTask {
         task_id: name.to_string(),
         strong_id: format!("{name}-strong"),
+        sampling_id: format!("{name}-strong"),
         sampler: Arc::new(DemHotspotEstimator::new(logical_edge_dem(probability)).unwrap()),
         decoder: None,
         decoder_name: None,
@@ -2188,6 +2195,7 @@ fn single_parallel_task_stops_after_completed_max_error_batch() {
     let task = DemLogicalCollectionTask {
         task_id: "single-stop".to_string(),
         strong_id: "single-stop-strong".to_string(),
+        sampling_id: "single-stop-strong".to_string(),
         sampler: Arc::new(DemHotspotEstimator::new(logical_edge_dem(1.0)).unwrap()),
         decoder: None,
         decoder_name: None,
@@ -2228,6 +2236,7 @@ fn progress_callback_receives_committed_fixed_batch_deltas_in_order() {
     let task = DemLogicalCollectionTask {
         task_id: "fixed-progress".to_string(),
         strong_id: "fixed-progress-strong".to_string(),
+        sampling_id: "fixed-progress-strong".to_string(),
         sampler: Arc::new(DemHotspotEstimator::new(logical_edge_dem(1.0)).unwrap()),
         decoder: None,
         decoder_name: None,
@@ -2288,6 +2297,7 @@ fn fixed_batch_seconds_track_wall_time_and_preserve_resume_seconds() {
     let task = DemLogicalCollectionTask {
         task_id: "fixed-wall-time".to_string(),
         strong_id: "fixed-wall-time-strong".to_string(),
+        sampling_id: "fixed-wall-time-strong".to_string(),
         sampler: Arc::new(DemHotspotEstimator::new(graphlike_dem(1.0)).unwrap()),
         decoder: Some(decoder.clone()),
         decoder_name: Some(NativeDecoderFactory::name(decoder.as_ref()).to_string()),
@@ -2315,6 +2325,7 @@ fn fixed_batch_seconds_track_wall_time_and_preserve_resume_seconds() {
         errors: 4,
         discards: 0,
         seconds: existing_seconds,
+        counter_schema: DemLogicalCounterSchema::default(),
         custom_counts: HashMap::new(),
     };
     let mut deltas = Vec::new();
@@ -2368,6 +2379,7 @@ fn progress_callback_stops_at_first_max_error_batch() {
     let task = DemLogicalCollectionTask {
         task_id: "fixed-stop-progress".to_string(),
         strong_id: "fixed-stop-progress-strong".to_string(),
+        sampling_id: "fixed-stop-progress-strong".to_string(),
         sampler: Arc::new(DemHotspotEstimator::new(logical_edge_dem(1.0)).unwrap()),
         decoder: None,
         decoder_name: None,
@@ -2414,6 +2426,7 @@ fn progress_callback_receives_adaptive_task_deltas() {
     let task = DemLogicalCollectionTask {
         task_id: "adaptive-progress".to_string(),
         strong_id: "adaptive-progress-strong".to_string(),
+        sampling_id: "adaptive-progress-strong".to_string(),
         sampler: Arc::new(DemHotspotEstimator::new(logical_edge_dem(1.0)).unwrap()),
         decoder: None,
         decoder_name: None,
@@ -2461,6 +2474,7 @@ fn adaptive_progress_error_stops_before_next_batch() {
     let task = DemLogicalCollectionTask {
         task_id: "adaptive-cancel".to_string(),
         strong_id: "adaptive-cancel-strong".to_string(),
+        sampling_id: "adaptive-cancel-strong".to_string(),
         sampler: Arc::new(DemHotspotEstimator::new(graphlike_dem(1.0)).unwrap()),
         decoder: Some(decoder.clone()),
         decoder_name: Some(NativeDecoderFactory::name(decoder.as_ref()).to_string()),
@@ -2511,6 +2525,7 @@ fn progress_callback_error_propagates_after_joining_workers() {
     let task = DemLogicalCollectionTask {
         task_id: "progress-error".to_string(),
         strong_id: "progress-error-strong".to_string(),
+        sampling_id: "progress-error-strong".to_string(),
         sampler: Arc::new(DemHotspotEstimator::new(logical_edge_dem(1.0)).unwrap()),
         decoder: None,
         decoder_name: None,
@@ -2561,6 +2576,7 @@ fn adaptive_batch_task_uses_multiple_workers_after_calibration() {
     let task = DemLogicalCollectionTask {
         task_id: "adaptive".to_string(),
         strong_id: "adaptive-strong".to_string(),
+        sampling_id: "adaptive-strong".to_string(),
         sampler: Arc::new(DemHotspotEstimator::new(graphlike_dem(1.0)).unwrap()),
         decoder: Some(decoder.clone()),
         decoder_name: Some(NativeDecoderFactory::name(decoder.as_ref()).to_string()),
@@ -2605,6 +2621,7 @@ fn adaptive_parallel_phase_stops_at_first_committed_error_batch() {
     let task = DemLogicalCollectionTask {
         task_id: "adaptive-parallel-stop".to_string(),
         strong_id: "adaptive-parallel-stop-strong".to_string(),
+        sampling_id: "adaptive-parallel-stop-strong".to_string(),
         sampler: Arc::new(DemHotspotEstimator::new(graphlike_dem(1.0)).unwrap()),
         decoder: Some(decoder.clone()),
         decoder_name: Some(NativeDecoderFactory::name(decoder.as_ref()).to_string()),
@@ -2658,6 +2675,7 @@ fn adaptive_calibration_stops_immediately_at_error_limit() {
     let task = DemLogicalCollectionTask {
         task_id: "adaptive-calibration-stop".to_string(),
         strong_id: "adaptive-calibration-stop-strong".to_string(),
+        sampling_id: "adaptive-calibration-stop-strong".to_string(),
         sampler: Arc::new(DemHotspotEstimator::new(logical_edge_dem(1.0)).unwrap()),
         decoder: None,
         decoder_name: None,
@@ -2705,6 +2723,7 @@ fn adaptive_task_resumes_partial_existing_stats_to_target() {
     let task = DemLogicalCollectionTask {
         task_id: "adaptive-resume".to_string(),
         strong_id: "adaptive-resume-strong".to_string(),
+        sampling_id: "adaptive-resume-strong".to_string(),
         sampler: Arc::new(DemHotspotEstimator::new(logical_edge_dem(1.0)).unwrap()),
         decoder: None,
         decoder_name: None,
@@ -2731,6 +2750,7 @@ fn adaptive_task_resumes_partial_existing_stats_to_target() {
         errors: 5,
         discards: 0,
         seconds: 0.25,
+        counter_schema: DemLogicalCounterSchema::default(),
         custom_counts: HashMap::new(),
     };
 
@@ -2762,6 +2782,7 @@ fn adaptive_seconds_and_progress_deltas_track_calibration_plus_parallel_wall_tim
     let task = DemLogicalCollectionTask {
         task_id: "adaptive-wall-time".to_string(),
         strong_id: "adaptive-wall-time-strong".to_string(),
+        sampling_id: "adaptive-wall-time-strong".to_string(),
         sampler: Arc::new(DemHotspotEstimator::new(graphlike_dem(1.0)).unwrap()),
         decoder: Some(decoder.clone()),
         decoder_name: Some(NativeDecoderFactory::name(decoder.as_ref()).to_string()),
@@ -2822,6 +2843,7 @@ fn adaptive_parallel_phase_honors_custom_error_stop_counter() {
     let task = DemLogicalCollectionTask {
         task_id: "adaptive-custom-stop".to_string(),
         strong_id: "adaptive-custom-stop-strong".to_string(),
+        sampling_id: "adaptive-custom-stop-strong".to_string(),
         sampler: Arc::new(DemHotspotEstimator::new(graphlike_dem(1.0)).unwrap()),
         decoder: None,
         decoder_name: None,
@@ -2866,6 +2888,7 @@ fn adaptive_calibration_propagates_decoder_errors() {
     let task = DemLogicalCollectionTask {
         task_id: "adaptive-failing".to_string(),
         strong_id: "adaptive-failing-strong".to_string(),
+        sampling_id: "adaptive-failing-strong".to_string(),
         sampler: Arc::new(DemHotspotEstimator::new(graphlike_dem(1.0)).unwrap()),
         decoder: Some(decoder.clone()),
         decoder_name: Some(NativeDecoderFactory::name(decoder.as_ref()).to_string()),
@@ -2905,6 +2928,7 @@ fn global_scheduler_resumes_partial_existing_stats() {
     let task = DemLogicalCollectionTask {
         task_id: "partial".to_string(),
         strong_id: "partial-strong".to_string(),
+        sampling_id: "partial-strong".to_string(),
         sampler: Arc::new(DemHotspotEstimator::new(logical_edge_dem(1.0)).unwrap()),
         decoder: None,
         decoder_name: None,
@@ -2931,6 +2955,7 @@ fn global_scheduler_resumes_partial_existing_stats() {
         errors: 8,
         discards: 0,
         seconds: 0.25,
+        counter_schema: DemLogicalCounterSchema::default(),
         custom_counts: HashMap::new(),
     };
 
@@ -2957,6 +2982,7 @@ fn seeded_resume_does_not_replay_the_original_detector_batch() {
     let make_task = |max_shots| DemLogicalCollectionTask {
         task_id: "seeded-resume".to_string(),
         strong_id: "seeded-resume-strong".to_string(),
+        sampling_id: "seeded-resume-strong".to_string(),
         sampler: Arc::new(DemHotspotEstimator::new(graphlike_dem(0.5)).unwrap()),
         decoder: Some(decoder.clone()),
         decoder_name: Some(NativeDecoderFactory::name(decoder.as_ref()).to_string()),
@@ -3013,6 +3039,7 @@ fn global_scheduler_mixes_fixed_and_adaptive_tasks() {
     let fixed = DemLogicalCollectionTask {
         task_id: "fixed".to_string(),
         strong_id: "fixed-strong".to_string(),
+        sampling_id: "fixed-strong".to_string(),
         sampler: Arc::new(DemHotspotEstimator::new(logical_edge_dem(0.375)).unwrap()),
         decoder: None,
         decoder_name: None,
@@ -3033,6 +3060,7 @@ fn global_scheduler_mixes_fixed_and_adaptive_tasks() {
     let adaptive = DemLogicalCollectionTask {
         task_id: "adaptive-mixed".to_string(),
         strong_id: "adaptive-mixed-strong".to_string(),
+        sampling_id: "adaptive-mixed-strong".to_string(),
         sampler: Arc::new(DemHotspotEstimator::new(logical_edge_dem(0.375)).unwrap()),
         decoder: None,
         decoder_name: None,
@@ -3097,6 +3125,7 @@ fn global_scheduler_returns_worker_errors() {
     let task = DemLogicalCollectionTask {
         task_id: "failing".to_string(),
         strong_id: "failing-strong".to_string(),
+        sampling_id: "failing-strong".to_string(),
         sampler: Arc::new(DemHotspotEstimator::new(graphlike_dem(1.0)).unwrap()),
         decoder: Some(decoder.clone()),
         decoder_name: Some(NativeDecoderFactory::name(decoder.as_ref()).to_string()),
@@ -3178,6 +3207,7 @@ fn postselection_and_custom_counts_are_reported() {
         vec![DemLogicalCollectionTask {
             task_id: "post".to_string(),
             strong_id: "post-strong".to_string(),
+            sampling_id: "post-strong".to_string(),
             sampler: Arc::new(simulator),
             decoder: None,
             decoder_name: None,
@@ -3255,6 +3285,7 @@ fn implicit_dem_ids_are_consistent_across_fast_and_detailed_counting() {
         DemLogicalCollectionTask {
             task_id: task_id.to_string(),
             strong_id: format!("{task_id}-strong"),
+            sampling_id: format!("{task_id}-strong"),
             sampler: Arc::new(simulator.clone()),
             decoder: None,
             decoder_name: None,
@@ -3296,6 +3327,7 @@ fn existing_stats_resume_skips_completed_tasks() {
     let task = DemLogicalCollectionTask {
         task_id: "csv".to_string(),
         strong_id: "csv-strong".to_string(),
+        sampling_id: "csv-strong".to_string(),
         sampler: simulator,
         decoder: None,
         decoder_name: None,
@@ -3355,6 +3387,7 @@ fn custom_error_count_key_controls_stop_condition() {
     let task = DemLogicalCollectionTask {
         task_id: "custom-stop".to_string(),
         strong_id: "custom-stop-strong".to_string(),
+        sampling_id: "custom-stop-strong".to_string(),
         sampler: Arc::new(DemHotspotEstimator::new(graphlike_dem(1.0)).unwrap()),
         decoder: None,
         decoder_name: None,
@@ -3388,4 +3421,222 @@ fn custom_error_count_key_controls_stop_condition() {
 
     assert_eq!(stats[0].shots, 6);
     assert_eq!(stats[0].custom_counts["detection_events"], 6);
+}
+
+#[test]
+fn invalid_stop_key_is_rejected_before_worker_creation_for_all_schedulers() {
+    let tracker = Arc::new(InstanceTracker::default());
+    let decoder: Arc<dyn NativeDecoderFactory> =
+        Arc::new(WorkerOwnedDecoder::prototype(tracker.clone()));
+    let invalid_options = DemLogicalCollectionRunOptions {
+        num_workers: 4,
+        seed: Some(71),
+        count_observable_error_combos: false,
+        count_detection_events: false,
+        custom_error_count_key: Some("detection_event".to_string()),
+    };
+
+    for adaptive in [false, true] {
+        let task = decoder_collection_task("invalid-stop", decoder.clone(), 8, adaptive);
+        let err =
+            collect_dem_logical_error_tasks(vec![task], invalid_options.clone(), HashMap::new())
+                .unwrap_err();
+        assert!(err.message().contains("unsupported custom_error_count_key"));
+    }
+
+    let task = decoder_collection_task("invalid-hotspot-stop", decoder, 8, false);
+    let err = collect_dem_hotspot_tasks(vec![task], invalid_options).unwrap_err();
+    assert!(err.message().contains("unsupported custom_error_count_key"));
+    assert_eq!(tracker.created.load(Ordering::SeqCst), 0);
+    assert_eq!(tracker.decode_calls.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn zero_error_limit_returns_schema_complete_empty_stats_without_workers() {
+    let tracker = Arc::new(InstanceTracker::default());
+    let decoder: Arc<dyn NativeDecoderFactory> =
+        Arc::new(WorkerOwnedDecoder::prototype(tracker.clone()));
+    let mut task = decoder_collection_task("zero-limit", decoder, 8, true);
+    task.options.max_errors = Some(0);
+
+    let stats = collect_dem_logical_error_tasks(
+        vec![task],
+        DemLogicalCollectionRunOptions {
+            count_detection_events: true,
+            ..collection_run_options(4)
+        },
+        HashMap::new(),
+    )
+    .unwrap();
+
+    assert_eq!(stats[0].shots, 0);
+    assert_eq!(stats[0].custom_counts["detection_events"], 0);
+    assert_eq!(stats[0].custom_counts["detectors_checked"], 0);
+    assert_eq!(tracker.created.load(Ordering::SeqCst), 0);
+    assert_eq!(tracker.decode_calls.load(Ordering::SeqCst), 0);
+
+    let decoder: Arc<dyn NativeDecoderFactory> =
+        Arc::new(WorkerOwnedDecoder::prototype(tracker.clone()));
+    let mut hotspot_task = decoder_collection_task("zero-hotspot-limit", decoder, 8, false);
+    hotspot_task.options.max_errors = Some(0);
+    let hotspot = collect_dem_hotspot_tasks(
+        vec![hotspot_task],
+        DemLogicalCollectionRunOptions {
+            count_detection_events: true,
+            ..collection_run_options(4)
+        },
+    )
+    .unwrap();
+    assert_eq!(hotspot[0].stats.shots, 0);
+    assert_eq!(hotspot[0].stats.custom_counts["detection_events"], 0);
+    assert_eq!(hotspot[0].stats.custom_counts["detectors_checked"], 0);
+    assert_eq!(tracker.created.load(Ordering::SeqCst), 0);
+    assert_eq!(tracker.decode_calls.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn resume_rejects_schema_mismatch_and_missing_fixed_counters() {
+    let task = DemLogicalCollectionTask {
+        task_id: "strict-resume".to_string(),
+        strong_id: "strict-resume-strong".to_string(),
+        sampling_id: "strict-resume-sampling".to_string(),
+        sampler: Arc::new(DemHotspotEstimator::new(graphlike_dem(0.5)).unwrap()),
+        decoder: None,
+        decoder_name: None,
+        metadata_json: "{}".to_string(),
+        options: DemLogicalCollectionOptions {
+            max_shots: 8,
+            min_shots: 0,
+            max_errors: None,
+            batch_size: 4,
+            seed: Some(72),
+            start_batch_size: None,
+            max_batch_size: None,
+            max_batch_seconds: None,
+        },
+        postselection_mask: None,
+        postselected_observables_mask: None,
+    };
+    let detection_schema = DemLogicalCounterSchema::new(false, true);
+    let mismatched = DemLogicalCollectionStats::empty_for_task(&task, detection_schema);
+    let err = collect_dem_logical_error_tasks(
+        vec![task.clone()],
+        collection_run_options(1),
+        HashMap::from([(task.strong_id.clone(), mismatched)]),
+    )
+    .unwrap_err();
+    assert!(err.message().contains("counter schema differs"));
+
+    let mut missing = DemLogicalCollectionStats::empty_for_task(&task, detection_schema);
+    missing.custom_counts.remove("detection_events");
+    let err = collect_dem_logical_error_tasks(
+        vec![task.clone()],
+        DemLogicalCollectionRunOptions {
+            count_detection_events: true,
+            ..collection_run_options(1)
+        },
+        HashMap::from([(task.strong_id.clone(), missing)]),
+    )
+    .unwrap_err();
+    assert!(err
+        .message()
+        .contains("must contain counter \"detection_events\""));
+
+    let mut wrong_version = DemLogicalCollectionStats::empty_for_task(&task, detection_schema);
+    wrong_version.counter_schema.schema_version += 1;
+    let err = collect_dem_logical_error_tasks(
+        vec![task.clone()],
+        DemLogicalCollectionRunOptions {
+            count_detection_events: true,
+            ..collection_run_options(1)
+        },
+        HashMap::from([(task.strong_id.clone(), wrong_version)]),
+    )
+    .unwrap_err();
+    assert!(err
+        .message()
+        .contains("unsupported collection counter schema version"));
+
+    let combo_schema = DemLogicalCounterSchema::new(true, false);
+    let mut wrong_width = DemLogicalCollectionStats::empty_for_task(&task, combo_schema);
+    wrong_width
+        .custom_counts
+        .insert("obs_mistake_mask=EE".to_string(), 1);
+    let err = collect_dem_logical_error_tasks(
+        vec![task.clone()],
+        DemLogicalCollectionRunOptions {
+            count_observable_error_combos: true,
+            ..collection_run_options(1)
+        },
+        HashMap::from([(task.strong_id.clone(), wrong_width)]),
+    )
+    .unwrap_err();
+    assert!(err.message().contains("has width 2"));
+}
+
+#[test]
+fn valid_absent_observable_combo_is_zero_and_detection_zero_keys_are_preserved() {
+    let two_observable_dem = DetectorErrorModel {
+        detectors: Vec::new(),
+        observables: vec![
+            LogicalObservable {
+                id: 0,
+                measurement_keys: Vec::new(),
+                pauli_qubits: Vec::new(),
+                pauli: String::new(),
+            },
+            LogicalObservable {
+                id: 1,
+                measurement_keys: Vec::new(),
+                pauli_qubits: Vec::new(),
+                pauli: String::new(),
+            },
+        ],
+        edges: vec![DetectorErrorEdge {
+            probability: 1.0,
+            detectors: Vec::new(),
+            observables: vec![0],
+            location_id: "observable-zero".to_string(),
+            event: DemEvent::Bool(true),
+            tags: HashMap::new(),
+        }],
+    };
+    let task = DemLogicalCollectionTask {
+        task_id: "absent-combo".to_string(),
+        strong_id: "absent-combo-strong".to_string(),
+        sampling_id: "absent-combo-sampling".to_string(),
+        sampler: Arc::new(DemHotspotEstimator::new(two_observable_dem).unwrap()),
+        decoder: None,
+        decoder_name: None,
+        metadata_json: "{}".to_string(),
+        options: DemLogicalCollectionOptions {
+            max_shots: 5,
+            min_shots: 0,
+            max_errors: Some(1),
+            batch_size: 2,
+            seed: Some(73),
+            start_batch_size: None,
+            max_batch_size: None,
+            max_batch_seconds: None,
+        },
+        postselection_mask: None,
+        postselected_observables_mask: None,
+    };
+    let stats = collect_dem_logical_error_tasks(
+        vec![task],
+        DemLogicalCollectionRunOptions {
+            num_workers: 2,
+            seed: None,
+            count_observable_error_combos: true,
+            count_detection_events: true,
+            custom_error_count_key: Some("obs_mistake_mask=_E".to_string()),
+        },
+        HashMap::new(),
+    )
+    .unwrap();
+
+    assert_eq!(stats[0].shots, 5);
+    assert!(!stats[0].custom_counts.contains_key("obs_mistake_mask=_E"));
+    assert_eq!(stats[0].custom_counts["detection_events"], 0);
+    assert_eq!(stats[0].custom_counts["detectors_checked"], 0);
 }

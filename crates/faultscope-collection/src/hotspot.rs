@@ -6,8 +6,9 @@ use std::time::Instant;
 use faultscope_core::{NativeDecoderWorker, NpError, NpResult, SmallRng};
 
 use crate::api::{
-    stop_error_count, validate_task, DemLogicalCollectionRunOptions, DemLogicalCollectionStats,
-    DemLogicalCollectionTask,
+    stop_error_count, validate_stop_counter_for_tasks, validate_task,
+    DemLogicalCollectionRunOptions, DemLogicalCollectionStats, DemLogicalCollectionTask,
+    ValidatedStopCounter,
 };
 use crate::counting::{count_detailed_batch, CountOptions};
 use crate::scheduler::{batch_seed, next_batch_size, task_run_seed};
@@ -137,6 +138,8 @@ pub fn collect_dem_hotspot_tasks(
     if run_options.num_workers == 0 {
         return Err(NpError::new("num_workers must be positive"));
     }
+    let counter_schema = run_options.counter_schema();
+    counter_schema.validate()?;
     for task in &tasks {
         validate_task(task)?;
         if task.options.max_batch_seconds.is_some() {
@@ -145,6 +148,7 @@ pub fn collect_dem_hotspot_tasks(
             ));
         }
     }
+    let stop_counter = validate_stop_counter_for_tasks(&tasks, &run_options)?;
     if tasks.is_empty() {
         return Ok(Vec::new());
     }
@@ -153,7 +157,7 @@ pub fn collect_dem_hotspot_tasks(
     let mut states = tasks
         .iter()
         .map(|task| HotspotCommitState {
-            stats: DemLogicalCollectionStats::empty_for_task(task),
+            stats: DemLogicalCollectionStats::empty_for_task(task, counter_schema),
             batch_stats: Vec::new(),
             sensitivity_sums: vec![0.0; task.sampler.edge_count()],
             pending: HashMap::new(),
@@ -166,6 +170,9 @@ pub fn collect_dem_hotspot_tasks(
             completed_seconds: None,
         })
         .collect::<Vec<_>>();
+    if states.iter().all(|state| state.complete) {
+        return states.into_iter().map(finish_hotspot_state).collect();
+    }
     let mut work_queue = HotspotWorkQueue::new(tasks, run_options.clone());
     let worker_count = run_options.num_workers.min(work_queue.total_batches).max(1);
     let executor = WorkerExecutor::new(
@@ -194,7 +201,7 @@ pub fn collect_dem_hotspot_tasks(
         "hotspot collection worker result channel closed",
         |_| true,
         |result, work_tx, in_flight| {
-            commit_hotspot_result(result, &mut states, &run_options)?;
+            commit_hotspot_result(result, &mut states, &stop_counter)?;
             schedule_hotspot_work(
                 &mut work_queue,
                 &mut states,
@@ -274,6 +281,7 @@ fn run_hotspot_batch(
         errors: detailed.stats.errors,
         discards: detailed.stats.discards,
         seconds: started.elapsed().as_secs_f64(),
+        counter_schema: work.run_options.counter_schema(),
         custom_counts: detailed.stats.custom_counts,
     };
     Ok(HotspotBatchResult {
@@ -300,7 +308,7 @@ fn hotspot_worker_context(work: &HotspotWork) -> String {
 fn commit_hotspot_result(
     result: HotspotBatchResult,
     states: &mut [HotspotCommitState],
-    run_options: &DemLogicalCollectionRunOptions,
+    stop_counter: &ValidatedStopCounter,
 ) -> NpResult<()> {
     let state = states
         .get_mut(result.task_index)
@@ -329,12 +337,15 @@ fn commit_hotspot_result(
         }
         state.batch_stats.push(batch.stats);
         state.next_ordinal += 1;
-        if state.stats.shots >= state.max_shots
-            || (state.stats.shots >= state.min_shots
-                && state.max_errors.is_some_and(|limit| {
-                    stop_error_count(&state.stats, &run_options.custom_error_count_key) >= limit
-                }))
-        {
+        let reached_error_limit = if state.stats.shots >= state.min_shots {
+            match state.max_errors {
+                Some(limit) => stop_error_count(&state.stats, stop_counter)? >= limit,
+                None => false,
+            }
+        } else {
+            false
+        };
+        if state.stats.shots >= state.max_shots || reached_error_limit {
             state.complete = true;
             state.completed_seconds = state.started.map(|started| started.elapsed().as_secs_f64());
             break;
