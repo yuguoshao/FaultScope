@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::fmt;
+use std::sync::Arc;
 
 use crate::Mask;
 
@@ -745,12 +746,58 @@ pub struct DemLocationGroup {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct DemBatch {
-    pub shots: usize,
-    pub all_mask: Mask,
+    shots: usize,
+    all_mask: Mask,
     pub detectors: HashMap<i64, Mask>,
     pub observables: HashMap<i64, Mask>,
-    pub edge_event_masks: Vec<Mask>,
+    edge_event_masks: Vec<Mask>,
     pub loss_mask: Mask,
+    edge_events_recorded: bool,
+    hotspot_layout_identity: Arc<()>,
+}
+
+impl DemBatch {
+    pub(crate) fn new(
+        shots: usize,
+        all_mask: Mask,
+        detectors: HashMap<i64, Mask>,
+        observables: HashMap<i64, Mask>,
+        edge_event_masks: Option<Vec<Mask>>,
+        loss_mask: Mask,
+        hotspot_layout_identity: Arc<()>,
+    ) -> Self {
+        let edge_events_recorded = edge_event_masks.is_some();
+        Self {
+            shots,
+            all_mask,
+            detectors,
+            observables,
+            edge_event_masks: edge_event_masks.unwrap_or_default(),
+            loss_mask,
+            edge_events_recorded,
+            hotspot_layout_identity,
+        }
+    }
+
+    pub fn shots(&self) -> usize {
+        self.shots
+    }
+
+    pub fn all_mask(&self) -> &Mask {
+        &self.all_mask
+    }
+
+    pub fn edge_event_masks(&self) -> &[Mask] {
+        &self.edge_event_masks
+    }
+
+    pub fn records_edge_events(&self) -> bool {
+        self.edge_events_recorded
+    }
+
+    pub(crate) fn matches_hotspot_layout(&self, identity: &Arc<()>) -> bool {
+        Arc::ptr_eq(&self.hotspot_layout_identity, identity)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]

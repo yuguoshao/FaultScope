@@ -316,6 +316,10 @@ estimate(shots, loss_mask_fn=None, decoder=None, correction_mask_fn=None, seed=N
 estimate_hotspots(batch, loss_mask, baseline=None, top_k=10)
 ```
 
+`estimate_hotspots(...)` accepts only a native batch produced by the same
+compiled sampler. The batch must contain recorded per-location event masks;
+foreign batches and invalid loss-mask widths raise `ValueError`.
+
 `NativeDemGenerator` methods:
 
 ```text
@@ -363,6 +367,10 @@ estimate(
 ) -> DemHotspotEstimate
 estimate_hotspots(batch, loss_mask, baseline=None, top_k=10) -> DemHotspotEstimate
 ```
+
+DEM hotspot estimation likewise requires a native batch from the same compiled
+sampler with edge-event recording enabled. Missing events, incompatible batch
+identity, zero shots, or invalid loss-mask widths raise `ValueError`.
 
 `materialize_dem=False` uses the same light sampling path as
 `compile_native_dem_sampler_from_circuit(..., materialize_dem=False)`. In that
@@ -1124,8 +1132,20 @@ let circuit = Circuit {
 
 let simulator = FaultScopeSimulator::new(circuit, Vec::new())?;
 let batch = simulator.run_batch(1024, Some(1), true)?;
-let estimate = simulator.estimate_from_loss(&batch, &batch.measurements["m0"], None, 10);
+let estimate = simulator.estimate_from_loss(&batch, &batch.measurements["m0"], None, 10)?;
 ```
 
 Validation failures return `NpError` in Rust and usually become `ValueError` or
 `UnsupportedNativeCircuitError` through the public Python wrappers.
+Both Rust `estimate_from_loss` methods and the low-level
+`compute_packed_estimate` return `NpResult`. Runtime states and DEM batches are
+bound to their compiled layout; clones preserve that identity, while a
+separately compiled estimator is intentionally incompatible even if its source
+model is equal. Their hotspot-layout fields are private. Read them through
+methods such as `noise_locations()`, `shots()`, `all_mask()`, `event_masks()`,
+and `edge_event_masks()`. Unrelated public result fields such as detector,
+observable, and loss masks remain directly accessible. This prevents callers
+from invalidating an already validated event layout; public estimate methods
+validate once and dispatch to a trusted internal aggregation loop. The
+standalone low-level `compute_packed_estimate` remains a checked boundary for
+callers that pair a `RuntimeState` with raw locations and a catalog.

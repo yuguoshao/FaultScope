@@ -112,11 +112,11 @@ pub(crate) fn noise_event_masks_to_py(
     let mut bytes = Vec::new();
     let dict = PyDict::new(py);
     for (noise_id, value) in values.iter().enumerate() {
-        let Some(location) = program.noise_locations.get(noise_id) else {
+        let Some(location) = program.noise_locations().get(noise_id) else {
             continue;
         };
         dict.set_item(
-            program.location_catalog.label(location.location_id),
+            program.location_catalog().label(location.location_id),
             mask_to_py_with_converter(py, value, &from_bytes, &byteorder, &mut bytes)?,
         )?;
     }

@@ -484,6 +484,7 @@ fn emit_sampler_program(
         stored_operation_count: compiled.stored_operation_count,
         logical_operation_count: compiled.logical_operation_count,
         loop_kernel_count: compiled.loop_kernel_count,
+        hotspot_layout_identity: std::sync::Arc::new(()),
     })
 }
 

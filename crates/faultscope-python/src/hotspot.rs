@@ -23,15 +23,11 @@ pub(crate) fn compute_packed_estimate(
     loss_mask: &Mask,
     baseline: Option<f64>,
     top_k: usize,
-) -> PackedEstimate {
-    faultscope_core::compute_packed_estimate(
-        &sampler.program.noise_locations,
-        &sampler.program.location_catalog,
-        state,
-        loss_mask,
-        baseline,
-        top_k,
-    )
+) -> PyResult<PackedEstimate> {
+    sampler
+        .program
+        .estimate_from_loss(state, loss_mask, baseline, top_k)
+        .map_err(|err| PyValueError::new_err(err.to_string()))
 }
 
 pub(crate) fn compute_dem_estimate(
@@ -40,10 +36,11 @@ pub(crate) fn compute_dem_estimate(
     loss_mask: &Mask,
     baseline: Option<f64>,
     top_k: usize,
-) -> DemEstimate {
+) -> PyResult<DemEstimate> {
     sampler
         .simulator
         .estimate_from_loss(batch, loss_mask, baseline, top_k)
+        .map_err(|err| PyValueError::new_err(err.to_string()))
 }
 
 pub(crate) fn string_f64_map_to_py(

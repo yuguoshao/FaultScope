@@ -1734,6 +1734,47 @@ class NativePackedSamplerTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "unknown measurement key.*missing"):
             native_batch.measurement_masks(("missing",))
 
+    def test_forward_hotspot_rejects_native_batch_from_another_sampler(self) -> None:
+        location = NoiseLocation(
+            id="x0",
+            model=BernoulliPauliNoise("X"),
+            rate=0.25,
+            qubits=(0,),
+        )
+        circuit = Circuit(
+            n_qubits=1,
+            operations=[Operation.noise(location)],
+        )
+        source = self._native_sampler_or_skip(circuit)
+        foreign = self._native_sampler_or_skip(circuit)
+        batch = source.run_native_batch(17, 11)
+
+        source.estimate_hotspots(batch, batch.all_mask)
+        with self.assertRaisesRegex(ValueError, "layout does not match"):
+            foreign.estimate_hotspots(batch, batch.all_mask)
+
+    def test_dem_hotspot_rejects_native_batch_from_another_sampler(self) -> None:
+        dem = DetectorErrorModel(
+            detectors=(),
+            observables=(LogicalObservable(id=0),),
+            edges=(
+                DetectorErrorEdge(
+                    probability=0.25,
+                    detectors=(),
+                    observables=(0,),
+                    location_id="logical",
+                    event="L",
+                ),
+            ),
+        )
+        source = compile_native_dem_sampler(dem)
+        foreign = compile_native_dem_sampler(dem)
+        batch = source.run_native_batch(17, 11)
+
+        source.estimate_hotspots(batch, batch.all_mask)
+        with self.assertRaisesRegex(ValueError, "layout does not match"):
+            foreign.estimate_hotspots(batch, batch.all_mask)
+
     def test_batch_forward_simulator_is_native_and_exposes_metadata(self) -> None:
         location = NoiseLocation(
             id="x0",

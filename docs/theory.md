@@ -862,3 +862,6 @@ corrections = decoder.decode_batch_masks(batch)
 
 理论页中的 `event_count`、`loss_event_count`、`sum_loss_score`、`sum_score`、`baseline`
 和 `sensitivity` 公式逐项对应这些实现。
+Rust batch/program 的 hotspot 不变量字段不可由库外修改。估算入口只验证
+event recording、compiled layout identity、shots 和外部 loss mask 宽度一次，
+随后进入可信聚合循环；因此缺失事件不能再被解释为“事件从未发生”。

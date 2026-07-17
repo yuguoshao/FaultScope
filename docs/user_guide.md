@@ -385,6 +385,12 @@ print(result.top_edges(1)[0].edge_index)
 edge-event masks, but no measurement record or Pauli-frame masks. Internally, it
 uses the same Rust path as `compile_native_dem_sampler_from_circuit(...)`.
 
+Hotspot estimation requires the per-location or per-edge event masks used to
+correlate noise events with failed shots. A native batch may be passed only to
+the same compiled sampler that produced it; missing event recording, a foreign
+sampler batch, zero shots, or an invalid loss-mask width raises `ValueError`
+instead of producing an estimate.
+
 If you already have a `DetectorErrorModel`, use `DemHotspotEstimator(dem)`:
 
 ```python

@@ -271,7 +271,7 @@ fn run_hotspot_batch(
     let estimate = work
         .task
         .sampler
-        .estimate_from_loss(&batch, &detailed.loss_mask, None, 0);
+        .estimate_from_loss(&batch, &detailed.loss_mask, None, 0)?;
     let stats = DemLogicalCollectionStats {
         task_id: work.task.task_id.clone(),
         strong_id: work.task.strong_id.clone(),

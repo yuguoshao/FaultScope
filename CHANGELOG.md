@@ -61,6 +61,12 @@ patch releases may make breaking API changes.
 
 ### Fixed
 
+- Hotspot estimation now rejects batches without recorded event masks, batches
+  from another compiled estimator, zero-shot states, and invalid loss-mask
+  widths with `NpError`/`ValueError` instead of panicking or silently
+  substituting zero event masks. Invariant-bearing Rust batch/program fields
+  are private and exposed through read-only getters, so aggregation validates
+  once at its public boundary and uses a trusted internal hot path.
 - Collection counter schemas are now explicit and versioned. The v3 strong-id
   and CSV resume contract isolates all count-flag combinations, rejects v2 CSV
   reads/appends, preserves fixed zero counters, and validates custom stop keys

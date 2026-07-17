@@ -190,17 +190,19 @@ fn rust_forward_batch_api_samples_and_estimates() {
     assert_eq!(
         simulator
             .program
-            .location_catalog
-            .label(simulator.program.noise_locations[0].location_id),
+            .location_catalog()
+            .label(simulator.program.noise_locations()[0].location_id),
         "x0"
     );
 
     let batch = simulator.run_batch(32, Some(1), true).unwrap();
     let measurement = batch.measurements[0].as_ref().unwrap();
-    let estimate = simulator.estimate_from_loss(&batch, measurement, None, 1);
+    let estimate = simulator
+        .estimate_from_loss(&batch, measurement, None, 1)
+        .unwrap();
 
-    assert_eq!(measurement, &batch.all_mask);
-    assert_eq!(batch.event_masks[0], batch.all_mask);
+    assert_eq!(measurement, batch.all_mask());
+    assert_eq!(&batch.event_masks()[0], batch.all_mask());
     assert_eq!(estimate.mean_loss, 1.0);
     assert_eq!(estimate.top_locations, vec!["x0"]);
 }
