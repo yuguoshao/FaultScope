@@ -61,6 +61,14 @@ patch releases may make breaking API changes.
 
 ### Fixed
 
+- Graphlike decoding problems now treat edge probability as the authoritative
+  value and derive the ABI/matching weight in core. The compatibility edge DTO
+  no longer accepts an independently writable weight that could be non-finite
+  or disagree with backend behavior.
+- Rust `SamplerProgram` internals and `FaultScopeSimulator::program` are now
+  private and exposed through read-only getters. Safe downstream callers can no
+  longer mutate compiler-validated qubit, noise, measurement, observable, or
+  capacity indices into layouts that panic in the packed runtime.
 - Collection completion now uses one predicate across single-task, fixed,
   adaptive, resumed, and hotspot runs. A zero error limit with zero minimum
   shots returns empty statistics without starting workers. Task-level

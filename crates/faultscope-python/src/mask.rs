@@ -90,7 +90,7 @@ pub(crate) fn measurement_masks_to_py(
         let Some(value) = value else {
             continue;
         };
-        let Some(key) = program.measurement_keys.get(measurement_id) else {
+        let Some(key) = program.measurement_keys().get(measurement_id) else {
             continue;
         };
         dict.set_item(

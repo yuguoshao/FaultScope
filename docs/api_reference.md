@@ -1107,7 +1107,8 @@ Core data types include:
 - `LogicalObservable`
 - `DetectorErrorEdge`
 - `DetectorErrorModel`
-- `SamplerProgram` and `RuntimeState` (integer-indexed forward-sampler IR and batch state)
+- `SamplerProgram` and `RuntimeState` (immutable integer-indexed forward-sampler
+  IR with read-only getters, and batch state)
 - `DemBatch`
 - `HotspotEstimate`
 - `DemHotspotEstimate`

@@ -26,7 +26,7 @@ fn indexed_measurement_mask<'a>(
     key: &str,
 ) -> PyResult<&'a Mask> {
     let measurement_id = program
-        .measurement_keys
+        .measurement_keys()
         .iter()
         .position(|candidate| candidate == key)
         .ok_or_else(|| PyValueError::new_err(format!("unknown measurement key {key:?}")))?;
@@ -64,22 +64,22 @@ impl NativePackedSampler {
 
     #[getter]
     pub(crate) fn n_qubits(&self) -> usize {
-        self.program.n_qubits
+        self.program.n_qubits()
     }
 
     #[getter]
     pub(crate) fn operation_count(&self) -> usize {
-        self.program.operations.len()
+        self.program.operations().len()
     }
 
     #[getter]
     pub(crate) fn stored_operation_count(&self) -> usize {
-        self.program.stored_operation_count
+        self.program.stored_operation_count()
     }
 
     #[getter]
     pub(crate) fn loop_kernel_count(&self) -> usize {
-        self.program.loop_kernel_count
+        self.program.loop_kernel_count()
     }
 
     #[pyo3(signature = (shots, seed=None, rng=None))]
@@ -95,7 +95,7 @@ impl NativePackedSampler {
             return Err(PyValueError::new_err("shots must be positive"));
         }
         let state = py.allow_threads(|| run_packed_sample(self, shots, seed, true))?;
-        validate_declared_observables(&state.observables, &self.program.observables)?;
+        validate_declared_observables(&state.observables, self.program.observables())?;
         batch_trajectory_from_state(py, &state, &self.program)
     }
 
@@ -169,7 +169,7 @@ impl NativePackedSampler {
         if let Some(native_decoder) = native_decoder.as_deref() {
             let canonical_observable_ids = self
                 .program
-                .observables
+                .observables()
                 .iter()
                 .map(|observable| observable.id)
                 .collect::<Vec<_>>();
@@ -179,10 +179,10 @@ impl NativePackedSampler {
         if loss_mask_fn.is_none() && correction_mask_fn.is_none() {
             if decoder.is_none() {
                 let corrections = faultscope_core::CorrectionMaskBatch::empty(state.shots());
-                validate_declared_observables(&state.observables, &self.program.observables)?;
+                validate_declared_observables(&state.observables, self.program.observables())?;
                 let observable_ids = self
                     .program
-                    .observables
+                    .observables()
                     .iter()
                     .map(|observable| observable.id)
                     .collect::<Vec<_>>();
@@ -220,10 +220,10 @@ impl NativePackedSampler {
                     let corrections = worker
                         .decode_batch_checked(view)
                         .map_err(|err| PyValueError::new_err(err.to_string()))?;
-                    validate_declared_observables(&state.observables, &self.program.observables)?;
+                    validate_declared_observables(&state.observables, self.program.observables())?;
                     let observable_ids = self
                         .program
-                        .observables
+                        .observables()
                         .iter()
                         .map(|observable| observable.id)
                         .collect::<Vec<_>>();
@@ -256,7 +256,7 @@ impl NativePackedSampler {
             call_forward_loss_mask_fn(py, loss_mask_fn, &batch, &corrections)?
         } else {
             let batch_ref = batch.bind(py).borrow();
-            forward_default_loss_mask(py, &batch_ref, &corrections, &self.program.observables)?
+            forward_default_loss_mask(py, &batch_ref, &corrections, self.program.observables())?
         };
         let batch_ref = batch.bind(py).borrow();
         let estimate =

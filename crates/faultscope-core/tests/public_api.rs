@@ -4,14 +4,15 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use faultscope_core::{
-    collect_dem_event_plan, generate_dem_edges_from_event_plan, Circuit, ConcreteStabilizer,
-    CorrectionMaskBatch, DemHotspotEstimator, Detector, DetectorErrorModelGenerator,
-    DetectorMaskBatchView, FaultScopeNativeCorrectionMaskBatchMutViewV1,
-    FaultScopeNativeDecoderFactoryV3, FaultScopeNativeDecoderStatusV1,
-    FaultScopeNativeDecoderStringViewV1, FaultScopeNativeDecoderWorkerV3,
-    FaultScopeNativeDetectorEventShotBatchViewV1, FaultScopeNativeDetectorMaskBatchViewV1,
-    FaultScopeNativeGraphlikeEdgeV1, FaultScopeNativeGraphlikeProblemV1,
-    FaultScopeNativePackedDetectorShotBatchViewV1, FaultScopeSimulator, LogicalObservable, Mask,
+    collect_dem_event_plan, generate_dem_edges_from_event_plan, log_likelihood_ratio, Circuit,
+    ConcreteStabilizer, CorrectionMaskBatch, DemHotspotEstimator, Detector,
+    DetectorErrorModelGenerator, DetectorMaskBatchView,
+    FaultScopeNativeCorrectionMaskBatchMutViewV1, FaultScopeNativeDecoderFactoryV3,
+    FaultScopeNativeDecoderStatusV1, FaultScopeNativeDecoderStringViewV1,
+    FaultScopeNativeDecoderWorkerV3, FaultScopeNativeDetectorEventShotBatchViewV1,
+    FaultScopeNativeDetectorMaskBatchViewV1, FaultScopeNativeGraphlikeEdgeV1,
+    FaultScopeNativeGraphlikeProblemV1, FaultScopeNativePackedDetectorShotBatchViewV1,
+    FaultScopeSimulator, GraphlikeDecodingProblem, GraphlikeEdge, LogicalObservable, Mask,
     NativeCompositeDecoder, NativeDecoderFactory, NativeDecoderWorker, NoiseLocation, NoiseModel,
     NpError, NpResult, Operation, PauliFrame, NATIVE_DECODER_FACTORY_FLAG_THREAD_SAFE,
     NATIVE_DECODER_PLUGIN_ABI_NAME, NATIVE_DECODER_PLUGIN_ABI_VERSION,
@@ -19,6 +20,27 @@ use faultscope_core::{
     NATIVE_GRAPHLIKE_PROBLEM_ABI_NAME, NATIVE_GRAPHLIKE_PROBLEM_ABI_VERSION,
     NATIVE_GRAPHLIKE_PROBLEM_CAPSULE_NAME,
 };
+
+#[test]
+fn graphlike_public_constructor_derives_canonical_weight() {
+    let problem = GraphlikeDecodingProblem::new(
+        vec![10],
+        vec![vec![]],
+        vec![],
+        vec![GraphlikeEdge {
+            detectors: vec![0],
+            fault_observables: vec![],
+            probability: 0.25,
+            dem_edge_index: 3,
+        }],
+    )
+    .unwrap();
+
+    assert_eq!(
+        problem.edge(0).unwrap().weight(),
+        log_likelihood_ratio(0.25)
+    );
+}
 
 #[test]
 fn pauli_api_exposes_only_validated_stateful_operations() {
@@ -186,12 +208,12 @@ fn rust_forward_batch_api_samples_and_estimates() {
         ],
     };
     let simulator = FaultScopeSimulator::new(circuit, Vec::new()).unwrap();
-    assert_eq!(simulator.program.n_qubits, 1);
+    assert_eq!(simulator.program().n_qubits(), 1);
     assert_eq!(
         simulator
-            .program
+            .program()
             .location_catalog()
-            .label(simulator.program.noise_locations()[0].location_id),
+            .label(simulator.program().noise_locations()[0].location_id),
         "x0"
     );
 

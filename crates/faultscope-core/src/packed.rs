@@ -10,29 +10,106 @@ use crate::{
 };
 
 /// Integer-indexed program used by the native forward sampler.
+///
+/// The program is an immutable, compiler-validated representation. Its
+/// collections are exposed as read-only slices so downstream safe Rust code
+/// cannot invalidate the indices trusted by the packed runtime.
+///
+/// ```compile_fail
+/// use faultscope_core::{compile_sampler_program_ref, SamplerOperation};
+///
+/// let mut program = compile_sampler_program_ref(1, &[], Vec::new()).unwrap();
+/// program.operations.push(SamplerOperation::H(usize::MAX));
+/// ```
 #[derive(Debug, Clone, PartialEq)]
 pub struct SamplerProgram {
-    pub n_qubits: usize,
-    pub operations: Vec<SamplerOperation>,
-    pub observables: Vec<LogicalObservable>,
-    pub compiled_observables: Vec<SamplerObservable>,
-    pub measurement_keys: Vec<String>,
-    pub(crate) noise_locations: Vec<IndexedNoiseLocation>,
-    pub(crate) location_catalog: LocationCatalog,
-    pub capacities: RuntimeCapacities,
-    pub stored_operation_count: usize,
-    pub logical_operation_count: usize,
-    pub loop_kernel_count: usize,
-    pub(crate) hotspot_layout_identity: Arc<()>,
+    n_qubits: usize,
+    operations: Vec<SamplerOperation>,
+    observables: Vec<LogicalObservable>,
+    compiled_observables: Vec<SamplerObservable>,
+    measurement_keys: Vec<String>,
+    noise_locations: Vec<IndexedNoiseLocation>,
+    location_catalog: LocationCatalog,
+    capacities: RuntimeCapacities,
+    stored_operation_count: usize,
+    logical_operation_count: usize,
+    loop_kernel_count: usize,
+    hotspot_layout_identity: Arc<()>,
 }
 
 impl SamplerProgram {
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn from_compiled_parts(
+        n_qubits: usize,
+        operations: Vec<SamplerOperation>,
+        observables: Vec<LogicalObservable>,
+        compiled_observables: Vec<SamplerObservable>,
+        measurement_keys: Vec<String>,
+        noise_locations: Vec<IndexedNoiseLocation>,
+        location_catalog: LocationCatalog,
+        capacities: RuntimeCapacities,
+        stored_operation_count: usize,
+        logical_operation_count: usize,
+        loop_kernel_count: usize,
+    ) -> Self {
+        Self {
+            n_qubits,
+            operations,
+            observables,
+            compiled_observables,
+            measurement_keys,
+            noise_locations,
+            location_catalog,
+            capacities,
+            stored_operation_count,
+            logical_operation_count,
+            loop_kernel_count,
+            hotspot_layout_identity: Arc::new(()),
+        }
+    }
+
+    pub fn n_qubits(&self) -> usize {
+        self.n_qubits
+    }
+
+    pub fn operations(&self) -> &[SamplerOperation] {
+        &self.operations
+    }
+
+    pub fn observables(&self) -> &[LogicalObservable] {
+        &self.observables
+    }
+
+    pub fn compiled_observables(&self) -> &[SamplerObservable] {
+        &self.compiled_observables
+    }
+
+    pub fn measurement_keys(&self) -> &[String] {
+        &self.measurement_keys
+    }
+
     pub fn noise_locations(&self) -> &[IndexedNoiseLocation] {
         &self.noise_locations
     }
 
     pub fn location_catalog(&self) -> &LocationCatalog {
         &self.location_catalog
+    }
+
+    pub fn capacities(&self) -> &RuntimeCapacities {
+        &self.capacities
+    }
+
+    pub fn stored_operation_count(&self) -> usize {
+        self.stored_operation_count
+    }
+
+    pub fn logical_operation_count(&self) -> usize {
+        self.logical_operation_count
+    }
+
+    pub fn loop_kernel_count(&self) -> usize {
+        self.loop_kernel_count
     }
 
     fn validate_hotspot_state(&self, state: &RuntimeState) -> NpResult<()> {
@@ -164,7 +241,7 @@ pub enum SamplerOperation {
 /// decoder and loss callback integration remains in the Python binding crate.
 #[derive(Debug, Clone, PartialEq)]
 pub struct FaultScopeSimulator {
-    pub program: SamplerProgram,
+    program: SamplerProgram,
 }
 
 impl FaultScopeSimulator {
@@ -181,6 +258,11 @@ impl FaultScopeSimulator {
         let program =
             crate::compile_sampler_program_ref(circuit.n_qubits, &circuit.operations, observables)?;
         Ok(Self { program })
+    }
+
+    /// Return the immutable compiled sampler program.
+    pub fn program(&self) -> &SamplerProgram {
+        &self.program
     }
 
     /// Run a batch of forward trajectories.
