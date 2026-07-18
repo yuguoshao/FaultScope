@@ -42,6 +42,40 @@ from faultscope.collection._identity import (
 # Native sampling, decoding, batch scheduling, and counting stay in Rust.
 
 
+@dataclass(frozen=True)
+class _PreparedSource:
+    """Immutable sampler and DEM shared by task views of one source."""
+
+    sampler: Any
+    dem: Any
+
+
+class _PreparationContext:
+    """Call-local cache for compiled collection sources."""
+
+    def __init__(self) -> None:
+        self._sources: dict[
+            tuple[int, ...],
+            list[tuple[tuple[object, ...], _PreparedSource]],
+        ] = {}
+
+    def prepare_source(self, task: CollectionTask) -> _PreparedSource:
+        references: tuple[object, ...]
+        if task.dem is not None:
+            references = (task.dem,)
+        else:
+            references = (task.circuit, task.detectors, task.observables)
+        key = tuple(id(reference) for reference in references)
+        entries = self._sources.setdefault(key, [])
+        for held_references, source in entries:
+            if all(current is held for current, held in zip(references, held_references)):
+                return source
+        sampler, dem = _compile_task_sampler(task)
+        source = _PreparedSource(sampler=sampler, dem=dem)
+        entries.append((references, source))
+        return source
+
+
 @dataclass(frozen=True, init=False)
 class Collector:
     """Reusable immutable configuration for native logical-error collection."""
@@ -143,13 +177,12 @@ def _run_collect(
     progress_sink: Callable[[Progress], object] | None = None,
 ) -> list[TaskStats]:
     counter_schema = _counter_schema_from_run_options(run_options)
-    task_list = _expand_tasks_for_decoders(list(tasks), run_options.decoders)
-    native_tasks = []
-    for index, task in enumerate(task_list):
-        effective = _merge_options(options, task.collection_options)
-        if effective.max_shots is None:
-            raise ValueError("max_shots is required")
-        native_tasks.append(_native_task(task, index, effective, counter_schema))
+    native_tasks = _prepare_native_tasks(
+        list(tasks),
+        options,
+        run_options.decoders,
+        counter_schema,
+    )
 
     existing = _read_existing_stats(
         run_options.existing_data_filepaths,
@@ -210,13 +243,12 @@ def _run_collect_hotspots(
     if run_options.existing_data_filepaths or run_options.save_resume_filepath is not None:
         raise ValueError("hotspot collection does not support CSV partial resume")
     counter_schema = _counter_schema_from_run_options(run_options)
-    task_list = _expand_tasks_for_decoders(list(tasks), run_options.decoders)
-    native_tasks = []
-    for index, task in enumerate(task_list):
-        effective = _merge_options(options, task.collection_options)
-        if effective.max_shots is None:
-            raise ValueError("max_shots is required")
-        native_tasks.append(_native_task(task, index, effective, counter_schema))
+    native_tasks = _prepare_native_tasks(
+        list(tasks),
+        options,
+        run_options.decoders,
+        counter_schema,
+    )
     native_results = _collect_dem_hotspots_many(
         native_tasks,
         num_workers=run_options.num_workers,
@@ -371,10 +403,15 @@ def _native_task(
     index: int,
     options: CollectionOptions,
     counter_schema: CollectionCounterSchema,
+    *,
+    source: _PreparedSource | None = None,
 ) -> dict[str, object]:
     if options.max_shots is None:
         raise ValueError("max_shots is required")
-    sampler, dem = _compile_task_sampler(task)
+    if source is None:
+        sampler, dem = _compile_task_sampler(task)
+    else:
+        sampler, dem = source.sampler, source.dem
     decoder = _resolve_decoder(task, dem)
     decoder_name = _decoder_name(decoder if decoder is not None else task.decoder)
     metadata = dict(task.metadata or {})
@@ -437,6 +474,34 @@ def _resolve_decoder(task: CollectionTask, dem: Any) -> object | None:
             options=task.decoder_options,
         )
     return task.decoder
+
+
+def _prepare_native_tasks(
+    tasks: list[CollectionTask],
+    options: CollectionOptions,
+    decoders: Iterable[str | object] | str | object | None,
+    counter_schema: CollectionCounterSchema,
+) -> list[dict[str, object]]:
+    """Compile each source once, then prepare its decoder task views."""
+
+    context = _PreparationContext()
+    task_list = _expand_tasks_for_decoders(tasks, decoders)
+    native_tasks: list[dict[str, object]] = []
+    for index, task in enumerate(task_list):
+        effective = _merge_options(options, task.collection_options)
+        if effective.max_shots is None:
+            raise ValueError("max_shots is required")
+        source = context.prepare_source(task)
+        native_tasks.append(
+            _native_task(
+                task,
+                index,
+                effective,
+                counter_schema,
+                source=source,
+            )
+        )
+    return native_tasks
 
 
 def _decoder_name(decoder: object | str | None) -> str | None:

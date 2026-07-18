@@ -56,6 +56,8 @@ patch releases may make breaking API changes.
 - The compiler throughput benchmark now preserves explicit Stim `REPEAT`
   blocks by default so it exercises the native Rust loop path; flattened input
   remains available as an explicit stress-test mode.
+- Collection decoder fan-out now compiles each shared circuit or DEM once and
+  reuses the immutable native sampler across the resulting decoder task views.
 - Added `generate_dem_edges_from_event_plan`; the obsolete compatibility
   overload with an unused operations argument was removed.
 - Python forward decoders can bulk-select only their required packed
