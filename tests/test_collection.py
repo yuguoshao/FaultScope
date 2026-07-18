@@ -2459,6 +2459,81 @@ class CollectionTests(unittest.TestCase):
 
         self.assertEqual(compile_source.call_count, 2)
 
+    def test_identity_v2_v4_domains_and_behavioral_inputs(self) -> None:
+        dem = _graphlike_dem(0.25)
+        options = CollectionOptions(max_shots=1, batch_size=1)
+        base_schema = CollectionCounterSchema()
+        reordered = collection_collect_module._prepare_native_tasks(
+            [
+                CollectionTask(dem=dem, metadata={"a": 1, "b": 2}),
+                CollectionTask(dem=dem, metadata={"b": 2, "a": 1}),
+            ],
+            options,
+            (),
+            base_schema,
+        )
+        self.assertEqual(reordered[0]["sampling_id"], reordered[1]["sampling_id"])
+        self.assertEqual(reordered[0]["strong_id"], reordered[1]["strong_id"])
+
+        counter_changed = collection_collect_module._prepare_native_tasks(
+            [CollectionTask(dem=dem, metadata={"a": 1, "b": 2})],
+            options,
+            (),
+            CollectionCounterSchema(count_detection_events=True),
+        )[0]
+        self.assertEqual(reordered[0]["sampling_id"], counter_changed["sampling_id"])
+        self.assertNotEqual(reordered[0]["strong_id"], counter_changed["strong_id"])
+
+        source_changed = collection_collect_module._prepare_native_tasks(
+            [CollectionTask(dem=_graphlike_dem(0.5), metadata={"a": 1, "b": 2})],
+            options,
+            (),
+            base_schema,
+        )[0]
+        mask_changed = collection_collect_module._prepare_native_tasks(
+            [
+                CollectionTask(
+                    dem=dem,
+                    metadata={"a": 1, "b": 2},
+                    postselection_mask=b"\x01",
+                )
+            ],
+            options,
+            (),
+            base_schema,
+        )[0]
+        decoder_changed = collection_collect_module._prepare_native_tasks(
+            [
+                CollectionTask(
+                    dem=dem,
+                    metadata={"a": 1, "b": 2},
+                    decoder=NativeNoCorrectionDecoder(
+                        observable_ids=(0,),
+                        detector_ids=(0,),
+                    ),
+                )
+            ],
+            options,
+            (),
+            base_schema,
+        )[0]
+        for changed in (source_changed, mask_changed, decoder_changed):
+            self.assertNotEqual(reordered[0]["sampling_id"], changed["sampling_id"])
+            self.assertNotEqual(reordered[0]["strong_id"], changed["strong_id"])
+
+        payload = {"same": "payload"}
+        source_domain = collection_collect_module.domain_digest(
+            schema="faultscope.collection.source_digest",
+            schema_version=1,
+            payload=payload,
+        )
+        decoder_domain = collection_collect_module.domain_digest(
+            schema="faultscope.collection.decoder_digest",
+            schema_version=1,
+            payload=payload,
+        )
+        self.assertNotEqual(source_domain, decoder_domain)
+
     def test_analysis_helpers_fit_and_predict_rates(self) -> None:
         stats = [
             TaskStats("a", 100, 10, 0, 0.1, "native", {"p": 0.1, "d": 3}, "a"),

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass, replace
-import hashlib
 import json
 from pathlib import Path
 import threading
@@ -32,8 +31,10 @@ from faultscope.collection._types import (
 from faultscope.collection._identity import (
     SAMPLING_ID_SCHEMA_VERSION,
     STRONG_ID_SCHEMA_VERSION,
-    canonical_json as _identity_canonical_json,
+    decoder_identity_digest,
     decoder_identity_payload,
+    domain_digest,
+    source_identity_digest,
     source_identity_payload,
 )
 
@@ -526,27 +527,33 @@ def _task_identities(
     postselected_observables_mask: bytes | None,
     counter_schema: CollectionCounterSchema,
 ) -> tuple[str, str]:
+    source_digest = source_identity_digest(source_identity_payload(circuit=task.circuit, dem=dem))
+    decoder_digest = decoder_identity_digest(
+        decoder_identity_payload(decoder, decoder_name=decoder_name)
+    )
     sampling_payload = {
-        "schema": "faultscope.collection.sampling_id",
-        "schema_version": SAMPLING_ID_SCHEMA_VERSION,
-        "source": source_identity_payload(circuit=task.circuit, dem=dem),
-        "decoder": decoder_identity_payload(decoder, decoder_name=decoder_name),
+        "source_digest": source_digest,
+        "decoder_digest": decoder_digest,
         "metadata": dict(metadata),
         "postselection_mask": (None if postselection_mask is None else postselection_mask.hex()),
         "postselected_observables_mask": (
             None if postselected_observables_mask is None else postselected_observables_mask.hex()
         ),
     }
-    sampling_id = hashlib.sha256(
-        _identity_canonical_json(sampling_payload).encode("utf-8")
-    ).hexdigest()
+    sampling_id = domain_digest(
+        schema="faultscope.collection.sampling_id",
+        schema_version=SAMPLING_ID_SCHEMA_VERSION,
+        payload=sampling_payload,
+    )
     strong_payload = {
-        "schema": "faultscope.collection.strong_id",
-        "schema_version": STRONG_ID_SCHEMA_VERSION,
         "sampling_id": sampling_id,
         "counter_schema": counter_schema._to_payload(),
     }
-    strong_id = hashlib.sha256(_identity_canonical_json(strong_payload).encode("utf-8")).hexdigest()
+    strong_id = domain_digest(
+        schema="faultscope.collection.strong_id",
+        schema_version=STRONG_ID_SCHEMA_VERSION,
+        payload=strong_payload,
+    )
     return sampling_id, strong_id
 
 

@@ -275,7 +275,7 @@ class ReleaseContractTests(unittest.TestCase):
         ]
         self.assertEqual(undocumented, [])
 
-    def test_collection_strong_id_schema_v3_is_frozen(self) -> None:
+    def test_collection_strong_id_schema_v4_is_frozen(self) -> None:
         dem = DetectorErrorModel(
             detectors=(),
             observables=(LogicalObservable(id=0),),
@@ -296,7 +296,7 @@ class ReleaseContractTests(unittest.TestCase):
         )
         self.assertEqual(
             stats.strong_id,
-            "4122c57d8371d4edd3ef8ffaec67a4fc3a017456f8cf27afe6915a8cf2607113",
+            "47d3915dcad87b8f719a47a204e479f564e98acefd21d730accab5f0004b2de5",
         )
 
 

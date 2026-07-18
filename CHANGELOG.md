@@ -58,6 +58,10 @@ patch releases may make breaking API changes.
   remains available as an explicit stress-test mode.
 - Collection decoder fan-out now compiles each shared circuit or DEM once and
   reuses the immutable native sampler across the resulting decoder task views.
+- Collection sampling identities now use domain-separated source and decoder
+  digests (sampling schema v2, strong-id schema v4). Existing resume rows use
+  older ids and are intentionally not reused; task-derived random streams can
+  therefore differ after upgrading.
 - Native decoder detector layouts must contain unique ids. Built-in
   constructors, composite children, ABI v3 factories, and DEM sampling plans
   now reject duplicate detector ids instead of silently selecting one column.
