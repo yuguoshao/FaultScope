@@ -1294,6 +1294,42 @@ fn direct_counting_rejects_noncanonical_decoder_layout_before_decode() {
 }
 
 #[test]
+fn direct_collection_rejects_duplicate_detector_ids_when_no_batch_is_needed() {
+    let detector_ids = [0, 0];
+    let observable_ids = [0];
+    let mut calls = 0;
+    let mut decoder = BorrowedDecoder {
+        name: "duplicate-detector-layout",
+        detector_ids: &detector_ids,
+        observable_ids: &observable_ids,
+        calls: &mut calls,
+    };
+    let sampler = DemHotspotEstimator::new(graphlike_dem(1.0)).unwrap();
+
+    let err = collect_dem_logical_error_stats(
+        &sampler,
+        DemLogicalCollectionOptions {
+            max_shots: 4,
+            min_shots: 0,
+            max_errors: Some(0),
+            batch_size: 4,
+            seed: Some(17),
+            start_batch_size: None,
+            max_batch_size: None,
+            max_batch_seconds: None,
+        },
+        Some(&mut decoder),
+    )
+    .unwrap_err();
+
+    assert_eq!(
+        err.message(),
+        "decoder detector ids must be unique; duplicate detector id 0"
+    );
+    assert_eq!(calls, 0);
+}
+
+#[test]
 fn collection_task_rejects_noncanonical_factory_layout_before_worker_creation() {
     let tracker = Arc::new(InstanceTracker::default());
     let mut prototype = WorkerOwnedDecoder::prototype(tracker.clone());
@@ -1307,6 +1343,23 @@ fn collection_task_rejects_noncanonical_factory_layout_before_worker_creation() 
     assert!(err
         .message()
         .contains("expected sampler canonical ids [0], got [1]"));
+    assert_eq!(tracker.created.load(Ordering::SeqCst), 0);
+    assert_eq!(tracker.decode_calls.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn hotspot_task_rejects_duplicate_factory_detector_ids_before_worker_creation() {
+    let tracker = Arc::new(InstanceTracker::default());
+    let mut prototype = WorkerOwnedDecoder::prototype(tracker.clone());
+    prototype.detector_ids = vec![0, 0];
+    let task = decoder_collection_task("duplicate-detector-layout", Arc::new(prototype), 4, false);
+
+    let err = collect_dem_hotspot_tasks(vec![task], collection_run_options(1)).unwrap_err();
+
+    assert_eq!(
+        err.message(),
+        "decoder detector ids must be unique; duplicate detector id 0"
+    );
     assert_eq!(tracker.created.load(Ordering::SeqCst), 0);
     assert_eq!(tracker.decode_calls.load(Ordering::SeqCst), 0);
 }

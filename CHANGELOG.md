@@ -58,6 +58,9 @@ patch releases may make breaking API changes.
   remains available as an explicit stress-test mode.
 - Collection decoder fan-out now compiles each shared circuit or DEM once and
   reuses the immutable native sampler across the resulting decoder task views.
+- Native decoder detector layouts must contain unique ids. Built-in
+  constructors, composite children, ABI v3 factories, and DEM sampling plans
+  now reject duplicate detector ids instead of silently selecting one column.
 - Added `generate_dem_edges_from_event_plan`; the obsolete compatibility
   overload with an unused operations argument was removed.
 - Python forward decoders can bulk-select only their required packed

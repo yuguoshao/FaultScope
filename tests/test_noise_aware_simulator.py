@@ -445,6 +445,20 @@ class NoiseAwareSimulatorTests(unittest.TestCase):
         self.assertEqual(base_decoder.observable_ids, (1,))
         self.assertIn("NativeBatchDecoder", repr(base_decoder))
 
+    def test_native_no_correction_decoders_reject_duplicate_detector_ids(self) -> None:
+        constructors = (
+            lambda: NativeNoCorrectionDecoder(observable_ids=(0,), detector_ids=(5, 5)),
+            lambda: NativeBatchDecoder.no_correction(observable_ids=(0,), detector_ids=(5, 5)),
+        )
+
+        for construct in constructors:
+            with self.subTest(construct=construct):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    r"decoder detector ids must be unique; duplicate detector id 5",
+                ):
+                    construct()
+
     def test_native_backend_catalog_includes_reserved_decoders(self) -> None:
         catalog = {entry.name: entry for entry in official_native_decoder_backend_catalog()}
 

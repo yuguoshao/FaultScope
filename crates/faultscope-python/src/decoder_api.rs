@@ -2,14 +2,14 @@ use crate::*;
 #[cfg(feature = "decoder-fusion-blossom")]
 use faultscope_core::NativeFusionBlossomDecoder as CoreNativeFusionBlossomDecoder;
 use faultscope_core::{
-    BinaryLinearDecodingProblem, CorrectionMaskBatch, DetectorEventShotBatchView,
-    DetectorMaskBatchView, FaultScopeNativeCorrectionMaskBatchMutViewV1,
-    FaultScopeNativeDecoderFactoryV3, FaultScopeNativeDecoderI64SliceV1,
-    FaultScopeNativeDecoderMaskMutViewV1, FaultScopeNativeDecoderMaskViewV1,
-    FaultScopeNativeDecoderStatusV1, FaultScopeNativeDecoderStringViewV1,
-    FaultScopeNativeDecoderWorkerV3, FaultScopeNativeDetectorEventShotBatchViewV1,
-    FaultScopeNativeDetectorMaskBatchViewV1, FaultScopeNativeGraphlikeProblemV1,
-    FaultScopeNativePackedDetectorShotBatchViewV1,
+    validate_decoder_detector_ids, BinaryLinearDecodingProblem, CorrectionMaskBatch,
+    DetectorEventShotBatchView, DetectorMaskBatchView,
+    FaultScopeNativeCorrectionMaskBatchMutViewV1, FaultScopeNativeDecoderFactoryV3,
+    FaultScopeNativeDecoderI64SliceV1, FaultScopeNativeDecoderMaskMutViewV1,
+    FaultScopeNativeDecoderMaskViewV1, FaultScopeNativeDecoderStatusV1,
+    FaultScopeNativeDecoderStringViewV1, FaultScopeNativeDecoderWorkerV3,
+    FaultScopeNativeDetectorEventShotBatchViewV1, FaultScopeNativeDetectorMaskBatchViewV1,
+    FaultScopeNativeGraphlikeProblemV1, FaultScopeNativePackedDetectorShotBatchViewV1,
     FaultScopeNativePackedObservableShotBatchMutViewV1, GraphlikeDecodingProblem, IndexedDem,
     NativeCompositeDecoder as CoreNativeCompositeDecoder,
     NativeDecoderFactory as CoreNativeDecoderFactory,
@@ -87,14 +87,17 @@ impl PyNativeBatchDecoder {
     pub(crate) fn no_correction(
         observable_ids: Option<Vec<i64>>,
         detector_ids: Option<Vec<i64>>,
-    ) -> Self {
-        Self {
-            inner: Arc::new(CoreNativeNoCorrectionDecoder::with_detector_ids(
-                detector_ids.unwrap_or_default(),
-                observable_ids.unwrap_or_default(),
-            )),
+    ) -> PyResult<Self> {
+        Ok(Self {
+            inner: Arc::new(
+                CoreNativeNoCorrectionDecoder::with_detector_ids(
+                    detector_ids.unwrap_or_default(),
+                    observable_ids.unwrap_or_default(),
+                )
+                .map_err(|err| PyValueError::new_err(err.to_string()))?,
+            ),
             python_decode_calls: Arc::new(AtomicUsize::new(0)),
-        }
+        })
     }
 
     #[getter]
@@ -236,14 +239,20 @@ impl PyNativeCompositeDecoder {
 impl PyNativeNoCorrectionDecoder {
     #[new]
     #[pyo3(signature = (observable_ids=None, detector_ids=None))]
-    pub(crate) fn new(observable_ids: Option<Vec<i64>>, detector_ids: Option<Vec<i64>>) -> Self {
-        Self {
-            inner: Arc::new(CoreNativeNoCorrectionDecoder::with_detector_ids(
-                detector_ids.unwrap_or_default(),
-                observable_ids.unwrap_or_default(),
-            )),
+    pub(crate) fn new(
+        observable_ids: Option<Vec<i64>>,
+        detector_ids: Option<Vec<i64>>,
+    ) -> PyResult<Self> {
+        Ok(Self {
+            inner: Arc::new(
+                CoreNativeNoCorrectionDecoder::with_detector_ids(
+                    detector_ids.unwrap_or_default(),
+                    observable_ids.unwrap_or_default(),
+                )
+                .map_err(|err| PyValueError::new_err(err.to_string()))?,
+            ),
             python_decode_calls: Arc::new(AtomicUsize::new(0)),
-        }
+        })
     }
 
     #[getter]
@@ -650,6 +659,8 @@ impl ExternalNativeDecoderFactory {
         let detector_ids = unsafe {
             call_decoder_ids(state, owner.detector_ids_callback()).map_err(PyValueError::new_err)?
         };
+        validate_decoder_detector_ids(&detector_ids)
+            .map_err(|err| PyValueError::new_err(err.to_string()))?;
         let observable_ids = unsafe {
             call_decoder_ids(state, owner.observable_ids_callback())
                 .map_err(PyValueError::new_err)?
@@ -1008,26 +1019,26 @@ pub(crate) fn native_decoder_from_py(
     decoder: &Bound<'_, PyAny>,
 ) -> PyResult<Option<Arc<dyn CoreNativeDecoderFactory>>> {
     if let Ok(decoder) = decoder.extract::<PyRef<'_, PyNativeBatchDecoder>>() {
-        return Ok(Some(decoder.inner.clone()));
+        return validated_native_decoder(decoder.inner.clone());
     }
     if let Ok(decoder) = decoder.extract::<PyRef<'_, PyNativeCompositeDecoder>>() {
-        return Ok(Some(decoder.inner.clone()));
+        return validated_native_decoder(decoder.inner.clone());
     }
     if let Ok(decoder) = decoder.extract::<PyRef<'_, PyNativeNoCorrectionDecoder>>() {
-        return Ok(Some(decoder.inner.clone()));
+        return validated_native_decoder(decoder.inner.clone());
     }
     if let Ok(decoder) = decoder.extract::<PyRef<'_, PyNativeGraphlikeDetectorCopyDecoder>>() {
-        return Ok(Some(decoder.inner.clone()));
+        return validated_native_decoder(decoder.inner.clone());
     }
     #[cfg(feature = "decoder-fusion-blossom")]
     if let Ok(decoder) = decoder.extract::<PyRef<'_, PyNativeFusionBlossomDecoder>>() {
-        return Ok(Some(decoder.inner.clone()));
+        return validated_native_decoder(decoder.inner.clone());
     }
     match decoder.getattr(NATIVE_DECODER_PLUGIN_CAPSULE_METHOD) {
         Ok(method) => {
             let capsule = method.call0()?;
             let external = ExternalNativeDecoderFactory::from_capsule(&capsule)?;
-            Ok(Some(Arc::new(external)))
+            validated_native_decoder(Arc::new(external))
         }
         Err(err) if err.is_instance_of::<pyo3::exceptions::PyAttributeError>(decoder.py()) => {
             Ok(None)
@@ -1036,10 +1047,20 @@ pub(crate) fn native_decoder_from_py(
     }
 }
 
+fn validated_native_decoder(
+    decoder: Arc<dyn CoreNativeDecoderFactory>,
+) -> PyResult<Option<Arc<dyn CoreNativeDecoderFactory>>> {
+    validate_decoder_detector_ids(decoder.detector_ids())
+        .map_err(|err| PyValueError::new_err(err.to_string()))?;
+    Ok(Some(decoder))
+}
+
 pub(crate) fn validate_native_decoder_observable_layout(
     decoder: &dyn CoreNativeDecoderFactory,
     canonical_observable_ids: &[i64],
 ) -> PyResult<()> {
+    validate_decoder_detector_ids(decoder.detector_ids())
+        .map_err(|err| PyValueError::new_err(err.to_string()))?;
     if decoder.observable_ids() != canonical_observable_ids {
         return Err(PyValueError::new_err(format!(
             "native decoder `{}` observable layout mismatch: expected sampler canonical ids {:?}, got {:?}",

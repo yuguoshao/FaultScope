@@ -4,9 +4,9 @@ use std::sync::Arc;
 use crate::dem_canonical::{canonical_id_order, parity_canonicalize};
 use crate::labels::LocationCatalogBuilder;
 use crate::{
-    bernoulli_mask, for_each_bernoulli_event, word_count, DemBatch, DemEvent, DemHotspotEstimate,
-    DemLocationGroup, DetectorErrorEdge, DetectorErrorModel, LocationCatalog, LocationId, Mask,
-    NpError, NpResult, SmallRng,
+    bernoulli_mask, for_each_bernoulli_event, validate_decoder_detector_ids, word_count, DemBatch,
+    DemEvent, DemHotspotEstimate, DemLocationGroup, DetectorErrorEdge, DetectorErrorModel,
+    LocationCatalog, LocationId, Mask, NpError, NpResult, SmallRng,
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -425,6 +425,7 @@ fn compile_dem_sampling_plan(
     observable_ids: &[i64],
     sampler_name: &str,
 ) -> NpResult<CompiledDemSamplingPlan> {
+    validate_decoder_detector_ids(detector_ids)?;
     let sampling_detector_index = sampling_detector_ids
         .iter()
         .copied()
@@ -1287,6 +1288,23 @@ mod tests {
         assert_eq!(
             observable_error.message(),
             "packed DEM sampler requested observable id 9, but it is not declared by the DEM"
+        );
+    }
+
+    #[test]
+    fn compiled_sampling_rejects_duplicate_detector_layout() {
+        let simulator = DemHotspotEstimator::from_sampling_parts(
+            vec![1],
+            vec![2],
+            vec![edge(0.5, vec![1], vec![2])],
+        )
+        .unwrap();
+
+        let error = simulator.compile_sampling_plan(&[1, 1], &[2]).unwrap_err();
+
+        assert_eq!(
+            error.message(),
+            "decoder detector ids must be unique; duplicate detector id 1"
         );
     }
 

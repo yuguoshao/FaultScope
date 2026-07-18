@@ -90,7 +90,10 @@ ABI v3 has one observable-output layout. When a native decoder is bound to a
 sampler, the factory's complete `observable_ids` sequence must equal the
 sampler's canonical observable ids. Missing ids, extra ids, and reordered ids
 are rejected before sampling and before `create_worker` or a decode callback is
-called. Detector ids remain decoder-defined and may use a different order.
+called. Detector ids remain decoder-defined and may use a different order, but
+each detector id must occur exactly once in a decoder's input layout. FaultScope
+rejects duplicate detector ids when binding an ABI factory and again when
+preparing a sampling plan.
 
 The host allocates every correction output using that canonical sequence and
 passes the same ids to all three decode callbacks. A callback must not replace

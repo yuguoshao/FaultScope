@@ -110,10 +110,12 @@ enum {
     MODE_INVALID_EVENT_OUTPUT = 19,
     MODE_INCONSISTENT_METADATA = 20,
     MODE_INVALID_PACKED_PADDING = 21,
-    MODE_INVALID_EVENT_PADDING = 22
+    MODE_INVALID_EVENT_PADDING = 22,
+    MODE_DUPLICATE_DETECTOR_IDS = 23
 };
 
 static const int64_t DETECTOR_IDS[] = {0};
+static const int64_t DUPLICATE_DETECTOR_IDS[] = {0, 0};
 static const int64_t OBSERVABLE_IDS[] = {0};
 static const char NAME[] = "test-v3-factory";
 static const char CHANGED_NAME[] = "changed-v3-factory";
@@ -142,9 +144,14 @@ static FsStatus factory_name(const void *state, FsString *out) {
 }
 
 static FsStatus factory_detector_ids(const void *state, FsI64Slice *out) {
-    (void)state;
-    out->ptr = DETECTOR_IDS;
-    out->len = 1;
+    const TestFactory *factory = (const TestFactory *)state;
+    if (factory->mode == MODE_DUPLICATE_DETECTOR_IDS) {
+        out->ptr = DUPLICATE_DETECTOR_IDS;
+        out->len = 2;
+    } else {
+        out->ptr = DETECTOR_IDS;
+        out->len = 1;
+    }
     return ok();
 }
 

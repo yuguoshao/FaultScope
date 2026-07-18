@@ -2,10 +2,11 @@ use std::collections::HashMap;
 use std::time::Instant;
 
 use faultscope_core::{
-    logical_residual_loss_mask_native, packed_residual_failure_count, word_count,
-    CompiledDemLogicalCountPlan, CompiledDemSamplingPlan, CorrectionMaskBatch, DemBatch,
-    DemHotspotEstimator, DetectorEventShotBatchView, DetectorMaskBatchView, Mask,
-    NativeDecoderWorker, NpError, NpResult, PackedDetectorShotBatchView, SmallRng,
+    logical_residual_loss_mask_native, packed_residual_failure_count,
+    validate_decoder_detector_ids, word_count, CompiledDemLogicalCountPlan,
+    CompiledDemSamplingPlan, CorrectionMaskBatch, DemBatch, DemHotspotEstimator,
+    DetectorEventShotBatchView, DetectorMaskBatchView, Mask, NativeDecoderWorker, NpError,
+    NpResult, PackedDetectorShotBatchView, SmallRng,
 };
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -51,6 +52,9 @@ pub(crate) fn prepare_dem_count_plan(
     detector_ids: Option<&[i64]>,
     count_options: &CountOptions<'_>,
 ) -> NpResult<PreparedDemCountPlan> {
+    if let Some(detector_ids) = detector_ids {
+        validate_decoder_detector_ids(detector_ids)?;
+    }
     if count_options.uses_detailed_path() {
         return Ok(PreparedDemCountPlan::Generic);
     }
@@ -442,4 +446,32 @@ fn set_mask_bit(mask: &mut Mask, shot: usize) {
 fn packed_mask_bit(mask: Option<&[u8]>, index: usize) -> bool {
     mask.and_then(|mask| mask.get(index >> 3))
         .is_some_and(|byte| ((byte >> (index & 7)) & 1) != 0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn prepared_plans_reject_duplicate_decoder_detector_ids() {
+        let sampler =
+            DemHotspotEstimator::from_sampling_parts(vec![10], vec![0], Vec::new()).unwrap();
+        let duplicate_ids = [10, 10];
+        let options = [
+            CountOptions::default(),
+            CountOptions {
+                count_detection_events: true,
+                ..CountOptions::default()
+            },
+        ];
+
+        for option in options {
+            let error =
+                prepare_dem_count_plan(&sampler, Some(&duplicate_ids), &option).unwrap_err();
+            assert_eq!(
+                error.message(),
+                "decoder detector ids must be unique; duplicate detector id 10"
+            );
+        }
+    }
 }

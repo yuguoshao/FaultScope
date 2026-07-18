@@ -28,7 +28,8 @@ circuit or DEM again.
 
 The runtime expects detector and observable ids to be stable:
 
-- `detector_ids` define the syndrome order consumed by the decoder.
+- `detector_ids` define the syndrome order consumed by the decoder and must be
+  unique within that decoder's input layout.
 - `observable_ids` must be the sampler's complete canonical logical-id sequence;
   native decoders may not omit, add, or reorder ids.
 - A correction mask bit `k` is the decoder's predicted logical correction for

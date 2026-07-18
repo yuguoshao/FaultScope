@@ -542,6 +542,7 @@ impl CorrectionMaskBatch {
 
 pub trait NativeDecoderFactory: Send + Sync {
     fn name(&self) -> &str;
+    /// Ordered detector input layout. Detector ids must be unique.
     fn detector_ids(&self) -> &[i64];
     fn observable_ids(&self) -> &[i64];
     fn create_worker(&self) -> NpResult<Box<dyn NativeDecoderWorker>>;
@@ -549,6 +550,7 @@ pub trait NativeDecoderFactory: Send + Sync {
 
 pub trait NativeDecoderWorker: Send {
     fn name(&self) -> &str;
+    /// Ordered detector input layout. Detector ids must be unique.
     fn detector_ids(&self) -> &[i64];
     fn observable_ids(&self) -> &[i64];
     fn decode_batch(
@@ -615,6 +617,19 @@ pub trait NativeDecoderWorker: Send {
     }
 }
 
+/// Validate the ordered detector input layout exposed by a decoder.
+pub fn validate_decoder_detector_ids(detector_ids: &[i64]) -> NpResult<()> {
+    let mut seen = HashSet::with_capacity(detector_ids.len());
+    for &detector_id in detector_ids {
+        if !seen.insert(detector_id) {
+            return Err(NpError::new(format!(
+                "decoder detector ids must be unique; duplicate detector id {detector_id}"
+            )));
+        }
+    }
+    Ok(())
+}
+
 pub struct NativeCompositeDecoder {
     children: Vec<Arc<dyn NativeDecoderFactory>>,
     detector_ids: Vec<i64>,
@@ -653,7 +668,14 @@ impl NativeCompositeDecoder {
         let mut observable_ids = Vec::new();
         let mut seen_observables = HashSet::new();
         let mut child_detector_indices = Vec::with_capacity(children.len());
-        for child in &children {
+        for (child_index, child) in children.iter().enumerate() {
+            validate_decoder_detector_ids(child.detector_ids()).map_err(|err| {
+                NpError::new(format!(
+                    "native composite decoder child {child_index} (`{}`) has invalid detector metadata: {}",
+                    child.name(),
+                    err.message()
+                ))
+            })?;
             let mut indices = Vec::with_capacity(child.detector_ids().len());
             for &detector_id in child.detector_ids() {
                 let index = *detector_indices.entry(detector_id).or_insert_with(|| {
@@ -1011,11 +1033,12 @@ impl NativeNoCorrectionDecoder {
         }
     }
 
-    pub fn with_detector_ids(detector_ids: Vec<i64>, observable_ids: Vec<i64>) -> Self {
-        Self {
+    pub fn with_detector_ids(detector_ids: Vec<i64>, observable_ids: Vec<i64>) -> NpResult<Self> {
+        validate_decoder_detector_ids(&detector_ids)?;
+        Ok(Self {
             detector_ids,
             observable_ids,
-        }
+        })
     }
 }
 
@@ -1667,6 +1690,22 @@ mod tests {
     }
 
     #[test]
+    fn composite_decoder_rejects_duplicate_child_detector_ids() {
+        let child: Arc<dyn NativeDecoderFactory> = Arc::new(FixedCorrectionDecoder {
+            detector_ids: vec![10, 10],
+            observable_ids: vec![2],
+            correction: Mask::zero(1),
+        });
+
+        let error = NativeCompositeDecoder::new(vec![child]).unwrap_err();
+
+        assert_eq!(
+            error.message(),
+            "native composite decoder child 0 (`fixed-correction`) has invalid detector metadata: decoder detector ids must be unique; duplicate detector id 10"
+        );
+    }
+
+    #[test]
     fn composite_decoder_dispatches_packed_and_event_fast_paths() {
         let children: Vec<Arc<dyn NativeDecoderFactory>> = vec![
             Arc::new(FastCopyDecoder {
@@ -2009,7 +2048,7 @@ mod tests {
 
     #[test]
     fn no_correction_decoder_returns_zero_packed_rows_for_observables() {
-        let factory = NativeNoCorrectionDecoder::with_detector_ids(vec![1, 2], vec![0, 3]);
+        let factory = NativeNoCorrectionDecoder::with_detector_ids(vec![1, 2], vec![0, 3]).unwrap();
         let mut decoder = factory.create_worker().unwrap();
         let detector_data = vec![0b11, 0b01, 0b10, 0b00];
         let detector_ids = decoder.detector_ids().to_vec();
@@ -2021,6 +2060,16 @@ mod tests {
         assert_eq!(corrections.shots, 4);
         assert_eq!(corrections.observable_byte_count, 1);
         assert_eq!(corrections.data, vec![0; 4]);
+    }
+
+    #[test]
+    fn no_correction_decoder_rejects_duplicate_detector_ids() {
+        let err = NativeNoCorrectionDecoder::with_detector_ids(vec![1, 2, 1], vec![0]).unwrap_err();
+
+        assert_eq!(
+            err.message(),
+            "decoder detector ids must be unique; duplicate detector id 1"
+        );
     }
 
     #[test]

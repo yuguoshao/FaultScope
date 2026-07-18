@@ -10,7 +10,8 @@ use crate::scheduler::{
     batch_seed, collect_task_set, collect_task_set_with_progress, next_batch_size,
 };
 use faultscope_core::{
-    DemHotspotEstimator, NativeDecoderFactory, NativeDecoderWorker, NpError, NpResult, SmallRng,
+    validate_decoder_detector_ids, DemHotspotEstimator, NativeDecoderFactory, NativeDecoderWorker,
+    NpError, NpResult, SmallRng,
 };
 
 pub const DEM_LOGICAL_COUNTER_SCHEMA_VERSION: u32 = 1;
@@ -226,6 +227,9 @@ pub fn collect_dem_logical_error_stats(
     mut decoder: Option<&mut dyn NativeDecoderWorker>,
 ) -> NpResult<DemLogicalCollectionStats> {
     validate_collection_options(options)?;
+    if let Some(decoder) = decoder.as_deref() {
+        validate_decoder_detector_ids(decoder.detector_ids())?;
+    }
 
     let decoder_name = decoder.as_ref().map(|decoder| decoder.name().to_string());
     let started = Instant::now();
@@ -362,6 +366,7 @@ pub(crate) fn validate_task(task: &DemLogicalCollectionTask) -> NpResult<()> {
         "postselected_observables_mask",
     )?;
     if let Some(decoder) = &task.decoder {
+        validate_decoder_detector_ids(decoder.detector_ids())?;
         validate_decoder_observable_layout(
             task.sampler.observable_ids(),
             decoder.observable_ids(),

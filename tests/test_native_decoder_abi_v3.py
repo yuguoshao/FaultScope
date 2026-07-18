@@ -223,6 +223,7 @@ class NativeDecoderAbiV3Tests(unittest.TestCase):
             15: r"ABI v3.*required callbacks",
             16: r"ABI v3.*required callbacks",
             17: r"ABI v3.*required callbacks",
+            23: r"decoder detector ids must be unique; duplicate detector id 0",
         }
         for mode, message in cases.items():
             with self.subTest(mode=mode):

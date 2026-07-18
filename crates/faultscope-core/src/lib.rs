@@ -27,14 +27,14 @@ pub use compile::compile_sampler_program_ref;
 #[cfg(feature = "decoder-fusion-blossom")]
 pub use decoder::NativeFusionBlossomDecoder;
 pub use decoder::{
-    logical_residual_loss_mask_native, packed_residual_failure_count, CorrectionMaskBatch,
-    DetectorEventShotBatchView, DetectorMaskBatchView,
-    FaultScopeNativeCorrectionMaskBatchMutViewV1, FaultScopeNativeDecoderFactoryV3,
-    FaultScopeNativeDecoderI64SliceV1, FaultScopeNativeDecoderMaskMutViewV1,
-    FaultScopeNativeDecoderMaskViewV1, FaultScopeNativeDecoderStatusV1,
-    FaultScopeNativeDecoderStringViewV1, FaultScopeNativeDecoderWorkerV3,
-    FaultScopeNativeDetectorEventShotBatchViewV1, FaultScopeNativeDetectorMaskBatchViewV1,
-    FaultScopeNativePackedDetectorShotBatchViewV1,
+    logical_residual_loss_mask_native, packed_residual_failure_count,
+    validate_decoder_detector_ids, CorrectionMaskBatch, DetectorEventShotBatchView,
+    DetectorMaskBatchView, FaultScopeNativeCorrectionMaskBatchMutViewV1,
+    FaultScopeNativeDecoderFactoryV3, FaultScopeNativeDecoderI64SliceV1,
+    FaultScopeNativeDecoderMaskMutViewV1, FaultScopeNativeDecoderMaskViewV1,
+    FaultScopeNativeDecoderStatusV1, FaultScopeNativeDecoderStringViewV1,
+    FaultScopeNativeDecoderWorkerV3, FaultScopeNativeDetectorEventShotBatchViewV1,
+    FaultScopeNativeDetectorMaskBatchViewV1, FaultScopeNativePackedDetectorShotBatchViewV1,
     FaultScopeNativePackedObservableShotBatchMutViewV1, NativeCompositeDecoder,
     NativeDecoderFactory, NativeDecoderWorker, NativeGraphlikeDetectorCopyDecoder,
     NativeNoCorrectionDecoder, PackedDetectorShotBatchView, PackedObservableShotBatch,
