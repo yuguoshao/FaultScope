@@ -3,14 +3,16 @@ use std::sync::mpsc;
 use std::sync::Arc;
 use std::time::Instant;
 
-use faultscope_core::{NativeDecoderWorker, NpError, NpResult, SmallRng};
+use faultscope_core::{CompiledDemSamplingPlan, NativeDecoderWorker, NpError, NpResult, SmallRng};
 
 use crate::api::{
     task_is_complete, validate_stop_counter_for_tasks, validate_task, DemLogicalCollectionOptions,
     DemLogicalCollectionRunOptions, DemLogicalCollectionStats, DemLogicalCollectionTask,
     ValidatedStopCounter,
 };
-use crate::counting::{count_detailed_batch, CountOptions};
+use crate::counting::{
+    count_detailed_sampling_result, prepare_dem_count_plan, CountOptions, PreparedDemCountPlan,
+};
 use crate::scheduler::{batch_seed, next_batch_size, task_run_seed};
 use crate::worker_decoder::WorkerDecoderCache;
 use crate::worker_executor::WorkerExecutor;
@@ -30,6 +32,7 @@ struct HotspotWork {
     seed: Option<u64>,
     task: Arc<DemLogicalCollectionTask>,
     run_options: Arc<DemLogicalCollectionRunOptions>,
+    prepared_plan: Arc<CompiledDemSamplingPlan>,
 }
 
 struct HotspotBatchResult {
@@ -56,6 +59,7 @@ struct HotspotTaskCursor {
     seed: Option<u64>,
     shots_scheduled: usize,
     next_ordinal: usize,
+    prepared_plan: Arc<CompiledDemSamplingPlan>,
 }
 
 struct HotspotWorkQueue {
@@ -69,7 +73,7 @@ impl HotspotWorkQueue {
     fn new(
         tasks: Vec<DemLogicalCollectionTask>,
         run_options: Arc<DemLogicalCollectionRunOptions>,
-    ) -> Self {
+    ) -> NpResult<Self> {
         let total_batches = tasks.iter().fold(0usize, |total, task| {
             total.saturating_add(fixed_hotspot_batch_count(task.options))
         });
@@ -77,20 +81,40 @@ impl HotspotWorkQueue {
             .into_iter()
             .map(|task| {
                 let seed = task_run_seed(&task, &run_options);
-                HotspotTaskCursor {
+                let count_options = CountOptions {
+                    postselection_mask: task.postselection_mask.as_deref(),
+                    postselected_observables_mask: task.postselected_observables_mask.as_deref(),
+                    count_observable_error_combos: run_options.count_observable_error_combos,
+                    count_detection_events: run_options.count_detection_events,
+                };
+                let prepared = prepare_dem_count_plan(
+                    &task.sampler,
+                    task.decoder
+                        .as_deref()
+                        .map(|factory| (factory.detector_ids(), factory.batch_formats())),
+                    &count_options,
+                    true,
+                )?;
+                let PreparedDemCountPlan::Decoder(prepared_plan) = prepared else {
+                    return Err(NpError::new(
+                        "hotspot collection requires a decoder sampling plan",
+                    ));
+                };
+                Ok(HotspotTaskCursor {
                     task: Arc::new(task),
                     seed,
                     shots_scheduled: 0,
                     next_ordinal: 0,
-                }
+                    prepared_plan: Arc::new(prepared_plan),
+                })
             })
-            .collect();
-        Self {
+            .collect::<NpResult<Vec<_>>>()?;
+        Ok(Self {
             tasks,
             next_task: 0,
             total_batches,
             run_options,
-        }
+        })
     }
 
     fn next_work(
@@ -119,6 +143,7 @@ impl HotspotWorkQueue {
                 seed: cursor.seed,
                 task: cursor.task.clone(),
                 run_options: self.run_options.clone(),
+                prepared_plan: cursor.prepared_plan.clone(),
             };
             cursor.shots_scheduled += shots;
             cursor.next_ordinal += 1;
@@ -173,7 +198,7 @@ pub fn collect_dem_hotspot_tasks(
     if states.iter().all(|state| state.complete) {
         return states.into_iter().map(finish_hotspot_state).collect();
     }
-    let mut work_queue = HotspotWorkQueue::new(tasks, run_options.clone());
+    let mut work_queue = HotspotWorkQueue::new(tasks, run_options.clone())?;
     let worker_count = run_options.num_workers.min(work_queue.total_batches).max(1);
     let executor = WorkerExecutor::new(
         worker_count,
@@ -257,21 +282,24 @@ fn run_hotspot_batch(
 ) -> NpResult<HotspotBatchResult> {
     let started = Instant::now();
     let mut rng = SmallRng::new(batch_seed(work.seed, 0, work.ordinal));
-    let batch = work
-        .task
-        .sampler
-        .run_batch_with_rng(work.shots, &mut rng, true);
+    let sampled = work
+        .prepared_plan
+        .run_sampling_result_with_rng(work.shots, &mut rng)?;
     let count_options = CountOptions {
         postselection_mask: work.task.postselection_mask.as_deref(),
         postselected_observables_mask: work.task.postselected_observables_mask.as_deref(),
         count_observable_error_combos: work.run_options.count_observable_error_combos,
         count_detection_events: work.run_options.count_detection_events,
     };
-    let detailed = count_detailed_batch(&work.task.sampler, &batch, decoder, &count_options)?;
-    let estimate = work
-        .task
-        .sampler
-        .estimate_from_loss(&batch, &detailed.loss_mask, None, 0)?;
+    let detailed =
+        count_detailed_sampling_result(&work.task.sampler, &sampled, decoder, &count_options)?;
+    let trace = sampled
+        .attribution()
+        .ok_or_else(|| NpError::new("hotspot sampling plan did not record an attribution trace"))?;
+    let estimate =
+        work.task
+            .sampler
+            .estimate_from_attribution(trace, &detailed.loss_mask, None, 0)?;
     let stats = DemLogicalCollectionStats {
         task_id: work.task.task_id.clone(),
         strong_id: work.task.strong_id.clone(),

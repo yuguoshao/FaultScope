@@ -4,7 +4,7 @@ All notable changes to FaultScope are documented here. FaultScope is pre-1.0:
 unless a contract is explicitly versioned (such as the native decoder ABI),
 patch releases may make breaking API changes.
 
-## [0.2.5] - Unreleased
+## [0.2.6] - Unreleased
 
 ### Added
 
@@ -12,14 +12,21 @@ patch releases may make breaking API changes.
 - Native logical error-rate collection with deterministic multi-worker scheduling.
 - Immutable Python `Collector` configuration, CSV/resume, typed streaming progress,
   explicit raw/accepted logical rates, decoder fanout, and threshold analysis.
-- Pure factory/worker native decoder plugin ABI v2 and optional PyMatching and
+- Factory/worker native decoder plugin ABI V4 and optional PyMatching and
   fusion-blossom backends.
 
 ### Changed
 
-- Native decoder plugins now use ABI v3. Decoder observable outputs must match
-  the sampler's complete canonical layout, packed padding must be zero, and ABI
-  v2 capsules/manifests are rejected without an adapter.
+- Native decoder plugins now use the breaking ABI V4. Factories publish a
+  stable ordered Masks/Packed/Events preference list and workers expose one
+  tagged `decode_batch` callback. Masks input returns mask-major corrections;
+  Packed and Events input return packed rows. V1–V3 capsules/manifests are
+  rejected without an adapter.
+- DEM syndrome layout is independent of hotspot attribution. Sampling produces
+  the decoder's preferred layout directly while FaultScope records an optional
+  private edge-event sidecar; ordinary sampling allocates no attribution trace.
+  Detailed counting now uses one Logical or Decoder plan and a shared residual,
+  discard, combo, and loss-mask implementation across all formats.
 - Pauli and stabilizer validation now occurs once at Python and Rust public
   boundaries. Validated owning state and borrowed sparse-Pauli views are used
   by internal hot paths, avoiding repeated full-width scans and allocations for
@@ -56,6 +63,15 @@ patch releases may make breaking API changes.
 - The compiler throughput benchmark now preserves explicit Stim `REPEAT`
   blocks by default so it exercises the native Rust loop path; flattened input
   remains available as an explicit stress-test mode.
+- Collection decoder fan-out now compiles each shared circuit or DEM once and
+  reuses the immutable native sampler across the resulting decoder task views.
+- Collection sampling identities now use domain-separated source and decoder
+  digests (sampling schema v2, strong-id schema v4). Existing resume rows use
+  older ids and are intentionally not reused; task-derived random streams can
+  therefore differ after upgrading.
+- Native decoder detector layouts must contain unique ids. Built-in
+  constructors, composite children, ABI V4 factories, and DEM sampling plans
+  now reject duplicate detector ids instead of silently selecting one column.
 - Added `generate_dem_edges_from_event_plan`; the obsolete compatibility
   overload with an unused operations argument was removed.
 - Python forward decoders can bulk-select only their required packed
@@ -106,4 +122,4 @@ patch releases may make breaking API changes.
 - Generated type stubs now mark factory-only native classes, including
   `StabilizerState`, as unavailable for direct construction.
 
-[0.2.5]: https://github.com/yuguoshao/FaultScope/releases/tag/v0.2.5
+[0.2.6]: https://github.com/yuguoshao/FaultScope/releases/tag/v0.2.6

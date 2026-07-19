@@ -864,7 +864,8 @@ result = sampler.estimate(shots=1024, seed=1, decoder=decoder)
 
 The `mwpm` proxy is currently unavailable. Its external `faultscope-mwpm`
 package still implements ABI v1 and is not yet migrated to the strict
-FaultScope native decoder ABI v3, so it remains non-installable. `bposd` is a
+FaultScope native decoder ABI V4, so it remains non-installable. `bpdecoder` is
+also temporarily non-installable while awaiting V4 migration. `bposd` is a
 reserved, unimplemented, non-installable catalog/status entry. The generic
 install subcommand accepts these names but only reports their unavailability;
 it returns no install plan or steps and installs nothing.
@@ -1001,8 +1002,8 @@ Inspect the built-in backend catalog and installed backend status with:
 python -m faultscope.backends status
 ```
 
-Inspect backend installation steps, or check the reserved `bposd` entry with
-the same generic subcommand:
+Inspect backend installation steps, or check the unavailable `bpdecoder` and
+reserved `bposd` entries with the same generic subcommand:
 
 ```bash
 python -m faultscope.backends install pymatching --dry-run
@@ -1011,27 +1012,11 @@ python -m faultscope.backends install bpdecoder --dry-run
 python -m faultscope.backends install bposd --dry-run
 ```
 
-The first three commands produce install plans. For `bposd`, the command only
-reports that the reserved catalog/status entry is unavailable; it produces no
-install plan or steps and installs nothing.
-
-The `bpdecoder` entry is the optional BP-family binary-linear backend. Its
-backend package is `faultscope-bpdecoder`; the install helper's dry run shows
-the concrete package command:
-
-```bash
-python -m pip install --upgrade faultscope-bpdecoder
-```
-
-After installation, construct it through the friendly proxy or the generic
-backend resolver:
-
-```python
-from faultscope.decoders import NativeBpDecoder, create_native_decoder
-
-decoder = NativeBpDecoder.from_dem(dem)
-decoder = create_native_decoder("bpdecoder", dem=dem)
-```
+The PyMatching and fusion-blossom commands produce install plans. The
+`bpdecoder` command reports that its package is temporarily disabled until it
+migrates to native decoder ABI V4; it intentionally returns no install plan or
+package command. The `bposd` command likewise reports that the reserved entry
+is unavailable and installs nothing.
 
 For local development, activate the project virtual environment, or otherwise
 ensure `.venv/bin` is on `PATH`, then install optional backend packages from the

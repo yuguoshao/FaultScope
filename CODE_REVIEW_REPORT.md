@@ -593,7 +593,7 @@ progress 模式下每个 committed delta 都调用 `write_stats_to_csv_file(...,
 | FS-09 | 已修复 | `RepetitionCodeDecoder` mapping 顺序已修正 |
 | FS-10 | 已修复 | `TaskStats` 关系校验及分析输入验证已完善 |
 | FS-11 | 原问题已修复，但出现新回归 | Stim 语法校验已收紧；扁平 repeat 恢复引入 FS-101 |
-| FS-12 | 已修复 | packed correction padding 已由 ABI v3 的精确宽度语义约束 |
+| FS-12 | 已修复 | packed correction padding 已由 ABI v4 的精确宽度语义约束 |
 | FS-13 | 已修复 | repetition 可视化的 distance=1 和画布范围已修复 |
 | FS-14 | 仍存在 | 对应本报告 FS-109 |
 

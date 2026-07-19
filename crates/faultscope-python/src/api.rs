@@ -217,8 +217,16 @@ impl NativePackedSampler {
                         state.shots(),
                     )
                     .map_err(|err| PyValueError::new_err(err.to_string()))?;
+                    let format = faultscope_core::select_detector_batch_format(
+                        native_decoder.batch_formats(),
+                        &[faultscope_core::DetectorBatchFormat::Masks],
+                    )
+                    .map_err(|err| PyValueError::new_err(err.to_string()))?;
+                    let negotiated = faultscope_core::convert_detector_batch(view.into(), format)
+                        .map_err(|err| PyValueError::new_err(err.to_string()))?;
                     let corrections = worker
-                        .decode_batch_checked(view)
+                        .decode_batch_checked(negotiated.view())
+                        .and_then(faultscope_core::DecoderCorrectionBatch::into_masks)
                         .map_err(|err| PyValueError::new_err(err.to_string()))?;
                     validate_declared_observables(&state.observables, self.program.observables())?;
                     let observable_ids = self
@@ -833,105 +841,45 @@ impl NativeDemSampler {
             if decoder.is_some() {
                 if let Some(native_decoder) = native_decoder {
                     let detector_ids = native_decoder.detector_ids().to_vec();
+                    let format = native_decoder.batch_formats()[0];
+                    let plan = self
+                        .simulator
+                        .compile_decoder_sampling_plan(
+                            &detector_ids,
+                            &self.observables,
+                            format,
+                            &[],
+                            aggregate_hotspots,
+                        )
+                        .map_err(|err| PyValueError::new_err(err.to_string()))?;
                     let mut worker = native_decoder
                         .create_worker()
                         .map_err(|err| PyValueError::new_err(err.to_string()))?;
                     let estimate = py.allow_threads(|| {
                         let mut rng = SmallRng::new(seed.unwrap_or(0x95f2_04dc_4291_a715));
-                        if !aggregate_hotspots && worker.supports_detector_event_batch() {
-                            let event_batch = self
-                                .simulator
-                                .run_detector_event_shot_batch_with_rng(
-                                    shots,
-                                    &mut rng,
-                                    &detector_ids,
-                                    &self.observables,
-                                )
-                                .map_err(|err| PyValueError::new_err(err.to_string()))?;
-                            let detector_view = faultscope_core::DetectorEventShotBatchView::new(
-                                &detector_ids,
-                                &event_batch.offsets,
-                                &event_batch.events,
-                                event_batch.shots,
-                            )
+                        let sampled = plan
+                            .run_sampling_result_with_rng(shots, &mut rng)
                             .map_err(|err| PyValueError::new_err(err.to_string()))?;
-                            let corrections = worker
-                                .decode_detector_event_batch_checked(detector_view)
-                                .map_err(|err| PyValueError::new_err(err.to_string()))?;
-                            let mean_loss = packed_residual_mean_loss_from_rows(
-                                &event_batch.observable_ids,
-                                &event_batch.observable_data,
-                                event_batch.observable_byte_count,
-                                &corrections,
-                                event_batch.shots,
-                            )?;
-                            return Ok::<DemEstimate, PyErr>(dem_estimate_from_mean_loss(
-                                event_batch.shots,
-                                mean_loss,
-                                baseline,
-                            ));
-                        }
-                        if !aggregate_hotspots && worker.supports_packed_batch() {
-                            let packed_batch = self
-                                .simulator
-                                .run_packed_shot_batch_with_rng(
-                                    shots,
-                                    &mut rng,
-                                    &detector_ids,
-                                    &self.observables,
-                                )
-                                .map_err(|err| PyValueError::new_err(err.to_string()))?;
-                            let detector_view = faultscope_core::PackedDetectorShotBatchView::new(
-                                &detector_ids,
-                                &packed_batch.detector_data,
-                                packed_batch.shots,
-                            )
-                            .map_err(|err| PyValueError::new_err(err.to_string()))?;
-                            let corrections = worker
-                                .decode_packed_batch_checked(detector_view)
-                                .map_err(|err| PyValueError::new_err(err.to_string()))?;
-                            let mean_loss = packed_residual_mean_loss_from_rows(
-                                &packed_batch.observable_ids,
-                                &packed_batch.observable_data,
-                                packed_batch.observable_byte_count,
-                                &corrections,
-                                packed_batch.shots,
-                            )?;
-                            return Ok::<DemEstimate, PyErr>(dem_estimate_from_mean_loss(
-                                packed_batch.shots,
-                                mean_loss,
-                                baseline,
-                            ));
-                        }
-                        let batch = run_dem_batch(self, shots, &mut rng, aggregate_hotspots);
-                        let detector_masks = detector_mask_view_from_map(
-                            &batch.detectors,
-                            &detector_ids,
-                            batch.shots(),
-                        )?;
-                        let view = faultscope_core::DetectorMaskBatchView::new(
-                            &detector_ids,
-                            &detector_masks,
-                            batch.shots(),
-                        )
-                        .map_err(|err| PyValueError::new_err(err.to_string()))?;
                         let corrections = worker
-                            .decode_batch_checked(view)
+                            .decode_batch_checked(sampled.syndrome())
                             .map_err(|err| PyValueError::new_err(err.to_string()))?;
-                        let loss_mask = faultscope_core::logical_residual_loss_mask_native(
-                            &batch.observables,
-                            &corrections,
-                            &self.observables,
-                            batch.all_mask(),
-                        );
-                        dem_estimate_from_loss_mask(
-                            self,
-                            &batch,
-                            &loss_mask,
-                            baseline,
-                            top_k,
-                            aggregate_hotspots,
-                        )
+                        let loss_mask = dem_sampling_residual_loss_mask(&sampled, corrections)?;
+                        if aggregate_hotspots {
+                            let trace = sampled.attribution().ok_or_else(|| {
+                                PyValueError::new_err(
+                                    "DEM sampler did not record an attribution trace",
+                                )
+                            })?;
+                            self.simulator
+                                .estimate_from_attribution(trace, &loss_mask, baseline, top_k)
+                                .map_err(|err| PyValueError::new_err(err.to_string()))
+                        } else {
+                            Ok(dem_estimate_from_mean_loss(
+                                sampled.shots(),
+                                loss_mask.bit_count() as f64 / sampled.shots() as f64,
+                                baseline,
+                            ))
+                        }
                     })?;
                     return dem_hotspot_result_from_estimate(py, self, &estimate);
                 }
@@ -1039,6 +987,30 @@ fn dem_estimate_from_mean_loss(shots: usize, mean_loss: f64, baseline: Option<f6
     }
 }
 
+fn dem_sampling_residual_loss_mask(
+    sampled: &faultscope_core::DemSamplingResult,
+    corrections: faultscope_core::DecoderCorrectionBatch,
+) -> PyResult<Mask> {
+    let actual = sampled
+        .observables()
+        .as_masks()
+        .map_err(|err| PyValueError::new_err(err.to_string()))?;
+    let corrections = corrections
+        .into_masks()
+        .map_err(|err| PyValueError::new_err(err.to_string()))?;
+    corrections
+        .validate_against(&actual.observable_ids, sampled.shots())
+        .map_err(|err| PyValueError::new_err(err.to_string()))?;
+    let mut loss = Mask::zero(faultscope_core::word_count(sampled.shots()));
+    for (actual, correction) in actual.masks.iter().zip(&corrections.masks) {
+        let mut residual = actual.clone();
+        residual.xor_assign(correction);
+        loss.or_assign(&residual);
+    }
+    loss.and_assign(sampled.all_mask());
+    Ok(loss)
+}
+
 fn dem_estimate_from_loss_mask(
     sampler: &NativeDemSampler,
     batch: &DemBatch,
@@ -1060,24 +1032,6 @@ fn dem_estimate_from_loss_mask(
         mean_loss,
         baseline,
     ))
-}
-
-fn packed_residual_mean_loss_from_rows(
-    observable_ids: &[i64],
-    observable_data: &[u8],
-    observable_byte_count: usize,
-    corrections: &faultscope_core::PackedObservableShotBatch,
-    shots: usize,
-) -> PyResult<f64> {
-    let failures = faultscope_core::packed_residual_failure_count(
-        observable_ids,
-        observable_data,
-        observable_byte_count,
-        corrections,
-        shots,
-    )
-    .map_err(|err| PyValueError::new_err(err.to_string()))?;
-    Ok(failures as f64 / shots as f64)
 }
 
 #[pymethods]

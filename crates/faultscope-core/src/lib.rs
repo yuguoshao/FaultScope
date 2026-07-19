@@ -27,21 +27,28 @@ pub use compile::compile_sampler_program_ref;
 #[cfg(feature = "decoder-fusion-blossom")]
 pub use decoder::NativeFusionBlossomDecoder;
 pub use decoder::{
-    logical_residual_loss_mask_native, packed_residual_failure_count, CorrectionMaskBatch,
-    DetectorEventShotBatchView, DetectorMaskBatchView,
-    FaultScopeNativeCorrectionMaskBatchMutViewV1, FaultScopeNativeDecoderFactoryV3,
-    FaultScopeNativeDecoderI64SliceV1, FaultScopeNativeDecoderMaskMutViewV1,
-    FaultScopeNativeDecoderMaskViewV1, FaultScopeNativeDecoderStatusV1,
-    FaultScopeNativeDecoderStringViewV1, FaultScopeNativeDecoderWorkerV3,
+    convert_detector_batch, logical_residual_loss_mask_native, mask_corrections_to_packed,
+    packed_corrections_to_masks, packed_residual_failure_count, select_detector_batch_format,
+    validate_decoder_batch_formats, validate_decoder_detector_ids, CorrectionMaskBatch,
+    DecoderCorrectionBatch, DetectorBatch, DetectorBatchFormat, DetectorBatchView,
+    DetectorEventShotBatchView, DetectorMaskBatchView, FaultScopeNativeCorrectionBatchMutViewV4,
+    FaultScopeNativeCorrectionBatchPayloadV4, FaultScopeNativeCorrectionMaskBatchMutViewV1,
+    FaultScopeNativeDecoderFactoryV4, FaultScopeNativeDecoderI64SliceV1,
+    FaultScopeNativeDecoderMaskMutViewV1, FaultScopeNativeDecoderMaskViewV1,
+    FaultScopeNativeDecoderStatusV1, FaultScopeNativeDecoderStringViewV1,
+    FaultScopeNativeDecoderU32SliceV1, FaultScopeNativeDecoderWorkerV4,
+    FaultScopeNativeDetectorBatchPayloadV4, FaultScopeNativeDetectorBatchViewV4,
     FaultScopeNativeDetectorEventShotBatchViewV1, FaultScopeNativeDetectorMaskBatchViewV1,
     FaultScopeNativePackedDetectorShotBatchViewV1,
     FaultScopeNativePackedObservableShotBatchMutViewV1, NativeCompositeDecoder,
     NativeDecoderFactory, NativeDecoderWorker, NativeGraphlikeDetectorCopyDecoder,
     NativeNoCorrectionDecoder, PackedDetectorShotBatchView, PackedObservableShotBatch,
-    NATIVE_DECODER_FACTORY_FLAG_THREAD_SAFE, NATIVE_DECODER_PLUGIN_ABI_NAME,
-    NATIVE_DECODER_PLUGIN_ABI_VERSION, NATIVE_DECODER_PLUGIN_CAPSULE_METHOD,
-    NATIVE_DECODER_PLUGIN_CAPSULE_NAME, NATIVE_DECODER_PLUGIN_ENTRY_POINT_GROUP,
-    NATIVE_DECODER_PLUGIN_STATUS_ERROR, NATIVE_DECODER_PLUGIN_STATUS_OK,
+    NATIVE_DECODER_BATCH_FORMAT_EVENTS, NATIVE_DECODER_BATCH_FORMAT_MASKS,
+    NATIVE_DECODER_BATCH_FORMAT_PACKED, NATIVE_DECODER_FACTORY_FLAG_THREAD_SAFE,
+    NATIVE_DECODER_PLUGIN_ABI_NAME, NATIVE_DECODER_PLUGIN_ABI_VERSION,
+    NATIVE_DECODER_PLUGIN_CAPSULE_METHOD, NATIVE_DECODER_PLUGIN_CAPSULE_NAME,
+    NATIVE_DECODER_PLUGIN_ENTRY_POINT_GROUP, NATIVE_DECODER_PLUGIN_STATUS_ERROR,
+    NATIVE_DECODER_PLUGIN_STATUS_OK,
 };
 pub use dem::{
     collect_dem_event_plan, detectors_from_circuit, generate_dem_edges,
@@ -56,8 +63,8 @@ pub use dem_problem::{
     NATIVE_GRAPHLIKE_PROBLEM_CAPSULE_NAME,
 };
 pub use dem_sampling::{
-    CompiledDemLogicalCountPlan, CompiledDemSamplingPlan, DemHotspotEstimator,
-    DetectorEventDemShotBatch, PackedDemShotBatch,
+    CompiledDemLogicalCountPlan, CompiledDemSamplingPlan, DemAttributionTrace, DemHotspotEstimator,
+    DemObservableBatch, DemSamplingResult, DetectorEventDemShotBatch, PackedDemShotBatch,
 };
 pub use expr::Expr;
 pub use hotspot::compute_packed_estimate;

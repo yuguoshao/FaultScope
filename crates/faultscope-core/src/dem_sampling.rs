@@ -4,9 +4,11 @@ use std::sync::Arc;
 use crate::dem_canonical::{canonical_id_order, parity_canonicalize};
 use crate::labels::LocationCatalogBuilder;
 use crate::{
-    bernoulli_mask, for_each_bernoulli_event, word_count, DemBatch, DemEvent, DemHotspotEstimate,
-    DemLocationGroup, DetectorErrorEdge, DetectorErrorModel, LocationCatalog, LocationId, Mask,
-    NpError, NpResult, SmallRng,
+    convert_detector_batch, for_each_bernoulli_event, packed_corrections_to_masks,
+    validate_decoder_detector_ids, word_count, CorrectionMaskBatch, DemBatch, DemEvent,
+    DemHotspotEstimate, DemLocationGroup, DetectorBatch, DetectorBatchFormat, DetectorBatchView,
+    DetectorErrorEdge, DetectorErrorModel, LocationCatalog, LocationId, Mask, NpError, NpResult,
+    PackedObservableShotBatch, SmallRng,
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -82,6 +84,151 @@ pub struct DetectorEventDemShotBatch {
     pub observable_byte_count: usize,
 }
 
+/// Read-only edge-event data used only by FaultScope's attribution pipeline.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DemAttributionTrace {
+    shots: usize,
+    edge_event_masks: Vec<Mask>,
+    sampler_identity: Arc<()>,
+}
+
+impl DemAttributionTrace {
+    pub fn shots(&self) -> usize {
+        self.shots
+    }
+
+    pub fn edge_event_masks(&self) -> &[Mask] {
+        &self.edge_event_masks
+    }
+
+    fn matches_sampler(&self, identity: &Arc<()>) -> bool {
+        Arc::ptr_eq(&self.sampler_identity, identity)
+    }
+}
+
+/// Observable truth in the layout fixed by the negotiated detector input format.
+#[derive(Debug, Clone, PartialEq)]
+pub enum DemObservableBatch {
+    Masks(CorrectionMaskBatch),
+    Packed(PackedObservableShotBatch),
+}
+
+impl DemObservableBatch {
+    pub fn observable_ids(&self) -> &[i64] {
+        match self {
+            Self::Masks(batch) => &batch.observable_ids,
+            Self::Packed(batch) => &batch.observable_ids,
+        }
+    }
+
+    pub fn shots(&self) -> usize {
+        match self {
+            Self::Masks(batch) => batch.shots,
+            Self::Packed(batch) => batch.shots,
+        }
+    }
+
+    pub fn as_masks(&self) -> NpResult<CorrectionMaskBatch> {
+        match self {
+            Self::Masks(batch) => Ok(batch.clone()),
+            Self::Packed(batch) => packed_corrections_to_masks(batch.clone()),
+        }
+    }
+
+    pub fn as_packed(&self) -> NpResult<PackedObservableShotBatch> {
+        match self {
+            Self::Masks(batch) => crate::mask_corrections_to_packed(batch.clone()),
+            Self::Packed(batch) => Ok(batch.clone()),
+        }
+    }
+}
+
+/// Cross-crate result of one negotiated DEM sampling pass.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DemSamplingResult {
+    syndrome: DetectorBatch,
+    observables: DemObservableBatch,
+    detail_detector_ids: Vec<i64>,
+    detail_detector_masks: Vec<Mask>,
+    all_mask: Mask,
+    attribution: Option<DemAttributionTrace>,
+    sampler_identity: Arc<()>,
+}
+
+impl DemSamplingResult {
+    pub fn shots(&self) -> usize {
+        self.syndrome.shots()
+    }
+
+    pub fn syndrome(&self) -> DetectorBatchView<'_> {
+        self.syndrome.view()
+    }
+
+    pub fn syndrome_batch(&self) -> &DetectorBatch {
+        &self.syndrome
+    }
+
+    pub fn observables(&self) -> &DemObservableBatch {
+        &self.observables
+    }
+
+    pub fn detail_detector_ids(&self) -> &[i64] {
+        &self.detail_detector_ids
+    }
+
+    pub fn detail_detector_masks(&self) -> &[Mask] {
+        &self.detail_detector_masks
+    }
+
+    pub fn detector_detail_mask(&self, detector_id: i64) -> Option<&Mask> {
+        self.detail_detector_ids
+            .iter()
+            .position(|id| *id == detector_id)
+            .and_then(|index| self.detail_detector_masks.get(index))
+    }
+
+    pub fn all_mask(&self) -> &Mask {
+        &self.all_mask
+    }
+
+    pub fn attribution(&self) -> Option<&DemAttributionTrace> {
+        self.attribution.as_ref()
+    }
+
+    pub fn into_dem_batch(self) -> NpResult<DemBatch> {
+        let masks = convert_detector_batch(self.syndrome.view(), DetectorBatchFormat::Masks)?;
+        let DetectorBatch::Masks {
+            detector_ids,
+            masks,
+            shots,
+        } = masks
+        else {
+            unreachable!("Masks conversion returns Masks storage")
+        };
+        let detectors = detector_ids.into_iter().zip(masks).collect();
+        let observable_masks = self.observables.as_masks()?;
+        let observables = observable_masks
+            .observable_ids
+            .into_iter()
+            .zip(observable_masks.masks)
+            .collect::<HashMap<_, _>>();
+        let mut loss_mask = Mask::zero(word_count(shots));
+        for observable in observables.values() {
+            loss_mask.or_assign(observable);
+        }
+        loss_mask.and_assign(&self.all_mask);
+        Ok(DemBatch::new(
+            shots,
+            self.all_mask,
+            detectors,
+            observables,
+            self.attribution.map(|trace| trace.edge_event_masks),
+            loss_mask,
+            self.sampler_identity,
+        ))
+    }
+}
+
 /// Precomputed detector and observable layouts for repeated DEM sampling.
 ///
 /// The plan is immutable and independent of [`DemHotspotEstimator`], so it
@@ -90,6 +237,10 @@ pub struct DetectorEventDemShotBatch {
 pub struct CompiledDemSamplingPlan {
     detector_ids: Vec<i64>,
     observable_ids: Vec<i64>,
+    format: DetectorBatchFormat,
+    detail_detector_ids: Vec<i64>,
+    record_attribution: bool,
+    sampler_identity: Arc<()>,
     edges: Vec<CompiledSamplingEdge>,
     detector_byte_count: usize,
     observable_byte_count: usize,
@@ -100,6 +251,8 @@ struct CompiledSamplingEdge {
     probability: f64,
     detector_columns: Vec<usize>,
     packed_detector_columns: Vec<(usize, u8)>,
+    detail_detector_columns: Vec<usize>,
+    observable_mask_columns: Vec<usize>,
     observable_columns: Vec<(usize, u8)>,
 }
 
@@ -301,15 +454,18 @@ impl DemHotspotEstimator {
         rng: &mut SmallRng,
         return_edge_events: bool,
     ) -> DemBatch {
-        run_dem_program_batch(
+        self.compile_decoder_sampling_plan(
             self.detector_ids(),
             self.observable_ids(),
-            &self.edges,
-            shots,
-            rng,
+            DetectorBatchFormat::Masks,
+            &[],
             return_edge_events,
-            &self.hotspot_layout_identity,
         )
+        .expect("canonical DEM layouts compile")
+        .run_sampling_result_with_rng(shots, rng)
+        .expect("canonical DEM sampling cannot fail")
+        .into_dem_batch()
+        .expect("canonical DEM batches materialize")
     }
 
     pub fn run_packed_shot_batch_with_rng(
@@ -331,14 +487,18 @@ impl DemHotspotEstimator {
         detector_ids: &[i64],
         observable_ids: &[i64],
     ) -> NpResult<DetectorEventDemShotBatch> {
-        Ok(compile_dem_sampling_plan(
-            self.detector_ids(),
-            self.observable_ids(),
-            &self.edges,
+        Ok(compile_dem_sampling_plan(DemSamplingPlanSpec {
+            sampling_detector_ids: self.detector_ids(),
+            sampling_observable_ids: self.observable_ids(),
+            edges: &self.edges,
             detector_ids,
             observable_ids,
-            "detector-event DEM sampler",
-        )?
+            format: DetectorBatchFormat::Events,
+            detail_detector_ids: &[],
+            record_attribution: false,
+            sampler_identity: &self.hotspot_layout_identity,
+            sampler_name: "detector-event DEM sampler",
+        })?
         .run_detector_event_shot_batch_with_rng(shots, rng))
     }
 
@@ -348,14 +508,41 @@ impl DemHotspotEstimator {
         detector_ids: &[i64],
         observable_ids: &[i64],
     ) -> NpResult<CompiledDemSamplingPlan> {
-        compile_dem_sampling_plan(
-            self.detector_ids(),
-            self.observable_ids(),
-            &self.edges,
+        compile_dem_sampling_plan(DemSamplingPlanSpec {
+            sampling_detector_ids: self.detector_ids(),
+            sampling_observable_ids: self.observable_ids(),
+            edges: &self.edges,
             detector_ids,
             observable_ids,
-            "packed DEM sampler",
-        )
+            format: DetectorBatchFormat::Packed,
+            detail_detector_ids: &[],
+            record_attribution: false,
+            sampler_identity: &self.hotspot_layout_identity,
+            sampler_name: "packed DEM sampler",
+        })
+    }
+
+    /// Compile one decoder-oriented sampling plan with optional detail and attribution sidecars.
+    pub fn compile_decoder_sampling_plan(
+        &self,
+        detector_ids: &[i64],
+        observable_ids: &[i64],
+        format: DetectorBatchFormat,
+        detail_detector_ids: &[i64],
+        record_attribution: bool,
+    ) -> NpResult<CompiledDemSamplingPlan> {
+        compile_dem_sampling_plan(DemSamplingPlanSpec {
+            sampling_detector_ids: self.detector_ids(),
+            sampling_observable_ids: self.observable_ids(),
+            edges: &self.edges,
+            detector_ids,
+            observable_ids,
+            format,
+            detail_detector_ids,
+            record_attribution,
+            sampler_identity: &self.hotspot_layout_identity,
+            sampler_name: "decoder DEM sampler",
+        })
     }
 
     /// Compile the observable-only path used to count default logical failures.
@@ -415,16 +602,79 @@ impl DemHotspotEstimator {
             top_k,
         ))
     }
+
+    /// Estimate hotspots from the attribution sidecar produced by a negotiated sampler plan.
+    pub fn estimate_from_attribution(
+        &self,
+        trace: &DemAttributionTrace,
+        loss_mask: &Mask,
+        baseline: Option<f64>,
+        top_k: usize,
+    ) -> NpResult<DemHotspotEstimate> {
+        if !trace.matches_sampler(&self.hotspot_layout_identity) {
+            return Err(NpError::new(
+                "hotspot attribution trace does not match the current DEM estimator",
+            ));
+        }
+        if trace.shots == 0 {
+            return Err(NpError::new(
+                "DEM hotspot estimation requires shots to be positive",
+            ));
+        }
+        if trace.edge_event_masks.len() != self.edges.len() {
+            return Err(NpError::new(format!(
+                "hotspot attribution trace has {} edge masks; expected {}",
+                trace.edge_event_masks.len(),
+                self.edges.len()
+            )));
+        }
+        crate::hotspot::validate_loss_mask_width("DEM hotspot", trace.shots, loss_mask)?;
+        let all_mask = Mask::all(trace.shots);
+        Ok(crate::hotspot::compute_dem_estimate_from_trace(
+            crate::hotspot::DemEstimateProgram {
+                edges: &self.edges,
+                edge_metadata: self.edge_metadata.as_deref().unwrap_or(&[]),
+                location_groups: &self.location_groups,
+                catalog: &self.location_catalog,
+            },
+            trace.shots,
+            &all_mask,
+            &trace.edge_event_masks,
+            loss_mask,
+            baseline,
+            top_k,
+        ))
+    }
 }
 
-fn compile_dem_sampling_plan(
-    sampling_detector_ids: &[i64],
-    sampling_observable_ids: &[i64],
-    edges: &[DemProgramEdge],
-    detector_ids: &[i64],
-    observable_ids: &[i64],
-    sampler_name: &str,
-) -> NpResult<CompiledDemSamplingPlan> {
+struct DemSamplingPlanSpec<'a> {
+    sampling_detector_ids: &'a [i64],
+    sampling_observable_ids: &'a [i64],
+    edges: &'a [DemProgramEdge],
+    detector_ids: &'a [i64],
+    observable_ids: &'a [i64],
+    format: DetectorBatchFormat,
+    detail_detector_ids: &'a [i64],
+    record_attribution: bool,
+    sampler_identity: &'a Arc<()>,
+    sampler_name: &'a str,
+}
+
+fn compile_dem_sampling_plan(spec: DemSamplingPlanSpec<'_>) -> NpResult<CompiledDemSamplingPlan> {
+    let DemSamplingPlanSpec {
+        sampling_detector_ids,
+        sampling_observable_ids,
+        edges,
+        detector_ids,
+        observable_ids,
+        format,
+        detail_detector_ids,
+        record_attribution,
+        sampler_identity,
+        sampler_name,
+    } = spec;
+    validate_decoder_detector_ids(detector_ids)?;
+    validate_decoder_detector_ids(detail_detector_ids)?;
     let sampling_detector_index = sampling_detector_ids
         .iter()
         .copied()
@@ -438,7 +688,20 @@ fn compile_dem_sampling_plan(
             )));
         }
     }
+    for detector_id in detail_detector_ids {
+        if !sampling_detector_index.contains_key(detector_id) {
+            return Err(NpError::new(format!(
+                "{sampler_name} requested detail detector id {detector_id}, but it is not declared by the DEM"
+            )));
+        }
+    }
     let detector_index = detector_ids
+        .iter()
+        .copied()
+        .enumerate()
+        .map(|(index, id)| (id, index))
+        .collect::<HashMap<_, _>>();
+    let detail_detector_index = detail_detector_ids
         .iter()
         .copied()
         .enumerate()
@@ -471,21 +734,30 @@ fn compile_dem_sampling_plan(
             let detector_columns = edge
                 .detectors
                 .iter()
-                .map(|detector_id| packed_column_for_id(*detector_id, &detector_index))
-                .collect::<NpResult<Vec<_>>>()?;
+                .filter_map(|detector_id| detector_index.get(detector_id).copied())
+                .collect::<Vec<_>>();
             let packed_detector_columns = detector_columns
                 .iter()
                 .map(|column| (column >> 3, 1u8 << (column & 7)))
                 .collect();
+            let detail_detector_columns = edge
+                .detectors
+                .iter()
+                .filter_map(|detector_id| detail_detector_index.get(detector_id).copied())
+                .collect();
+            let mut observable_mask_columns = Vec::with_capacity(edge.observables.len());
             let mut observable_columns = Vec::with_capacity(edge.observables.len());
             for observable_id in &edge.observables {
                 let column = packed_column_for_id(*observable_id, &observable_index)?;
+                observable_mask_columns.push(column);
                 observable_columns.push((column >> 3, 1u8 << (column & 7)));
             }
             Ok(CompiledSamplingEdge {
                 probability: edge.probability,
                 detector_columns,
                 packed_detector_columns,
+                detail_detector_columns,
+                observable_mask_columns,
                 observable_columns,
             })
         })
@@ -494,6 +766,10 @@ fn compile_dem_sampling_plan(
     Ok(CompiledDemSamplingPlan {
         detector_ids: detector_ids.to_vec(),
         observable_ids: observable_ids.to_vec(),
+        format,
+        detail_detector_ids: detail_detector_ids.to_vec(),
+        record_attribution,
+        sampler_identity: sampler_identity.clone(),
         edges: compiled_edges,
         detector_byte_count: detector_ids.len().div_ceil(8),
         observable_byte_count: observable_ids.len().div_ceil(8),
@@ -509,6 +785,175 @@ impl CompiledDemSamplingPlan {
     /// Observable ids in the packed output order.
     pub fn observable_ids(&self) -> &[i64] {
         &self.observable_ids
+    }
+
+    pub fn format(&self) -> DetectorBatchFormat {
+        self.format
+    }
+
+    pub fn detail_detector_ids(&self) -> &[i64] {
+        &self.detail_detector_ids
+    }
+
+    pub fn records_attribution(&self) -> bool {
+        self.record_attribution
+    }
+
+    /// Sample syndrome, observable truth, optional detector detail, and an optional
+    /// attribution trace in a single RNG pass.
+    pub fn run_sampling_result_with_rng(
+        &self,
+        shots: usize,
+        rng: &mut SmallRng,
+    ) -> NpResult<DemSamplingResult> {
+        let words = word_count(shots);
+        let detector_len = shots
+            .checked_mul(self.detector_byte_count)
+            .ok_or_else(|| NpError::new("DEM detector batch length overflowed usize"))?;
+        let observable_len = shots
+            .checked_mul(self.observable_byte_count)
+            .ok_or_else(|| NpError::new("DEM observable batch length overflowed usize"))?;
+
+        let mut detector_masks = (self.format == DetectorBatchFormat::Masks)
+            .then(|| vec![Mask::zero(words); self.detector_ids.len()]);
+        let mut detector_data =
+            (self.format == DetectorBatchFormat::Packed).then(|| vec![0u8; detector_len]);
+        let mut event_counts =
+            (self.format == DetectorBatchFormat::Events).then(|| vec![0usize; shots]);
+        let mut raw_events = Vec::<(usize, usize)>::new();
+
+        let mut observable_masks = (self.format == DetectorBatchFormat::Masks)
+            .then(|| vec![Mask::zero(words); self.observable_ids.len()]);
+        let mut observable_data =
+            (self.format != DetectorBatchFormat::Masks).then(|| vec![0u8; observable_len]);
+        let mut detail_detector_masks = vec![Mask::zero(words); self.detail_detector_ids.len()];
+        let mut trace_masks = self
+            .record_attribution
+            .then(|| Vec::with_capacity(self.edges.len()));
+        let mut count_overflowed = false;
+
+        for edge in &self.edges {
+            let mut trace_mask = self.record_attribution.then(|| Mask::zero(words));
+            for_each_bernoulli_event(rng, shots, edge.probability, |shot, _| {
+                let shot_word = shot >> 6;
+                let shot_bit = 1u64 << (shot & 63);
+                if let Some(mask) = &mut trace_mask {
+                    mask.words[shot_word] |= shot_bit;
+                }
+                if let Some(masks) = &mut detector_masks {
+                    for detector in &edge.detector_columns {
+                        masks[*detector].words[shot_word] ^= shot_bit;
+                    }
+                } else if let Some(data) = &mut detector_data {
+                    let row = shot * self.detector_byte_count;
+                    for (byte, bit) in &edge.packed_detector_columns {
+                        data[row + byte] ^= bit;
+                    }
+                } else if let Some(counts) = &mut event_counts {
+                    match counts[shot].checked_add(edge.detector_columns.len()) {
+                        Some(count) => counts[shot] = count,
+                        None => count_overflowed = true,
+                    }
+                    raw_events.extend(
+                        edge.detector_columns
+                            .iter()
+                            .copied()
+                            .map(|detector| (shot, detector)),
+                    );
+                }
+
+                if let Some(masks) = &mut observable_masks {
+                    for observable in &edge.observable_mask_columns {
+                        masks[*observable].words[shot_word] ^= shot_bit;
+                    }
+                } else if let Some(data) = &mut observable_data {
+                    let row = shot * self.observable_byte_count;
+                    for (byte, bit) in &edge.observable_columns {
+                        data[row + byte] ^= bit;
+                    }
+                }
+                for detector in &edge.detail_detector_columns {
+                    detail_detector_masks[*detector].words[shot_word] ^= shot_bit;
+                }
+            });
+            if let (Some(masks), Some(mask)) = (&mut trace_masks, trace_mask) {
+                masks.push(mask);
+            }
+        }
+        if count_overflowed {
+            return Err(NpError::new("DEM detector event count overflowed usize"));
+        }
+
+        let syndrome = match self.format {
+            DetectorBatchFormat::Masks => DetectorBatch::Masks {
+                detector_ids: self.detector_ids.clone(),
+                masks: detector_masks.expect("Masks plan allocates mask-major syndrome"),
+                shots,
+            },
+            DetectorBatchFormat::Packed => DetectorBatch::Packed {
+                detector_ids: self.detector_ids.clone(),
+                data: detector_data.expect("Packed plan allocates packed syndrome"),
+                shots,
+                detector_byte_count: self.detector_byte_count,
+            },
+            DetectorBatchFormat::Events => {
+                let counts = event_counts.expect("Events plan allocates event counts");
+                let mut offsets = crate::decoder::empty_detector_event_offsets(shots)?;
+                for count in counts {
+                    let next = offsets
+                        .last()
+                        .copied()
+                        .expect("offset zero is present")
+                        .checked_add(count)
+                        .ok_or_else(|| {
+                            NpError::new("DEM detector event offset overflowed usize")
+                        })?;
+                    offsets.push(next);
+                }
+                let mut events = vec![0usize; offsets.last().copied().unwrap_or(0)];
+                let mut next = offsets.clone();
+                for (shot, detector) in raw_events {
+                    events[next[shot]] = detector;
+                    next[shot] += 1;
+                }
+                DetectorBatch::Events {
+                    detector_ids: self.detector_ids.clone(),
+                    offsets,
+                    events,
+                    shots,
+                }
+            }
+        };
+        syndrome.validate_shape()?;
+
+        let observables = if self.format == DetectorBatchFormat::Masks {
+            DemObservableBatch::Masks(CorrectionMaskBatch::new(
+                self.observable_ids.clone(),
+                observable_masks.expect("Masks plan allocates mask-major observables"),
+                shots,
+            )?)
+        } else {
+            DemObservableBatch::Packed(PackedObservableShotBatch::new(
+                self.observable_ids.clone(),
+                observable_data.expect("non-Masks plan allocates packed observables"),
+                shots,
+            )?)
+        };
+        let all_mask = Mask::all(shots);
+        let attribution = trace_masks.map(|edge_event_masks| DemAttributionTrace {
+            shots,
+            edge_event_masks,
+            sampler_identity: self.sampler_identity.clone(),
+        });
+        Ok(DemSamplingResult {
+            syndrome,
+            observables,
+            detail_detector_ids: self.detail_detector_ids.clone(),
+            detail_detector_masks,
+            all_mask,
+            attribution,
+            sampler_identity: self.sampler_identity.clone(),
+        })
     }
 
     /// Sample a shot-major bit-packed detector and observable batch.
@@ -775,65 +1220,6 @@ fn packed_column_for_id(id: i64, index: &HashMap<i64, usize>) -> NpResult<usize>
     })
 }
 
-fn run_dem_program_batch(
-    detector_ids: &[i64],
-    observable_ids: &[i64],
-    edges: &[DemProgramEdge],
-    shots: usize,
-    rng: &mut SmallRng,
-    return_edge_events: bool,
-    hotspot_layout_identity: &Arc<()>,
-) -> DemBatch {
-    let words = word_count(shots);
-    let all_mask = Mask::all(shots);
-    let mut detectors = HashMap::new();
-    for detector_id in detector_ids {
-        detectors.insert(*detector_id, Mask::zero(words));
-    }
-    let mut observables = HashMap::new();
-    for observable_id in observable_ids {
-        observables.insert(*observable_id, Mask::zero(words));
-    }
-    let mut edge_event_masks = return_edge_events.then(|| Vec::with_capacity(edges.len()));
-
-    for edge in edges {
-        let event_mask = bernoulli_mask(rng, shots, edge.probability);
-        if !event_mask.is_zero() {
-            for detector_id in &edge.detectors {
-                detectors
-                    .get_mut(detector_id)
-                    .expect("canonical DEM layout must include every edge detector")
-                    .xor_assign(&event_mask);
-            }
-            for observable_id in &edge.observables {
-                observables
-                    .get_mut(observable_id)
-                    .expect("canonical DEM layout must include every edge observable")
-                    .xor_assign(&event_mask);
-            }
-        }
-        if let Some(edge_event_masks) = &mut edge_event_masks {
-            edge_event_masks.push(event_mask);
-        }
-    }
-
-    let mut loss_mask = Mask::zero(words);
-    for observable in observables.values() {
-        loss_mask.or_assign(observable);
-    }
-    loss_mask.and_assign(&all_mask);
-
-    DemBatch::new(
-        shots,
-        all_mask,
-        detectors,
-        observables,
-        edge_event_masks,
-        loss_mask,
-        hotspot_layout_identity.clone(),
-    )
-}
-
 fn canonicalize_program_parts(
     detector_ids: Vec<i64>,
     observable_ids: Vec<i64>,
@@ -1017,6 +1403,125 @@ mod tests {
             }
         }
         (detectors, observables)
+    }
+
+    fn mask_batch_parts(batch: DetectorBatch) -> (Vec<i64>, Vec<Mask>, usize) {
+        let DetectorBatch::Masks {
+            detector_ids,
+            masks,
+            shots,
+        } = batch
+        else {
+            unreachable!("requested Masks conversion")
+        };
+        (detector_ids, masks, shots)
+    }
+
+    #[test]
+    fn negotiated_sampling_formats_preserve_syndrome_truth_rng_detail_and_attribution() {
+        let simulator = DemHotspotEstimator::from_parts(
+            vec![10, 20, 30],
+            vec![7, 9],
+            vec![
+                edge(0.0, vec![10], vec![7]),
+                edge(0.13, vec![20, 30], vec![9]),
+                edge(0.71, vec![10, 30], vec![7, 9]),
+                edge(1.0, vec![20], vec![]),
+                edge(0.37, vec![10, 20], vec![7]),
+            ],
+        )
+        .unwrap();
+        let detector_ids = [30, 10, 20];
+        let observable_ids = [9, 7];
+        let detail_ids = [20, 10];
+        type ExpectedSampling = (
+            Vec<Mask>,
+            CorrectionMaskBatch,
+            Vec<Mask>,
+            Vec<Mask>,
+            u64,
+            Option<DemHotspotEstimate>,
+        );
+
+        for shots in [0, 1, 7, 8, 63, 64, 65, 129] {
+            let mut expected: Option<ExpectedSampling> = None;
+            for format in DetectorBatchFormat::STABLE_ORDER {
+                let plan = simulator
+                    .compile_decoder_sampling_plan(
+                        &detector_ids,
+                        &observable_ids,
+                        format,
+                        &detail_ids,
+                        true,
+                    )
+                    .unwrap();
+                assert_eq!(plan.format(), format);
+                assert_eq!(plan.detail_detector_ids(), detail_ids);
+                assert!(plan.records_attribution());
+
+                let mut rng = SmallRng::new(0xdec0de);
+                let sampled = plan.run_sampling_result_with_rng(shots, &mut rng).unwrap();
+                let next = rng.next_u64();
+                let (_, syndrome_masks, sampled_shots) = mask_batch_parts(
+                    convert_detector_batch(sampled.syndrome(), DetectorBatchFormat::Masks).unwrap(),
+                );
+                assert_eq!(sampled_shots, shots);
+                let observable_masks = sampled.observables().as_masks().unwrap();
+                let detail_masks = sampled.detail_detector_masks().to_vec();
+                let trace = sampled.attribution().expect("attribution was requested");
+                assert_eq!(trace.shots(), shots);
+                let trace_masks = trace.edge_event_masks().to_vec();
+                let estimate = if shots == 0 {
+                    None
+                } else {
+                    let mut loss = Mask::zero(word_count(shots));
+                    for mask in &observable_masks.masks {
+                        loss.or_assign(mask);
+                    }
+                    Some(
+                        simulator
+                            .estimate_from_attribution(trace, &loss, None, simulator.edge_count())
+                            .unwrap(),
+                    )
+                };
+
+                let actual = (
+                    syndrome_masks,
+                    observable_masks,
+                    detail_masks,
+                    trace_masks,
+                    next,
+                    estimate,
+                );
+                if let Some(expected) = &expected {
+                    assert_eq!(&actual, expected);
+                } else {
+                    expected = Some(actual);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn ordinary_negotiated_sampling_does_not_record_attribution() {
+        let simulator = DemHotspotEstimator::from_sampling_parts(
+            vec![1],
+            vec![2],
+            vec![edge(0.25, vec![1], vec![2])],
+        )
+        .unwrap();
+        for format in DetectorBatchFormat::STABLE_ORDER {
+            let plan = simulator
+                .compile_decoder_sampling_plan(&[1], &[2], format, &[], false)
+                .unwrap();
+            assert!(!plan.records_attribution());
+            let sampled = plan
+                .run_sampling_result_with_rng(65, &mut SmallRng::new(4))
+                .unwrap();
+            assert!(sampled.attribution().is_none());
+            assert!(sampled.detail_detector_ids().is_empty());
+            assert!(sampled.detail_detector_masks().is_empty());
+        }
     }
 
     #[test]
@@ -1287,6 +1792,23 @@ mod tests {
         assert_eq!(
             observable_error.message(),
             "packed DEM sampler requested observable id 9, but it is not declared by the DEM"
+        );
+    }
+
+    #[test]
+    fn compiled_sampling_rejects_duplicate_detector_layout() {
+        let simulator = DemHotspotEstimator::from_sampling_parts(
+            vec![1],
+            vec![2],
+            vec![edge(0.5, vec![1], vec![2])],
+        )
+        .unwrap();
+
+        let error = simulator.compile_sampling_plan(&[1, 1], &[2]).unwrap_err();
+
+        assert_eq!(
+            error.message(),
+            "decoder detector ids must be unique; duplicate detector id 1"
         );
     }
 

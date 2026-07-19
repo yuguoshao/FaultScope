@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass, replace
-import hashlib
 import json
 from pathlib import Path
 import threading
@@ -32,14 +31,50 @@ from faultscope.collection._types import (
 from faultscope.collection._identity import (
     SAMPLING_ID_SCHEMA_VERSION,
     STRONG_ID_SCHEMA_VERSION,
-    canonical_json as _identity_canonical_json,
+    decoder_identity_digest,
     decoder_identity_payload,
+    domain_digest,
+    source_identity_digest,
     source_identity_payload,
 )
 
 
 # Python owns task parsing, strong-id construction, and CSV resume orchestration.
 # Native sampling, decoding, batch scheduling, and counting stay in Rust.
+
+
+@dataclass(frozen=True)
+class _PreparedSource:
+    """Immutable sampler and DEM shared by task views of one source."""
+
+    sampler: Any
+    dem: Any
+
+
+class _PreparationContext:
+    """Call-local cache for compiled collection sources."""
+
+    def __init__(self) -> None:
+        self._sources: dict[
+            tuple[int, ...],
+            list[tuple[tuple[object, ...], _PreparedSource]],
+        ] = {}
+
+    def prepare_source(self, task: CollectionTask) -> _PreparedSource:
+        references: tuple[object, ...]
+        if task.dem is not None:
+            references = (task.dem,)
+        else:
+            references = (task.circuit, task.detectors, task.observables)
+        key = tuple(id(reference) for reference in references)
+        entries = self._sources.setdefault(key, [])
+        for held_references, source in entries:
+            if all(current is held for current, held in zip(references, held_references)):
+                return source
+        sampler, dem = _compile_task_sampler(task)
+        source = _PreparedSource(sampler=sampler, dem=dem)
+        entries.append((references, source))
+        return source
 
 
 @dataclass(frozen=True, init=False)
@@ -143,13 +178,12 @@ def _run_collect(
     progress_sink: Callable[[Progress], object] | None = None,
 ) -> list[TaskStats]:
     counter_schema = _counter_schema_from_run_options(run_options)
-    task_list = _expand_tasks_for_decoders(list(tasks), run_options.decoders)
-    native_tasks = []
-    for index, task in enumerate(task_list):
-        effective = _merge_options(options, task.collection_options)
-        if effective.max_shots is None:
-            raise ValueError("max_shots is required")
-        native_tasks.append(_native_task(task, index, effective, counter_schema))
+    native_tasks = _prepare_native_tasks(
+        list(tasks),
+        options,
+        run_options.decoders,
+        counter_schema,
+    )
 
     existing = _read_existing_stats(
         run_options.existing_data_filepaths,
@@ -210,13 +244,12 @@ def _run_collect_hotspots(
     if run_options.existing_data_filepaths or run_options.save_resume_filepath is not None:
         raise ValueError("hotspot collection does not support CSV partial resume")
     counter_schema = _counter_schema_from_run_options(run_options)
-    task_list = _expand_tasks_for_decoders(list(tasks), run_options.decoders)
-    native_tasks = []
-    for index, task in enumerate(task_list):
-        effective = _merge_options(options, task.collection_options)
-        if effective.max_shots is None:
-            raise ValueError("max_shots is required")
-        native_tasks.append(_native_task(task, index, effective, counter_schema))
+    native_tasks = _prepare_native_tasks(
+        list(tasks),
+        options,
+        run_options.decoders,
+        counter_schema,
+    )
     native_results = _collect_dem_hotspots_many(
         native_tasks,
         num_workers=run_options.num_workers,
@@ -371,10 +404,15 @@ def _native_task(
     index: int,
     options: CollectionOptions,
     counter_schema: CollectionCounterSchema,
+    *,
+    source: _PreparedSource | None = None,
 ) -> dict[str, object]:
     if options.max_shots is None:
         raise ValueError("max_shots is required")
-    sampler, dem = _compile_task_sampler(task)
+    if source is None:
+        sampler, dem = _compile_task_sampler(task)
+    else:
+        sampler, dem = source.sampler, source.dem
     decoder = _resolve_decoder(task, dem)
     decoder_name = _decoder_name(decoder if decoder is not None else task.decoder)
     metadata = dict(task.metadata or {})
@@ -439,6 +477,34 @@ def _resolve_decoder(task: CollectionTask, dem: Any) -> object | None:
     return task.decoder
 
 
+def _prepare_native_tasks(
+    tasks: list[CollectionTask],
+    options: CollectionOptions,
+    decoders: Iterable[str | object] | str | object | None,
+    counter_schema: CollectionCounterSchema,
+) -> list[dict[str, object]]:
+    """Compile each source once, then prepare its decoder task views."""
+
+    context = _PreparationContext()
+    task_list = _expand_tasks_for_decoders(tasks, decoders)
+    native_tasks: list[dict[str, object]] = []
+    for index, task in enumerate(task_list):
+        effective = _merge_options(options, task.collection_options)
+        if effective.max_shots is None:
+            raise ValueError("max_shots is required")
+        source = context.prepare_source(task)
+        native_tasks.append(
+            _native_task(
+                task,
+                index,
+                effective,
+                counter_schema,
+                source=source,
+            )
+        )
+    return native_tasks
+
+
 def _decoder_name(decoder: object | str | None) -> str | None:
     if decoder is None:
         return None
@@ -461,27 +527,33 @@ def _task_identities(
     postselected_observables_mask: bytes | None,
     counter_schema: CollectionCounterSchema,
 ) -> tuple[str, str]:
+    source_digest = source_identity_digest(source_identity_payload(circuit=task.circuit, dem=dem))
+    decoder_digest = decoder_identity_digest(
+        decoder_identity_payload(decoder, decoder_name=decoder_name)
+    )
     sampling_payload = {
-        "schema": "faultscope.collection.sampling_id",
-        "schema_version": SAMPLING_ID_SCHEMA_VERSION,
-        "source": source_identity_payload(circuit=task.circuit, dem=dem),
-        "decoder": decoder_identity_payload(decoder, decoder_name=decoder_name),
+        "source_digest": source_digest,
+        "decoder_digest": decoder_digest,
         "metadata": dict(metadata),
         "postselection_mask": (None if postselection_mask is None else postselection_mask.hex()),
         "postselected_observables_mask": (
             None if postselected_observables_mask is None else postselected_observables_mask.hex()
         ),
     }
-    sampling_id = hashlib.sha256(
-        _identity_canonical_json(sampling_payload).encode("utf-8")
-    ).hexdigest()
+    sampling_id = domain_digest(
+        schema="faultscope.collection.sampling_id",
+        schema_version=SAMPLING_ID_SCHEMA_VERSION,
+        payload=sampling_payload,
+    )
     strong_payload = {
-        "schema": "faultscope.collection.strong_id",
-        "schema_version": STRONG_ID_SCHEMA_VERSION,
         "sampling_id": sampling_id,
         "counter_schema": counter_schema._to_payload(),
     }
-    strong_id = hashlib.sha256(_identity_canonical_json(strong_payload).encode("utf-8")).hexdigest()
+    strong_id = domain_digest(
+        schema="faultscope.collection.strong_id",
+        schema_version=STRONG_ID_SCHEMA_VERSION,
+        payload=strong_payload,
+    )
     return sampling_id, strong_id
 
 

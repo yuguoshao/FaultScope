@@ -445,6 +445,20 @@ class NoiseAwareSimulatorTests(unittest.TestCase):
         self.assertEqual(base_decoder.observable_ids, (1,))
         self.assertIn("NativeBatchDecoder", repr(base_decoder))
 
+    def test_native_no_correction_decoders_reject_duplicate_detector_ids(self) -> None:
+        constructors = (
+            lambda: NativeNoCorrectionDecoder(observable_ids=(0,), detector_ids=(5, 5)),
+            lambda: NativeBatchDecoder.no_correction(observable_ids=(0,), detector_ids=(5, 5)),
+        )
+
+        for construct in constructors:
+            with self.subTest(construct=construct):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    r"decoder detector ids must be unique; duplicate detector id 5",
+                ):
+                    construct()
+
     def test_native_backend_catalog_includes_reserved_decoders(self) -> None:
         catalog = {entry.name: entry for entry in official_native_decoder_backend_catalog()}
 
@@ -462,11 +476,12 @@ class NoiseAwareSimulatorTests(unittest.TestCase):
         self.assertEqual(catalog["mwpm"].package_name, "faultscope-mwpm")
         self.assertEqual(catalog["mwpm"].repo_url, "https://github.com/Quon-team/mwpm.rs.git")
         self.assertIn("ABI v1", catalog["mwpm"].description)
-        self.assertIn("FaultScope native decoder ABI v3", catalog["mwpm"].description)
+        self.assertIn("FaultScope native decoder ABI v4", catalog["mwpm"].description)
         self.assertIn("bpdecoder", catalog)
         self.assertEqual(catalog["bpdecoder"].problem_kind, "binary-linear")
-        self.assertTrue(catalog["bpdecoder"].installable)
+        self.assertFalse(catalog["bpdecoder"].installable)
         self.assertEqual(catalog["bpdecoder"].package_name, "faultscope-bpdecoder")
+        self.assertIn("native decoder ABI v4", catalog["bpdecoder"].description)
         self.assertIn("bposd", catalog)
         self.assertEqual(catalog["bposd"].problem_kind, "binary-linear")
         self.assertFalse(catalog["bposd"].installable)
@@ -525,7 +540,7 @@ class NoiseAwareSimulatorTests(unittest.TestCase):
                 NativePyMatchingDecoder.from_dem(dem)
         clear_native_decoder_plugin_cache()
 
-    def test_mwpm_backend_is_unavailable_pending_abi_v2_migration(self) -> None:
+    def test_mwpm_backend_is_unavailable_pending_abi_v4_migration(self) -> None:
         dem = DetectorErrorModel(
             detectors=(Detector(id=0, measurement_keys=()),),
             observables=(LogicalObservable(id=0),),
@@ -549,11 +564,11 @@ class NoiseAwareSimulatorTests(unittest.TestCase):
                 NativeMwpmDecoder.from_dem(dem)
             message = str(raised.exception)
             self.assertIn("ABI v1", message)
-            self.assertIn("FaultScope native decoder ABI v3", message)
+            self.assertIn("FaultScope native decoder ABI v4", message)
             self.assertNotIn("python -m faultscope.backends install mwpm", message)
         clear_native_decoder_plugin_cache()
 
-    def test_missing_bpdecoder_backend_has_install_hint(self) -> None:
+    def test_bpdecoder_backend_is_unavailable_pending_abi_v4_migration(self) -> None:
         dem = DetectorErrorModel(
             detectors=(Detector(id=0, measurement_keys=()),),
             observables=(LogicalObservable(id=0),),
@@ -573,11 +588,11 @@ class NoiseAwareSimulatorTests(unittest.TestCase):
             return_value=_FakeEntryPoints(()),
         ):
             clear_native_decoder_plugin_cache()
-            with self.assertRaisesRegex(
-                NativeDecoderBackendUnavailable,
-                "python -m faultscope.backends install bpdecoder",
-            ):
+            with self.assertRaises(NativeDecoderBackendUnavailable) as raised:
                 NativeBpDecoder.from_dem(dem)
+            message = str(raised.exception)
+            self.assertIn("FaultScope native decoder ABI v4", message)
+            self.assertNotIn("python -m faultscope.backends install bpdecoder", message)
         clear_native_decoder_plugin_cache()
 
     def test_reserved_bposd_backend_has_install_hint(self) -> None:
@@ -630,7 +645,7 @@ class NoiseAwareSimulatorTests(unittest.TestCase):
                 "name": "fusion-blossom",
                 "version": "test",
                 "source": "unit-test",
-                "abi_version": "faultscope.native_decoder_plugin.v3",
+                "abi_version": "faultscope.native_decoder_plugin.v4",
                 "decoders": {"fusion-blossom": MockFusionBlossomDecoder},
             }
 
@@ -728,7 +743,9 @@ class NoiseAwareSimulatorTests(unittest.TestCase):
                     )
                 self.assertFalse(os.listdir(tmpdir))
             self.assertIn("faultscope-bpdecoder", stdout.getvalue())
-            self.assertIn("pip install --upgrade faultscope-bpdecoder", stdout.getvalue())
+            self.assertIn("native decoder ABI v4", stdout.getvalue())
+            self.assertNotIn("FaultScope will install", stdout.getvalue())
+            self.assertNotIn("pip install", stdout.getvalue())
 
             stdout = io.StringIO()
             with tempfile.TemporaryDirectory() as tmpdir:
@@ -747,7 +764,7 @@ class NoiseAwareSimulatorTests(unittest.TestCase):
                     )
                 self.assertFalse(os.listdir(tmpdir))
             self.assertIn("ABI v1", stdout.getvalue())
-            self.assertIn("FaultScope native decoder ABI v3", stdout.getvalue())
+            self.assertIn("FaultScope native decoder ABI v4", stdout.getvalue())
             self.assertNotIn("FaultScope will install", stdout.getvalue())
             self.assertNotIn("python -m faultscope.backends install mwpm", stdout.getvalue())
             self.assertNotIn("pip install", stdout.getvalue())
@@ -772,9 +789,10 @@ class NoiseAwareSimulatorTests(unittest.TestCase):
             self.assertIn("faultscope-bposd", stdout.getvalue())
         clear_native_decoder_plugin_cache()
 
-    def test_post_install_plugin_manifest_abi_is_strict_v3(self) -> None:
-        expected = "faultscope.native_decoder_plugin.v3"
+    def test_post_install_plugin_manifest_abi_is_strict_v4(self) -> None:
+        expected = "faultscope.native_decoder_plugin.v4"
         for observed in (
+            "faultscope.native_decoder_plugin.v3",
             "faultscope.native_decoder_plugin.v2",
             "faultscope.native_decoder_plugin.v1",
             "wrong",
@@ -827,7 +845,7 @@ class NoiseAwareSimulatorTests(unittest.TestCase):
             self.assertTrue(status.installed)
             self.assertFalse(status.loadable)
             self.assertIn("faultscope.native_decoder_plugin.v1", status.error)
-            self.assertIn("faultscope.native_decoder_plugin.v3", status.error)
+            self.assertIn("faultscope.native_decoder_plugin.v4", status.error)
             self.assertNotIn("python -m faultscope.backends install mwpm", status.error)
         clear_native_decoder_plugin_cache()
 
@@ -837,7 +855,7 @@ class NoiseAwareSimulatorTests(unittest.TestCase):
                 "name": "backend-a",
                 "version": "test",
                 "source": "unit-test",
-                "abi_version": "faultscope.native_decoder_plugin.v3",
+                "abi_version": "faultscope.native_decoder_plugin.v4",
                 "decoders": {"fusion-blossom": object},
             }
 
@@ -846,7 +864,7 @@ class NoiseAwareSimulatorTests(unittest.TestCase):
                 "name": "backend-b",
                 "version": "test",
                 "source": "unit-test",
-                "abi_version": "faultscope.native_decoder_plugin.v3",
+                "abi_version": "faultscope.native_decoder_plugin.v4",
                 "decoders": {"fusion-blossom": object},
             }
 
@@ -872,7 +890,7 @@ class NoiseAwareSimulatorTests(unittest.TestCase):
                 "name": "missing-decoders",
                 "version": "test",
                 "source": "unit-test",
-                "abi_version": "faultscope.native_decoder_plugin.v3",
+                "abi_version": "faultscope.native_decoder_plugin.v4",
             }
 
         with mock.patch(
@@ -890,7 +908,7 @@ class NoiseAwareSimulatorTests(unittest.TestCase):
             return {
                 "name": "missing-version",
                 "source": "unit-test",
-                "abi_version": "faultscope.native_decoder_plugin.v3",
+                "abi_version": "faultscope.native_decoder_plugin.v4",
                 "decoders": {"missing-version": object},
             }
 

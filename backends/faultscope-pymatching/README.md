@@ -7,13 +7,17 @@ problems. Current FaultScope problems cross the extension boundary through the
 zero-copy native graphlike construction PyCapsule ABI v1; older or third-party
 problem objects retain the Python attribute compatibility path. The resulting
 decoder is exposed through the separate FaultScope native decoder PyCapsule ABI
-v3. The public Python object is a factory handle; each private worker owns an
-exclusive native solver. It uses pinned
+V4. The factory declares `[Packed]`; each private worker owns an exclusive
+native solver and receives all batches through one tagged callback. It uses pinned
 PyMatching sparse-blossom C++ source internally; it does not call the Python
 `PyMatchingDecoder` hot path. Independent parallel edges are merged only when
 they have the same detector endpoints and logical-observable support. The
 adapter rejects conflicting logical effects because PyMatching cannot preserve
 both effects on one simple-graph edge.
+
+Hotspot attribution is not part of the decoder input. FaultScope records the
+edge-event trace in its own sidecar while this backend receives only packed
+detector syndrome rows.
 
 Dynamic native error views remain valid until the associated decoder state is
 dropped. The backend retains every dynamic error message in state-owned storage

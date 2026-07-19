@@ -1,7 +1,7 @@
 # Release And Compatibility
 
 FaultScope uses one workspace version for the Python distribution and the
-published Rust libraries. The current workspace version is `0.2.5`.
+published Rust libraries. The current workspace version is `0.2.6`.
 
 ## Compatibility Contract
 
@@ -12,8 +12,8 @@ published Rust libraries. The current workspace version is `0.2.5`.
   surfaces. Private modules and `_`-prefixed names are implementation details.
 - `tests/public_api_contract.json` records the current Python export surface for
   deliberate review; it is not a historical compatibility guarantee.
-- The native decoder plugin ABI is independently versioned. ABI v3 is the only
-  runtime contract in `0.2.4`; ABI v2 plugins are rejected and must be rebuilt.
+- The native decoder plugin ABI is independently versioned. ABI V4 is the only
+  runtime contract in `0.2.6`; V1–V3 plugins are rejected and must be rebuilt.
 - Collection CSV and strong-id regression tests detect changes, but pre-1.0
   releases may deliberately revise those formats with release notes.
 
@@ -37,7 +37,7 @@ with an `abi3-py310` wheel tag.
 - `faultscope-fusion-blossom` remains a source-install beta for the `0.2.x`
   release line.
 
-Official backend packages require `faultscope>=0.2.4,<0.3` so they are not
+Official backend packages require `faultscope>=0.2.6,<0.3` so they are not
 installed against an older main package with a different pre-1.0 API surface.
 
 ## Release Process

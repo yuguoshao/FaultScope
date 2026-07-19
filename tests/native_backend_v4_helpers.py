@@ -4,11 +4,22 @@ import ctypes
 from concurrent.futures import ThreadPoolExecutor
 
 
-CAPSULE_NAME = b"faultscope.native_decoder_plugin.v3"
+CAPSULE_NAME = b"faultscope.native_decoder_plugin.v4"
+MASKS = 1
+PACKED = 2
+EVENTS = 3
 
 
 class StringView(ctypes.Structure):
     _fields_ = [("ptr", ctypes.c_void_p), ("len", ctypes.c_size_t)]
+
+
+class I64Slice(ctypes.Structure):
+    _fields_ = [("ptr", ctypes.POINTER(ctypes.c_int64)), ("len", ctypes.c_size_t)]
+
+
+class U32Slice(ctypes.Structure):
+    _fields_ = [("ptr", ctypes.POINTER(ctypes.c_uint32)), ("len", ctypes.c_size_t)]
 
 
 class Status(ctypes.Structure):
@@ -75,18 +86,44 @@ class PackedObservableBatch(ctypes.Structure):
     ]
 
 
-class WorkerV3(ctypes.Structure):
+class DetectorPayload(ctypes.Union):
+    _fields_ = [
+        ("masks", MaskBatch),
+        ("packed", PackedDetectorBatch),
+        ("events", DetectorEventBatch),
+    ]
+
+
+class TaggedDetectorBatch(ctypes.Structure):
+    _fields_ = [
+        ("format", ctypes.c_uint32),
+        ("reserved", ctypes.c_uint32),
+        ("payload", DetectorPayload),
+    ]
+
+
+class CorrectionPayload(ctypes.Union):
+    _fields_ = [("masks", CorrectionBatch), ("packed", PackedObservableBatch)]
+
+
+class TaggedCorrectionBatch(ctypes.Structure):
+    _fields_ = [
+        ("format", ctypes.c_uint32),
+        ("reserved", ctypes.c_uint32),
+        ("payload", CorrectionPayload),
+    ]
+
+
+class WorkerV4(ctypes.Structure):
     _fields_ = [
         ("struct_size", ctypes.c_size_t),
         ("worker_state", ctypes.c_void_p),
         ("drop_worker_state", ctypes.c_void_p),
         ("decode_batch", ctypes.c_void_p),
-        ("decode_packed_batch", ctypes.c_void_p),
-        ("decode_detector_event_batch", ctypes.c_void_p),
     ]
 
 
-class FactoryV3(ctypes.Structure):
+class FactoryV4(ctypes.Structure):
     _fields_ = [
         ("abi_version", ctypes.c_uint32),
         ("struct_size", ctypes.c_size_t),
@@ -96,6 +133,7 @@ class FactoryV3(ctypes.Structure):
         ("name", ctypes.c_void_p),
         ("detector_ids", ctypes.c_void_p),
         ("observable_ids", ctypes.c_void_p),
+        ("batch_formats", ctypes.c_void_p),
         ("create_worker", ctypes.c_void_p),
     ]
 
@@ -103,27 +141,16 @@ class FactoryV3(ctypes.Structure):
 CREATE_WORKER = ctypes.CFUNCTYPE(
     Status,
     ctypes.c_void_p,
-    ctypes.POINTER(WorkerV3),
+    ctypes.POINTER(WorkerV4),
     ctypes.c_size_t,
 )
 DROP_WORKER = ctypes.CFUNCTYPE(None, ctypes.c_void_p)
-DECODE_MASK = ctypes.CFUNCTYPE(
+GET_FORMATS = ctypes.CFUNCTYPE(Status, ctypes.c_void_p, ctypes.POINTER(U32Slice))
+DECODE = ctypes.CFUNCTYPE(
     Status,
     ctypes.c_void_p,
-    ctypes.POINTER(MaskBatch),
-    ctypes.POINTER(CorrectionBatch),
-)
-DECODE_PACKED = ctypes.CFUNCTYPE(
-    Status,
-    ctypes.c_void_p,
-    ctypes.POINTER(PackedDetectorBatch),
-    ctypes.POINTER(PackedObservableBatch),
-)
-DECODE_EVENTS = ctypes.CFUNCTYPE(
-    Status,
-    ctypes.c_void_p,
-    ctypes.POINTER(DetectorEventBatch),
-    ctypes.POINTER(PackedObservableBatch),
+    ctypes.POINTER(TaggedDetectorBatch),
+    ctypes.POINTER(TaggedCorrectionBatch),
 )
 
 
@@ -139,28 +166,41 @@ def _bytes(value: ctypes.Structure) -> bytes:
     return ctypes.string_at(ctypes.byref(value), ctypes.sizeof(value))
 
 
-def _filled_worker() -> WorkerV3:
-    worker = WorkerV3()
+def _filled_worker() -> WorkerV4:
+    worker = WorkerV4()
     ctypes.memset(ctypes.byref(worker), 0xA5, ctypes.sizeof(worker))
     return worker
 
 
-def assert_v3_worker_contract(test, decoder):
+def assert_v4_worker_contract(test, decoder):
+    test.assertEqual(ctypes.sizeof(U32Slice), 16)
+    test.assertEqual(ctypes.sizeof(TaggedDetectorBatch), 64)
+    test.assertEqual(ctypes.sizeof(TaggedCorrectionBatch), 48)
+    test.assertEqual(ctypes.sizeof(FactoryV4), 80)
+    test.assertEqual(ctypes.sizeof(WorkerV4), 32)
+
     test_stats = decoder._inner._test_stats_for_test()
     capsule = decoder.__faultscope_native_decoder_capsule__()
     test.assertEqual(_py_capsule_get_name(capsule), CAPSULE_NAME)
     pointer = _py_capsule_get_pointer(capsule, CAPSULE_NAME)
     test.assertTrue(pointer)
-    factory = ctypes.cast(pointer, ctypes.POINTER(FactoryV3)).contents
-    test.assertEqual(factory.abi_version, 3)
-    test.assertEqual(factory.struct_size, ctypes.sizeof(FactoryV3))
+    factory = ctypes.cast(pointer, ctypes.POINTER(FactoryV4)).contents
+    test.assertEqual(factory.abi_version, 4)
+    test.assertEqual(factory.struct_size, ctypes.sizeof(FactoryV4))
     test.assertEqual(factory.flags, 1)
     test.assertTrue(factory.factory_state)
     test.assertTrue(factory.drop_factory_state)
     test.assertTrue(factory.name)
     test.assertTrue(factory.detector_ids)
     test.assertTrue(factory.observable_ids)
+    test.assertTrue(factory.batch_formats)
     test.assertTrue(factory.create_worker)
+
+    formats = U32Slice()
+    status = GET_FORMATS(factory.batch_formats)(factory.factory_state, ctypes.byref(formats))
+    test.assertEqual(status.code, 0)
+    test.assertTrue(formats.ptr)
+    test.assertEqual(tuple(formats.ptr[index] for index in range(formats.len)), (PACKED,))
 
     create_worker = CREATE_WORKER(factory.create_worker)
     sentinel = _filled_worker()
@@ -168,22 +208,22 @@ def assert_v3_worker_contract(test, decoder):
     status = create_worker(
         factory.factory_state,
         ctypes.byref(sentinel),
-        ctypes.sizeof(WorkerV3) - 1,
+        ctypes.sizeof(WorkerV4) - 1,
     )
     test.assertNotEqual(status.code, 0)
     test.assertEqual(_bytes(sentinel), before)
 
-    status = create_worker(factory.factory_state, None, ctypes.sizeof(WorkerV3))
+    status = create_worker(factory.factory_state, None, ctypes.sizeof(WorkerV4))
     test.assertNotEqual(status.code, 0)
 
     null_factory_out = _filled_worker()
     before = _bytes(null_factory_out)
-    status = create_worker(None, ctypes.byref(null_factory_out), ctypes.sizeof(WorkerV3))
+    status = create_worker(None, ctypes.byref(null_factory_out), ctypes.sizeof(WorkerV4))
     test.assertNotEqual(status.code, 0)
     test.assertEqual(_bytes(null_factory_out), before)
 
-    first = WorkerV3()
-    second = WorkerV3()
+    first = WorkerV4()
+    second = WorkerV4()
     test.assertEqual(
         create_worker(factory.factory_state, ctypes.byref(first), ctypes.sizeof(first)).code,
         0,
@@ -193,28 +233,26 @@ def assert_v3_worker_contract(test, decoder):
         0,
     )
     try:
-        test.assertEqual(first.struct_size, ctypes.sizeof(WorkerV3))
-        test.assertEqual(second.struct_size, ctypes.sizeof(WorkerV3))
+        test.assertEqual(first.struct_size, ctypes.sizeof(WorkerV4))
+        test.assertEqual(second.struct_size, ctypes.sizeof(WorkerV4))
         test.assertTrue(first.worker_state)
         test.assertTrue(second.worker_state)
         test.assertNotEqual(first.worker_state, second.worker_state)
         for worker in (first, second):
             test.assertTrue(worker.drop_worker_state)
             test.assertTrue(worker.decode_batch)
-            test.assertTrue(worker.decode_packed_batch)
-            test.assertTrue(worker.decode_detector_event_batch)
-            test.assertEqual(_decode_mask(worker, decoder), 1)
             test.assertEqual(_decode_packed(worker, decoder), 1)
-            test.assertEqual(_decode_events(worker, decoder), 1)
+            test.assertNotEqual(_decode_mask(worker, decoder)[0].code, 0)
+            test.assertNotEqual(_decode_events(worker, decoder)[0].code, 0)
 
-            first_error = DECODE_MASK(worker.decode_batch)(worker.worker_state, None, None)
+            first_error = DECODE(worker.decode_batch)(worker.worker_state, None, None)
             test.assertNotEqual(first_error.code, 0)
             test.assertTrue(first_error.message.ptr)
             retained_message = ctypes.string_at(
                 first_error.message.ptr,
                 first_error.message.len,
             )
-            second_error = DECODE_MASK(worker.decode_batch)(worker.worker_state, None, None)
+            second_error = DECODE(worker.decode_batch)(worker.worker_state, None, None)
             test.assertNotEqual(second_error.code, 0)
             test.assertEqual(
                 ctypes.string_at(first_error.message.ptr, first_error.message.len),
@@ -239,7 +277,7 @@ def assert_factory_failure_lifetimes(test, invalid_decoder_type) -> None:
         decoder = invalid_decoder_type(kind)
         capsule = decoder.__faultscope_native_decoder_capsule__()
         pointer = _py_capsule_get_pointer(capsule, CAPSULE_NAME)
-        factory = ctypes.cast(pointer, ctypes.POINTER(FactoryV3)).contents
+        factory = ctypes.cast(pointer, ctypes.POINTER(FactoryV4)).contents
         create_worker = CREATE_WORKER(factory.create_worker)
 
         def fail_once(_index):
@@ -259,10 +297,7 @@ def assert_factory_failure_lifetimes(test, invalid_decoder_type) -> None:
             test.assertNotEqual(status.code, 0)
             test.assertEqual(after, before)
             test.assertTrue(status.message.ptr)
-            test.assertIn(
-                expected,
-                ctypes.string_at(status.message.ptr, status.message.len),
-            )
+            test.assertIn(expected, ctypes.string_at(status.message.ptr, status.message.len))
         retained = [
             ctypes.string_at(status.message.ptr, status.message.len)
             for status, _before, _after in failures
@@ -277,40 +312,71 @@ def _ids(decoder):
     )
 
 
-def _decode_mask(worker: WorkerV3, decoder) -> int:
+def _decode_mask(worker: WorkerV4, decoder):
     detector_ids, observable_ids = _ids(decoder)
     detector_words = (ctypes.c_uint64 * 1)(1)
     observable_words = (ctypes.c_uint64 * 1)(0)
     masks = (MaskView * 1)(MaskView(detector_words, 1))
     corrections = (MaskMutView * 1)(MaskMutView(observable_words, 1))
-    inputs = MaskBatch(detector_ids, 1, masks, 1, 1)
-    outputs = CorrectionBatch(observable_ids, 1, corrections, 1, 1)
-    status = DECODE_MASK(worker.decode_batch)(worker.worker_state, inputs, outputs)
+    input_payload = DetectorPayload()
+    input_payload.masks = MaskBatch(detector_ids, 1, masks, 1, 1)
+    output_payload = CorrectionPayload()
+    output_payload.masks = CorrectionBatch(observable_ids, 1, corrections, 1, 1)
+    inputs = TaggedDetectorBatch(MASKS, 0, input_payload)
+    outputs = TaggedCorrectionBatch(MASKS, 0, output_payload)
+    status = DECODE(worker.decode_batch)(
+        worker.worker_state,
+        ctypes.byref(inputs),
+        ctypes.byref(outputs),
+    )
+    return status, observable_words[0]
+
+
+def _decode_packed(worker: WorkerV4, decoder) -> int:
+    status, value = _decode_packed_raw(worker, decoder)
     if status.code:
-        raise AssertionError(f"mask callback failed with status {status.code}")
-    return observable_words[0]
+        raise AssertionError(f"packed callback failed with status {status.code}")
+    return value
 
 
-def _decode_packed(worker: WorkerV3, decoder) -> int:
+def _decode_packed_raw(
+    worker: WorkerV4,
+    decoder,
+    *,
+    input_reserved: int = 0,
+    output_reserved: int = 0,
+):
     detector_ids, observable_ids = _ids(decoder)
     detector_data = (ctypes.c_uint8 * 1)(1)
     observable_data = (ctypes.c_uint8 * 1)(0)
-    inputs = PackedDetectorBatch(detector_ids, 1, detector_data, 1, 1)
-    outputs = PackedObservableBatch(observable_ids, 1, observable_data, 1, 1)
-    status = DECODE_PACKED(worker.decode_packed_batch)(worker.worker_state, inputs, outputs)
-    if status.code:
-        raise AssertionError(f"packed callback failed with status {status.code}")
-    return observable_data[0]
+    input_payload = DetectorPayload()
+    input_payload.packed = PackedDetectorBatch(detector_ids, 1, detector_data, 1, 1)
+    output_payload = CorrectionPayload()
+    output_payload.packed = PackedObservableBatch(observable_ids, 1, observable_data, 1, 1)
+    inputs = TaggedDetectorBatch(PACKED, input_reserved, input_payload)
+    outputs = TaggedCorrectionBatch(PACKED, output_reserved, output_payload)
+    status = DECODE(worker.decode_batch)(
+        worker.worker_state,
+        ctypes.byref(inputs),
+        ctypes.byref(outputs),
+    )
+    return status, observable_data[0]
 
 
-def _decode_events(worker: WorkerV3, decoder) -> int:
+def _decode_events(worker: WorkerV4, decoder):
     detector_ids, observable_ids = _ids(decoder)
     offsets = (ctypes.c_size_t * 2)(0, 1)
     events = (ctypes.c_size_t * 1)(0)
     observable_data = (ctypes.c_uint8 * 1)(0)
-    inputs = DetectorEventBatch(detector_ids, 1, offsets, 2, events, 1, 1)
-    outputs = PackedObservableBatch(observable_ids, 1, observable_data, 1, 1)
-    status = DECODE_EVENTS(worker.decode_detector_event_batch)(worker.worker_state, inputs, outputs)
-    if status.code:
-        raise AssertionError(f"event callback failed with status {status.code}")
-    return observable_data[0]
+    input_payload = DetectorPayload()
+    input_payload.events = DetectorEventBatch(detector_ids, 1, offsets, 2, events, 1, 1)
+    output_payload = CorrectionPayload()
+    output_payload.packed = PackedObservableBatch(observable_ids, 1, observable_data, 1, 1)
+    inputs = TaggedDetectorBatch(EVENTS, 0, input_payload)
+    outputs = TaggedCorrectionBatch(PACKED, 0, output_payload)
+    status = DECODE(worker.decode_batch)(
+        worker.worker_state,
+        ctypes.byref(inputs),
+        ctypes.byref(outputs),
+    )
+    return status, observable_data[0]
