@@ -130,17 +130,54 @@ pub(crate) fn compute_dem_estimate(
     baseline: Option<f64>,
     top_k: usize,
 ) -> DemHotspotEstimate {
+    debug_assert!(batch.records_edge_events());
+    compute_dem_estimate_parts(
+        program,
+        batch.shots(),
+        batch.all_mask(),
+        batch.edge_event_masks(),
+        loss_mask,
+        baseline,
+        top_k,
+    )
+}
+
+pub(crate) fn compute_dem_estimate_from_trace(
+    program: DemEstimateProgram<'_>,
+    shots: usize,
+    all_mask: &Mask,
+    event_masks: &[Mask],
+    loss_mask: &Mask,
+    baseline: Option<f64>,
+    top_k: usize,
+) -> DemHotspotEstimate {
+    compute_dem_estimate_parts(
+        program,
+        shots,
+        all_mask,
+        event_masks,
+        loss_mask,
+        baseline,
+        top_k,
+    )
+}
+
+fn compute_dem_estimate_parts(
+    program: DemEstimateProgram<'_>,
+    shots: usize,
+    all_mask: &Mask,
+    event_masks: &[Mask],
+    loss_mask: &Mask,
+    baseline: Option<f64>,
+    top_k: usize,
+) -> DemHotspotEstimate {
     let DemEstimateProgram {
         edges,
         edge_metadata,
         location_groups,
         catalog,
     } = program;
-    let shots = batch.shots();
-    let all_mask = batch.all_mask();
-    let event_masks = batch.edge_event_masks();
     debug_assert!(shots > 0);
-    debug_assert!(batch.records_edge_events());
     debug_assert_eq!(event_masks.len(), edges.len());
     debug_assert_eq!(loss_mask.words.len(), all_mask.words.len());
     let mut clipped_loss = loss_mask.clone();

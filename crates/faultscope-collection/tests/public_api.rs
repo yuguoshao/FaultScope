@@ -11,22 +11,24 @@ use faultscope_collection::{
     DemLogicalCollectionTask, DemLogicalCounterSchema,
 };
 use faultscope_core::{
-    CorrectionMaskBatch, DemEvent, DemHotspotEstimator, Detector, DetectorErrorEdge,
-    DetectorErrorModel, DetectorMaskBatchView, LogicalObservable, Mask, NativeDecoderFactory,
-    NativeDecoderWorker, NativeGraphlikeDetectorCopyDecoder,
+    CorrectionMaskBatch, DecoderCorrectionBatch, DemEvent, DemHotspotEstimator, Detector,
+    DetectorBatchFormat, DetectorBatchView, DetectorErrorEdge, DetectorErrorModel,
+    LogicalObservable, Mask, NativeDecoderFactory, NativeDecoderWorker,
+    NativeGraphlikeDetectorCopyDecoder,
 };
 
 const TEST_COORDINATION_TIMEOUT: Duration = Duration::from_secs(2);
+const MASK_FORMAT: [DetectorBatchFormat; 1] = [DetectorBatchFormat::Masks];
 
 fn zero_correction_batch(
     observable_ids: &[i64],
     shots: usize,
-) -> faultscope_core::NpResult<CorrectionMaskBatch> {
-    CorrectionMaskBatch::new(
+) -> faultscope_core::NpResult<DecoderCorrectionBatch> {
+    Ok(DecoderCorrectionBatch::Masks(CorrectionMaskBatch::new(
         observable_ids.to_vec(),
         vec![Mask::zero(faultscope_core::word_count(shots)); observable_ids.len()],
         shots,
-    )
+    )?))
 }
 
 #[derive(Debug)]
@@ -217,6 +219,10 @@ impl NativeDecoderFactory for WorkerOwnedDecoder {
         &self.observable_ids
     }
 
+    fn batch_formats(&self) -> &[DetectorBatchFormat] {
+        &MASK_FORMAT
+    }
+
     fn create_worker(&self) -> faultscope_core::NpResult<Box<dyn NativeDecoderWorker>> {
         self.tracker.created.fetch_add(1, Ordering::SeqCst);
         Ok(Box::new(self.worker()))
@@ -236,10 +242,14 @@ impl NativeDecoderWorker for WorkerOwnedDecoder {
         &self.observable_ids
     }
 
+    fn batch_formats(&self) -> &[DetectorBatchFormat] {
+        &MASK_FORMAT
+    }
+
     fn decode_batch(
         &mut self,
-        detectors: DetectorMaskBatchView<'_>,
-    ) -> faultscope_core::NpResult<CorrectionMaskBatch> {
+        detectors: DetectorBatchView<'_>,
+    ) -> faultscope_core::NpResult<DecoderCorrectionBatch> {
         self.tracker.decode_calls.fetch_add(1, Ordering::SeqCst);
         if self.is_prototype {
             self.tracker
@@ -270,7 +280,7 @@ impl NativeDecoderWorker for WorkerOwnedDecoder {
         drop(owner);
         thread::sleep(Duration::from_millis(5));
         self.active.store(false, Ordering::SeqCst);
-        zero_correction_batch(&self.observable_ids, detectors.shots)
+        zero_correction_batch(&self.observable_ids, detectors.shots())
     }
 }
 
@@ -325,6 +335,10 @@ impl NativeDecoderFactory for DecodeFailureFactory {
         &self.observable_ids
     }
 
+    fn batch_formats(&self) -> &[DetectorBatchFormat] {
+        &MASK_FORMAT
+    }
+
     fn create_worker(&self) -> faultscope_core::NpResult<Box<dyn NativeDecoderWorker>> {
         self.tracker.created.fetch_add(1, Ordering::SeqCst);
         Ok(Box::new(DecodeFailureWorker {
@@ -363,10 +377,14 @@ impl NativeDecoderWorker for DecodeFailureWorker {
         &self.observable_ids
     }
 
+    fn batch_formats(&self) -> &[DetectorBatchFormat] {
+        &MASK_FORMAT
+    }
+
     fn decode_batch(
         &mut self,
-        _detectors: DetectorMaskBatchView<'_>,
-    ) -> faultscope_core::NpResult<CorrectionMaskBatch> {
+        _detectors: DetectorBatchView<'_>,
+    ) -> faultscope_core::NpResult<DecoderCorrectionBatch> {
         self.tracker.decode_calls.fetch_add(1, Ordering::SeqCst);
         self.latch.arrive_and_wait()?;
         Err(faultscope_core::NpError::new(
@@ -437,6 +455,10 @@ impl NativeDecoderFactory for SecondInstancePanickingDecoder {
         &self.observable_ids
     }
 
+    fn batch_formats(&self) -> &[DetectorBatchFormat] {
+        &MASK_FORMAT
+    }
+
     fn create_worker(&self) -> faultscope_core::NpResult<Box<dyn NativeDecoderWorker>> {
         let call = self.tracker.factory_calls.fetch_add(1, Ordering::SeqCst) + 1;
         if call == 2 {
@@ -468,16 +490,20 @@ impl NativeDecoderWorker for SecondInstancePanickingDecoder {
         &self.observable_ids
     }
 
+    fn batch_formats(&self) -> &[DetectorBatchFormat] {
+        &MASK_FORMAT
+    }
+
     fn decode_batch(
         &mut self,
-        detectors: DetectorMaskBatchView<'_>,
-    ) -> faultscope_core::NpResult<CorrectionMaskBatch> {
+        detectors: DetectorBatchView<'_>,
+    ) -> faultscope_core::NpResult<DecoderCorrectionBatch> {
         if !self.is_worker {
-            return zero_correction_batch(&self.observable_ids, detectors.shots);
+            return zero_correction_batch(&self.observable_ids, detectors.shots());
         }
         self.coordination.first_decode_started.signal()?;
         self.coordination.release_decode.wait()?;
-        zero_correction_batch(&self.observable_ids, detectors.shots)
+        zero_correction_batch(&self.observable_ids, detectors.shots())
     }
 }
 
@@ -500,6 +526,10 @@ impl NativeDecoderFactory for SecondInstanceFailingDecoder {
 
     fn observable_ids(&self) -> &[i64] {
         &self.observable_ids
+    }
+
+    fn batch_formats(&self) -> &[DetectorBatchFormat] {
+        &MASK_FORMAT
     }
 
     fn create_worker(&self) -> faultscope_core::NpResult<Box<dyn NativeDecoderWorker>> {
@@ -535,16 +565,20 @@ impl NativeDecoderWorker for SecondInstanceFailingDecoder {
         &self.observable_ids
     }
 
+    fn batch_formats(&self) -> &[DetectorBatchFormat] {
+        &MASK_FORMAT
+    }
+
     fn decode_batch(
         &mut self,
-        detectors: DetectorMaskBatchView<'_>,
-    ) -> faultscope_core::NpResult<CorrectionMaskBatch> {
+        detectors: DetectorBatchView<'_>,
+    ) -> faultscope_core::NpResult<DecoderCorrectionBatch> {
         if !self.is_worker {
-            return zero_correction_batch(&self.observable_ids, detectors.shots);
+            return zero_correction_batch(&self.observable_ids, detectors.shots());
         }
         self.coordination.first_decode_started.signal()?;
         self.coordination.release_decode.wait()?;
-        zero_correction_batch(&self.observable_ids, detectors.shots)
+        zero_correction_batch(&self.observable_ids, detectors.shots())
     }
 }
 
@@ -567,6 +601,10 @@ impl NativeDecoderFactory for GatedAdaptiveDecoder {
 
     fn observable_ids(&self) -> &[i64] {
         &self.observable_ids
+    }
+
+    fn batch_formats(&self) -> &[DetectorBatchFormat] {
+        &MASK_FORMAT
     }
 
     fn create_worker(&self) -> faultscope_core::NpResult<Box<dyn NativeDecoderWorker>> {
@@ -595,10 +633,14 @@ impl NativeDecoderWorker for GatedAdaptiveDecoder {
         &self.observable_ids
     }
 
+    fn batch_formats(&self) -> &[DetectorBatchFormat] {
+        &MASK_FORMAT
+    }
+
     fn decode_batch(
         &mut self,
-        detectors: DetectorMaskBatchView<'_>,
-    ) -> faultscope_core::NpResult<CorrectionMaskBatch> {
+        detectors: DetectorBatchView<'_>,
+    ) -> faultscope_core::NpResult<DecoderCorrectionBatch> {
         if let Some(started_tx) = self.started_tx.lock().unwrap().take() {
             let _ = started_tx.send(());
         }
@@ -607,7 +649,7 @@ impl NativeDecoderWorker for GatedAdaptiveDecoder {
         while !*released {
             released = ready.wait(released).unwrap();
         }
-        zero_correction_batch(&self.observable_ids, detectors.shots)
+        zero_correction_batch(&self.observable_ids, detectors.shots())
     }
 }
 
@@ -630,6 +672,10 @@ impl NativeDecoderFactory for SignalingUnsupportedDecoder {
 
     fn observable_ids(&self) -> &[i64] {
         &self.observable_ids
+    }
+
+    fn batch_formats(&self) -> &[DetectorBatchFormat] {
+        &MASK_FORMAT
     }
 
     fn create_worker(&self) -> faultscope_core::NpResult<Box<dyn NativeDecoderWorker>> {
@@ -655,12 +701,16 @@ impl NativeDecoderWorker for SignalingUnsupportedDecoder {
         &self.observable_ids
     }
 
+    fn batch_formats(&self) -> &[DetectorBatchFormat] {
+        &MASK_FORMAT
+    }
+
     fn decode_batch(
         &mut self,
-        detectors: DetectorMaskBatchView<'_>,
-    ) -> faultscope_core::NpResult<CorrectionMaskBatch> {
+        detectors: DetectorBatchView<'_>,
+    ) -> faultscope_core::NpResult<DecoderCorrectionBatch> {
         self.decode_calls.fetch_add(1, Ordering::SeqCst);
-        zero_correction_batch(&self.observable_ids, detectors.shots)
+        zero_correction_batch(&self.observable_ids, detectors.shots())
     }
 }
 
@@ -684,6 +734,10 @@ impl NativeDecoderFactory for NearMatchFactoryErrorDecoder {
         &self.observable_ids
     }
 
+    fn batch_formats(&self) -> &[DetectorBatchFormat] {
+        &MASK_FORMAT
+    }
+
     fn create_worker(&self) -> faultscope_core::NpResult<Box<dyn NativeDecoderWorker>> {
         Err(faultscope_core::NpError::new(
             "near_match does not support collection worker instances (temporary)",
@@ -704,12 +758,16 @@ impl NativeDecoderWorker for NearMatchFactoryErrorDecoder {
         &self.observable_ids
     }
 
+    fn batch_formats(&self) -> &[DetectorBatchFormat] {
+        &MASK_FORMAT
+    }
+
     fn decode_batch(
         &mut self,
-        detectors: DetectorMaskBatchView<'_>,
-    ) -> faultscope_core::NpResult<CorrectionMaskBatch> {
+        detectors: DetectorBatchView<'_>,
+    ) -> faultscope_core::NpResult<DecoderCorrectionBatch> {
         self.decode_calls.fetch_add(1, Ordering::SeqCst);
-        zero_correction_batch(&self.observable_ids, detectors.shots)
+        zero_correction_batch(&self.observable_ids, detectors.shots())
     }
 }
 
@@ -761,6 +819,10 @@ impl NativeDecoderFactory for LegacyTrackingDecoder {
         &self.observable_ids
     }
 
+    fn batch_formats(&self) -> &[DetectorBatchFormat] {
+        &MASK_FORMAT
+    }
+
     fn create_worker(&self) -> faultscope_core::NpResult<Box<dyn NativeDecoderWorker>> {
         self.tracker.created.fetch_add(1, Ordering::SeqCst);
         Ok(Box::new(Self {
@@ -785,15 +847,19 @@ impl NativeDecoderWorker for LegacyTrackingDecoder {
         &self.observable_ids
     }
 
+    fn batch_formats(&self) -> &[DetectorBatchFormat] {
+        &MASK_FORMAT
+    }
+
     fn decode_batch(
         &mut self,
-        detectors: DetectorMaskBatchView<'_>,
-    ) -> faultscope_core::NpResult<CorrectionMaskBatch> {
+        detectors: DetectorBatchView<'_>,
+    ) -> faultscope_core::NpResult<DecoderCorrectionBatch> {
         self.tracker.calls.fetch_add(1, Ordering::SeqCst);
         if !self.is_worker {
             self.tracker.prototype_calls.fetch_add(1, Ordering::SeqCst);
         }
-        zero_correction_batch(&self.observable_ids, detectors.shots)
+        zero_correction_batch(&self.observable_ids, detectors.shots())
     }
 }
 
@@ -837,6 +903,10 @@ impl NativeDecoderFactory for ThreadRecordingDecoder {
         &self.observable_ids
     }
 
+    fn batch_formats(&self) -> &[DetectorBatchFormat] {
+        &MASK_FORMAT
+    }
+
     fn create_worker(&self) -> faultscope_core::NpResult<Box<dyn NativeDecoderWorker>> {
         Ok(Box::new(Self {
             threads: self.threads.clone(),
@@ -860,13 +930,17 @@ impl NativeDecoderWorker for ThreadRecordingDecoder {
         &self.observable_ids
     }
 
+    fn batch_formats(&self) -> &[DetectorBatchFormat] {
+        &MASK_FORMAT
+    }
+
     fn decode_batch(
         &mut self,
-        detectors: DetectorMaskBatchView<'_>,
-    ) -> faultscope_core::NpResult<CorrectionMaskBatch> {
+        detectors: DetectorBatchView<'_>,
+    ) -> faultscope_core::NpResult<DecoderCorrectionBatch> {
         self.threads.lock().unwrap().insert(thread::current().id());
         thread::sleep(self.sleep);
-        zero_correction_batch(&self.observable_ids, detectors.shots)
+        zero_correction_batch(&self.observable_ids, detectors.shots())
     }
 }
 
@@ -904,6 +978,10 @@ impl NativeDecoderFactory for CountingDecoder {
         &self.observable_ids
     }
 
+    fn batch_formats(&self) -> &[DetectorBatchFormat] {
+        &MASK_FORMAT
+    }
+
     fn create_worker(&self) -> faultscope_core::NpResult<Box<dyn NativeDecoderWorker>> {
         Ok(Box::new(Self {
             calls: self.calls.clone(),
@@ -926,12 +1004,16 @@ impl NativeDecoderWorker for CountingDecoder {
         &self.observable_ids
     }
 
+    fn batch_formats(&self) -> &[DetectorBatchFormat] {
+        &MASK_FORMAT
+    }
+
     fn decode_batch(
         &mut self,
-        detectors: DetectorMaskBatchView<'_>,
-    ) -> faultscope_core::NpResult<CorrectionMaskBatch> {
+        detectors: DetectorBatchView<'_>,
+    ) -> faultscope_core::NpResult<DecoderCorrectionBatch> {
         *self.calls.lock().unwrap() += 1;
-        zero_correction_batch(&self.observable_ids, detectors.shots)
+        zero_correction_batch(&self.observable_ids, detectors.shots())
     }
 }
 
@@ -969,6 +1051,10 @@ impl NativeDecoderFactory for MaskRecordingDecoder {
         &self.observable_ids
     }
 
+    fn batch_formats(&self) -> &[DetectorBatchFormat] {
+        &MASK_FORMAT
+    }
+
     fn create_worker(&self) -> faultscope_core::NpResult<Box<dyn NativeDecoderWorker>> {
         Ok(Box::new(Self {
             batches: self.batches.clone(),
@@ -991,15 +1077,24 @@ impl NativeDecoderWorker for MaskRecordingDecoder {
         &self.observable_ids
     }
 
+    fn batch_formats(&self) -> &[DetectorBatchFormat] {
+        &MASK_FORMAT
+    }
+
     fn decode_batch(
         &mut self,
-        detectors: DetectorMaskBatchView<'_>,
-    ) -> faultscope_core::NpResult<CorrectionMaskBatch> {
+        detectors: DetectorBatchView<'_>,
+    ) -> faultscope_core::NpResult<DecoderCorrectionBatch> {
+        let DetectorBatchView::Masks(mask_batch) = detectors else {
+            return Err(faultscope_core::NpError::new(
+                "mask-recording test decoder only accepts Masks",
+            ));
+        };
         self.batches
             .lock()
             .unwrap()
-            .push(detectors.masks[0].words.clone());
-        zero_correction_batch(&self.observable_ids, detectors.shots)
+            .push(mask_batch.masks[0].words.clone());
+        zero_correction_batch(&self.observable_ids, mask_batch.shots)
     }
 }
 
@@ -1033,6 +1128,10 @@ impl NativeDecoderFactory for CalibrationCorrectingDecoder {
         &self.observable_ids
     }
 
+    fn batch_formats(&self) -> &[DetectorBatchFormat] {
+        &MASK_FORMAT
+    }
+
     fn create_worker(&self) -> faultscope_core::NpResult<Box<dyn NativeDecoderWorker>> {
         Ok(Box::new(Self {
             calls: self.calls.clone(),
@@ -1055,19 +1154,28 @@ impl NativeDecoderWorker for CalibrationCorrectingDecoder {
         &self.observable_ids
     }
 
+    fn batch_formats(&self) -> &[DetectorBatchFormat] {
+        &MASK_FORMAT
+    }
+
     fn decode_batch(
         &mut self,
-        detectors: DetectorMaskBatchView<'_>,
-    ) -> faultscope_core::NpResult<CorrectionMaskBatch> {
+        detectors: DetectorBatchView<'_>,
+    ) -> faultscope_core::NpResult<DecoderCorrectionBatch> {
+        let DetectorBatchView::Masks(mask_batch) = detectors else {
+            return Err(faultscope_core::NpError::new(
+                "calibration test decoder only accepts Masks",
+            ));
+        };
         let call = self.calls.fetch_add(1, Ordering::SeqCst);
         if call < 2 {
-            return Ok(CorrectionMaskBatch {
+            return Ok(DecoderCorrectionBatch::Masks(CorrectionMaskBatch {
                 observable_ids: self.observable_ids.clone(),
-                masks: vec![detectors.masks[0].clone()],
-                shots: detectors.shots,
-            });
+                masks: vec![mask_batch.masks[0].clone()],
+                shots: mask_batch.shots,
+            }));
         }
-        zero_correction_batch(&self.observable_ids, detectors.shots)
+        zero_correction_batch(&self.observable_ids, mask_batch.shots)
     }
 }
 
@@ -1092,12 +1200,16 @@ impl NativeDecoderWorker for BorrowedDecoder<'_> {
         self.observable_ids
     }
 
+    fn batch_formats(&self) -> &[DetectorBatchFormat] {
+        &MASK_FORMAT
+    }
+
     fn decode_batch(
         &mut self,
-        detectors: DetectorMaskBatchView<'_>,
-    ) -> faultscope_core::NpResult<CorrectionMaskBatch> {
+        detectors: DetectorBatchView<'_>,
+    ) -> faultscope_core::NpResult<DecoderCorrectionBatch> {
         *self.calls += 1;
-        zero_correction_batch(self.observable_ids, detectors.shots)
+        zero_correction_batch(self.observable_ids, detectors.shots())
     }
 }
 
@@ -1118,6 +1230,10 @@ impl NativeDecoderFactory for FailingDecoder {
 
     fn observable_ids(&self) -> &[i64] {
         &self.observable_ids
+    }
+
+    fn batch_formats(&self) -> &[DetectorBatchFormat] {
+        &MASK_FORMAT
     }
 
     fn create_worker(&self) -> faultscope_core::NpResult<Box<dyn NativeDecoderWorker>> {
@@ -1141,10 +1257,14 @@ impl NativeDecoderWorker for FailingDecoder {
         &self.observable_ids
     }
 
+    fn batch_formats(&self) -> &[DetectorBatchFormat] {
+        &MASK_FORMAT
+    }
+
     fn decode_batch(
         &mut self,
-        _detectors: DetectorMaskBatchView<'_>,
-    ) -> faultscope_core::NpResult<CorrectionMaskBatch> {
+        _detectors: DetectorBatchView<'_>,
+    ) -> faultscope_core::NpResult<DecoderCorrectionBatch> {
         Err(faultscope_core::NpError::new("intentional decoder failure"))
     }
 }
@@ -1330,6 +1450,52 @@ fn direct_collection_rejects_duplicate_detector_ids_when_no_batch_is_needed() {
 }
 
 #[test]
+fn direct_collection_validates_sampler_layout_when_no_batch_is_needed() {
+    let sampler = DemHotspotEstimator::new(graphlike_dem(1.0)).unwrap();
+    let assert_rejected =
+        |name: &str, detector_ids: &[i64], observable_ids: &[i64], expected: &str| {
+            let mut calls = 0;
+            let mut decoder = BorrowedDecoder {
+                name,
+                detector_ids,
+                observable_ids,
+                calls: &mut calls,
+            };
+            let error = collect_dem_logical_error_stats(
+                &sampler,
+                DemLogicalCollectionOptions {
+                    max_shots: 4,
+                    min_shots: 0,
+                    max_errors: Some(0),
+                    batch_size: 4,
+                    seed: Some(17),
+                    start_batch_size: None,
+                    max_batch_size: None,
+                    max_batch_seconds: None,
+                },
+                Some(&mut decoder),
+            )
+            .unwrap_err();
+
+            assert_eq!(error.message(), expected);
+            assert_eq!(calls, 0);
+        };
+
+    assert_rejected(
+        "unknown-detector-layout",
+        &[99],
+        &[0],
+        "decoder DEM sampler requested detector id 99, but it is not declared by the DEM",
+    );
+    assert_rejected(
+        "mismatched-observable-layout",
+        &[0],
+        &[1],
+        "native decoder `mismatched-observable-layout` observable layout mismatch: expected sampler canonical ids [0], got [1]",
+    );
+}
+
+#[test]
 fn collection_task_rejects_noncanonical_factory_layout_before_worker_creation() {
     let tracker = Arc::new(InstanceTracker::default());
     let mut prototype = WorkerOwnedDecoder::prototype(tracker.clone());
@@ -1362,6 +1528,72 @@ fn hotspot_task_rejects_duplicate_factory_detector_ids_before_worker_creation() 
     );
     assert_eq!(tracker.created.load(Ordering::SeqCst), 0);
     assert_eq!(tracker.decode_calls.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn completed_tasks_reject_decoder_detectors_outside_the_sampler_before_worker_creation() {
+    let tracker = Arc::new(InstanceTracker::default());
+    let mut prototype = WorkerOwnedDecoder::prototype(tracker.clone());
+    prototype.detector_ids = vec![99];
+    let decoder: Arc<dyn NativeDecoderFactory> = Arc::new(prototype);
+    let mut task = decoder_collection_task("unknown-detector-complete", decoder, 4, false);
+    task.options.max_errors = Some(0);
+    let expected =
+        "decoder DEM sampler requested detector id 99, but it is not declared by the DEM";
+
+    let error = collect_dem_logical_error_tasks(
+        vec![task.clone()],
+        collection_run_options(1),
+        HashMap::new(),
+    )
+    .unwrap_err();
+    assert_eq!(error.message(), expected);
+
+    let error = collect_dem_hotspot_tasks(vec![task], collection_run_options(1)).unwrap_err();
+    assert_eq!(error.message(), expected);
+    assert_eq!(tracker.created.load(Ordering::SeqCst), 0);
+    assert_eq!(tracker.decode_calls.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn active_and_mixed_tasks_reject_decoder_detectors_outside_the_sampler_consistently() {
+    let invalid_tracker = Arc::new(InstanceTracker::default());
+    let mut invalid_prototype = WorkerOwnedDecoder::prototype(invalid_tracker.clone());
+    invalid_prototype.detector_ids = vec![99];
+    let invalid_decoder: Arc<dyn NativeDecoderFactory> = Arc::new(invalid_prototype);
+    let invalid_task =
+        decoder_collection_task("unknown-detector-active", invalid_decoder, 4, false);
+    let expected =
+        "decoder DEM sampler requested detector id 99, but it is not declared by the DEM";
+
+    let error = collect_dem_logical_error_tasks(
+        vec![invalid_task.clone()],
+        collection_run_options(1),
+        HashMap::new(),
+    )
+    .unwrap_err();
+    assert_eq!(error.message(), expected);
+
+    let valid_tracker = Arc::new(InstanceTracker::default());
+    let valid_decoder: Arc<dyn NativeDecoderFactory> =
+        Arc::new(WorkerOwnedDecoder::prototype(valid_tracker.clone()));
+    let valid_task = decoder_collection_task("valid-before-invalid", valid_decoder, 4, false);
+    let mixed_tasks = vec![valid_task, invalid_task];
+
+    let error = collect_dem_logical_error_tasks(
+        mixed_tasks.clone(),
+        collection_run_options(2),
+        HashMap::new(),
+    )
+    .unwrap_err();
+    assert_eq!(error.message(), expected);
+
+    let error = collect_dem_hotspot_tasks(mixed_tasks, collection_run_options(2)).unwrap_err();
+    assert_eq!(error.message(), expected);
+    assert_eq!(invalid_tracker.created.load(Ordering::SeqCst), 0);
+    assert_eq!(invalid_tracker.decode_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(valid_tracker.created.load(Ordering::SeqCst), 0);
+    assert_eq!(valid_tracker.decode_calls.load(Ordering::SeqCst), 0);
 }
 
 #[test]

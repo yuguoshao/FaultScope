@@ -5,21 +5,27 @@ use std::sync::Arc;
 
 use faultscope_core::{
     collect_dem_event_plan, generate_dem_edges_from_event_plan, log_likelihood_ratio, Circuit,
-    ConcreteStabilizer, CorrectionMaskBatch, DemHotspotEstimator, Detector,
-    DetectorErrorModelGenerator, DetectorMaskBatchView,
-    FaultScopeNativeCorrectionMaskBatchMutViewV1, FaultScopeNativeDecoderFactoryV3,
+    ConcreteStabilizer, CorrectionMaskBatch, DecoderCorrectionBatch, DemHotspotEstimator, Detector,
+    DetectorBatchFormat, DetectorBatchView, DetectorErrorModelGenerator, DetectorMaskBatchView,
+    FaultScopeNativeCorrectionBatchMutViewV4, FaultScopeNativeCorrectionBatchPayloadV4,
+    FaultScopeNativeCorrectionMaskBatchMutViewV1, FaultScopeNativeDecoderFactoryV4,
     FaultScopeNativeDecoderStatusV1, FaultScopeNativeDecoderStringViewV1,
-    FaultScopeNativeDecoderWorkerV3, FaultScopeNativeDetectorEventShotBatchViewV1,
-    FaultScopeNativeDetectorMaskBatchViewV1, FaultScopeNativeGraphlikeEdgeV1,
-    FaultScopeNativeGraphlikeProblemV1, FaultScopeNativePackedDetectorShotBatchViewV1,
-    FaultScopeSimulator, GraphlikeDecodingProblem, GraphlikeEdge, LogicalObservable, Mask,
-    NativeCompositeDecoder, NativeDecoderFactory, NativeDecoderWorker, NoiseLocation, NoiseModel,
-    NpError, NpResult, Operation, PauliFrame, NATIVE_DECODER_FACTORY_FLAG_THREAD_SAFE,
+    FaultScopeNativeDecoderU32SliceV1, FaultScopeNativeDecoderWorkerV4,
+    FaultScopeNativeDetectorBatchPayloadV4, FaultScopeNativeDetectorBatchViewV4,
+    FaultScopeNativeDetectorEventShotBatchViewV1, FaultScopeNativeDetectorMaskBatchViewV1,
+    FaultScopeNativeGraphlikeEdgeV1, FaultScopeNativeGraphlikeProblemV1,
+    FaultScopeNativePackedDetectorShotBatchViewV1, FaultScopeSimulator, GraphlikeDecodingProblem,
+    GraphlikeEdge, LogicalObservable, Mask, NativeCompositeDecoder, NativeDecoderFactory,
+    NativeDecoderWorker, NoiseLocation, NoiseModel, NpError, NpResult, Operation, PauliFrame,
+    NATIVE_DECODER_BATCH_FORMAT_EVENTS, NATIVE_DECODER_BATCH_FORMAT_MASKS,
+    NATIVE_DECODER_BATCH_FORMAT_PACKED, NATIVE_DECODER_FACTORY_FLAG_THREAD_SAFE,
     NATIVE_DECODER_PLUGIN_ABI_NAME, NATIVE_DECODER_PLUGIN_ABI_VERSION,
     NATIVE_DECODER_PLUGIN_CAPSULE_NAME, NATIVE_DECODER_PLUGIN_ENTRY_POINT_GROUP,
     NATIVE_GRAPHLIKE_PROBLEM_ABI_NAME, NATIVE_GRAPHLIKE_PROBLEM_ABI_VERSION,
     NATIVE_GRAPHLIKE_PROBLEM_CAPSULE_NAME,
 };
+
+const MASK_FORMAT: [DetectorBatchFormat; 1] = [DetectorBatchFormat::Masks];
 
 #[test]
 fn graphlike_public_constructor_derives_canonical_weight() {
@@ -87,6 +93,10 @@ impl NativeDecoderFactory for FactoryDecoder {
         &self.observable_ids
     }
 
+    fn batch_formats(&self) -> &[DetectorBatchFormat] {
+        &MASK_FORMAT
+    }
+
     fn create_worker(&self) -> NpResult<Box<dyn NativeDecoderWorker>> {
         let id = self.created.fetch_add(1, Ordering::SeqCst);
         Ok(Box::new(FactoryWorkerDecoder::new(
@@ -122,6 +132,10 @@ impl NativeDecoderFactory for SharedNameFactoryDecoder {
 
     fn observable_ids(&self) -> &[i64] {
         &self.observable_ids
+    }
+
+    fn batch_formats(&self) -> &[DetectorBatchFormat] {
+        &MASK_FORMAT
     }
 
     fn create_worker(&self) -> NpResult<Box<dyn NativeDecoderWorker>> {
@@ -166,11 +180,18 @@ impl NativeDecoderWorker for FactoryWorkerDecoder {
         &self.observable_ids
     }
 
+    fn batch_formats(&self) -> &[DetectorBatchFormat] {
+        &MASK_FORMAT
+    }
+
     fn decode_batch(
         &mut self,
-        detectors: DetectorMaskBatchView<'_>,
-    ) -> NpResult<CorrectionMaskBatch> {
-        CorrectionMaskBatch::new(
+        detectors: DetectorBatchView<'_>,
+    ) -> NpResult<DecoderCorrectionBatch> {
+        let DetectorBatchView::Masks(detectors) = detectors else {
+            return Err(NpError::new("factory test decoder only accepts Masks"));
+        };
+        Ok(DecoderCorrectionBatch::Masks(CorrectionMaskBatch::new(
             self.observable_ids.clone(),
             vec![
                 Mask {
@@ -179,7 +200,7 @@ impl NativeDecoderWorker for FactoryWorkerDecoder {
                 self.observable_ids.len()
             ],
             detectors.shots,
-        )
+        )?))
     }
 }
 
@@ -358,9 +379,24 @@ fn native_decoder_worker_instances_are_fresh_and_preserve_ids() {
     let second_detector_ids = second.detector_ids().to_vec();
     let first_view = DetectorMaskBatchView::new(&first_detector_ids, &detector_masks, 4).unwrap();
     let second_view = DetectorMaskBatchView::new(&second_detector_ids, &detector_masks, 4).unwrap();
-    assert_eq!(first.decode_batch(first_view).unwrap().masks[0].words, [1]);
     assert_eq!(
-        second.decode_batch(second_view).unwrap().masks[0].words,
+        first
+            .decode_batch(first_view.into())
+            .unwrap()
+            .into_masks()
+            .unwrap()
+            .masks[0]
+            .words,
+        [1]
+    );
+    assert_eq!(
+        second
+            .decode_batch(second_view.into())
+            .unwrap()
+            .into_masks()
+            .unwrap()
+            .masks[0]
+            .words,
         [2]
     );
 }
@@ -398,7 +434,9 @@ fn composite_worker_instance_recursively_creates_fresh_children() {
     let second_view = DetectorMaskBatchView::new(&second_detector_ids, &detector_masks, 4).unwrap();
     assert_eq!(
         first
-            .decode_batch(first_view)
+            .decode_batch(first_view.into())
+            .unwrap()
+            .into_masks()
             .unwrap()
             .masks
             .into_iter()
@@ -408,7 +446,9 @@ fn composite_worker_instance_recursively_creates_fresh_children() {
     );
     assert_eq!(
         second
-            .decode_batch(second_view)
+            .decode_batch(second_view.into())
+            .unwrap()
+            .into_masks()
             .unwrap()
             .masks
             .into_iter()
@@ -445,11 +485,11 @@ fn composite_worker_factory_error_identifies_duplicate_named_child_by_index() {
 }
 
 #[test]
-fn native_decoder_v3_abi_layout_is_frozen_on_64_bit_targets() {
-    assert_eq!(NATIVE_DECODER_PLUGIN_ABI_VERSION, 3);
+fn native_decoder_v4_abi_layout_is_frozen_on_64_bit_targets() {
+    assert_eq!(NATIVE_DECODER_PLUGIN_ABI_VERSION, 4);
     assert_eq!(
         NATIVE_DECODER_PLUGIN_ABI_NAME,
-        "faultscope.native_decoder_plugin.v3"
+        "faultscope.native_decoder_plugin.v4"
     );
     assert_eq!(
         NATIVE_DECODER_PLUGIN_CAPSULE_NAME,
@@ -460,9 +500,16 @@ fn native_decoder_v3_abi_layout_is_frozen_on_64_bit_targets() {
         "faultscope.native_decoders"
     );
     assert_eq!(NATIVE_DECODER_FACTORY_FLAG_THREAD_SAFE, 1 << 0);
+    assert_eq!(NATIVE_DECODER_BATCH_FORMAT_MASKS, 1);
+    assert_eq!(NATIVE_DECODER_BATCH_FORMAT_PACKED, 2);
+    assert_eq!(NATIVE_DECODER_BATCH_FORMAT_EVENTS, 3);
 
     if cfg!(target_pointer_width = "64") {
         assert_eq!(size_of::<FaultScopeNativeDecoderStringViewV1>(), 16);
+        assert_eq!(size_of::<FaultScopeNativeDecoderU32SliceV1>(), 16);
+        assert_eq!(align_of::<FaultScopeNativeDecoderU32SliceV1>(), 8);
+        assert_eq!(offset_of!(FaultScopeNativeDecoderU32SliceV1, ptr), 0);
+        assert_eq!(offset_of!(FaultScopeNativeDecoderU32SliceV1, len), 8);
         assert_eq!(size_of::<FaultScopeNativeDetectorMaskBatchViewV1>(), 40);
         assert_eq!(
             size_of::<FaultScopeNativeCorrectionMaskBatchMutViewV1>(),
@@ -477,52 +524,70 @@ fn native_decoder_v3_abi_layout_is_frozen_on_64_bit_targets() {
             56
         );
         assert_eq!(size_of::<FaultScopeNativeDecoderStatusV1>(), 24);
-        assert_eq!(size_of::<FaultScopeNativeDecoderFactoryV3>(), 72);
-        assert_eq!(align_of::<FaultScopeNativeDecoderFactoryV3>(), 8);
-        assert_eq!(offset_of!(FaultScopeNativeDecoderFactoryV3, abi_version), 0);
-        assert_eq!(offset_of!(FaultScopeNativeDecoderFactoryV3, struct_size), 8);
-        assert_eq!(offset_of!(FaultScopeNativeDecoderFactoryV3, flags), 16);
+        assert_eq!(size_of::<FaultScopeNativeDetectorBatchPayloadV4>(), 56);
+        assert_eq!(size_of::<FaultScopeNativeDetectorBatchViewV4>(), 64);
+        assert_eq!(align_of::<FaultScopeNativeDetectorBatchViewV4>(), 8);
+        assert_eq!(offset_of!(FaultScopeNativeDetectorBatchViewV4, format), 0);
+        assert_eq!(offset_of!(FaultScopeNativeDetectorBatchViewV4, reserved), 4);
+        assert_eq!(offset_of!(FaultScopeNativeDetectorBatchViewV4, payload), 8);
+        assert_eq!(size_of::<FaultScopeNativeCorrectionBatchPayloadV4>(), 40);
+        assert_eq!(size_of::<FaultScopeNativeCorrectionBatchMutViewV4>(), 48);
+        assert_eq!(align_of::<FaultScopeNativeCorrectionBatchMutViewV4>(), 8);
         assert_eq!(
-            offset_of!(FaultScopeNativeDecoderFactoryV3, factory_state),
+            offset_of!(FaultScopeNativeCorrectionBatchMutViewV4, format),
+            0
+        );
+        assert_eq!(
+            offset_of!(FaultScopeNativeCorrectionBatchMutViewV4, reserved),
+            4
+        );
+        assert_eq!(
+            offset_of!(FaultScopeNativeCorrectionBatchMutViewV4, payload),
+            8
+        );
+
+        assert_eq!(size_of::<FaultScopeNativeDecoderFactoryV4>(), 80);
+        assert_eq!(align_of::<FaultScopeNativeDecoderFactoryV4>(), 8);
+        assert_eq!(offset_of!(FaultScopeNativeDecoderFactoryV4, abi_version), 0);
+        assert_eq!(offset_of!(FaultScopeNativeDecoderFactoryV4, struct_size), 8);
+        assert_eq!(offset_of!(FaultScopeNativeDecoderFactoryV4, flags), 16);
+        assert_eq!(
+            offset_of!(FaultScopeNativeDecoderFactoryV4, factory_state),
             24
         );
         assert_eq!(
-            offset_of!(FaultScopeNativeDecoderFactoryV3, drop_factory_state),
+            offset_of!(FaultScopeNativeDecoderFactoryV4, drop_factory_state),
             32
         );
-        assert_eq!(offset_of!(FaultScopeNativeDecoderFactoryV3, name), 40);
+        assert_eq!(offset_of!(FaultScopeNativeDecoderFactoryV4, name), 40);
         assert_eq!(
-            offset_of!(FaultScopeNativeDecoderFactoryV3, detector_ids),
+            offset_of!(FaultScopeNativeDecoderFactoryV4, detector_ids),
             48
         );
         assert_eq!(
-            offset_of!(FaultScopeNativeDecoderFactoryV3, observable_ids),
+            offset_of!(FaultScopeNativeDecoderFactoryV4, observable_ids),
             56
         );
         assert_eq!(
-            offset_of!(FaultScopeNativeDecoderFactoryV3, create_worker),
+            offset_of!(FaultScopeNativeDecoderFactoryV4, batch_formats),
             64
         );
-
-        assert_eq!(size_of::<FaultScopeNativeDecoderWorkerV3>(), 48);
-        assert_eq!(align_of::<FaultScopeNativeDecoderWorkerV3>(), 8);
-        assert_eq!(offset_of!(FaultScopeNativeDecoderWorkerV3, struct_size), 0);
-        assert_eq!(offset_of!(FaultScopeNativeDecoderWorkerV3, worker_state), 8);
         assert_eq!(
-            offset_of!(FaultScopeNativeDecoderWorkerV3, drop_worker_state),
+            offset_of!(FaultScopeNativeDecoderFactoryV4, create_worker),
+            72
+        );
+
+        assert_eq!(size_of::<FaultScopeNativeDecoderWorkerV4>(), 32);
+        assert_eq!(align_of::<FaultScopeNativeDecoderWorkerV4>(), 8);
+        assert_eq!(offset_of!(FaultScopeNativeDecoderWorkerV4, struct_size), 0);
+        assert_eq!(offset_of!(FaultScopeNativeDecoderWorkerV4, worker_state), 8);
+        assert_eq!(
+            offset_of!(FaultScopeNativeDecoderWorkerV4, drop_worker_state),
             16
         );
         assert_eq!(
-            offset_of!(FaultScopeNativeDecoderWorkerV3, decode_batch),
+            offset_of!(FaultScopeNativeDecoderWorkerV4, decode_batch),
             24
-        );
-        assert_eq!(
-            offset_of!(FaultScopeNativeDecoderWorkerV3, decode_packed_batch),
-            32
-        );
-        assert_eq!(
-            offset_of!(FaultScopeNativeDecoderWorkerV3, decode_detector_event_batch),
-            40
         );
     }
 }

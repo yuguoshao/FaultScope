@@ -16,9 +16,9 @@ from faultscope.decoders import (
 )
 from faultscope.dem import Detector, DetectorErrorEdge, DetectorErrorModel, LogicalObservable
 from faultscope.runtime import compile_native_dem_sampler
-from tests.native_backend_v3_helpers import (
+from tests.native_backend_v4_helpers import (
     assert_factory_failure_lifetimes,
-    assert_v3_worker_contract,
+    assert_v4_worker_contract,
 )
 
 BACKEND_SRC = Path(__file__).resolve().parents[1] / "backends" / "faultscope-pymatching" / "src"
@@ -220,10 +220,10 @@ class PyMatchingBackendPackageTests(unittest.TestCase):
         )
 
     @requires_native_backend
-    def test_exact_v3_factory_creates_distinct_workers_and_fast_paths(self) -> None:
+    def test_exact_v4_factory_creates_distinct_workers_and_fast_paths(self) -> None:
         decoder = faultscope_pymatching.NativePyMatchingDecoder.from_dem(single_boundary_dem())
 
-        test_stats = assert_v3_worker_contract(self, decoder)
+        test_stats = assert_v4_worker_contract(self, decoder)
         self.assertEqual(test_stats.factory_drops, 0)
         del decoder
         gc.collect()
@@ -239,9 +239,9 @@ class PyMatchingBackendPackageTests(unittest.TestCase):
         test_stats.enable_decode_overlap()
         tasks = (
             {
-                "task_id": "pymatching-v3-workers",
-                "strong_id": "pymatching-v3-workers-strong",
-                "sampling_id": "pymatching-v3-workers-sampling",
+                "task_id": "pymatching-v4-workers",
+                "strong_id": "pymatching-v4-workers-strong",
+                "sampling_id": "pymatching-v4-workers-sampling",
                 "sampler": compile_native_dem_sampler(dem),
                 "decoder": decoder,
                 "metadata_json": "{}",

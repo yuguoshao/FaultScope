@@ -434,13 +434,17 @@ ordinary Python decoders and do not enter the native fast path.
 `available_native_decoders()` returns the names of compiled native decoder
 backends. The default build exposes `"no-correction"` and
 `"graphlike-detector-copy"`. Compatible post-install backends can add names such
-as `"pymatching"`, `"fusion-blossom"`, and `"bpdecoder"` through the
+as `"pymatching"` and `"fusion-blossom"` through the
 `faultscope.native_decoders` entry point group. Use
 `get_native_decoder_class(name)` or `create_native_decoder(name, dem=dem)` for a
 uniform API. Friendly proxies such as `NativePyMatchingDecoder`,
 `NativeFusionBlossomDecoder`, `NativeMwpmDecoder`, and `NativeBposdDecoder` remain importable;
 construction raises a precise availability error when no compatible backend is
-available. `mwpm` is discoverable but unavailable pending its ABI v3 migration.
+available. Native plugins use ABI V4: each factory declares an ordered
+Masks/Packed/Events preference list and each worker exposes one tagged callback.
+DEM hotspot attribution is held in a separate FaultScope sidecar, not passed to
+the decoder. `bpdecoder` and `mwpm` are discoverable but temporarily unavailable
+pending ABI V4 migration.
 `bposd` is a reserved, unimplemented, non-installable catalog/status entry. The
 generic `python -m faultscope.backends install bposd --dry-run` subcommand only
 reports that unavailability; it creates no install plan or steps and installs

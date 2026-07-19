@@ -347,6 +347,7 @@ pub trait NativeDecoderFactory: Send + Sync {
     fn name(&self) -> &str;
     fn detector_ids(&self) -> &[i64];
     fn observable_ids(&self) -> &[i64];
+    fn batch_formats(&self) -> &[DetectorBatchFormat];
     fn create_worker(&self) -> NpResult<Box<dyn NativeDecoderWorker>>;
 }
 
@@ -354,91 +355,42 @@ pub trait NativeDecoderWorker: Send {
     fn name(&self) -> &str;
     fn detector_ids(&self) -> &[i64];
     fn observable_ids(&self) -> &[i64];
+    fn batch_formats(&self) -> &[DetectorBatchFormat];
     fn decode_batch(
         &mut self,
-        detectors: DetectorMaskBatchView<'_>,
-    ) -> NpResult<CorrectionMaskBatch>;
-
-    fn supports_packed_batch(&self) -> bool {
-        false
-    }
-
-    fn decode_packed_batch(
-        &mut self,
-        _detectors: PackedDetectorShotBatchView<'_>,
-    ) -> NpResult<PackedObservableShotBatch> {
-        Err(NpError::new(format!(
-            "{} does not support packed-row batch decode",
-            self.name()
-        )))
-    }
-
-    fn supports_detector_event_batch(&self) -> bool {
-        false
-    }
-
-    fn decode_detector_event_batch(
-        &mut self,
-        _detectors: DetectorEventShotBatchView<'_>,
-    ) -> NpResult<PackedObservableShotBatch> {
-        Err(NpError::new(format!(
-            "{} does not support detector-event batch decode",
-            self.name()
-        )))
-    }
+        detectors: DetectorBatchView<'_>,
+    ) -> NpResult<DecoderCorrectionBatch>;
 
     fn decode_batch_checked(
         &mut self,
-        detectors: DetectorMaskBatchView<'_>,
-    ) -> NpResult<CorrectionMaskBatch> {
-        let shots = detectors.shots;
-        let corrections = self.decode_batch(detectors)?;
-        corrections.validate_against(self.observable_ids(), shots)?;
-        Ok(corrections)
-    }
-
-    fn decode_packed_batch_checked(
-        &mut self,
-        detectors: PackedDetectorShotBatchView<'_>,
-    ) -> NpResult<PackedObservableShotBatch> {
-        let shots = detectors.shots;
-        let corrections = self.decode_packed_batch(detectors)?;
-        corrections.validate_against(self.observable_ids(), shots)?;
-        Ok(corrections)
-    }
-
-    fn decode_detector_event_batch_checked(
-        &mut self,
-        detectors: DetectorEventShotBatchView<'_>,
-    ) -> NpResult<PackedObservableShotBatch> {
-        let shots = detectors.shots;
-        let corrections = self.decode_detector_event_batch(detectors)?;
-        corrections.validate_against(self.observable_ids(), shots)?;
-        Ok(corrections)
-    }
+        detectors: DetectorBatchView<'_>,
+    ) -> NpResult<DecoderCorrectionBatch>;
 }
 ```
 
-FaultScope calls the checked wrappers to validate shot counts and observable
-ids. A minimal implementation with both optional fast paths has this ownership
-shape:
+`batch_formats()` is a stable, non-empty, duplicate-free preference list using
+`Masks`, `Packed`, or `Events`. FaultScope calls the single checked wrapper to
+validate input shape, detector ID order, declared support, output variant,
+observable layout, shot count, and padding. Masks input must return mask-major
+corrections; Packed and Events input must return packed-row corrections. A
+minimal Packed-native implementation has this ownership shape:
 
 ```rust
 use std::sync::Arc;
 
 use faultscope_core::{
-    CorrectionMaskBatch,
-    DetectorEventShotBatchView,
-    DetectorMaskBatchView,
-    Mask,
+    DecoderCorrectionBatch,
+    DetectorBatchFormat,
+    DetectorBatchView,
     NativeDecoderFactory,
     NativeDecoderWorker,
+    NpError,
     NpResult,
-    PackedDetectorShotBatchView,
     PackedObservableShotBatch,
 };
 
 const DECODER_NAME: &str = "my-decoder";
+const BATCH_FORMATS: [DetectorBatchFormat; 1] = [DetectorBatchFormat::Packed];
 
 struct MyCompiledProblem;
 struct MySolver;
@@ -466,6 +418,10 @@ impl NativeDecoderFactory for MyNativeDecoderFactory {
 
     fn observable_ids(&self) -> &[i64] {
         &self.observable_ids
+    }
+
+    fn batch_formats(&self) -> &[DetectorBatchFormat] {
+        &BATCH_FORMATS
     }
 
     fn create_worker(&self) -> NpResult<Box<dyn NativeDecoderWorker>> {
@@ -496,60 +452,31 @@ impl NativeDecoderWorker for MyNativeDecoderWorker {
         &self.observable_ids
     }
 
+    fn batch_formats(&self) -> &[DetectorBatchFormat] {
+        &BATCH_FORMATS
+    }
+
     fn decode_batch(
         &mut self,
-        detectors: DetectorMaskBatchView<'_>,
-    ) -> NpResult<CorrectionMaskBatch> {
-        let _solver = &mut self.solver; // Decode detector-major masks here.
-        CorrectionMaskBatch::new(
-            self.observable_ids.clone(),
-            vec![
-                Mask::zero(faultscope_core::word_count(detectors.shots));
-                self.observable_ids.len()
-            ],
-            detectors.shots,
-        )
-    }
-
-    fn supports_packed_batch(&self) -> bool {
-        true
-    }
-
-    fn decode_packed_batch(
-        &mut self,
-        detectors: PackedDetectorShotBatchView<'_>,
-    ) -> NpResult<PackedObservableShotBatch> {
+        detectors: DetectorBatchView<'_>,
+    ) -> NpResult<DecoderCorrectionBatch> {
+        let DetectorBatchView::Packed(detectors) = detectors else {
+            return Err(NpError::new("my-decoder only accepts Packed batches"));
+        };
         let _solver = &mut self.solver; // Decode row-major packed shots here.
-        Ok(PackedObservableShotBatch::zero(
+        Ok(DecoderCorrectionBatch::Packed(PackedObservableShotBatch::zero(
             self.observable_ids.clone(),
             detectors.shots,
-        ))
-    }
-
-    fn supports_detector_event_batch(&self) -> bool {
-        true
-    }
-
-    fn decode_detector_event_batch(
-        &mut self,
-        detectors: DetectorEventShotBatchView<'_>,
-    ) -> NpResult<PackedObservableShotBatch> {
-        let _solver = &mut self.solver; // Decode sparse detector events here.
-        Ok(PackedObservableShotBatch::zero(
-            self.observable_ids.clone(),
-            detectors.shots,
-        ))
+        )?))
     }
 }
 ```
 
-Every worker must report the same `name`, `detector_ids`, and `observable_ids`
-as its factory for its entire lifetime. `decode_batch(...)` is the required
-detector-major mask path. A worker may additionally advertise the packed-row
-path for `shots x ceil(detectors / 8)` bytes and the sparse detector-event path
-for per-shot event offsets and detector indices. The optional methods still
-mutate only that exclusive worker; they do not move solver state into the
-factory.
+Every worker must report the same `name`, `detector_ids`, `observable_ids`, and
+ordered `batch_formats` as its factory for its entire lifetime. `decode_batch`
+is the only dispatch method. Events may contain repeated detector indices and
+the decoder must combine them by XOR. Mutable solver state remains exclusively
+inside the worker.
 
 The PyO3 layer should expose a Python handle with constructors such as:
 
@@ -574,12 +501,12 @@ no backend decoder pool or worker mutex. A Python subclass that only implements
 native fast path.
 
 Native backends are discovered through built-in handles and post-install plugin
-entry points. FaultScope 0.2 uses the strict pure factory/worker ABI v3:
+entry points. FaultScope 0.2.5 uses the strict factory/worker ABI V4:
 
 ```text
 entry point group: faultscope.native_decoders
-ABI and capsule name: faultscope.native_decoder_plugin.v3
-numeric ABI: 3
+ABI and capsule name: faultscope.native_decoder_plugin.v4
+numeric ABI: 4
 capsule method: __faultscope_native_decoder_capsule__
 ```
 
@@ -588,16 +515,30 @@ handles. The factory cannot decode; FaultScope creates private exclusive workers
 for collection, estimate, debug, and composite decoding. Collection caches a
 worker per thread and task, including a one-worker collection, so a backend does
 not need a solver pool or a mutex around mutable solver state. See
-[Native Decoder ABI v3](native_decoder_abi.md) for layouts and lifecycle rules.
+[Native Decoder ABI V4](native_decoder_abi.md) for tagged layouts, format
+negotiation, fixed output mapping, and lifecycle rules.
+
+The capsule returned by `__faultscope_native_decoder_capsule__()` must have a
+non-null capsule destructor. That destructor owns the descriptor and factory
+state, calls `drop_factory_state` exactly once, and then releases the
+descriptor. FaultScope rejects V4 capsules without this ownership hook.
+
+V4 is deliberately incompatible with V3: remove `supports_*` and the packed/
+event-specific callbacks, add a stable ordered `batch_formats` metadata
+callback, and route all layouts through one tagged `decode_batch`. The public
+Python class names, constructors, entry-point group, and
+`decode_batch_masks()` comparison helper remain unchanged. A problem view only
+constructs the decoder; runtime layout is chosen later by format negotiation.
 
 Official backend installation metadata lives in the built-in catalog. Each
 entry records the backend name, backend package, proxy class name, target
 problem view, source repository, default revision, installability, and a short
-description. `pymatching`, `fusion-blossom`, and `bpdecoder` are installable.
+description. `pymatching` and `fusion-blossom` are installable.
+`bpdecoder` is temporarily non-installable while awaiting its V4 migration.
 `mwpm` remains discoverable but unavailable because its package is ABI v1 and
-not yet migrated to FaultScope native decoder ABI v3. `bposd` is a reserved,
+not yet migrated to FaultScope native decoder ABI V4. `bposd` is a reserved,
 unimplemented, non-installable catalog/status entry. A generic install request
-for either unavailable entry reports why it is unavailable and returns no
+for any unavailable entry reports why it is unavailable and returns no
 install plan or steps.
 
 Python can inspect compiled native backend names:
@@ -688,12 +629,11 @@ Installable catalog entries expose explicit installation helpers:
 ```bash
 python -m faultscope.backends install fusion-blossom --dry-run
 python -m faultscope.backends install pymatching --dry-run
-python -m faultscope.backends install bpdecoder --dry-run
 ```
 
-These commands print clone/build/install steps for the three installable
-entries. `mwpm` is shown by `status` as unavailable pending ABI v3 migration
-and a generic install request returns no plan. `bposd` is a reserved,
+These commands print clone/build/install steps for the two installable
+entries. `bpdecoder` and `mwpm` are shown by `status` as unavailable pending
+ABI V4 migration, and generic install requests return no plan. `bposd` is a reserved,
 unimplemented, non-installable catalog/status entry; the generic
 `python -m faultscope.backends install bposd --dry-run` command is accepted but
 only reports its unavailability, emits no install steps, and installs nothing.
@@ -709,9 +649,9 @@ from faultscope.decoders import (
     NativePyMatchingDecoder,
 )
 
-decoder = NativeBpDecoder.from_dem(dem)  # raises until installed
+decoder = NativeBpDecoder.from_dem(dem)  # temporarily unavailable pending ABI V4
 decoder = NativeFusionBlossomDecoder.from_dem(dem)  # raises until installed
-decoder = NativeMwpmDecoder.from_dem(dem)  # unavailable pending ABI v3 migration
+decoder = NativeMwpmDecoder.from_dem(dem)  # unavailable pending ABI V4 migration
 decoder = NativePyMatchingDecoder.from_dem(dem)  # raises until installed
 ```
 
@@ -736,13 +676,8 @@ virtual environment, or with `.venv/bin` explicitly on `PATH`:
 .venv/bin/python -m pip install -e backends/faultscope-fusion-blossom
 ```
 
-The `bpdecoder` backend is an official post-install backend, but its source
-checkout lives outside this repository. For local development, install the
-external `bpdecoder.rs` checkout into the same environment:
-
-```bash
-.venv/bin/python -m pip install -e /path/to/bpdecoder.rs --no-build-isolation
-```
+The `bpdecoder` backend remains in the official catalog but is intentionally
+non-installable until its external package implements ABI V4.
 
 The in-repo backend packages declare:
 
@@ -763,9 +698,11 @@ The PyMatching backend links pinned PyMatching sparse-blossom C++ source in the
 `PyMatchingDecoder` hot path and does not depend on the PyPI wheel exposing
 a stable native SDK. The backend uses the same native PyCapsule boundary as the
 other official packages: Python passes construction metadata, while hot-path
-detector/correction buffers stay native. For `aggregate_hotspots=False`, it
-uses the optional row-major packed batch callback so the hot input layout
-matches PyMatching's `decode_batch(..., bit_packed_shots=True)` convention.
+detector/correction buffers stay native. It declares `[Packed]`, so ordinary
+collection and hotspot collection both use the single tagged callback with a
+row-major input matching PyMatching's
+`decode_batch(..., bit_packed_shots=True)` convention. FaultScope holds the
+edge-event attribution trace in an independent sidecar.
 
 The current backend is a minimal serial-solver beta fusion-blossom MWPM
 adapter. It maps FaultScope detector indices to fusion-blossom vertices, converts
@@ -812,7 +749,9 @@ decoder.decode_batch_masks(batch)  # explicit Python comparison helper
 
 FaultScope only calls the capsule method on the native fast path. The plugin ABI is
 host-allocated for hot outputs: FaultScope allocates correction mask words for the
-decoder's declared observables, and the backend writes into those buffers.
+decoder's declared observables and initializes every correction word or byte to
+zero before the callback. A backend may leave zero corrections untouched or XOR
+its corrections into those buffers.
 Backend packages must not allocate correction masks and ask FaultScope to free them
 across the dynamic-library boundary.
 
@@ -857,10 +796,10 @@ The implemented minimal beta adapter is:
 7. Preserve each solver edge's contributing DEM edge indices and
    fault-observable indices so the solver prediction
    can be converted back into observable correction masks.
-8. Convert each hot-path `DetectorMaskBatchView` shot into the solver syndrome
-   representation, run serial MWPM, and recover matched-pair paths through the
-   exclusive worker's cache without touching Python.
-9. Return a checked `CorrectionMaskBatch`.
+8. Read each hot-path Packed row into the solver syndrome representation, run
+   serial MWPM, and recover matched-pair paths through the exclusive worker's
+   cache without touching Python.
+9. Return a checked packed-row correction through the V4 tagged callback.
 
 The construction summary is intentionally lightweight and safe to inspect from
 Python:

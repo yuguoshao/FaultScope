@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -10,8 +10,8 @@ use crate::scheduler::{
     batch_seed, collect_task_set, collect_task_set_with_progress, next_batch_size,
 };
 use faultscope_core::{
-    validate_decoder_detector_ids, DemHotspotEstimator, NativeDecoderFactory, NativeDecoderWorker,
-    NpError, NpResult, SmallRng,
+    validate_decoder_batch_formats, validate_decoder_detector_ids, DemHotspotEstimator,
+    DetectorBatchFormat, NativeDecoderFactory, NativeDecoderWorker, NpError, NpResult, SmallRng,
 };
 
 pub const DEM_LOGICAL_COUNTER_SCHEMA_VERSION: u32 = 1;
@@ -228,7 +228,13 @@ pub fn collect_dem_logical_error_stats(
 ) -> NpResult<DemLogicalCollectionStats> {
     validate_collection_options(options)?;
     if let Some(decoder) = decoder.as_deref() {
-        validate_decoder_detector_ids(decoder.detector_ids())?;
+        validate_decoder_layout_against_sampler(
+            sampler,
+            decoder.name(),
+            decoder.detector_ids(),
+            decoder.observable_ids(),
+            decoder.batch_formats(),
+        )?;
     }
 
     let decoder_name = decoder.as_ref().map(|decoder| decoder.name().to_string());
@@ -241,8 +247,11 @@ pub fn collect_dem_logical_error_stats(
         let count_options = CountOptions::default();
         let prepared_plan = prepare_dem_count_plan(
             sampler,
-            decoder.as_deref().map(NativeDecoderWorker::detector_ids),
+            decoder
+                .as_deref()
+                .map(|worker| (worker.detector_ids(), worker.batch_formats())),
             &count_options,
+            false,
         )?;
 
         while !collection_limits_reached(options, shots_done, errors) {
@@ -306,8 +315,11 @@ pub fn sample_dem_logical_error_stats(
     let count_options = CountOptions::default();
     let prepared_plan = prepare_dem_count_plan(
         sampler,
-        decoder.as_deref().map(NativeDecoderWorker::detector_ids),
+        decoder
+            .as_deref()
+            .map(|worker| (worker.detector_ids(), worker.batch_formats())),
         &count_options,
+        false,
     )?;
     let batch = sample_dem_logical_error_stats_with_rng(
         sampler,
@@ -366,11 +378,12 @@ pub(crate) fn validate_task(task: &DemLogicalCollectionTask) -> NpResult<()> {
         "postselected_observables_mask",
     )?;
     if let Some(decoder) = &task.decoder {
-        validate_decoder_detector_ids(decoder.detector_ids())?;
-        validate_decoder_observable_layout(
-            task.sampler.observable_ids(),
-            decoder.observable_ids(),
+        validate_decoder_layout_against_sampler(
+            &task.sampler,
             decoder.name(),
+            decoder.detector_ids(),
+            decoder.observable_ids(),
+            decoder.batch_formats(),
         )?;
     }
     if task.strong_id.is_empty() {
@@ -380,6 +393,30 @@ pub(crate) fn validate_task(task: &DemLogicalCollectionTask) -> NpResult<()> {
         return Err(NpError::new("sampling_id must not be empty"));
     }
     Ok(())
+}
+
+fn validate_decoder_layout_against_sampler(
+    sampler: &DemHotspotEstimator,
+    decoder_name: &str,
+    detector_ids: &[i64],
+    observable_ids: &[i64],
+    batch_formats: &[DetectorBatchFormat],
+) -> NpResult<()> {
+    validate_decoder_detector_ids(detector_ids)?;
+    let sampler_detector_ids = sampler
+        .detector_ids()
+        .iter()
+        .copied()
+        .collect::<HashSet<_>>();
+    for &detector_id in detector_ids {
+        if !sampler_detector_ids.contains(&detector_id) {
+            return Err(NpError::new(format!(
+                "decoder DEM sampler requested detector id {detector_id}, but it is not declared by the DEM"
+            )));
+        }
+    }
+    validate_decoder_batch_formats(batch_formats)?;
+    validate_decoder_observable_layout(sampler.observable_ids(), observable_ids, decoder_name)
 }
 
 fn validate_collection_options(options: DemLogicalCollectionOptions) -> NpResult<()> {
