@@ -53,8 +53,8 @@ API_SNAPSHOT = REPO_ROOT / "tests" / "public_api_contract.json"
 
 class ReleaseContractTests(unittest.TestCase):
     def test_python_distribution_version_is_v0_2(self) -> None:
-        self.assertEqual(faultscope.__version__, "0.2.5")
-        self.assertEqual(importlib.metadata.version("faultscope"), "0.2.5")
+        self.assertEqual(faultscope.__version__, "0.2.6")
+        self.assertEqual(importlib.metadata.version("faultscope"), "0.2.6")
 
     def test_package_contains_pep561_marker_and_native_stub(self) -> None:
         package_root = Path(faultscope.__file__).resolve().parent
