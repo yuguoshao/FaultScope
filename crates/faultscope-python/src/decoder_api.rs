@@ -260,6 +260,33 @@ impl PyNativeNoCorrectionDecoder {
         })
     }
 
+    #[staticmethod]
+    #[pyo3(signature = (circuit, *, detectors=None, observables=None))]
+    pub(crate) fn from_circuit(
+        py: Python<'_>,
+        circuit: &Bound<'_, PyAny>,
+        detectors: Option<&Bound<'_, PyAny>>,
+        observables: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Self> {
+        let generator = core_dem_generator_from_circuit(py, circuit, detectors, observables)?;
+        Self::new(
+            Some(
+                generator
+                    .observables
+                    .iter()
+                    .map(|observable| observable.id)
+                    .collect(),
+            ),
+            Some(
+                generator
+                    .detectors
+                    .iter()
+                    .map(|detector| detector.id)
+                    .collect(),
+            ),
+        )
+    }
+
     #[getter]
     pub(crate) fn name(&self) -> String {
         self.inner.name().to_string()

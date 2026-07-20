@@ -52,9 +52,10 @@ def create_native_decoder(
                 detector_ids=indexed.detector_ids,
             )
         if circuit is not None:
-            return NativeNoCorrectionDecoder(
-                observable_ids=tuple(observable.id for observable in observables or ()),
-                detector_ids=tuple(detector.id for detector in detectors or ()),
+            return NativeNoCorrectionDecoder.from_circuit(
+                circuit,
+                detectors=detectors,
+                observables=observables,
             )
         raise ValueError("supply dem or circuit")
     if name == "graphlike-detector-copy":

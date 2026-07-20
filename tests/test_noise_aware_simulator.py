@@ -2769,6 +2769,81 @@ class NativeDetectorErrorModelTests(unittest.TestCase):
         self.assertEqual(decoder.detector_ids, indexed.detector_ids)
         self.assertEqual(decoder.observable_ids, indexed.observable_ids)
 
+    def test_no_correction_decoder_from_circuit_infers_declarations(self) -> None:
+        self._require_native_dem()
+        circuit = Circuit(
+            n_qubits=1,
+            operations=[
+                Operation.measure(0, key="m", basis="Z"),
+                Operation.detector(("m",), detector_id=5),
+                Operation.observable_include(7, ("m",)),
+            ],
+        )
+
+        decoder = create_native_decoder("no-correction", circuit=circuit)
+        direct_decoder = NativeNoCorrectionDecoder.from_circuit(circuit)
+
+        self.assertEqual(decoder.detector_ids, (5,))
+        self.assertEqual(decoder.observable_ids, (7,))
+        self.assertEqual(direct_decoder.detector_ids, (5,))
+        self.assertEqual(direct_decoder.observable_ids, (7,))
+        result = compile_native_dem_sampler_from_circuit(circuit).estimate(
+            shots=8,
+            seed=37,
+            decoder=decoder,
+        )
+        self.assertEqual(result.shots, 8)
+
+        imported = parse_stim_circuit(
+            "M 0\nDETECTOR rec[-1]\nOBSERVABLE_INCLUDE(3) rec[-1]"
+        )
+        imported_decoder = create_native_decoder(
+            "no-correction",
+            circuit=imported.circuit,
+        )
+        self.assertEqual(imported_decoder.detector_ids, (0,))
+        self.assertEqual(imported_decoder.observable_ids, (3,))
+
+    def test_no_correction_decoder_from_circuit_preserves_explicit_empty_layouts(
+        self,
+    ) -> None:
+        self._require_native_dem()
+        circuit = Circuit(
+            n_qubits=1,
+            operations=[
+                Operation.measure(0, key="m", basis="Z"),
+                Operation.detector(("m",), detector_id=5),
+                Operation.observable_include(7, ("m",)),
+            ],
+        )
+
+        empty = create_native_decoder(
+            "no-correction",
+            circuit=circuit,
+            detectors=(),
+            observables=(),
+        )
+        detector_empty = create_native_decoder(
+            "no-correction",
+            circuit=circuit,
+            detectors=(),
+        )
+        observable_empty = create_native_decoder(
+            "no-correction",
+            circuit=circuit,
+            observables=(),
+        )
+
+        self.assertEqual((empty.detector_ids, empty.observable_ids), ((), ()))
+        self.assertEqual(
+            (detector_empty.detector_ids, detector_empty.observable_ids),
+            ((), (7,)),
+        )
+        self.assertEqual(
+            (observable_empty.detector_ids, observable_empty.observable_ids),
+            ((5,), ()),
+        )
+
     def test_native_dem_sampler_compiles_directly_from_circuit(self) -> None:
         self._require_native_dem()
         location = NoiseLocation(

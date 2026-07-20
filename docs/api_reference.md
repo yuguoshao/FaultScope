@@ -420,11 +420,19 @@ from faultscope.decoders import (
 
 available_native_decoders()
 decoder = NativeNoCorrectionDecoder(observable_ids=(0,))
+decoder_from_circuit = NativeNoCorrectionDecoder.from_circuit(circuit)
 decoder.name
 decoder.detector_ids
 decoder.observable_ids
 composite = NativeCompositeDecoder((decoder_a, decoder_b))
 ```
+
+`NativeNoCorrectionDecoder.from_circuit(...)` and
+`create_native_decoder("no-correction", circuit=circuit)` infer omitted detector
+and observable layouts from `Operation.detector(...)` and
+`Operation.observable_include(...)` declarations embedded in the circuit.
+Passing an explicit empty sequence, such as `detectors=()`, requests an empty
+layout instead of inference.
 
 Native decoders are Python-owned handles around Rust decoder objects. When a
 native decoder is passed to `estimate(..., decoder=decoder)` without
