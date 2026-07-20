@@ -332,17 +332,65 @@ circuit = Circuit(
 )
 
 generator = compile_native_dem_generator(circuit)
-dem = generator.generate_dem()
+artifact = generator.generate_artifact()
+dem = artifact.dem
 light_sampler = generator.compile_sampler(materialize_dem=False)
 
 print(len(dem.edges))
+print(artifact.graphlike_hints)  # Native circuit generation currently returns None.
 print(light_sampler.dem)
 ```
+
+`GeneratedDetectorErrorModel` keeps one canonical sampling model and an
+optional, sparse `GraphlikeDecompositionHints` sidecar. Use
+`artifact.compile_graphlike_problem()` for decoder construction and
+`artifact.dem` for sampling. Stim `^` groups can populate this sidecar; native
+circuit generation does not synthesize such hints yet. Consequently, an
+unhinted edge touching more than two detectors is rejected by graphlike MWPM
+compilation instead of being split silently.
 
 DEM generation requires deterministic detector and observable effects in the
 ideal and single-error circuits. If a referenced measurement is random in the
 ideal circuit, use forward sampling with a custom loss mask or change the
 detector parity.
+
+Circuit-to-DEM noise conversion follows Stim's policy:
+
+- `SingleQubitDepolarizing` and `TwoQubitDepolarizing` use an exact independent
+  reparameterization, so DEM sampling preserves the detector/observable joint
+  distribution. Exact conversion rejects rates above `3/4` and `15/16`,
+  respectively; use forward sampling above those mixing limits.
+- A one-qubit `PauliChannel` first attempts Stim's conversion into independent
+  X/Y/Z mechanisms. A single positive component is trivially exact, and some
+  multi-component channels are also accepted when this conversion succeeds.
+  A channel that cannot use this path is categorical and is rejected by
+  default. `PAULI_CHANNEL_2` and wider FaultScope channels do not have a general
+  exact factorization attempt.
+- To accept Stim's independent approximation, pass
+  `approximate_disjoint_errors=True` to `DetectorErrorModelGenerator`,
+  `generate_native_dem`, `compile_native_dem_generator`,
+  `compile_native_dem_sampler_from_circuit`, or `DemFaultScopeSimulator`.
+  A float such as `0.01` enables the approximation only when every component
+  probability is at most that threshold.
+
+After propagation, mutually exclusive Pauli outcomes with identical
+detector/observable effects are first combined exactly by summing their
+probabilities. Distinct effect classes are then approximated as independent, so
+two originally exclusive classes can occur in one shot with probability equal
+to the product of their class probabilities. FaultScope does not currently
+store categorical or correlated error groups in `DetectorErrorModel`. Use
+forward sampling when that joint distribution must remain exact. DEM location
+hotspot values are summaries of independent edge derivatives; they are not
+automatically chain-rule derivatives with respect to the original
+depolarizing/channel rate.
+
+As in Stim 1.16, the one-qubit conversion is numerical: it accepts an X/Y/Z
+independent representation when the reconstructed disjoint probabilities have
+total absolute residual below `1e-14`. Consequently, a sufficiently small
+non-factorable one-qubit channel can be treated as numerically exact even when
+`approximate_disjoint_errors=False`; tiny effects below that absolute tolerance
+may disappear from the DEM. Use forward sampling when those probabilities are
+material.
 
 ## DEM Sampling And Hotspots
 
@@ -990,7 +1038,15 @@ matching_problem = dem.compile_graphlike_problem()
 binary_problem = dem.compile_binary_linear_problem()
 ```
 
-`compile_graphlike_problem()` is for future MWPM/fusion-blossom style backends.
+`compile_graphlike_problem()` is for MWPM/fusion-blossom style backends. Its
+recommended hinted path packages
+`GraphlikeDecompositionHints(dem, components_by_edge)` inside a
+`GeneratedDetectorErrorModel`; calling `artifact.compile_graphlike_problem()`
+then compiles canonical hyperedges into graphlike decoder components. The raw
+`decomposition={dem_edge_index: ((detector_ids, observable_ids), ...)}` argument
+remains available as a low-level compatibility API.
+The components must XOR back to the parent support and retain the parent's
+probability/index; they are never sampled independently.
 `compile_binary_linear_problem()` is for future BP+OSD/LDPC style backends.
 These native views expose stable ids, counts, `edge_summary`, and compact reprs
 for inspection, but intentionally avoid public `to_numpy_*` hot-path helpers.
@@ -1049,6 +1105,9 @@ The local `faultscope-pymatching` package links pinned PyMatching sparse-blossom
 source and exposes `NativePyMatchingDecoder`. It is graphlike-only and keeps
 hot-path detector/correction masks out of Python; the existing
 `PyMatchingDecoder` remains available as the Python compatibility adapter.
+Both optional native matching packages expose
+`from_graphlike_problem(problem, *, options=None)` for a precompiled view;
+`from_dem(...)` delegates through the ordinary no-hint compilation path.
 
 For the full developer contract, including `from_circuit(...)`,
 `from_dem(...)`, Python prototype decoders, and native backend skeletons, see
@@ -1081,7 +1140,11 @@ print(dem.to_dem_text())
 Supported instructions include common Clifford gates, Pauli gates, resets,
 measurements, MPP, Pauli/depolarizing noise, `PAULI_CHANNEL_1`,
 `PAULI_CHANNEL_2`, `DETECTOR`, and `OBSERVABLE_INCLUDE`. `REPEAT` blocks and
-full Stim feedback/correlated-error semantics are outside the subset.
+full Stim feedback/correlated-error semantics are outside the subset. Imported
+`PAULI_CHANNEL_1/2` remains categorical in forward sampling. Circuit→DEM first
+attempts Stim's one-qubit independent conversion for `PAULI_CHANNEL_1`; other
+multi-component cases are rejected unless `approximate_disjoint_errors` is
+explicitly enabled.
 
 Use `load_stim_file(path)` when the circuit lives in a file.
 
@@ -1191,6 +1254,9 @@ require `numpy`, `scipy`, `pymatching`, and `stim`. The surface-code decoder
 performance benchmark compares PyMatching with the optional
 `faultscope-pymatching` and `faultscope-fusion-blossom` backends when those backends are
 installed; unavailable native backends are reported as `skip:<reason>` rows.
+It samples one canonical FaultScope edge per Stim `error` instruction. Stim `^`
+separator groups are used only to compile the decoder problem, whose current
+matching interpretation is an uncorrelated graphlike approximation.
 The `stim-dem-pymatching-bitpacked` row uses Stim bit-packed DEM sampling plus
 PyMatching bit-packed batch decode as the official-style maximum-throughput
 baseline.

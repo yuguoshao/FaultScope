@@ -211,6 +211,26 @@ edges, because matching-style backends cannot infer those errors from syndrome
 data. `BinaryLinearDecodingProblem` does not require graphlike edges; each DEM
 edge is an independent binary error variable.
 
+When an external format supplies a valid graphlike decomposition for a
+canonical hyperedge, bind it to the canonical model once:
+
+```python
+from faultscope.dem import GeneratedDetectorErrorModel, GraphlikeDecompositionHints
+
+hints = GraphlikeDecompositionHints(
+    dem,
+    {0: (((10, 20), (0,)), ((30,), ()))},
+)
+artifact = GeneratedDetectorErrorModel(dem, graphlike_hints=hints)
+graphlike = artifact.compile_graphlike_problem()
+```
+
+The typed sidecar is a decoder construction hint, not another DEM. Every component
+keeps the parent probability and `dem_edge_index`, while native sampling still
+uses one Bernoulli variable per canonical edge. The compiler rejects invalid
+ids, empty or pure-logical components, components with more than two detectors,
+and decompositions whose GF(2) XOR differs from the parent support.
+
 The problem views expose ids, detector coordinates, counts, `edge_summary`,
 probabilities, weights, and sparse binary matrix entries for construction-time
 inspection. `detector_coords` is ordered exactly like `detector_ids`; backend
@@ -688,10 +708,12 @@ fusion-blossom = "faultscope_fusion_blossom:backend_manifest"
 ```
 
 Each manifest returns the current FaultScope native decoder plugin ABI, package
-metadata, and one or more decoder classes. Each class implements
-`from_dem(...)` and `from_circuit(...)`; construction compiles the DEM to a
-`GraphlikeDecodingProblem`, passes that metadata to the package's Rust/PyO3
-extension, and stores external native decoder state in a PyCapsule.
+metadata, and one or more decoder classes. The matching classes implement
+`from_dem(...)`, `from_graphlike_problem(...)`, and `from_circuit(...)`;
+`from_dem(...)` compiles the ordinary no-hint `GraphlikeDecodingProblem`, while
+the problem constructor accepts a precompiled decomposition view. Construction
+passes that metadata to the package's Rust/PyO3 extension and stores external
+native decoder state in a PyCapsule.
 
 The PyMatching backend links pinned PyMatching sparse-blossom C++ source in the
 `faultscope-pymatching` package. It does not call the Python
@@ -807,6 +829,7 @@ Python:
 ```python
 summary = decoder.build_summary
 summary["dem_edge_count"]
+summary["graphlike_edge_count"]
 summary["solver_edge_count"]
 summary["merged_parallel_edge_count"]
 summary["edges"][0]["dem_edge_indices"]
@@ -826,12 +849,17 @@ benchmark:
 ```
 
 It compares Stim DEM + PyMatching, Stim bit-packed DEM + PyMatching bit-packed
-batch decode, FaultScope DEM + Python PyMatching, FaultScope DEM + native PyMatching, and
-FaultScope DEM + fusion-blossom native decoding when the optional backend packages
-are installed. The bit-packed Stim/PyMatching row is the official-style
-maximum-throughput baseline. The benchmark uses a local graphlike Stim DEM
-converter that splits separator groups into FaultScope DEM edges for native paths;
-this does not change the threshold benchmark. It reports construction time,
+batch decode, FaultScope DEM + Python PyMatching, FaultScope DEM + native
+PyMatching, and FaultScope DEM + fusion-blossom native decoding when the optional
+backend packages are installed. The bit-packed Stim/PyMatching row is the
+official-style maximum-throughput baseline. The converter creates exactly one
+canonical FaultScope edge per effective Stim `error` instruction and packages
+actual multi-component separator groups in sparse, model-bound graphlike hints.
+Every FaultScope path
+samples that same canonical DEM; native matching backends consume the compiled
+problem as an uncorrelated graphlike approximation. A backend without
+`from_graphlike_problem(...)` is reported as `skip` instead of being constructed
+from a transformed sampling model. The benchmark reports construction time,
 sampling time where separable, native estimate time, solver-edge metadata,
 merged parallel edges, and whether native paths stayed out of Python callbacks.
 

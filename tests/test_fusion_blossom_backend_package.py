@@ -159,9 +159,35 @@ class FusionBlossomBackendPackageTests(unittest.TestCase):
         self.assertEqual(decoder.solver_edge_count, 1)
         self.assertEqual(decoder.boundary_vertex_count, 1)
         self.assertEqual(decoder.build_summary["dem_edge_count"], 1)
+        self.assertEqual(decoder.build_summary["graphlike_edge_count"], 1)
         self.assertEqual(decoder.build_summary["solver_edge_count"], 1)
         self.assertEqual(decoder.python_decode_call_count, 0)
         self.assertIsNotNone(decoder.__faultscope_native_decoder_capsule__())
+
+    @requires_native_backend
+    def test_public_from_graphlike_problem_preserves_parent_edge_counts(self) -> None:
+        dem = DetectorErrorModel(
+            detectors=(
+                Detector(id=0, measurement_keys=()),
+                Detector(id=1, measurement_keys=()),
+            ),
+            observables=(LogicalObservable(id=0),),
+            edges=(DetectorErrorEdge(0.2, (0, 1), (0,), "parent", "X"),),
+        )
+        problem = dem.compile_graphlike_problem(
+            decomposition={0: (((0,), (0,)), ((1,), ()))},
+        )
+
+        decoder = faultscope_fusion_blossom.NativeFusionBlossomDecoder.from_graphlike_problem(
+            problem
+        )
+
+        self.assertEqual(decoder.edge_count, 1)
+        self.assertEqual(decoder.solver_edge_count, 2)
+        self.assertEqual(decoder.build_summary["dem_edge_count"], 1)
+        self.assertEqual(decoder.build_summary["graphlike_edge_count"], 2)
+        self.assertEqual(decoder.build_summary["solver_edge_count"], 2)
+        self.assertEqual(decoder.python_decode_call_count, 0)
 
     @requires_native_backend
     def test_backend_consumes_native_graphlike_capsule_without_python_edge_objects(self) -> None:
@@ -358,11 +384,15 @@ class FusionBlossomBackendPackageTests(unittest.TestCase):
             )
             decoder = create_native_decoder("fusion-blossom", dem=dem)
             friendly_decoder = NativeFusionBlossomDecoder.from_dem(dem)
+            friendly_problem_decoder = NativeFusionBlossomDecoder.from_graphlike_problem(
+                dem.compile_graphlike_problem()
+            )
             self.assertEqual(decoder.name, "fusion-blossom")
             result = simulator.estimate(shots=4096, seed=111, decoder=decoder)
 
         self.assertEqual(decoder.python_decode_call_count, 0)
         self.assertEqual(friendly_decoder.python_decode_call_count, 0)
+        self.assertEqual(friendly_problem_decoder.python_decode_call_count, 0)
         self.assertEqual(result.mean_loss, 0.0)
 
     @requires_native_backend

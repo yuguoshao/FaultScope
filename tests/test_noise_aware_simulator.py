@@ -4,7 +4,7 @@ import os
 import random
 import tempfile
 import unittest
-from types import SimpleNamespace
+from types import MappingProxyType, SimpleNamespace
 from unittest import mock
 
 import faultscope
@@ -18,6 +18,8 @@ from faultscope.dem import (
     DetectorErrorModelGenerator,
     DetectorGraphEdgeHotspot,
     DetectorGraphHotspots,
+    GeneratedDetectorErrorModel,
+    GraphlikeDecompositionHints,
     GraphlikeDecodingProblem,
     IndexedDem,
     LogicalObservable,
@@ -2154,7 +2156,7 @@ class NativeDetectorErrorModelTests(unittest.TestCase):
 
         self.assertEqual(faultscope_dem_error_edges(native), stim_dem_error_edges(stim_dem))
 
-    def test_native_dem_generator_splits_pauli_channel_edges(self) -> None:
+    def test_native_dem_generator_requires_opt_in_for_pauli_channel_approximation(self) -> None:
         self._require_native_dem()
         location = NoiseLocation(
             id="pc",
@@ -2172,14 +2174,180 @@ class NativeDetectorErrorModelTests(unittest.TestCase):
             ],
         )
 
-        native = generate_native_dem(circuit)
-        by_event = {edge.event: edge for edge in native.edges}
+        with self.assertRaisesRegex(
+            UnsupportedNativeCircuitError,
+            "multiple disjoint outcomes",
+        ):
+            generate_native_dem(circuit)
+        with self.assertRaises(UnsupportedNativeCircuitError):
+            generate_native_dem(circuit, approximate_disjoint_errors=0.29)
 
-        self.assertEqual(set(by_event), {"X", "Y"})
-        self.assertAlmostEqual(by_event["X"].probability, 0.1)
-        self.assertAlmostEqual(by_event["Y"].probability, 0.3)
-        self.assertEqual(by_event["Y"].detectors, (0,))
-        self.assertEqual(dict(by_event["Y"].tags), {"gate": "channel"})
+        tiny_circuit = Circuit(
+            n_qubits=2,
+            operations=[
+                Operation.noise(
+                    NoiseLocation(
+                        id="tiny_pc",
+                        model=PauliChannel({"XI": 1.0, "IX": 1.0}),
+                        rate=1e-20,
+                        qubits=(0, 1),
+                    )
+                )
+            ],
+        )
+        with self.assertRaises(UnsupportedNativeCircuitError):
+            generate_native_dem(tiny_circuit)
+
+        native = generate_native_dem(circuit, approximate_disjoint_errors=0.3)
+        self.assertEqual(len(native.edges), 1)
+        edge = native.edges[0]
+        self.assertEqual(edge.event, "X|Y")
+        self.assertAlmostEqual(edge.probability, 0.4)
+        self.assertEqual(edge.detectors, (0,))
+        self.assertEqual(dict(edge.tags), {"gate": "channel"})
+        batch = compile_native_dem_sampler(native).run_batch(shots=100_000, seed=5001)
+        self.assertAlmostEqual(batch.detectors[0].bit_count() / batch.shots, 0.4, delta=0.01)
+
+    def test_one_qubit_pauli_channel_uses_stim_exact_conversion_before_approximation(self) -> None:
+        self._require_native_dem()
+        circuit = Circuit(
+            n_qubits=1,
+            operations=[
+                Operation.noise(
+                    NoiseLocation(
+                        id="pc_exact",
+                        model=PauliChannel({"X": 2.0, "Y": 2.0, "Z": 1.0}),
+                        rate=0.5,
+                        qubits=(0,),
+                    )
+                ),
+                Operation.measure(0, key="m", basis="Z"),
+                Operation.detector(("m",), detector_id=0),
+            ],
+        )
+
+        native = generate_native_dem(circuit)
+        self.assertEqual(len(native.edges), 1)
+        self.assertEqual(native.edges[0].event, "X^Y")
+        self.assertAlmostEqual(native.edges[0].probability, 0.4)
+        batch = compile_native_dem_sampler(native).run_batch(shots=100_000, seed=5002)
+        self.assertAlmostEqual(batch.detectors[0].bit_count() / batch.shots, 0.4, delta=0.01)
+
+    def test_native_dem_depolarizing_sampling_matches_forward_joint_distribution(self) -> None:
+        self._require_native_dem()
+        rate = 0.6
+        shots = 100_000
+        location = NoiseLocation(
+            id="depol2",
+            model=TwoQubitDepolarizing(),
+            rate=rate,
+            qubits=(0, 1),
+        )
+        circuit = Circuit(
+            n_qubits=2,
+            operations=[
+                Operation.noise(location),
+                Operation.measure(0, key="m0", basis="Z"),
+                Operation.measure(1, key="m1", basis="Z"),
+                Operation.detector(("m0",), detector_id=0),
+                Operation.detector(("m1",), detector_id=1),
+                Operation.observable_include(0, ("m0",)),
+            ],
+        )
+
+        forward = compile_native_sampler(circuit).sample(shots=shots, seed=5101)
+        dem = generate_native_dem(circuit)
+        dem_batch = compile_native_dem_sampler(dem).run_batch(shots=shots, seed=5102)
+        all_mask = (1 << shots) - 1
+
+        def joint_rates(left: int, right: int) -> tuple[float, float, float, float]:
+            return (
+                ((~left & ~right) & all_mask).bit_count() / shots,
+                (left & ~right).bit_count() / shots,
+                ((~left & right) & all_mask).bit_count() / shots,
+                (left & right).bit_count() / shots,
+            )
+
+        expected = (0.52, 0.16, 0.16, 0.16)
+        forward_rates = joint_rates(forward.measurements["m0"], forward.measurements["m1"])
+        dem_rates = joint_rates(dem_batch.detectors[0], dem_batch.detectors[1])
+        for actual, target in zip(forward_rates, expected):
+            self.assertAlmostEqual(actual, target, delta=0.01)
+        for actual, target in zip(dem_rates, expected):
+            self.assertAlmostEqual(actual, target, delta=0.01)
+        for forward_rate, dem_rate in zip(forward_rates, dem_rates):
+            self.assertAlmostEqual(forward_rate, dem_rate, delta=0.01)
+        self.assertEqual(dem_batch.detectors[0], dem_batch.observables[0])
+
+    def test_pauli_channel_opt_in_has_stim_independent_approximation_semantics(self) -> None:
+        self._require_native_dem()
+        shots = 100_000
+        circuit = Circuit(
+            n_qubits=2,
+            operations=[
+                Operation.noise(
+                    NoiseLocation(
+                        id="channel",
+                        model=PauliChannel({"XI": 1.0, "IX": 1.0}),
+                        rate=0.4,
+                        qubits=(0, 1),
+                    )
+                ),
+                Operation.measure(0, key="m0", basis="Z"),
+                Operation.measure(1, key="m1", basis="Z"),
+                Operation.detector(("m0",), detector_id=0),
+                Operation.detector(("m1",), detector_id=1),
+            ],
+        )
+
+        with self.assertRaises(UnsupportedNativeCircuitError):
+            generate_native_dem(circuit)
+        dem = generate_native_dem(circuit, approximate_disjoint_errors=True)
+        explicit = compile_native_dem_sampler(dem).run_batch(shots=shots, seed=5202)
+        generator = compile_native_dem_generator(
+            circuit,
+            approximate_disjoint_errors=True,
+        )
+        generated = generator.compile_sampler(materialize_dem=False).run_batch(
+            shots=shots,
+            seed=5202,
+        )
+        direct = compile_native_dem_sampler_from_circuit(
+            circuit,
+            approximate_disjoint_errors=0.2,
+        ).run_batch(shots=shots, seed=5202)
+        direct_light = compile_native_dem_sampler_from_circuit(
+            circuit,
+            approximate_disjoint_errors=True,
+            materialize_dem=False,
+        ).run_batch(shots=shots, seed=5202)
+        simulator = DemFaultScopeSimulator(
+            circuit,
+            approximate_disjoint_errors=True,
+        )
+        simulated = simulator.run_batch(shots=shots, seed=5202)
+        forward = compile_native_sampler(circuit).sample(shots=shots, seed=5201)
+
+        self.assertEqual(generated.detectors, explicit.detectors)
+        self.assertEqual(direct.detectors, explicit.detectors)
+        self.assertEqual(direct_light.detectors, explicit.detectors)
+        self.assertEqual(simulated.detectors, explicit.detectors)
+        self.assertEqual((forward.measurements["m0"] & forward.measurements["m1"]).bit_count(), 0)
+        approximated_both_rate = (explicit.detectors[0] & explicit.detectors[1]).bit_count() / shots
+        self.assertAlmostEqual(approximated_both_rate, 0.04, delta=0.006)
+
+    def test_dem_approximation_option_rejects_invalid_values(self) -> None:
+        self._require_native_dem()
+        circuit = Circuit(n_qubits=0, operations=[])
+        for value in (-0.1, 1.1, float("nan"), float("inf")):
+            with self.subTest(value=value):
+                with self.assertRaises(UnsupportedNativeCircuitError):
+                    generate_native_dem(circuit, approximate_disjoint_errors=value)
+        with self.assertRaises(TypeError):
+            DetectorErrorModelGenerator(
+                circuit,
+                approximate_disjoint_errors="yes",
+            )
 
     def test_native_dem_reports_missing_extension(self) -> None:
         dem = DetectorErrorModel(detectors=(), observables=(), edges=())
@@ -2509,6 +2677,67 @@ class NativeDetectorErrorModelTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             bad.compile_graphlike_problem()
 
+    def test_graphlike_decomposition_keeps_one_canonical_sampling_event(self) -> None:
+        self._require_native_dem()
+        dem = DetectorErrorModel(
+            detectors=tuple(Detector(id=index, measurement_keys=()) for index in range(3)),
+            observables=(LogicalObservable(id=0),),
+            edges=(
+                DetectorErrorEdge(
+                    0.5,
+                    (0, 1, 2),
+                    (0,),
+                    "correlated",
+                    "X",
+                ),
+            ),
+        )
+        decomposition = MappingProxyType(
+            {
+                0: (
+                    ((2,), ()),
+                    ((1, 0), (0,)),
+                )
+            }
+        )
+
+        hints = GraphlikeDecompositionHints(dem, decomposition)
+        artifact = GeneratedDetectorErrorModel(dem, graphlike_hints=hints)
+        problem = artifact.compile_graphlike_problem()
+
+        self.assertIs(artifact.dem, dem)
+        self.assertIs(artifact.graphlike_hints, hints)
+        self.assertEqual(hints.components_by_edge, dict(decomposition))
+        self.assertEqual(problem.edge_count, 2)
+        self.assertEqual([edge.dem_edge_index for edge in problem.edges], [0, 0])
+        self.assertEqual([edge.probability for edge in problem.edges], [0.5, 0.5])
+        self.assertEqual(problem.edges[0].detectors, (2,))
+        self.assertEqual(problem.edges[0].fault_observables, ())
+        self.assertEqual(problem.edges[1].detectors, (1, 0))
+        self.assertEqual(problem.edges[1].fault_observables, (0,))
+
+        batch = compile_native_dem_sampler(dem).run_batch(
+            shots=257,
+            seed=123,
+            return_edge_events=False,
+        )
+        self.assertEqual(batch.detectors[0], batch.detectors[1])
+        self.assertEqual(batch.detectors[0], batch.detectors[2])
+        self.assertEqual(batch.detectors[0], batch.observables[0])
+
+        with self.assertRaisesRegex(ValueError, "does not reproduce"):
+            dem.compile_graphlike_problem(decomposition={0: (((0, 1), (0,)),)})
+        with self.assertRaisesRegex(ValueError, "does not reproduce"):
+            GraphlikeDecompositionHints(dem, {0: (((0, 1), (0,)),)})
+
+        equivalent_dem = DetectorErrorModel(
+            detectors=dem.detectors,
+            observables=dem.observables,
+            edges=dem.edges,
+        )
+        with self.assertRaisesRegex(ValueError, "different DetectorErrorModel instance"):
+            GeneratedDetectorErrorModel(equivalent_dem, graphlike_hints=hints)
+
     def test_native_dem_problem_views_canonicalize_ids_and_edge_parity(self) -> None:
         self._require_native_dem()
         dem = DetectorErrorModel(
@@ -2561,6 +2790,8 @@ class NativeDetectorErrorModelTests(unittest.TestCase):
         dem = generate_native_dem(circuit)
         regular_sampler = compile_native_dem_sampler(dem)
         generator = compile_native_dem_generator(circuit)
+        generated_artifact = generator.generate_artifact()
+        direct_artifact = DetectorErrorModelGenerator(circuit).generate_artifact()
         direct_sampler = compile_native_dem_sampler_from_circuit(circuit)
         direct_light_sampler = compile_native_dem_sampler_from_circuit(
             circuit,
@@ -2583,6 +2814,11 @@ class NativeDetectorErrorModelTests(unittest.TestCase):
         self.assertIsInstance(direct_sampler.dem, DetectorErrorModel)
         self.assertEqual(edge_rows(direct_sampler.dem), edge_rows(dem))
         self.assertEqual(edge_rows(generator.generate_dem()), edge_rows(dem))
+        self.assertIsInstance(generated_artifact, GeneratedDetectorErrorModel)
+        self.assertIsNone(generated_artifact.graphlike_hints)
+        self.assertEqual(edge_rows(generated_artifact.dem), edge_rows(dem))
+        self.assertEqual(edge_rows(direct_artifact.dem), edge_rows(dem))
+        self.assertEqual(generated_artifact.compile_graphlike_problem().edge_count, 1)
         self.assertIsNone(direct_light_sampler.dem)
 
         regular_batch = regular_sampler.run_batch(shots=256, seed=123)
@@ -2843,7 +3079,7 @@ class DetectorErrorModelTests(unittest.TestCase):
         self.assertAlmostEqual(graph.by_observable[0], 3.0)
         self.assertEqual(graph.top_edges(1)[0].location_id, "data_r0_q0")
 
-    def test_splits_location_sensitivity_across_pauli_channel_edges(self) -> None:
+    def test_projects_location_sensitivity_to_merged_pauli_channel_effect(self) -> None:
         location = NoiseLocation(
             id="pc",
             model=PauliChannel({"X": 1.0, "Y": 3.0}),
@@ -2858,12 +3094,15 @@ class DetectorErrorModelTests(unittest.TestCase):
                 Operation.detector(("m",), detector_id=0),
             ],
         )
-        dem = DetectorErrorModelGenerator(circuit).generate()
+        dem = DetectorErrorModelGenerator(
+            circuit,
+            approximate_disjoint_errors=True,
+        ).generate()
         graph = dem.project_sensitivities_to_detector_graph({"pc": 8.0})
         by_event = {edge.event: edge for edge in graph.edge_hotspots}
 
-        self.assertAlmostEqual(by_event["X"].sensitivity, 2.0)
-        self.assertAlmostEqual(by_event["Y"].sensitivity, 6.0)
+        self.assertEqual(set(by_event), {"X|Y"})
+        self.assertAlmostEqual(by_event["X|Y"].sensitivity, 8.0)
         self.assertAlmostEqual(graph.by_detector_edge[((0,), ())], 8.0)
 
     def test_circuit_detector_operations_generate_measurement_noise_dem(self) -> None:

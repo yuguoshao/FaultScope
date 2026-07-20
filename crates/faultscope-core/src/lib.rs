@@ -51,16 +51,17 @@ pub use decoder::{
     NATIVE_DECODER_PLUGIN_STATUS_OK,
 };
 pub use dem::{
-    collect_dem_event_plan, detectors_from_circuit, generate_dem_edges,
-    generate_dem_edges_from_event_plan, observables_from_circuit, DemEventPlan,
-    DetectorErrorModelGenerator, LazyDetectorErrorModel, ValidatedDemCircuit,
+    collect_dem_event_plan, collect_dem_event_plan_with_options, detectors_from_circuit,
+    generate_dem_edges, generate_dem_edges_from_event_plan, generate_dem_edges_with_options,
+    observables_from_circuit, DemEventPlan, DemGenerationOptions, DetectorErrorModelGenerator,
+    LazyDetectorErrorModel, ValidatedDemCircuit,
 };
 pub use dem_problem::{
     log_likelihood_ratio, BinaryLinearDecodingProblem, FaultScopeNativeGraphlikeEdgeV1,
-    FaultScopeNativeGraphlikeProblemV1, GraphlikeDecodingProblem, GraphlikeEdge, GraphlikeEdgeRef,
-    IndexedDem, IndexedDemEdge, SparseBinaryMatrix, NATIVE_GRAPHLIKE_PROBLEM_ABI_NAME,
-    NATIVE_GRAPHLIKE_PROBLEM_ABI_VERSION, NATIVE_GRAPHLIKE_PROBLEM_CAPSULE_METHOD,
-    NATIVE_GRAPHLIKE_PROBLEM_CAPSULE_NAME,
+    FaultScopeNativeGraphlikeProblemV1, GraphlikeDecodingProblem, GraphlikeDecompositionComponent,
+    GraphlikeEdge, GraphlikeEdgeRef, IndexedDem, IndexedDemEdge, SparseBinaryMatrix,
+    NATIVE_GRAPHLIKE_PROBLEM_ABI_NAME, NATIVE_GRAPHLIKE_PROBLEM_ABI_VERSION,
+    NATIVE_GRAPHLIKE_PROBLEM_CAPSULE_METHOD, NATIVE_GRAPHLIKE_PROBLEM_CAPSULE_NAME,
 };
 pub use dem_sampling::{
     CompiledDemLogicalCountPlan, CompiledDemSamplingPlan, DemAttributionTrace, DemHotspotEstimator,

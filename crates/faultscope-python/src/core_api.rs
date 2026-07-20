@@ -1239,6 +1239,149 @@ pub(crate) struct PyDetectorErrorModel {
     edges: Vec<Py<PyAny>>,
 }
 
+type CoreGraphlikeDecomposition =
+    HashMap<usize, Vec<faultscope_core::GraphlikeDecompositionComponent>>;
+
+/// Sparse graphlike decomposition hints bound to one canonical DEM instance.
+///
+/// The canonical model remains the only sampling model.  The compiled problem
+/// cached here is a decoder-only view whose component edges retain their
+/// canonical parent edge index.
+#[pyclass(
+    name = "GraphlikeDecompositionHints",
+    module = "faultscope._native",
+    frozen
+)]
+pub(crate) struct PyGraphlikeDecompositionHints {
+    dem: Py<PyDetectorErrorModel>,
+    decomposition: CoreGraphlikeDecomposition,
+    graphlike_problem: std::sync::Arc<faultscope_core::GraphlikeDecodingProblem>,
+}
+
+#[pymethods]
+impl PyGraphlikeDecompositionHints {
+    #[new]
+    pub(crate) fn new(
+        py: Python<'_>,
+        dem: Py<PyDetectorErrorModel>,
+        components_by_edge: &Bound<'_, PyAny>,
+    ) -> PyResult<Self> {
+        let decomposition = parse_graphlike_decomposition(py, components_by_edge)?;
+        let graphlike_problem = {
+            let dem_ref = dem.bind(py).borrow();
+            let core_dem = dem_ref.to_core_dem(py)?;
+            std::sync::Arc::new(
+                core_dem
+                    .compile_graphlike_problem_with_decomposition(&decomposition)
+                    .map_err(|err| PyValueError::new_err(err.to_string()))?,
+            )
+        };
+        Ok(Self {
+            dem,
+            decomposition,
+            graphlike_problem,
+        })
+    }
+
+    #[getter]
+    pub(crate) fn components_by_edge(&self, py: Python<'_>) -> PyResult<PyObject> {
+        graphlike_decomposition_to_py(py, &self.decomposition)
+    }
+
+    pub(crate) fn __repr__(&self) -> String {
+        let component_count = self.decomposition.values().map(Vec::len).sum::<usize>();
+        format!(
+            "GraphlikeDecompositionHints(hinted_edges={}, components={})",
+            self.decomposition.len(),
+            component_count,
+        )
+    }
+}
+
+/// One canonical detector error model plus optional decoder-only structure.
+#[pyclass(
+    name = "GeneratedDetectorErrorModel",
+    module = "faultscope._native",
+    frozen
+)]
+pub(crate) struct PyGeneratedDetectorErrorModel {
+    dem: Py<PyDetectorErrorModel>,
+    graphlike_hints: Option<Py<PyGraphlikeDecompositionHints>>,
+}
+
+#[pymethods]
+impl PyGeneratedDetectorErrorModel {
+    #[new]
+    #[pyo3(signature = (dem, *, graphlike_hints=None))]
+    pub(crate) fn new(
+        py: Python<'_>,
+        dem: Py<PyDetectorErrorModel>,
+        graphlike_hints: Option<Py<PyGraphlikeDecompositionHints>>,
+    ) -> PyResult<Self> {
+        if let Some(hints) = &graphlike_hints {
+            let hinted_dem = hints.bind(py).borrow().dem.as_ptr();
+            if hinted_dem != dem.as_ptr() {
+                return Err(PyValueError::new_err(
+                    "graphlike_hints are bound to a different DetectorErrorModel instance",
+                ));
+            }
+        }
+        Ok(Self::from_parts(dem, graphlike_hints))
+    }
+
+    #[getter]
+    pub(crate) fn dem(&self, py: Python<'_>) -> Py<PyDetectorErrorModel> {
+        self.dem.clone_ref(py)
+    }
+
+    #[getter]
+    pub(crate) fn graphlike_hints(
+        &self,
+        py: Python<'_>,
+    ) -> Option<Py<PyGraphlikeDecompositionHints>> {
+        self.graphlike_hints
+            .as_ref()
+            .map(|hints| hints.clone_ref(py))
+    }
+
+    pub(crate) fn compile_graphlike_problem(
+        &self,
+        py: Python<'_>,
+    ) -> PyResult<PyGraphlikeDecodingProblem> {
+        if let Some(hints) = &self.graphlike_hints {
+            let problem = std::sync::Arc::clone(&hints.bind(py).borrow().graphlike_problem);
+            return Ok(PyGraphlikeDecodingProblem::new(problem));
+        }
+        self.dem
+            .bind(py)
+            .borrow()
+            .compile_graphlike_problem(py, None)
+    }
+
+    pub(crate) fn __repr__(&self) -> String {
+        format!(
+            "GeneratedDetectorErrorModel(has_graphlike_hints={})",
+            self.graphlike_hints.is_some(),
+        )
+    }
+}
+
+impl PyGeneratedDetectorErrorModel {
+    pub(crate) fn without_hints(dem: Py<PyDetectorErrorModel>) -> Self {
+        Self::from_parts(dem, None)
+    }
+
+    fn from_parts(
+        dem: Py<PyDetectorErrorModel>,
+        graphlike_hints: Option<Py<PyGraphlikeDecompositionHints>>,
+    ) -> Self {
+        Self {
+            dem,
+            graphlike_hints,
+        }
+    }
+}
+
 struct PyDemEdgeView {
     location_id: String,
     event: Py<PyAny>,
@@ -1538,10 +1681,23 @@ impl PyDetectorErrorModel {
         Ok(PyIndexedDem { indexed })
     }
 
+    #[pyo3(signature = (*, decomposition=None))]
     pub(crate) fn compile_graphlike_problem(
         &self,
         py: Python<'_>,
+        decomposition: Option<Bound<'_, PyAny>>,
     ) -> PyResult<PyGraphlikeDecodingProblem> {
+        if let Some(decomposition) = decomposition {
+            let decomposition = parse_graphlike_decomposition(py, &decomposition)?;
+            let dem = self.to_core_dem(py)?;
+            let problem = dem
+                .compile_graphlike_problem_with_decomposition(&decomposition)
+                .map_err(|err| PyValueError::new_err(err.to_string()))?;
+            return Ok(PyGraphlikeDecodingProblem::new(std::sync::Arc::new(
+                problem,
+            )));
+        }
+
         let problem = if let Some(dem) = &self.core_lazy_dem {
             if let Some(problem) = self.core_graphlike_problem.get() {
                 std::sync::Arc::clone(problem)
@@ -1706,6 +1862,52 @@ fn mapping_to_dict(py: Python<'_>, value: Option<Bound<'_, PyAny>>) -> PyResult<
         }
     }
     Ok(dict.into())
+}
+
+fn parse_graphlike_decomposition(
+    py: Python<'_>,
+    value: &Bound<'_, PyAny>,
+) -> PyResult<CoreGraphlikeDecomposition> {
+    let decomposition_dict = PyDict::new(py);
+    decomposition_dict.call_method1("update", (value,))?;
+    let decomposition =
+        decomposition_dict.extract::<HashMap<usize, Vec<(Vec<i64>, Vec<i64>)>>>()?;
+    Ok(decomposition
+        .into_iter()
+        .map(|(edge_index, components)| {
+            (
+                edge_index,
+                components
+                    .into_iter()
+                    .map(|(detectors, observables)| {
+                        faultscope_core::GraphlikeDecompositionComponent {
+                            detectors,
+                            observables,
+                        }
+                    })
+                    .collect(),
+            )
+        })
+        .collect())
+}
+
+fn graphlike_decomposition_to_py(
+    py: Python<'_>,
+    decomposition: &CoreGraphlikeDecomposition,
+) -> PyResult<PyObject> {
+    let result = PyDict::new(py);
+    let mut edge_indices = decomposition.keys().copied().collect::<Vec<_>>();
+    edge_indices.sort_unstable();
+    for edge_index in edge_indices {
+        let mut component_objects = Vec::with_capacity(decomposition[&edge_index].len());
+        for component in &decomposition[&edge_index] {
+            let detectors = PyTuple::new(py, component.detectors.iter().copied())?.into_any();
+            let observables = PyTuple::new(py, component.observables.iter().copied())?.into_any();
+            component_objects.push(PyTuple::new(py, [detectors, observables])?);
+        }
+        result.set_item(edge_index, PyTuple::new(py, component_objects)?)?;
+    }
+    Ok(result.into())
 }
 
 fn kwargs_to_dict<'py>(

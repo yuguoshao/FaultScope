@@ -126,7 +126,25 @@ class NativeFusionBlossomDecoder(_NativeDecoderProxy):
         *,
         options: Mapping[str, object] | None = None,
     ) -> Any:
-        return create_native_decoder("fusion-blossom", dem=dem, options=options)
+        backend = get_native_decoder_class("fusion-blossom")
+        factory = getattr(backend, "from_graphlike_problem", None)
+        if factory is not None:
+            return factory(dem.compile_graphlike_problem(), options=options)
+        return backend.from_dem(dem, options=options)
+
+    @staticmethod
+    def from_graphlike_problem(
+        problem: Any,
+        *,
+        options: Mapping[str, object] | None = None,
+    ) -> Any:
+        backend = get_native_decoder_class("fusion-blossom")
+        factory = getattr(backend, "from_graphlike_problem", None)
+        if factory is None:
+            raise NativeDecoderBackendUnavailable(
+                "installed fusion-blossom backend does not support from_graphlike_problem"
+            )
+        return factory(problem, options=options)
 
     @staticmethod
     def from_circuit(
@@ -246,7 +264,25 @@ class NativePyMatchingDecoder(_NativeDecoderProxy):
         *,
         options: Mapping[str, object] | None = None,
     ) -> Any:
-        return create_native_decoder("pymatching", dem=dem, options=options)
+        backend = get_native_decoder_class("pymatching")
+        factory = getattr(backend, "from_graphlike_problem", None)
+        if factory is not None:
+            return factory(dem.compile_graphlike_problem(), options=options)
+        return backend.from_dem(dem, options=options)
+
+    @staticmethod
+    def from_graphlike_problem(
+        problem: Any,
+        *,
+        options: Mapping[str, object] | None = None,
+    ) -> Any:
+        backend = get_native_decoder_class("pymatching")
+        factory = getattr(backend, "from_graphlike_problem", None)
+        if factory is None:
+            raise NativeDecoderBackendUnavailable(
+                "installed pymatching backend does not support from_graphlike_problem"
+            )
+        return factory(problem, options=options)
 
     @staticmethod
     def from_circuit(

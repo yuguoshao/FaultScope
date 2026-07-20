@@ -549,6 +549,103 @@ class BenchmarkSmokeTests(unittest.TestCase):
             test_extra = tomllib.load(f)["project"]["optional-dependencies"]["test"]
         self.assertTrue(any(dependency.startswith("pytest") for dependency in test_extra))
 
+    def test_surface_code_converter_keeps_separator_components_correlated(self) -> None:
+        if not _has_module("stim"):
+            self.skipTest("stim is required for this benchmark")
+
+        import stim
+
+        from benchmarks.surface_code_decoder_performance import stim_dem_to_faultscope_dem
+        from faultscope.runtime import compile_native_dem_sampler
+
+        stim_dem = stim.DetectorErrorModel("error(0.5) D0 ^ D1\nerror(0.5) D2 L0 ^ D3\n")
+        artifact = stim_dem_to_faultscope_dem(stim_dem)
+        problem = artifact.compile_graphlike_problem()
+
+        self.assertIsNotNone(artifact.graphlike_hints)
+        self.assertEqual(len(artifact.graphlike_hints.components_by_edge), 2)
+        self.assertEqual(len(artifact.dem.edges), 2)
+        self.assertEqual(artifact.dem.edges[0].detectors, (0, 1))
+        self.assertEqual(artifact.dem.edges[1].detectors, (2, 3))
+        self.assertEqual(artifact.dem.edges[1].observables, (0,))
+        self.assertEqual(problem.edge_count, 4)
+        self.assertEqual([edge.dem_edge_index for edge in problem.edges], [0, 0, 1, 1])
+
+        batch = compile_native_dem_sampler(artifact.dem).run_batch(
+            shots=257,
+            seed=321,
+            return_edge_events=False,
+        )
+        self.assertEqual(batch.detectors[0], batch.detectors[1])
+        self.assertEqual(batch.detectors[2], batch.detectors[3])
+        self.assertEqual(batch.detectors[2], batch.observables[0])
+
+    def test_surface_code_converter_has_one_canonical_edge_per_error_instruction(self) -> None:
+        if not _has_module("stim"):
+            self.skipTest("stim is required for this benchmark")
+
+        import stim
+
+        from benchmarks.surface_code_decoder_performance import stim_dem_to_faultscope_dem
+
+        circuit = stim.Circuit.generated(
+            code_task="surface_code:rotated_memory_x",
+            distance=3,
+            rounds=3,
+            after_clifford_depolarization=0.01,
+        )
+        stim_dem = circuit.detector_error_model(decompose_errors=True, flatten_loops=True)
+        error_instruction_count = sum(instruction.type == "error" for instruction in stim_dem)
+
+        artifact = stim_dem_to_faultscope_dem(stim_dem)
+        problem = artifact.compile_graphlike_problem()
+
+        self.assertIsNotNone(artifact.graphlike_hints)
+        self.assertLess(
+            len(artifact.graphlike_hints.components_by_edge),
+            len(artifact.dem.edges),
+        )
+        self.assertEqual(len(artifact.dem.edges), error_instruction_count)
+        self.assertGreater(problem.edge_count, len(artifact.dem.edges))
+
+    def test_surface_code_converter_reduces_targets_by_parity_and_skips_no_effects(self) -> None:
+        if not _has_module("stim"):
+            self.skipTest("stim is required for this benchmark")
+
+        import stim
+
+        from benchmarks.surface_code_decoder_performance import stim_dem_to_faultscope_dem
+
+        stim_dem = stim.DetectorErrorModel(
+            "error(0.5) D0 D0 L0 L0\nerror(0.5) D1 D1 D1 ^ D2 D2 D3\n"
+        )
+
+        artifact = stim_dem_to_faultscope_dem(stim_dem)
+
+        self.assertEqual(len(artifact.dem.edges), 1)
+        self.assertEqual(artifact.dem.edges[0].detectors, (1, 3))
+        self.assertEqual(artifact.dem.edges[0].observables, ())
+        self.assertEqual(
+            artifact.graphlike_hints.components_by_edge,
+            {0: (((1,), ()), ((3,), ()))},
+        )
+
+    def test_surface_code_converter_preserves_late_detector_coordinates(self) -> None:
+        if not _has_module("stim"):
+            self.skipTest("stim is required for this benchmark")
+
+        import stim
+
+        from benchmarks.surface_code_decoder_performance import stim_dem_to_faultscope_dem
+
+        stim_dem = stim.DetectorErrorModel("error(0.1) D0 D1\ndetector(1.5, 2.5) D0\n")
+        artifact = stim_dem_to_faultscope_dem(stim_dem)
+        detectors = {detector.id: detector for detector in artifact.dem.detectors}
+
+        self.assertIsNone(artifact.graphlike_hints)
+        self.assertEqual(detectors[0].coords, (1.5, 2.5))
+        self.assertEqual(detectors[1].coords, ())
+
     def test_surface_code_decoder_performance_smoke(self) -> None:
         for module_name in ("stim", "pymatching", "numpy"):
             if not _has_module(module_name):
@@ -591,6 +688,8 @@ class BenchmarkSmokeTests(unittest.TestCase):
         self.assertIn("faultscope-dem-pymatching-native", rows_by_path)
         self.assertIn("faultscope-dem-mwpm", rows_by_path)
         self.assertIn("faultscope-dem-fusion-blossom", rows_by_path)
+        canonical_edge_counts = {row["dem_edges"] for row in body}
+        self.assertEqual(len(canonical_edge_counts), 1)
 
         native_pymatching_row = rows_by_path["faultscope-dem-pymatching-native"]
         if native_pymatching_row["status"] == "ok":

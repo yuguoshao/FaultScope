@@ -10,6 +10,8 @@ from faultscope._native import (
     DetectorErrorModelGenerator,
     DetectorGraphEdgeHotspot,
     DetectorGraphHotspots,
+    GeneratedDetectorErrorModel,
+    GraphlikeDecompositionHints,
     GraphlikeDecodingProblem,
     IndexedDem,
     LogicalObservable,

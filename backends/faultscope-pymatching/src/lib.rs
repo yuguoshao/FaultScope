@@ -15,7 +15,7 @@ use faultscope_core::{
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyIterator, PyTuple};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ffi::{c_void, CString};
 use std::mem;
 use std::os::raw::{c_char, c_int};
@@ -350,6 +350,7 @@ fn build_py_native_decoder(
     let state = Box::new(state);
     let build_summary = BuildSummary {
         dem_edge_count: built.dem_edge_count,
+        graphlike_edge_count: built.graphlike_edge_count,
         solver_edge_count: built.edges.len(),
         merged_parallel_edge_count: built.merged_parallel_edge_count,
         edges: built.edges,
@@ -756,7 +757,8 @@ impl ErrorBuffer {
 struct PyMatchingProblemBuilder {
     detector_ids: Vec<i64>,
     observable_ids: Vec<i64>,
-    dem_edge_count: usize,
+    dem_edge_indices: HashSet<usize>,
+    graphlike_edge_count: usize,
     groups: Vec<EdgeGroup>,
     group_by_endpoint: HashMap<(usize, Option<usize>), usize>,
 }
@@ -783,6 +785,7 @@ struct BuiltPyMatchingEdge {
 #[derive(Clone)]
 struct BuildSummary {
     dem_edge_count: usize,
+    graphlike_edge_count: usize,
     solver_edge_count: usize,
     merged_parallel_edge_count: usize,
     edges: Vec<BuiltPyMatchingEdge>,
@@ -791,6 +794,7 @@ struct BuildSummary {
 struct BuiltPyMatchingProblem {
     edges: Vec<BuiltPyMatchingEdge>,
     dem_edge_count: usize,
+    graphlike_edge_count: usize,
     merged_parallel_edge_count: usize,
 }
 
@@ -911,7 +915,8 @@ impl PyMatchingProblemBuilder {
         Self {
             detector_ids,
             observable_ids,
-            dem_edge_count: 0,
+            dem_edge_indices: HashSet::new(),
+            graphlike_edge_count: 0,
             groups: Vec::new(),
             group_by_endpoint: HashMap::new(),
         }
@@ -924,7 +929,8 @@ impl PyMatchingProblemBuilder {
         fault_observables: Vec<usize>,
         probability: f64,
     ) -> PyResult<()> {
-        self.dem_edge_count += 1;
+        self.graphlike_edge_count += 1;
+        self.dem_edge_indices.insert(dem_edge_index);
         validate_probability(probability, dem_edge_index)?;
         let fault_observables = canonical_fault_observables(fault_observables);
         for &detector_index in &detectors {
@@ -980,7 +986,8 @@ impl PyMatchingProblemBuilder {
     ) -> PyResult<()> {
         let dem_edge_index = edge.dem_edge_index;
         let probability = edge.probability;
-        self.dem_edge_count += 1;
+        self.graphlike_edge_count += 1;
+        self.dem_edge_indices.insert(dem_edge_index);
         validate_probability(probability, dem_edge_index)?;
         let fault_observables = canonical_fault_observables(
             native_fault_observables
@@ -1102,7 +1109,8 @@ impl PyMatchingProblemBuilder {
             .sum();
         Ok(BuiltPyMatchingProblem {
             edges,
-            dem_edge_count: self.dem_edge_count,
+            dem_edge_count: self.dem_edge_indices.len(),
+            graphlike_edge_count: self.graphlike_edge_count,
             merged_parallel_edge_count,
         })
     }
@@ -1546,6 +1554,7 @@ unsafe fn decoder_decode_packed_batch_impl(
 fn build_summary_to_py(py: Python<'_>, summary: &BuildSummary) -> PyResult<PyObject> {
     let out = PyDict::new(py);
     out.set_item("dem_edge_count", summary.dem_edge_count)?;
+    out.set_item("graphlike_edge_count", summary.graphlike_edge_count)?;
     out.set_item("solver_edge_count", summary.solver_edge_count)?;
     out.set_item(
         "merged_parallel_edge_count",

@@ -36,7 +36,14 @@ from faultscope.decoders import (
     NativeNoCorrectionDecoder,
     NativePyMatchingDecoder,
 )
-from faultscope.dem import Detector, DetectorErrorEdge, DetectorErrorModel, LogicalObservable
+from faultscope.dem import (
+    Detector,
+    DetectorErrorEdge,
+    DetectorErrorModel,
+    GeneratedDetectorErrorModel,
+    GraphlikeDecompositionHints,
+    LogicalObservable,
+)
 from faultscope.runtime import compile_native_dem_sampler
 from surface_code_threshold import (
     _decode_batch_masks_with_matching,
@@ -103,7 +110,17 @@ class BenchmarkRow:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(
+        description=(
+            "Compare surface-code decoders while sampling one canonical FaultScope DEM "
+            "edge per Stim error instruction."
+        ),
+        epilog=(
+            "Stim separator groups are graphlike decomposition hints only. Native MWPM "
+            "backends use the resulting uncorrelated graphlike approximation; sampling "
+            "always uses the canonical DEM joint distribution."
+        ),
+    )
     parser.add_argument("--distances", nargs="+", type=int, default=[3, 5, 7])
     parser.add_argument("--rates", nargs="+", type=float, default=[0.01])
     parser.add_argument("--shots", type=int, default=10_000)
@@ -169,7 +186,9 @@ def main() -> None:
                 decompose_errors=True,
                 flatten_loops=True,
             )
-            faultscope_dem = stim_dem_to_graphlike_faultscope_dem(stim_dem)
+            artifact = stim_dem_to_faultscope_dem(stim_dem)
+            faultscope_dem = artifact.dem
+            graphlike_problem = artifact.compile_graphlike_problem()
             metadata = ProblemMetadata(
                 dem_edges=len(faultscope_dem.edges),
                 detectors=len(faultscope_dem.detectors),
@@ -213,6 +232,7 @@ def main() -> None:
                 "faultscope-dem-pymatching-native": lambda seed: (
                     run_faultscope_dem_pymatching_native(
                         faultscope_dem,
+                        graphlike_problem,
                         args.basis,
                         distance,
                         rounds,
@@ -225,6 +245,7 @@ def main() -> None:
                 ),
                 "faultscope-dem-mwpm": lambda seed: run_faultscope_dem_mwpm(
                     faultscope_dem,
+                    graphlike_problem,
                     args.basis,
                     distance,
                     rounds,
@@ -236,6 +257,7 @@ def main() -> None:
                 ),
                 "faultscope-dem-fusion-blossom": lambda seed: run_faultscope_dem_fusion_blossom(
                     faultscope_dem,
+                    graphlike_problem,
                     args.basis,
                     distance,
                     rounds,
@@ -429,7 +451,8 @@ def run_faultscope_dem_pymatching(
 
 
 def run_faultscope_dem_pymatching_native(
-    faultscope_dem: Any,
+    canonical_dem: Any,
+    graphlike_problem: Any,
     basis: str,
     distance: int,
     rounds: int,
@@ -440,7 +463,8 @@ def run_faultscope_dem_pymatching_native(
     split_baseline: bool,
 ) -> BenchmarkRow:
     return run_native_decoder(
-        faultscope_dem=faultscope_dem,
+        canonical_dem=canonical_dem,
+        graphlike_problem=graphlike_problem,
         basis=basis,
         distance=distance,
         rounds=rounds,
@@ -449,13 +473,14 @@ def run_faultscope_dem_pymatching_native(
         metadata=metadata,
         seed=seed,
         path_name="faultscope-dem-pymatching-native",
-        decoder_factory=NativePyMatchingDecoder.from_dem,
+        decoder_factory=NativePyMatchingDecoder.from_graphlike_problem,
         split_baseline=split_baseline,
     )
 
 
 def run_faultscope_dem_fusion_blossom(
-    faultscope_dem: Any,
+    canonical_dem: Any,
+    graphlike_problem: Any,
     basis: str,
     distance: int,
     rounds: int,
@@ -466,7 +491,8 @@ def run_faultscope_dem_fusion_blossom(
     split_baseline: bool,
 ) -> BenchmarkRow:
     return run_native_decoder(
-        faultscope_dem=faultscope_dem,
+        canonical_dem=canonical_dem,
+        graphlike_problem=graphlike_problem,
         basis=basis,
         distance=distance,
         rounds=rounds,
@@ -475,13 +501,14 @@ def run_faultscope_dem_fusion_blossom(
         metadata=metadata,
         seed=seed,
         path_name="faultscope-dem-fusion-blossom",
-        decoder_factory=NativeFusionBlossomDecoder.from_dem,
+        decoder_factory=NativeFusionBlossomDecoder.from_graphlike_problem,
         split_baseline=split_baseline,
     )
 
 
 def run_faultscope_dem_mwpm(
-    faultscope_dem: Any,
+    canonical_dem: Any,
+    graphlike_problem: Any,
     basis: str,
     distance: int,
     rounds: int,
@@ -491,8 +518,15 @@ def run_faultscope_dem_mwpm(
     seed: int,
     split_baseline: bool,
 ) -> BenchmarkRow:
+    decoder_factory = getattr(NativeMwpmDecoder, "from_graphlike_problem", None)
+    if decoder_factory is None:
+        raise RuntimeError(
+            "NativeMwpmDecoder does not provide from_graphlike_problem; refusing to "
+            "construct it from decomposition components"
+        )
     return run_native_decoder(
-        faultscope_dem=faultscope_dem,
+        canonical_dem=canonical_dem,
+        graphlike_problem=graphlike_problem,
         basis=basis,
         distance=distance,
         rounds=rounds,
@@ -501,13 +535,14 @@ def run_faultscope_dem_mwpm(
         metadata=metadata,
         seed=seed,
         path_name="faultscope-dem-mwpm",
-        decoder_factory=NativeMwpmDecoder.from_dem,
+        decoder_factory=decoder_factory,
         split_baseline=split_baseline,
     )
 
 
 def run_native_decoder(
-    faultscope_dem: Any,
+    canonical_dem: Any,
+    graphlike_problem: Any,
     basis: str,
     distance: int,
     rounds: int,
@@ -520,8 +555,20 @@ def run_native_decoder(
     split_baseline: bool,
 ) -> BenchmarkRow:
     started = time.perf_counter()
-    sampler = compile_native_dem_sampler(faultscope_dem)
-    decoder = decoder_factory(faultscope_dem)
+    sampler = compile_native_dem_sampler(canonical_dem)
+    decoder = decoder_factory(graphlike_problem)
+    summary = decoder.build_summary
+    dem_edge_count = int(summary.get("dem_edge_count", -1))
+    graphlike_edge_count = int(summary.get("graphlike_edge_count", -1))
+    if dem_edge_count != metadata.dem_edges:
+        raise RuntimeError(
+            f"decoder reported {dem_edge_count} canonical DEM edges; expected {metadata.dem_edges}"
+        )
+    if graphlike_edge_count != int(graphlike_problem.edge_count):
+        raise RuntimeError(
+            f"decoder reported {graphlike_edge_count} graphlike edges; "
+            f"expected {graphlike_problem.edge_count}"
+        )
     construct_s = time.perf_counter() - started
 
     baseline_s = None
@@ -551,8 +598,6 @@ def run_native_decoder(
 
     python_decode_calls = int(getattr(decoder, "python_decode_call_count", -1))
     status = "ok" if python_decode_calls == 0 else "python-callback-used"
-    summary = decoder.build_summary
-
     return BenchmarkRow(
         basis,
         distance,
@@ -597,12 +642,17 @@ def _logical_failure_stats_from_packed_arrays(
     return LogicalFailureStats(shots=shots, failures=failures)
 
 
-def stim_dem_to_graphlike_faultscope_dem(stim_dem: Any) -> DetectorErrorModel:
+def stim_dem_to_faultscope_dem(stim_dem: Any) -> GeneratedDetectorErrorModel:
     detectors_by_id: dict[int, Detector] = {}
     observable_ids: set[int] = set()
     edges: list[DetectorErrorEdge] = []
+    decomposition: dict[
+        int,
+        tuple[tuple[tuple[int, ...], tuple[int, ...]], ...],
+    ] = {}
     detector_offset = 0
     coord_offsets: list[float] = []
+    error_instruction_index = 0
 
     for instruction in stim_dem:
         instruction_type = instruction.type
@@ -620,20 +670,40 @@ def stim_dem_to_graphlike_faultscope_dem(stim_dem: Any) -> DetectorErrorModel:
                     observable_ids.add(observable_id)
                 else:
                     raise ValueError(f"unsupported Stim DEM target {target!r}")
-            for detectors, observables in groups:
-                if not detectors and not observables:
-                    continue
+            component_list: list[tuple[tuple[int, ...], tuple[int, ...]]] = []
+            for raw_detectors, raw_observables in groups:
+                detectors = _gf2_support(raw_detectors)
+                observables = _gf2_support(raw_observables)
+                if detectors or observables:
+                    component_list.append((detectors, observables))
+            components = tuple(component_list)
+            for detectors, observables in components:
+                observable_ids.update(observables)
+
+            canonical_detectors = _gf2_support(
+                detector_id for detectors, _observables in components for detector_id in detectors
+            )
+            canonical_observables = _gf2_support(
+                observable_id
+                for _detectors, observables in components
+                for observable_id in observables
+            )
+            if canonical_detectors or canonical_observables:
                 edge_index = len(edges)
+                location_id = f"stim_dem_error_{error_instruction_index}"
                 edges.append(
                     DetectorErrorEdge(
                         probability=probability,
-                        detectors=tuple(detectors),
-                        observables=tuple(observables),
-                        location_id=f"stim_dem_edge_{edge_index}",
-                        event=f"stim_dem_edge_{edge_index}",
-                        tags={"source": "stim_dem_graphlike"},
+                        detectors=canonical_detectors,
+                        observables=canonical_observables,
+                        location_id=location_id,
+                        event=location_id,
+                        tags={"source": "stim_dem_canonical"},
                     )
                 )
+                if len(components) > 1:
+                    decomposition[edge_index] = components
+            error_instruction_index += 1
         elif instruction_type == "detector":
             raw_coords = [float(coord) for coord in instruction.args_copy()]
             if len(raw_coords) > len(coord_offsets):
@@ -674,13 +744,23 @@ def stim_dem_to_graphlike_faultscope_dem(stim_dem: Any) -> DetectorErrorModel:
             )
         observable_ids.update(edge.observables)
 
-    return DetectorErrorModel(
+    dem = DetectorErrorModel(
         detectors=tuple(detectors_by_id[key] for key in sorted(detectors_by_id)),
         observables=tuple(
             LogicalObservable(id=observable_id) for observable_id in sorted(observable_ids)
         ),
         edges=tuple(edges),
     )
+    graphlike_hints = GraphlikeDecompositionHints(dem, decomposition) if decomposition else None
+    return GeneratedDetectorErrorModel(dem, graphlike_hints=graphlike_hints)
+
+
+def _gf2_support(values: Any) -> tuple[int, ...]:
+    parity: dict[int, bool] = {}
+    for value in values:
+        value = int(value)
+        parity[value] = not parity.get(value, False)
+    return tuple(value for value, odd in parity.items() if odd)
 
 
 def safe_run(

@@ -413,14 +413,16 @@ impl PyFaultScopeSimulator {
 #[pymethods]
 impl PyDemFaultScopeSimulator {
     #[new]
-    #[pyo3(signature = (circuit, *, detectors=None, observables=None, materialize_dem=true))]
+    #[pyo3(signature = (circuit, *, detectors=None, observables=None, approximate_disjoint_errors=0.0, materialize_dem=true))]
     pub(crate) fn new(
         py: Python<'_>,
         circuit: &Bound<'_, PyAny>,
         detectors: Option<&Bound<'_, PyAny>>,
         observables: Option<&Bound<'_, PyAny>>,
+        approximate_disjoint_errors: f64,
         materialize_dem: bool,
     ) -> PyResult<Self> {
+        let options = parse_dem_generation_options(approximate_disjoint_errors)?;
         Ok(Self {
             py_circuit: circuit.clone().unbind(),
             sampler: native_dem_sampler_from_circuit(
@@ -428,6 +430,7 @@ impl PyDemFaultScopeSimulator {
                 circuit,
                 detectors,
                 observables,
+                options,
                 materialize_dem,
             )?,
         })
@@ -1047,6 +1050,16 @@ impl NativeDemGenerator {
         self.generate_dem(py)
     }
 
+    pub(crate) fn generate_artifact(
+        &self,
+        py: Python<'_>,
+    ) -> PyResult<PyGeneratedDetectorErrorModel> {
+        let dem = py
+            .allow_threads(|| self.generator.generate_lazy())
+            .map_err(|err| PyValueError::new_err(err.to_string()))?;
+        detector_error_model_artifact_lazy_to_py(py, dem)
+    }
+
     #[pyo3(signature = (*, materialize_dem=true))]
     pub(crate) fn compile_sampler(
         &self,
@@ -1493,14 +1506,22 @@ fn native_packed_sampler_from_circuit(
 }
 
 #[pyfunction]
+#[pyo3(signature = (circuit, detectors, observables, *, approximate_disjoint_errors=0.0))]
 pub(crate) fn generate_dem(
     py: Python<'_>,
     circuit: &Bound<'_, PyAny>,
     detectors: &Bound<'_, PyAny>,
     observables: &Bound<'_, PyAny>,
+    approximate_disjoint_errors: f64,
 ) -> PyResult<PyDetectorErrorModel> {
-    let generator =
-        core_dem_generator_from_circuit(py, circuit, Some(detectors), Some(observables))?;
+    let options = parse_dem_generation_options(approximate_disjoint_errors)?;
+    let generator = core_dem_generator_from_circuit_with_options(
+        py,
+        circuit,
+        Some(detectors),
+        Some(observables),
+        options,
+    )?;
     let dem = generator
         .generate_lazy()
         .map_err(|err| PyValueError::new_err(err.to_string()))?;
@@ -1508,27 +1529,38 @@ pub(crate) fn generate_dem(
 }
 
 #[pyfunction]
-#[pyo3(signature = (circuit, detectors=None, observables=None))]
+#[pyo3(signature = (circuit, detectors=None, observables=None, *, approximate_disjoint_errors=0.0))]
 pub(crate) fn compile_dem_generator(
     py: Python<'_>,
     circuit: &Bound<'_, PyAny>,
     detectors: Option<&Bound<'_, PyAny>>,
     observables: Option<&Bound<'_, PyAny>>,
+    approximate_disjoint_errors: f64,
 ) -> PyResult<NativeDemGenerator> {
+    let options = parse_dem_generation_options(approximate_disjoint_errors)?;
     Ok(NativeDemGenerator {
-        generator: core_dem_generator_from_circuit(py, circuit, detectors, observables)?,
+        generator: core_dem_generator_from_circuit_with_options(
+            py,
+            circuit,
+            detectors,
+            observables,
+            options,
+        )?,
     })
 }
 
 #[pyfunction]
-#[pyo3(signature = (circuit, detectors=None, observables=None))]
+#[pyo3(signature = (circuit, detectors=None, observables=None, *, approximate_disjoint_errors=0.0))]
 pub(crate) fn generate_and_compile_dem_sampler(
     py: Python<'_>,
     circuit: &Bound<'_, PyAny>,
     detectors: Option<&Bound<'_, PyAny>>,
     observables: Option<&Bound<'_, PyAny>>,
+    approximate_disjoint_errors: f64,
 ) -> PyResult<PyObject> {
-    let sampler = native_dem_sampler_from_circuit(py, circuit, detectors, observables, true)?;
+    let options = parse_dem_generation_options(approximate_disjoint_errors)?;
+    let sampler =
+        native_dem_sampler_from_circuit(py, circuit, detectors, observables, options, true)?;
     let dem = sampler
         .py_dem
         .as_ref()
@@ -1541,14 +1573,16 @@ pub(crate) fn generate_and_compile_dem_sampler(
 }
 
 #[pyfunction]
-#[pyo3(signature = (circuit, detectors=None, observables=None))]
+#[pyo3(signature = (circuit, detectors=None, observables=None, *, approximate_disjoint_errors=0.0))]
 pub(crate) fn compile_generated_dem_sampler(
     py: Python<'_>,
     circuit: &Bound<'_, PyAny>,
     detectors: Option<&Bound<'_, PyAny>>,
     observables: Option<&Bound<'_, PyAny>>,
+    approximate_disjoint_errors: f64,
 ) -> PyResult<NativeDemSampler> {
-    native_dem_sampler_from_circuit(py, circuit, detectors, observables, false)
+    let options = parse_dem_generation_options(approximate_disjoint_errors)?;
+    native_dem_sampler_from_circuit(py, circuit, detectors, observables, options, false)
 }
 
 #[pyfunction]
@@ -1561,17 +1595,35 @@ fn native_dem_sampler_from_circuit(
     circuit: &Bound<'_, PyAny>,
     detectors: Option<&Bound<'_, PyAny>>,
     observables: Option<&Bound<'_, PyAny>>,
+    options: faultscope_core::DemGenerationOptions,
     materialize_dem: bool,
 ) -> PyResult<NativeDemSampler> {
-    let generator = core_dem_generator_from_circuit(py, circuit, detectors, observables)?;
+    let generator =
+        core_dem_generator_from_circuit_with_options(py, circuit, detectors, observables, options)?;
     native_dem_sampler_from_core_generator(py, &generator, materialize_dem)
 }
 
 pub(crate) fn core_dem_generator_from_circuit(
+    py: Python<'_>,
+    circuit: &Bound<'_, PyAny>,
+    detectors: Option<&Bound<'_, PyAny>>,
+    observables: Option<&Bound<'_, PyAny>>,
+) -> PyResult<CoreDetectorErrorModelGenerator> {
+    core_dem_generator_from_circuit_with_options(
+        py,
+        circuit,
+        detectors,
+        observables,
+        faultscope_core::DemGenerationOptions::default(),
+    )
+}
+
+fn core_dem_generator_from_circuit_with_options(
     _py: Python<'_>,
     circuit: &Bound<'_, PyAny>,
     detectors: Option<&Bound<'_, PyAny>>,
     observables: Option<&Bound<'_, PyAny>>,
+    options: faultscope_core::DemGenerationOptions,
 ) -> PyResult<CoreDetectorErrorModelGenerator> {
     if let Ok(native_circuit) = circuit.extract::<PyRef<'_, PyCircuit>>() {
         if let Some(core_circuit) = native_circuit.core_circuit.as_ref() {
@@ -1583,10 +1635,11 @@ pub(crate) fn core_dem_generator_from_circuit(
                 Some(items) if !items.is_none() => Some(parse_dem_observable_sequence(items)?),
                 _ => None,
             };
-            return CoreDetectorErrorModelGenerator::new_with_validated_dem_circuit_options(
+            return CoreDetectorErrorModelGenerator::new_with_validated_dem_circuit_generation_options(
                 core_circuit,
                 detector_specs,
                 observable_specs,
+                options,
             )
             .map_err(|err| PyValueError::new_err(err.to_string()));
         }
@@ -1601,8 +1654,13 @@ pub(crate) fn core_dem_generator_from_circuit(
         Some(items) if !items.is_none() => Some(parse_dem_observable_sequence(items)?),
         _ => None,
     };
-    CoreDetectorErrorModelGenerator::new(core_circuit, detector_specs, observable_specs)
-        .map_err(|err| PyValueError::new_err(err.to_string()))
+    CoreDetectorErrorModelGenerator::new_with_options(
+        core_circuit,
+        detector_specs,
+        observable_specs,
+        options,
+    )
+    .map_err(|err| PyValueError::new_err(err.to_string()))
 }
 
 fn native_dem_sampler_from_core_generator(
@@ -1750,6 +1808,8 @@ pub(crate) fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<PyLogicalObservable>()?;
     module.add_class::<PyDetectorErrorEdge>()?;
     module.add_class::<PyDetectorErrorModel>()?;
+    module.add_class::<PyGraphlikeDecompositionHints>()?;
+    module.add_class::<PyGeneratedDetectorErrorModel>()?;
     module.add_class::<PyDetectorErrorModelGenerator>()?;
     module.add_class::<PyIndexedDemEdge>()?;
     module.add_class::<PyIndexedDem>()?;

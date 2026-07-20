@@ -14,8 +14,27 @@ patch releases may make breaking API changes.
   explicit raw/accepted logical rates, decoder fanout, and threshold analysis.
 - Factory/worker native decoder plugin ABI V4 and optional PyMatching and
   fusion-blossom backends.
+- Optional graphlike decomposition hints for compiling canonical DEM hyperedges
+  without changing the sampled detector/observable joint distribution.
+- Model-bound `GraphlikeDecompositionHints` and `GeneratedDetectorErrorModel`
+  package the canonical sampling DEM with optional decoder-only structure;
+  native generators expose the forward-compatible `generate_artifact()` API.
 
 ### Changed
+
+- Circuit-to-DEM generation now follows Stim's disjoint-error policy. Uniform
+  one- and two-qubit depolarizing channels are reparameterized exactly into
+  independent DEM mechanisms, and one-qubit `PauliChannel` first attempts
+  Stim's independent X/Y/Z conversion. A multi-component channel that cannot
+  take that exact path is rejected by default and requires explicit
+  `approximate_disjoint_errors=True` (or a component-probability threshold).
+  Matching propagated effects are first combined by disjoint probability sum;
+  distinct effect classes are then treated as independent edges.
+- The surface-code decoder benchmark now samples one canonical FaultScope DEM
+  edge per Stim `error` instruction and passes separator groups only to decoder
+  construction through a typed artifact. Only instructions with actual
+  multi-component separators allocate sparse hints. Native backend summaries distinguish canonical DEM,
+  pre-merge graphlike, and post-merge solver edge counts.
 
 - Native decoder plugins now use the breaking ABI V4. Factories publish a
   stable ordered Masks/Packed/Events preference list and workers expose one
@@ -80,6 +99,11 @@ patch releases may make breaking API changes.
 
 ### Fixed
 
+- Circuit-generated DEM sampling now preserves the detector/observable joint
+  distribution of supported depolarizing channels instead of independently
+  sampling the mutually exclusive Pauli marginals. The surface-code Stim DEM
+  converter also preserves detector coordinates declared after error
+  instructions.
 - Graphlike decoding problems now treat edge probability as the authoritative
   value and derive the ABI/matching weight in core. The compatibility edge DTO
   no longer accepts an independently writable weight that could be non-finite

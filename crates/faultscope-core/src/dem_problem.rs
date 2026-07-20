@@ -30,6 +30,17 @@ pub struct GraphlikeEdge {
     pub dem_edge_index: usize,
 }
 
+/// One graphlike component used to decompose a canonical DEM edge for decoding.
+///
+/// Detector and observable values are model IDs, not compact problem indices.
+/// All components that originate from the same canonical edge retain that
+/// edge's probability and `dem_edge_index` in the compiled problem.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GraphlikeDecompositionComponent {
+    pub detectors: Vec<i64>,
+    pub observables: Vec<i64>,
+}
+
 impl GraphlikeEdge {
     /// Return the canonical log-likelihood ratio derived from `probability`.
     pub fn weight(&self) -> f64 {
@@ -587,6 +598,139 @@ impl DetectorErrorModel {
         )
     }
 
+    /// Compile a graphlike decoder view using per-edge decomposition hints.
+    ///
+    /// The canonical DEM remains unchanged: every component inherits its
+    /// parent edge's probability and original edge index. The decomposition is
+    /// accepted only when the GF(2) XOR of its components exactly reproduces
+    /// the canonical detector and observable support of the parent edge.
+    pub fn compile_graphlike_problem_with_decomposition(
+        &self,
+        decomposition: &HashMap<usize, Vec<GraphlikeDecompositionComponent>>,
+    ) -> NpResult<GraphlikeDecodingProblem> {
+        for edge_index in decomposition.keys() {
+            if *edge_index >= self.edges.len() {
+                return Err(NpError::new(format!(
+                    "graphlike decomposition references DEM edge index {edge_index} but only {} edges exist",
+                    self.edges.len()
+                )));
+            }
+        }
+
+        let indexed = self.compile_indexed()?;
+        let detector_index = id_index(&indexed.detector_ids);
+        let observable_index = id_index(&indexed.observable_ids);
+        let edge_capacity = indexed.edges.iter().try_fold(0usize, |total, edge| {
+            total
+                .checked_add(
+                    decomposition
+                        .get(&edge.original_edge_index)
+                        .map_or(1, Vec::len),
+                )
+                .ok_or_else(|| NpError::new("graphlike decomposition edge count overflow"))
+        })?;
+        let mut builder = GraphlikeProblemBuilder::new(
+            indexed.detector_ids.clone(),
+            indexed.detector_coords.clone(),
+            indexed.observable_ids.clone(),
+            edge_capacity,
+        )?;
+
+        for edge in &indexed.edges {
+            let Some(components) = decomposition.get(&edge.original_edge_index) else {
+                builder.push_edge(
+                    &edge.detectors,
+                    &edge.observables,
+                    edge.probability,
+                    edge.original_edge_index,
+                )?;
+                continue;
+            };
+            if components.is_empty() {
+                return Err(NpError::new(format!(
+                    "graphlike decomposition for DEM edge {} must contain at least one component",
+                    edge.original_edge_index
+                )));
+            }
+
+            let mut compiled_components = Vec::with_capacity(components.len());
+            let mut detector_xor = Vec::new();
+            let mut observable_xor = Vec::new();
+            for (component_index, component) in components.iter().enumerate() {
+                let mut detectors = component
+                    .detectors
+                    .iter()
+                    .map(|detector_id| {
+                        detector_index.get(detector_id).copied().ok_or_else(|| {
+                            NpError::new(format!(
+                                "graphlike decomposition for DEM edge {} component {component_index} references unknown detector id {detector_id}",
+                                edge.original_edge_index
+                            ))
+                        })
+                    })
+                    .collect::<NpResult<Vec<_>>>()?;
+                parity_canonicalize(&mut detectors);
+                let mut observables = component
+                    .observables
+                    .iter()
+                    .map(|observable_id| {
+                        observable_index.get(observable_id).copied().ok_or_else(|| {
+                            NpError::new(format!(
+                                "graphlike decomposition for DEM edge {} component {component_index} references unknown logical observable id {observable_id}",
+                                edge.original_edge_index
+                            ))
+                        })
+                    })
+                    .collect::<NpResult<Vec<_>>>()?;
+                parity_canonicalize(&mut observables);
+
+                if detectors.is_empty() && observables.is_empty() {
+                    return Err(NpError::new(format!(
+                        "graphlike decomposition for DEM edge {} component {component_index} is empty after GF(2) parity reduction",
+                        edge.original_edge_index
+                    )));
+                }
+                if detectors.len() > 2 {
+                    return Err(NpError::new(format!(
+                        "graphlike decomposition for DEM edge {} component {component_index} has {} detectors after GF(2) parity reduction; expected at most two",
+                        edge.original_edge_index,
+                        detectors.len()
+                    )));
+                }
+                if detectors.is_empty() {
+                    return Err(NpError::new(format!(
+                        "graphlike decomposition for DEM edge {} component {component_index} is a pure logical component; at least one detector is required",
+                        edge.original_edge_index
+                    )));
+                }
+
+                detector_xor.extend_from_slice(&detectors);
+                observable_xor.extend_from_slice(&observables);
+                compiled_components.push((detectors, observables));
+            }
+
+            if !gf2_support_equal(&detector_xor, &edge.detectors)
+                || !gf2_support_equal(&observable_xor, &edge.observables)
+            {
+                return Err(NpError::new(format!(
+                    "graphlike decomposition for DEM edge {} does not reproduce the parent detector and observable support under GF(2) XOR",
+                    edge.original_edge_index
+                )));
+            }
+
+            for (detectors, observables) in compiled_components {
+                builder.push_edge(
+                    &detectors,
+                    &observables,
+                    edge.probability,
+                    edge.original_edge_index,
+                )?;
+            }
+        }
+
+        Ok(builder.build())
+    }
+
     pub fn compile_binary_linear_problem(&self) -> NpResult<BinaryLinearDecodingProblem> {
         let indexed = self.compile_indexed()?;
         let mut h_entries = Vec::new();
@@ -653,6 +797,16 @@ fn id_index(ids: &[i64]) -> HashMap<i64, usize> {
         .enumerate()
         .map(|(index, id)| (id, index))
         .collect()
+}
+
+fn gf2_support_equal(left: &[usize], right: &[usize]) -> bool {
+    let mut left = left.to_vec();
+    let mut right = right.to_vec();
+    parity_canonicalize(&mut left);
+    parity_canonicalize(&mut right);
+    left.sort_unstable();
+    right.sort_unstable();
+    left == right
 }
 
 pub fn log_likelihood_ratio(probability: f64) -> f64 {
@@ -731,6 +885,187 @@ mod tests {
         let err = dem.compile_graphlike_problem().unwrap_err();
 
         assert!(err.message().contains("at most two detectors"));
+    }
+
+    #[test]
+    fn graphlike_decomposition_accepts_order_independent_support_and_preserves_emission_order() {
+        let dem = DetectorErrorModel {
+            detectors: Vec::new(),
+            observables: Vec::new(),
+            edges: vec![
+                edge(0.125, vec![10, 20, 30], vec![7], "hyper"),
+                edge(0.25, vec![40], vec![], "plain"),
+            ],
+        };
+        let decomposition = HashMap::from([(
+            0,
+            vec![
+                GraphlikeDecompositionComponent {
+                    detectors: vec![30],
+                    observables: vec![],
+                },
+                GraphlikeDecompositionComponent {
+                    detectors: vec![20, 10, 20, 20],
+                    observables: vec![7, 7, 7],
+                },
+            ],
+        )]);
+
+        let problem = dem
+            .compile_graphlike_problem_with_decomposition(&decomposition)
+            .unwrap();
+        let edges = problem
+            .iter_edges()
+            .map(GraphlikeEdgeRef::to_owned)
+            .collect::<Vec<_>>();
+
+        assert_eq!(problem.detector_ids(), &[10, 20, 30, 40]);
+        assert_eq!(problem.observable_ids(), &[7]);
+        assert_eq!(edges.len(), 3);
+        assert_eq!(edges[0].detectors, vec![2]);
+        assert!(edges[0].fault_observables.is_empty());
+        assert_eq!(edges[1].detectors, vec![1, 0]);
+        assert_eq!(edges[1].fault_observables, vec![0]);
+        assert_eq!(edges[2].detectors, vec![3]);
+        assert_eq!(
+            edges
+                .iter()
+                .map(|edge| edge.dem_edge_index)
+                .collect::<Vec<_>>(),
+            vec![0, 0, 1]
+        );
+        assert_eq!(
+            edges
+                .iter()
+                .map(|edge| edge.probability)
+                .collect::<Vec<_>>(),
+            vec![0.125, 0.125, 0.25]
+        );
+    }
+
+    #[test]
+    fn graphlike_decomposition_rejects_invalid_edge_index_and_empty_component_list() {
+        let dem = DetectorErrorModel {
+            detectors: Vec::new(),
+            observables: Vec::new(),
+            edges: vec![edge(0.25, vec![10], vec![], "edge")],
+        };
+
+        let err = dem
+            .compile_graphlike_problem_with_decomposition(&HashMap::from([(1, vec![])]))
+            .unwrap_err();
+        assert!(err.message().contains("index 1"));
+
+        let err = dem
+            .compile_graphlike_problem_with_decomposition(&HashMap::from([(0, vec![])]))
+            .unwrap_err();
+        assert!(err.message().contains("at least one component"));
+    }
+
+    #[test]
+    fn graphlike_decomposition_rejects_invalid_components() {
+        let dem = DetectorErrorModel {
+            detectors: vec![
+                Detector {
+                    id: 10,
+                    measurement_keys: Vec::new(),
+                    coords: Vec::new(),
+                },
+                Detector {
+                    id: 20,
+                    measurement_keys: Vec::new(),
+                    coords: Vec::new(),
+                },
+                Detector {
+                    id: 30,
+                    measurement_keys: Vec::new(),
+                    coords: Vec::new(),
+                },
+            ],
+            observables: vec![LogicalObservable {
+                id: 7,
+                measurement_keys: Vec::new(),
+                pauli_qubits: Vec::new(),
+                pauli: String::new(),
+            }],
+            edges: vec![edge(0.25, vec![10, 20, 30], vec![7], "hyper")],
+        };
+
+        let cases = [
+            (
+                vec![GraphlikeDecompositionComponent {
+                    detectors: vec![10, 10],
+                    observables: vec![],
+                }],
+                "empty after GF(2)",
+            ),
+            (
+                vec![GraphlikeDecompositionComponent {
+                    detectors: vec![],
+                    observables: vec![7],
+                }],
+                "pure logical component",
+            ),
+            (
+                vec![GraphlikeDecompositionComponent {
+                    detectors: vec![10, 20, 30],
+                    observables: vec![7],
+                }],
+                "expected at most two",
+            ),
+            (
+                vec![GraphlikeDecompositionComponent {
+                    detectors: vec![99],
+                    observables: vec![],
+                }],
+                "unknown detector id 99",
+            ),
+            (
+                vec![GraphlikeDecompositionComponent {
+                    detectors: vec![10],
+                    observables: vec![99],
+                }],
+                "unknown logical observable id 99",
+            ),
+        ];
+        for (components, expected) in cases {
+            let err = dem
+                .compile_graphlike_problem_with_decomposition(&HashMap::from([(0, components)]))
+                .unwrap_err();
+            assert!(
+                err.message().contains(expected),
+                "expected {expected:?} in {:?}",
+                err.message()
+            );
+        }
+    }
+
+    #[test]
+    fn graphlike_decomposition_rejects_xor_mismatch() {
+        let dem = DetectorErrorModel {
+            detectors: Vec::new(),
+            observables: Vec::new(),
+            edges: vec![edge(0.25, vec![10, 20, 30], vec![], "hyper")],
+        };
+        let decomposition = HashMap::from([(
+            0,
+            vec![
+                GraphlikeDecompositionComponent {
+                    detectors: vec![10, 20],
+                    observables: vec![],
+                },
+                GraphlikeDecompositionComponent {
+                    detectors: vec![20, 30],
+                    observables: vec![],
+                },
+            ],
+        )]);
+
+        let err = dem
+            .compile_graphlike_problem_with_decomposition(&decomposition)
+            .unwrap_err();
+
+        assert!(err.message().contains("does not reproduce"));
     }
 
     #[test]

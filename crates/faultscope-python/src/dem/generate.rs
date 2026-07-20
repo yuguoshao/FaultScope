@@ -13,19 +13,25 @@ pub(crate) struct PyDetectorErrorModelGenerator {
 #[pymethods]
 impl PyDetectorErrorModelGenerator {
     #[new]
-    #[pyo3(signature = (circuit, *, detectors=None, observables=None))]
+    #[pyo3(signature = (circuit, *, detectors=None, observables=None, approximate_disjoint_errors=0.0))]
     pub(crate) fn new(
         py: Python<'_>,
         circuit: &Bound<'_, PyAny>,
         detectors: Option<&Bound<'_, PyAny>>,
         observables: Option<&Bound<'_, PyAny>>,
+        approximate_disjoint_errors: f64,
     ) -> PyResult<Self> {
         let core_circuit = parse_core_circuit_object(circuit)?;
         let detector_specs = optional_detector_specs(detectors)?;
         let observable_specs = optional_observable_specs(observables)?;
-        let generator =
-            CoreDetectorErrorModelGenerator::new(core_circuit, detector_specs, observable_specs)
-                .map_err(np_error_to_py)?;
+        let options = parse_dem_generation_options(approximate_disjoint_errors)?;
+        let generator = CoreDetectorErrorModelGenerator::new_with_options(
+            core_circuit,
+            detector_specs,
+            observable_specs,
+            options,
+        )
+        .map_err(np_error_to_py)?;
         let py_detectors = match detectors {
             Some(detectors) if !detectors.is_none() => py_tuple_from_sequence(py, detectors)?,
             _ => detectors_to_py_tuple(py, &generator.detectors)?,
@@ -62,6 +68,19 @@ impl PyDetectorErrorModelGenerator {
         detector_error_model_lazy_to_py(py, dem)
     }
 
+    /// Generate the canonical DEM together with its optional decoder hints.
+    ///
+    /// The native circuit generator does not produce graphlike decomposition
+    /// hints yet, so this currently returns an artifact with `None` hints.  The
+    /// wrapper keeps the API stable for future hint generation.
+    pub(crate) fn generate_artifact(
+        &self,
+        py: Python<'_>,
+    ) -> PyResult<PyGeneratedDetectorErrorModel> {
+        let dem = self.generator.generate_lazy().map_err(np_error_to_py)?;
+        detector_error_model_artifact_lazy_to_py(py, dem)
+    }
+
     pub(crate) fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
         Ok(format!(
             "DetectorErrorModelGenerator(circuit={}, detectors={}, observables={})",
@@ -77,6 +96,14 @@ pub(crate) fn detector_error_model_lazy_to_py(
     dem: faultscope_core::LazyDetectorErrorModel,
 ) -> PyResult<PyDetectorErrorModel> {
     Ok(PyDetectorErrorModel::from_core_lazy_dem(dem))
+}
+
+pub(crate) fn detector_error_model_artifact_lazy_to_py(
+    py: Python<'_>,
+    dem: faultscope_core::LazyDetectorErrorModel,
+) -> PyResult<PyGeneratedDetectorErrorModel> {
+    let dem = Py::new(py, PyDetectorErrorModel::from_core_lazy_dem(dem))?;
+    Ok(PyGeneratedDetectorErrorModel::without_hints(dem))
 }
 
 pub(crate) fn dem_event_to_py(

@@ -118,6 +118,7 @@ class PyMatchingBackendPackageTests(unittest.TestCase):
         self.assertEqual(decoder.edge_count, 1)
         self.assertEqual(decoder.solver_edge_count, 1)
         self.assertEqual(decoder.build_summary["dem_edge_count"], 1)
+        self.assertEqual(decoder.build_summary["graphlike_edge_count"], 1)
         self.assertEqual(decoder.build_summary["solver_edge_count"], 1)
         self.assertEqual(decoder.python_decode_call_count, 0)
         self.assertIsNotNone(decoder.__faultscope_native_decoder_capsule__())
@@ -127,6 +128,29 @@ class PyMatchingBackendPackageTests(unittest.TestCase):
         self.assertEqual(payload["native_decoder_abi"], NATIVE_DECODER_PLUGIN_ABI)
         self.assertEqual(payload["parameters"], {})
         self.assertEqual(payload["solver"], decoder.build_summary)
+
+    @requires_native_backend
+    def test_public_from_graphlike_problem_preserves_parent_edge_counts(self) -> None:
+        dem = DetectorErrorModel(
+            detectors=(
+                Detector(id=0, measurement_keys=()),
+                Detector(id=1, measurement_keys=()),
+            ),
+            observables=(LogicalObservable(id=0),),
+            edges=(DetectorErrorEdge(0.2, (0, 1), (0,), "parent", "X"),),
+        )
+        problem = dem.compile_graphlike_problem(
+            decomposition={0: (((0,), (0,)), ((1,), ()))},
+        )
+
+        decoder = faultscope_pymatching.NativePyMatchingDecoder.from_graphlike_problem(problem)
+
+        self.assertEqual(decoder.edge_count, 1)
+        self.assertEqual(decoder.solver_edge_count, 2)
+        self.assertEqual(decoder.build_summary["dem_edge_count"], 1)
+        self.assertEqual(decoder.build_summary["graphlike_edge_count"], 2)
+        self.assertEqual(decoder.build_summary["solver_edge_count"], 2)
+        self.assertEqual(decoder.python_decode_call_count, 0)
 
     @requires_native_backend
     def test_backend_consumes_native_graphlike_capsule_without_python_edge_objects(self) -> None:
@@ -313,6 +337,9 @@ class PyMatchingBackendPackageTests(unittest.TestCase):
             )
             decoder = create_native_decoder("pymatching", dem=dem)
             friendly_decoder = NativePyMatchingDecoder.from_dem(dem)
+            friendly_problem_decoder = NativePyMatchingDecoder.from_graphlike_problem(
+                dem.compile_graphlike_problem()
+            )
             result = sampler.estimate(shots=2048, seed=101, decoder=decoder)
             mean_loss_result = sampler.estimate(
                 shots=2048,
@@ -323,6 +350,7 @@ class PyMatchingBackendPackageTests(unittest.TestCase):
 
         self.assertEqual(decoder.python_decode_call_count, 0)
         self.assertEqual(friendly_decoder.python_decode_call_count, 0)
+        self.assertEqual(friendly_problem_decoder.python_decode_call_count, 0)
         self.assertEqual(result.mean_loss, 0.0)
         self.assertEqual(mean_loss_result.mean_loss, 0.0)
         self.assertEqual(mean_loss_result.edge_sensitivities, {})

@@ -22,7 +22,7 @@ use fusion_blossom::util::{
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyIterator, PyTuple};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::env;
 use std::ffi::{c_void, CString};
 use std::mem;
@@ -685,7 +685,8 @@ struct FusionBlossomProblemBuilder {
     detector_coords: Vec<Vec<f64>>,
     observable_ids: Vec<i64>,
     weight_scale: f64,
-    dem_edge_count: usize,
+    dem_edge_indices: HashSet<usize>,
+    graphlike_edge_count: usize,
     boundary_groups: Vec<BoundaryEdgeGroup>,
     boundary_group_by_key: HashMap<(usize, Vec<usize>), usize>,
     graph_groups: Vec<GraphEdgeGroup>,
@@ -735,6 +736,7 @@ struct SolverVertexLayout {
 #[derive(Debug, Clone)]
 struct BuildSummary {
     dem_edge_count: usize,
+    graphlike_edge_count: usize,
     solver_vertex_count: usize,
     solver_edge_count: usize,
     boundary_vertex_count: usize,
@@ -962,7 +964,8 @@ impl FusionBlossomProblemBuilder {
             detector_coords,
             observable_ids,
             weight_scale,
-            dem_edge_count: 0,
+            dem_edge_indices: HashSet::new(),
+            graphlike_edge_count: 0,
             boundary_groups: Vec::new(),
             boundary_group_by_key: HashMap::new(),
             graph_groups: Vec::new(),
@@ -978,7 +981,8 @@ impl FusionBlossomProblemBuilder {
         probability: f64,
         _weight: f64,
     ) -> PyResult<()> {
-        self.dem_edge_count += 1;
+        self.graphlike_edge_count += 1;
+        self.dem_edge_indices.insert(dem_edge_index);
         validate_probability(probability, dem_edge_index)?;
         let fault_observables = canonical_fault_observables(fault_observables);
         for &detector_index in &detectors {
@@ -1151,7 +1155,8 @@ impl FusionBlossomProblemBuilder {
             virtual_vertices,
         );
         let summary = BuildSummary {
-            dem_edge_count: self.dem_edge_count,
+            dem_edge_count: self.dem_edge_indices.len(),
+            graphlike_edge_count: self.graphlike_edge_count,
             solver_vertex_count,
             solver_edge_count,
             boundary_vertex_count,
@@ -2260,6 +2265,7 @@ fn collect_packed_defects(
 fn build_summary_to_py(py: Python<'_>, summary: &BuildSummary) -> PyResult<PyObject> {
     let out = PyDict::new(py);
     out.set_item("dem_edge_count", summary.dem_edge_count)?;
+    out.set_item("graphlike_edge_count", summary.graphlike_edge_count)?;
     out.set_item("solver_vertex_count", summary.solver_vertex_count)?;
     out.set_item("solver_edge_count", summary.solver_edge_count)?;
     out.set_item("boundary_vertex_count", summary.boundary_vertex_count)?;
@@ -2398,7 +2404,8 @@ mod tests {
             detector_coords: vec![Vec::new(), Vec::new()],
             observable_ids: vec![9],
             weight_scale: 10_000.0,
-            dem_edge_count: 0,
+            dem_edge_indices: HashSet::new(),
+            graphlike_edge_count: 0,
             boundary_groups: Vec::new(),
             boundary_group_by_key: HashMap::new(),
             graph_groups: Vec::new(),
@@ -2409,7 +2416,8 @@ mod tests {
             .push_edge(4, Vec::new(), Vec::new(), 0.37, 0.0)
             .unwrap();
 
-        assert_eq!(builder.dem_edge_count, 1);
+        assert_eq!(builder.dem_edge_indices, HashSet::from([4]));
+        assert_eq!(builder.graphlike_edge_count, 1);
         assert!(builder.boundary_groups.is_empty());
         assert!(builder.graph_groups.is_empty());
     }

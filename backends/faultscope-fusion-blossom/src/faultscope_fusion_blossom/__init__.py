@@ -58,9 +58,13 @@ class NativeFusionBlossomDecoder:
 
     @staticmethod
     def from_dem(dem, *, options=None):
+        problem = dem.compile_graphlike_problem()
+        return NativeFusionBlossomDecoder.from_graphlike_problem(problem, options=options)
+
+    @staticmethod
+    def from_graphlike_problem(problem, *, options=None):
         _require_native_extension()
         parsed = _parse_options(options)
-        problem = dem.compile_graphlike_problem()
         inner = _native.NativeFusionBlossomNativeDecoder.from_graphlike_problem(
             problem,
             weight_scale=parsed["weight_scale"],

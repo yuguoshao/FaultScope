@@ -12,6 +12,13 @@ pub(crate) type DemObservableSpec = CoreLogicalObservable;
 pub(crate) type Op = faultscope_core::Operation;
 pub(crate) type DemEdgeSpec = faultscope_core::DetectorErrorEdge;
 
+pub(crate) fn parse_dem_generation_options(
+    threshold: f64,
+) -> PyResult<faultscope_core::DemGenerationOptions> {
+    faultscope_core::DemGenerationOptions::new(threshold)
+        .map_err(|err| PyValueError::new_err(err.to_string()))
+}
+
 pub(crate) fn parse_core_circuit_object(
     value: &Bound<'_, PyAny>,
 ) -> PyResult<faultscope_core::Circuit> {

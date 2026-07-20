@@ -15,6 +15,13 @@ they have the same detector endpoints and logical-observable support. The
 adapter rejects conflicting logical effects because PyMatching cannot preserve
 both effects on one simple-graph edge.
 
+`NativePyMatchingDecoder.from_graphlike_problem(...)` accepts a precompiled
+view, including validated multi-component hints that share one canonical
+`dem_edge_index`. These components are an uncorrelated matching approximation;
+canonical DEM sampling remains outside this backend. Construction summaries
+report canonical `dem_edge_count`, pre-merge `graphlike_edge_count`, and
+post-merge `solver_edge_count` separately.
+
 Hotspot attribution is not part of the decoder input. FaultScope records the
 edge-event trace in its own sidecar while this backend receives only packed
 detector syndrome rows.

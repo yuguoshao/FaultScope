@@ -59,14 +59,20 @@ def generate_native_dem(
     *,
     detectors: Any | None = None,
     observables: Any | None = None,
+    approximate_disjoint_errors: bool | float = False,
 ) -> Any:
-    """Generate a detector error model through the native extension."""
+    """Generate a detector error model through the native extension.
+
+    ``approximate_disjoint_errors`` follows Stim's policy for categorical
+    Pauli channels; the default is strict.
+    """
 
     try:
         generator = compile_native_dem_generator(
             circuit,
             detectors=detectors,
             observables=observables,
+            approximate_disjoint_errors=approximate_disjoint_errors,
         )
         if hasattr(generator, "generate_dem"):
             return generator.generate_dem()
@@ -82,8 +88,16 @@ def compile_native_dem_generator(
     *,
     detectors: Any | None = None,
     observables: Any | None = None,
+    approximate_disjoint_errors: bool | float = False,
 ) -> NativeDemGenerator:
-    """Compile ``circuit`` into a reusable native DEM generator."""
+    """Compile ``circuit`` into a reusable native DEM generator.
+
+    One-qubit ``PauliChannel`` locations first attempt Stim's independent X/Y/Z
+    conversion. Multi-component channels that cannot use that path are rejected
+    by default because categorical outcomes are not independent DEM
+    instructions. Set ``approximate_disjoint_errors=True`` (or a maximum
+    component-probability threshold) to opt into Stim-compatible approximation.
+    """
 
     try:
         native_mod = importlib.import_module("faultscope._native")
@@ -93,9 +107,15 @@ def compile_native_dem_generator(
                 circuit,
                 detectors=detectors,
                 observables=observables,
+                approximate_disjoint_errors=approximate_disjoint_errors,
             )
         else:
-            generator = compile_generator(circuit, detectors, observables)
+            generator = compile_generator(
+                circuit,
+                detectors,
+                observables,
+                approximate_disjoint_errors=approximate_disjoint_errors,
+            )
         return generator
     except Exception as exc:
         raise UnsupportedNativeCircuitError(str(exc)) from exc
@@ -118,13 +138,16 @@ def compile_native_dem_sampler_from_circuit(
     *,
     detectors: Any | None = None,
     observables: Any | None = None,
+    approximate_disjoint_errors: bool | float = False,
     materialize_dem: bool = True,
 ) -> NativeDemSampler:
     """Generate and compile a native DEM sampler directly from ``circuit``.
 
     ``materialize_dem=False`` skips constructing the Python ``DetectorErrorModel``
     object. In that mode, ``sampler.dem`` is ``None`` and APIs requiring full
-    DEM metadata raise ``ValueError``.
+    DEM metadata raise ``ValueError``. ``approximate_disjoint_errors`` controls
+    the same Stim-compatible categorical-channel approximation as
+    :func:`generate_native_dem`.
     """
 
     try:
@@ -132,6 +155,7 @@ def compile_native_dem_sampler_from_circuit(
             circuit,
             detectors=detectors,
             observables=observables,
+            approximate_disjoint_errors=approximate_disjoint_errors,
         )
         if not hasattr(generator, "compile_sampler"):
             native_mod = importlib.import_module("faultscope._native")
@@ -140,12 +164,14 @@ def compile_native_dem_sampler_from_circuit(
                     circuit,
                     detectors,
                     observables,
+                    approximate_disjoint_errors=approximate_disjoint_errors,
                 )
                 return payload["sampler"]
             return native_mod.compile_generated_dem_sampler(
                 circuit,
                 detectors,
                 observables,
+                approximate_disjoint_errors=approximate_disjoint_errors,
             )
         if materialize_dem:
             return generator.compile_sampler(materialize_dem=True)

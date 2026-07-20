@@ -294,14 +294,17 @@ the public `UnsupportedNativeCircuitError` boundary:
 
 ```text
 compile_native_sampler(circuit, *, observables=None) -> NativePackedSampler
-generate_native_dem(circuit, *, detectors=None, observables=None) -> DetectorErrorModel
-compile_native_dem_generator(circuit, *, detectors=None, observables=None) -> NativeDemGenerator
+generate_native_dem(circuit, *, detectors=None, observables=None,
+                    approximate_disjoint_errors=False) -> DetectorErrorModel
+compile_native_dem_generator(circuit, *, detectors=None, observables=None,
+                             approximate_disjoint_errors=False) -> NativeDemGenerator
 compile_native_dem_sampler(dem) -> NativeDemSampler
 compile_native_dem_sampler_from_circuit(
     circuit,
     *,
     detectors=None,
     observables=None,
+    approximate_disjoint_errors=False,
     materialize_dem=True,
 ) -> NativeDemSampler
 ```
@@ -336,7 +339,8 @@ construction, raise `ValueError`.
 ## DEM Runtime From Circuit
 
 `DemFaultScopeSimulator(circuit, *, detectors=None, observables=None,
-materialize_dem=True)` is the DEM-level counterpart to `FaultScopeSimulator`.
+approximate_disjoint_errors=False, materialize_dem=True)` is the DEM-level
+counterpart to `FaultScopeSimulator`.
 It compiles a circuit into a detector error model sampler in Rust, then samples
 DEM edges directly. It does not run the forward stabilizer trajectory and does
 not expose measurement, `x_frame`, or `z_frame` masks.
@@ -504,7 +508,7 @@ Methods:
 to_dem_text(*, include_detector_coords=True) -> str
 edges_by_location() -> dict[str, list[DetectorErrorEdge]]
 compile_indexed() -> IndexedDem
-compile_graphlike_problem() -> GraphlikeDecodingProblem
+compile_graphlike_problem(*, decomposition=None) -> GraphlikeDecodingProblem
 compile_binary_linear_problem() -> BinaryLinearDecodingProblem
 is_graphlike() -> bool
 project_hotspots_to_edges(hotspots) -> dict[tuple[str, object], float]
@@ -515,16 +519,75 @@ project_sensitivities_to_detector_graph(sensitivities) -> DetectorGraphHotspots
 `project_hotspots_to_edges(...)` expects a mapping from location id to hotspot
 value. It returns edge values keyed by `(location_id, event)`.
 
-`DetectorErrorModelGenerator(circuit, *, detectors=None, observables=None)`
-generates a DEM from a circuit. If declarations are omitted, FaultScope reads
-`Operation.detector(...)` and `Operation.observable_include(...)` entries from
-the circuit.
+`compile_graphlike_problem(decomposition=...)` accepts an optional mapping from
+canonical DEM edge index to an ordered sequence of `(detector_ids,
+observable_ids)` components. Each component inherits the parent edge's
+probability and `dem_edge_index`. Component targets are reduced over GF(2), and
+the XOR of all components must exactly reproduce the parent edge's detector and
+observable support. Components must be nonempty, touch one or two detectors,
+and reference valid model ids; pure logical components are rejected. Edges
+without a hint retain the ordinary graphlike validation behavior. This
+argument compiles a decoder view only: DEM sampling always samples the original
+canonical edges.
+
+The mapping argument is the backward-compatible low-level interface. New code
+should package it once as typed, model-bound metadata:
+
+```python
+hints = GraphlikeDecompositionHints(dem, components_by_edge)
+artifact = GeneratedDetectorErrorModel(dem, graphlike_hints=hints)
+problem = artifact.compile_graphlike_problem()
+```
+
+`GraphlikeDecompositionHints` validates and compiles the sparse hint mapping at
+construction time. It is bound to the exact immutable `DetectorErrorModel`
+instance supplied to its constructor; attaching it to another model raises
+`ValueError`. Its read-only `components_by_edge` attribute exposes the validated
+sparse mapping.
+
+`GeneratedDetectorErrorModel` packages the canonical `dem` and optional
+`graphlike_hints`. `compile_graphlike_problem()` uses the hints when present and
+otherwise delegates to ordinary graphlike compilation. This is an API-level
+bundle only: sampling still consumes `artifact.dem`, never its components.
+
+`DetectorErrorModelGenerator(circuit, *, detectors=None, observables=None,
+approximate_disjoint_errors=0.0)` generates a DEM from a circuit. If declarations
+are omitted, FaultScope reads `Operation.detector(...)` and
+`Operation.observable_include(...)` entries from the circuit.
+
+`generate()` returns the backward-compatible canonical DEM.
+`generate_artifact()` returns a `GeneratedDetectorErrorModel`. The native
+circuit generator does not synthesize graphlike hints yet, so its artifact
+currently has `graphlike_hints is None`; this stable return type allows hints to
+be added later without changing sampler or decoder APIs.
+
+`approximate_disjoint_errors` matches Stim's circuit-to-DEM policy. Before using
+this option, a one-qubit `PauliChannel` attempts Stim's numerical conversion into
+independent X/Y/Z mechanisms; a single positive component is trivially exact,
+and some multi-component channels are exact as well. `False` or `0.0` rejects a
+categorical channel when that conversion is unavailable. `True` enables
+independent approximation for all valid component probabilities; a float in
+`[0, 1]` is the maximum accepted component probability. `PAULI_CHANNEL_2` and
+wider channels have no general exact conversion attempt. Depolarizing channels
+use an exact independent reparameterization and do not require this option, but
+exact conversion is limited to rates `<=3/4` for one qubit and `<=15/16` for two
+qubits. The option does not alter hand-built DEM semantics: every DEM edge
+remains an independent Bernoulli instruction. During an opted-in `PauliChannel`
+conversion, disjoint Pauli components with identical propagated
+detector/observable support are first combined by summing their probabilities;
+only distinct effect classes are approximated as independent.
+
+The one-qubit solver follows Stim's `1e-14` absolute residual criterion. A tiny
+non-factorable channel can therefore be accepted as numerically exact without
+the option, potentially dropping effects beneath that tolerance. Forward
+sampling remains the exact categorical reference.
 
 `IndexedDem`, `GraphlikeDecodingProblem`, and `BinaryLinearDecodingProblem` are
 native decoder-ready views. They expose stable ids, detector coordinates,
 counts, `edge_summary`, and compact `repr(...)` metadata for inspection.
 `detector_coords` follows `detector_ids` order. `GraphlikeDecodingProblem`
-targets MWPM-style backends such as future fusion-blossom adapters.
+targets MWPM-style backends, including the optional PyMatching and
+fusion-blossom adapters.
 `BinaryLinearDecodingProblem` targets BP+OSD/LDPC-style backends with sparse
 binary detector error matrix `H` and logical fault matrix `F`. These objects
 intentionally do not expose `to_numpy_*` hot-path helpers; native decoders

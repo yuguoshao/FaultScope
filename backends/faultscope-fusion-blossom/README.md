@@ -14,6 +14,11 @@ independent attribution sidecar. It is not
 yet the production partitioned or streaming adapter, and it does not support
 erasure or dynamic weights. The development build uses fusion-blossom's compact
 vertex/edge index mode and rejects graphs that exceed that backend index range.
+`NativeFusionBlossomDecoder.from_graphlike_problem(...)` accepts a precompiled
+view. Components that share a canonical `dem_edge_index` remain an uncorrelated
+matching approximation and are never sampled by this package. Construction
+summaries distinguish canonical `dem_edge_count`, pre-merge
+`graphlike_edge_count`, and post-merge `solver_edge_count`.
 Dynamic native error views remain valid until the associated decoder state is
 dropped. The backend retains every dynamic error message in state-owned storage
 to keep concurrent callback consumption safe, so repeated errors retain memory

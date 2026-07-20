@@ -125,6 +125,16 @@ print(result.hotspot_table(top_k=5))
   传入 detector / observable 时，会读取 circuit 中的 `Operation.detector(...)` 和
   `Operation.observable_include(...)`。每个 generated edge 对应 detector error matrix
   \(H\) 的一列及其 logical observable flips。
+- `DetectorErrorModelGenerator.generate_artifact()` 返回
+  `GeneratedDetectorErrorModel`，把唯一 canonical sampling DEM 与可选的稀疏
+  `GraphlikeDecompositionHints` 封装在一起。原生线路生成目前不产生 hint；Stim `^` importer
+  可以填充该 sidecar，decoder 通过 artifact 编译 graphlike view。
+- Circuit→DEM 对 depolarizing noise 使用 Stim 同样的精确独立化参数，并先尝试把 one-qubit
+  `PauliChannel` 精确转换成独立 X/Y/Z mechanisms。不能完成这种转换的多分量 categorical channel
+  默认拒绝；只有显式传入 `approximate_disjoint_errors=True`（或概率阈值）才启用近似。Stim 风格
+  转换会先合并具有相同 detector/observable effect 的互斥分量，再把不同 effect classes 视为独立；
+  后一步会允许同一 shot 同时发生多个原本互斥的结果，因此需要精确保留物理联合分布时应使用
+  forward sampling。
 - `DemHotspotEstimator` 在 DEM 层采样，每条 DEM edge 按独立 Bernoulli instruction 处理，并把
   sampled edge vector 映射成 detector syndrome 和 logical observable flip record。
 - `faultscope.collection.Collector` 提供可复用的 threshold-style logical error-rate
@@ -210,7 +220,9 @@ FaultScope 当前产品路径是 packed batch engine，不暴露通用的 per-sh
 
 Stim/PyMatching 相关 benchmark 会在对应可选依赖安装后启用对照；
 surface-code decoder performance benchmark 会在安装 `faultscope-pymatching` 或
-`faultscope-fusion-blossom` 后额外输出对应 native path。传入
+`faultscope-fusion-blossom` 后额外输出对应 native path。该 benchmark 对每条 Stim
+`error` 保留一条 canonical FaultScope DEM edge；`^` 分组只用于编译当前
+uncorrelated graphlike decoder view，不会被独立采样。传入
 `--split-native-baseline` 可把 native no-correction packed-row baseline 与
 decoder 增量分开显示。需要比较不同 native decoder 的 mean-loss 时，使用
 `--same-seed-across-paths` 让同一个 distance/rate 点复用相同 seed。
