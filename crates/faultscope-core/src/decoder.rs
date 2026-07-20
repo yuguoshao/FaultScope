@@ -1232,11 +1232,20 @@ const ALL_BATCH_FORMATS: [DetectorBatchFormat; 3] = DetectorBatchFormat::STABLE_
 
 /// Validate the ordered detector input layout exposed by a decoder.
 pub fn validate_decoder_detector_ids(detector_ids: &[i64]) -> NpResult<()> {
-    let mut seen = HashSet::with_capacity(detector_ids.len());
-    for &detector_id in detector_ids {
-        if !seen.insert(detector_id) {
+    validate_decoder_ids(detector_ids, "detector")
+}
+
+/// Validate the ordered logical-observable output layout exposed by a decoder.
+pub fn validate_decoder_observable_ids(observable_ids: &[i64]) -> NpResult<()> {
+    validate_decoder_ids(observable_ids, "observable")
+}
+
+fn validate_decoder_ids(ids: &[i64], kind: &str) -> NpResult<()> {
+    let mut seen = HashSet::with_capacity(ids.len());
+    for &id in ids {
+        if !seen.insert(id) {
             return Err(NpError::new(format!(
-                "decoder detector ids must be unique; duplicate detector id {detector_id}"
+                "decoder {kind} ids must be unique; duplicate {kind} id {id}"
             )));
         }
     }

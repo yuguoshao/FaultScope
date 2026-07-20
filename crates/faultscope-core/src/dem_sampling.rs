@@ -5,10 +5,10 @@ use crate::dem_canonical::{canonical_id_order, parity_canonicalize};
 use crate::labels::LocationCatalogBuilder;
 use crate::{
     convert_detector_batch, for_each_bernoulli_event, packed_corrections_to_masks,
-    validate_decoder_detector_ids, word_count, CorrectionMaskBatch, DemBatch, DemEvent,
-    DemHotspotEstimate, DemLocationGroup, DetectorBatch, DetectorBatchFormat, DetectorBatchView,
-    DetectorErrorEdge, DetectorErrorModel, LocationCatalog, LocationId, Mask, NpError, NpResult,
-    PackedObservableShotBatch, SmallRng,
+    validate_decoder_detector_ids, validate_decoder_observable_ids, word_count,
+    CorrectionMaskBatch, DemBatch, DemEvent, DemHotspotEstimate, DemLocationGroup, DetectorBatch,
+    DetectorBatchFormat, DetectorBatchView, DetectorErrorEdge, DetectorErrorModel, LocationCatalog,
+    LocationId, Mask, NpError, NpResult, PackedObservableShotBatch, SmallRng,
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -675,6 +675,7 @@ fn compile_dem_sampling_plan(spec: DemSamplingPlanSpec<'_>) -> NpResult<Compiled
     } = spec;
     validate_decoder_detector_ids(detector_ids)?;
     validate_decoder_detector_ids(detail_detector_ids)?;
+    validate_decoder_observable_ids(observable_ids)?;
     let sampling_detector_index = sampling_detector_ids
         .iter()
         .copied()
@@ -1809,6 +1810,23 @@ mod tests {
         assert_eq!(
             error.message(),
             "decoder detector ids must be unique; duplicate detector id 1"
+        );
+    }
+
+    #[test]
+    fn compiled_sampling_rejects_duplicate_observable_layout() {
+        let simulator = DemHotspotEstimator::from_sampling_parts(
+            vec![1],
+            vec![2],
+            vec![edge(0.5, vec![1], vec![2])],
+        )
+        .unwrap();
+
+        let error = simulator.compile_sampling_plan(&[1], &[2, 2]).unwrap_err();
+
+        assert_eq!(
+            error.message(),
+            "decoder observable ids must be unique; duplicate observable id 2"
         );
     }
 
