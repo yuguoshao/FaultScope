@@ -74,6 +74,12 @@ class StimSamplingComparisonTests(unittest.TestCase):
             "M(1.1) 0",
             "MPP X0**Y1",
             "MPP X0*",
+            "TICK(1)",
+            "TICK 0",
+            "SHIFT_COORDS 0",
+            "H(0.1) 0",
+            "CX(0.2) 0 1",
+            "R(0.3) 0",
         )
         for source in cases:
             with self.subTest(source=source):

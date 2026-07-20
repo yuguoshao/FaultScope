@@ -117,13 +117,17 @@ class _StructuredStimImporter:
         targets = node.targets
         line_no = node.line_no
         if name == "TICK":
+            _require_no_args(args, name, line_no)
+            _require_no_targets(targets, name, line_no)
             return [Operation.tick()]
         if name == "SHIFT_COORDS":
+            _require_no_targets(targets, name, line_no)
             return [Operation.shift_coords(args)]
         if name == "QUBIT_COORDS":
             self._record_qubits(_parse_qubit_targets(targets, line_no))
             return []
         if name in {"H", "S", "S_DAG", "SQRT_Z_DAG", "X", "Y", "Z"}:
+            _require_no_args(args, name, line_no)
             out: list[Operation] = []
             for qubit in _parse_qubit_targets(targets, line_no):
                 if name == "H":
@@ -141,6 +145,7 @@ class _StructuredStimImporter:
                 self._record_qubits((qubit,))
             return out
         if name in {"CX", "CNOT", "CZ", "SWAP"}:
+            _require_no_args(args, name, line_no)
             qubits = _parse_qubit_targets(targets, line_no)
             if len(qubits) % 2:
                 raise StimImportError(
@@ -157,6 +162,7 @@ class _StructuredStimImporter:
                 self._record_qubits((left, right))
             return out
         if name in {"R", "RX", "RY"}:
+            _require_no_args(args, name, line_no)
             basis = {"R": "Z", "RX": "X", "RY": "Y"}[name]
             qubits = _parse_qubit_targets(targets, line_no)
             self._record_qubits(qubits)
@@ -556,6 +562,16 @@ def _required_single_arg(args: tuple[float, ...], name: str, line_no: int) -> fl
     if len(args) != 1:
         raise StimImportError(f"{name} requires exactly one arg on line {line_no}")
     return _validate_probability(args[0], name, line_no)
+
+
+def _require_no_args(args: Sequence[float], name: str, line_no: int) -> None:
+    if args:
+        raise StimImportError(f"{name} does not accept arguments on line {line_no}")
+
+
+def _require_no_targets(targets: Sequence[str], name: str, line_no: int) -> None:
+    if targets:
+        raise StimImportError(f"{name} does not accept targets on line {line_no}")
 
 
 def _optional_single_arg(
