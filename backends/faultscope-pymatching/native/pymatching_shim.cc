@@ -23,6 +23,7 @@ struct FaultScopePyMatchingDecoder {
     size_t detector_count;
     size_t observable_count;
     size_t edge_count;
+    bool has_negative_weights;
 };
 
 namespace {
@@ -59,7 +60,17 @@ size_t trailing_zero_count(uint64_t word) {
 }
 
 DetectionEventSpan span_from_vector(const std::vector<uint64_t> &events) {
-    return DetectionEventSpan{events.data(), events.size()};
+    return DetectionEventSpan{events.empty() ? nullptr : events.data(), events.size()};
+}
+
+DetectionEventSpan span_from_subrange(
+    const std::vector<uint64_t> &events,
+    size_t begin,
+    size_t end) {
+    return DetectionEventSpan{
+        begin == end ? nullptr : events.data() + begin,
+        end - begin,
+    };
 }
 
 void process_timeline_until_completion(pm::Mwpm &mwpm, DetectionEventSpan detection_events) {
@@ -373,9 +384,11 @@ extern "C" FaultScopePyMatchingDecoder *faultscope_pymatching_decoder_new(
         }
         pm::MatchingGraph graph(detector_count, observable_count);
         pm::SearchGraph search_graph(detector_count);
+        bool has_negative_weights = false;
 
         for (size_t edge_index = 0; edge_index < edge_count; edge_index++) {
             const auto &edge = edges[edge_index];
+            has_negative_weights |= edge.weight < 0;
             auto observables = edge_observables(edge);
             if (edge.is_boundary) {
                 graph.add_boundary_edge(edge.left, edge.weight, observables);
@@ -395,6 +408,7 @@ extern "C" FaultScopePyMatchingDecoder *faultscope_pymatching_decoder_new(
             detector_count,
             observable_count,
             edge_count,
+            has_negative_weights,
         };
     } catch (const std::exception &ex) {
         write_error(error_message, error_message_capacity, ex.what());
@@ -478,13 +492,11 @@ extern "C" int faultscope_pymatching_decoder_decode_batch(
             for (size_t shot = 0; shot < shots; shot++) {
                 size_t begin = shot_events.offsets[shot];
                 size_t end = shot_events.offsets[shot + 1];
-                if (begin == end) {
+                if (begin == end && !decoder->has_negative_weights) {
                     continue;
                 }
-                DetectionEventSpan detection_events{
-                    shot_events.events.data() + begin,
-                    end - begin,
-                };
+                DetectionEventSpan detection_events =
+                    span_from_subrange(shot_events.events, begin, end);
                 pm::MatchingResult packed =
                     decode_detection_events_for_up_to_64_observables(decoder->mwpm, detection_events);
                 for (size_t observable = 0; observable < observable_count; observable++) {
@@ -498,13 +510,11 @@ extern "C" int faultscope_pymatching_decoder_decode_batch(
             for (size_t shot = 0; shot < shots; shot++) {
                 size_t begin = shot_events.offsets[shot];
                 size_t end = shot_events.offsets[shot + 1];
-                if (begin == end) {
+                if (begin == end && !decoder->has_negative_weights) {
                     continue;
                 }
-                DetectionEventSpan detection_events{
-                    shot_events.events.data() + begin,
-                    end - begin,
-                };
+                DetectionEventSpan detection_events =
+                    span_from_subrange(shot_events.events, begin, end);
                 std::fill(temp_predictions.begin(), temp_predictions.end(), 0);
                 pm::total_weight_int decoded_weight = 0;
                 decode_detection_events(
@@ -579,7 +589,7 @@ extern "C" int faultscope_pymatching_decoder_decode_packed_batch(
                         byte &= (uint8_t)(byte - 1);
                     }
                 }
-                if (detection_events.empty()) {
+                if (detection_events.empty() && !decoder->has_negative_weights) {
                     continue;
                 }
                 pm::MatchingResult packed =
@@ -616,7 +626,7 @@ extern "C" int faultscope_pymatching_decoder_decode_packed_batch(
                         byte &= (uint8_t)(byte - 1);
                     }
                 }
-                if (detection_events.empty()) {
+                if (detection_events.empty() && !decoder->has_negative_weights) {
                     continue;
                 }
                 std::fill(temp_predictions.begin(), temp_predictions.end(), 0);

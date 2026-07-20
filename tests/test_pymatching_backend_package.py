@@ -376,6 +376,35 @@ class PyMatchingBackendPackageTests(unittest.TestCase):
         self.assertEqual(decoder.python_decode_call_count, 1)
 
     @requires_native_backend
+    def test_decode_batch_masks_decodes_empty_syndromes_on_negative_weight_graph(self) -> None:
+        decoder = faultscope_pymatching.NativePyMatchingDecoder.from_dem(negative_cycle_dem())
+        batch = _Batch(
+            shots=6,
+            detectors={
+                0: (1 << 1) | (1 << 4),
+                1: (1 << 1) | (1 << 3),
+                2: (1 << 3) | (1 << 4),
+            },
+        )
+
+        corrections = decoder.decode_batch_masks(batch)
+
+        self.assertEqual(corrections, {0: 0b111101})
+
+    @requires_native_backend
+    def test_decode_batch_masks_decodes_empty_syndromes_above_64_observables(self) -> None:
+        decoder = faultscope_pymatching.NativePyMatchingDecoder.from_dem(
+            negative_cycle_dem(observable_count=65, logical_observable=64)
+        )
+        batch = _Batch(shots=5, detectors={0: 0, 1: 0, 2: 0})
+
+        corrections = decoder.decode_batch_masks(batch)
+
+        expected = {observable_id: 0 for observable_id in range(65)}
+        expected[64] = 0b11111
+        self.assertEqual(corrections, expected)
+
+    @requires_native_backend
     def test_matches_python_pymatching_on_small_graph(self) -> None:
         try:
             python_decoder = PyMatchingDecoder.from_dem(two_edge_dem())
@@ -459,6 +488,22 @@ def many_observable_dem(observable_count: int) -> DetectorErrorModel:
                 location_id="edge0",
                 event="X",
             ),
+        ),
+    )
+
+
+def negative_cycle_dem(
+    *,
+    observable_count: int = 1,
+    logical_observable: int = 0,
+) -> DetectorErrorModel:
+    return DetectorErrorModel(
+        detectors=tuple(Detector(id=index, measurement_keys=()) for index in range(3)),
+        observables=tuple(LogicalObservable(id=index) for index in range(observable_count)),
+        edges=(
+            DetectorErrorEdge(0.9, (0, 1), (logical_observable,), "edge0", "X"),
+            DetectorErrorEdge(0.9, (1, 2), (), "edge1", "X"),
+            DetectorErrorEdge(0.9, (0, 2), (), "edge2", "X"),
         ),
     )
 
