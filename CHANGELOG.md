@@ -4,7 +4,7 @@ All notable changes to FaultScope are documented here. FaultScope is pre-1.0:
 unless a contract is explicitly versioned (such as the native decoder ABI),
 patch releases may make breaking API changes.
 
-## [0.2.7] - Unreleased
+## [0.2.8] - Unreleased
 
 ### Added
 
@@ -146,4 +146,4 @@ patch releases may make breaking API changes.
 - Generated type stubs now mark factory-only native classes, including
   `StabilizerState`, as unavailable for direct construction.
 
-[0.2.7]: https://github.com/yuguoshao/FaultScope/releases/tag/v0.2.7
+[0.2.8]: https://github.com/yuguoshao/FaultScope/releases/tag/v0.2.8
