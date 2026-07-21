@@ -36,6 +36,37 @@ _REC_RE = re.compile(r"^rec\[(-[0-9]+)\]$")
 _MPP_TARGET_RE = re.compile(r"^([XYZ])([0-9]+)$")
 _REPEAT_RE = re.compile(r"^REPEAT\s+([0-9]+)\s*\{$", re.IGNORECASE)
 
+_MAX_RECOVERED_TICK_PERIOD = 64
+_RECOVERABLE_TICK_INSTRUCTIONS = frozenset(
+    {
+        "TICK",
+        "H",
+        "S",
+        "S_DAG",
+        "SQRT_Z_DAG",
+        "X",
+        "Y",
+        "Z",
+        "CX",
+        "CNOT",
+        "CZ",
+        "SWAP",
+        "R",
+        "RX",
+        "RY",
+        "MR",
+        "MRX",
+        "MRY",
+        "M",
+        "MX",
+        "MY",
+        "MPP",
+    }
+)
+_RECOVERED_CLIFFORD_INSTRUCTIONS = frozenset(
+    {"H", "S", "S_DAG", "SQRT_Z_DAG", "CX", "CNOT", "CZ", "SWAP"}
+)
+
 
 def load_stim_file(path: str | Path) -> StimImportResult:
     """Parse a supported Stim circuit from a UTF-8 text file."""
@@ -71,6 +102,15 @@ class _RepeatNode:
 
 
 _StimNode = _InstructionNode | _RepeatNode
+_InstructionSignature = tuple[str, tuple[float, ...], tuple[str, ...]]
+
+
+@dataclass(frozen=True)
+class _TickRepeatCandidate:
+    start_segment: int
+    period: int
+    repetitions: int
+    saved_node_count: int
 
 
 class _StructuredStimImporter:
@@ -86,6 +126,7 @@ class _StructuredStimImporter:
 
     def parse(self, text: str) -> StimImportResult:
         nodes = _parse_stim_nodes(text)
+        nodes = _recover_exact_tick_repeat(nodes)
         operations = self._build_nodes(nodes)
         self._scan_nodes(nodes)
         observables = tuple(
@@ -497,6 +538,162 @@ def _parse_stim_nodes(text: str) -> tuple[_StimNode, ...]:
         _, _, repeat_line = stack[-1]
         raise StimImportError(f"unterminated REPEAT block starting on line {repeat_line}")
     return tuple(root)
+
+
+def _recover_exact_tick_repeat(nodes: tuple[_StimNode, ...]) -> tuple[_StimNode, ...]:
+    """Recover one exact, side-effect-free top-level TICK cycle."""
+
+    if any(isinstance(node, _RepeatNode) for node in nodes):
+        return nodes
+    instructions = tuple(node for node in nodes if isinstance(node, _InstructionNode))
+    if len(instructions) != len(nodes):
+        return nodes
+
+    tick_indexes = [index for index, node in enumerate(instructions) if node.name == "TICK"]
+    if len(tick_indexes) < 2:
+        return nodes
+    boundaries = tick_indexes + [len(instructions)]
+    segment_signatures = [
+        tuple(
+            _instruction_signature(node)
+            for node in instructions[boundaries[index] : boundaries[index + 1]]
+        )
+        for index in range(len(tick_indexes))
+    ]
+    signature_ids: dict[tuple[_InstructionSignature, ...], int] = {}
+    segment_ids = [
+        signature_ids.setdefault(signature, len(signature_ids)) for signature in segment_signatures
+    ]
+
+    candidates: list[_TickRepeatCandidate] = []
+    maximum_period = min(_MAX_RECOVERED_TICK_PERIOD, len(segment_ids) // 2)
+    for period in range(1, maximum_period + 1):
+        run_start: int | None = None
+        for index in range(period, len(segment_ids) + 1):
+            matches_previous = (
+                index < len(segment_ids) and segment_ids[index] == segment_ids[index - period]
+            )
+            if matches_previous:
+                if run_start is None:
+                    run_start = index
+                continue
+            if run_start is None:
+                continue
+            matched_segments = index - run_start
+            repetitions = (matched_segments + period) // period
+            start_segment = run_start - period
+            candidate = _make_tick_repeat_candidate(
+                instructions,
+                boundaries,
+                start_segment=start_segment,
+                period=period,
+                repetitions=repetitions,
+            )
+            if candidate is not None:
+                candidates.append(candidate)
+            run_start = None
+
+    candidates.sort(
+        key=lambda candidate: (
+            -candidate.saved_node_count,
+            candidate.period,
+            candidate.start_segment,
+        )
+    )
+    candidate = next(
+        (
+            candidate
+            for candidate in candidates
+            if _tick_repeat_iterations_match(instructions, boundaries, candidate)
+        ),
+        None,
+    )
+    if candidate is None:
+        return nodes
+
+    body_start = boundaries[candidate.start_segment]
+    body_end = boundaries[candidate.start_segment + candidate.period]
+    repeated_end = boundaries[candidate.start_segment + candidate.period * candidate.repetitions]
+    body = tuple(instructions[body_start:body_end])
+    recovered = _RepeatNode(
+        count=candidate.repetitions - 1,
+        body=body,
+        line_no=instructions[body_start].line_no,
+    )
+    return tuple(instructions[:body_end]) + (recovered,) + tuple(instructions[repeated_end:])
+
+
+def _make_tick_repeat_candidate(
+    instructions: tuple[_InstructionNode, ...],
+    boundaries: list[int],
+    *,
+    start_segment: int,
+    period: int,
+    repetitions: int,
+) -> _TickRepeatCandidate | None:
+    if repetitions < 2:
+        return None
+    body_start = boundaries[start_segment]
+    body_end = boundaries[start_segment + period]
+    body = instructions[body_start:body_end]
+    if not _is_recoverable_tick_body(body):
+        return None
+
+    recovered_repetitions = repetitions - 1
+    has_clifford = any(node.name in _RECOVERED_CLIFFORD_INSTRUCTIONS for node in body)
+    minimum_repetitions = 8 if has_clifford else 4
+    if recovered_repetitions < minimum_repetitions:
+        return None
+
+    saved_node_count = (repetitions - 2) * len(body) - 1
+    if saved_node_count <= 0:
+        return None
+    return _TickRepeatCandidate(
+        start_segment=start_segment,
+        period=period,
+        repetitions=repetitions,
+        saved_node_count=saved_node_count,
+    )
+
+
+def _is_recoverable_tick_body(body: Sequence[_InstructionNode]) -> bool:
+    if not body or body[0].name != "TICK":
+        return False
+    has_quantum_instruction = False
+    for node in body:
+        if node.name not in _RECOVERABLE_TICK_INSTRUCTIONS or node.args:
+            return False
+        if node.name == "TICK":
+            if node.targets:
+                return False
+        else:
+            has_quantum_instruction = True
+    return has_quantum_instruction
+
+
+def _tick_repeat_iterations_match(
+    instructions: tuple[_InstructionNode, ...],
+    boundaries: list[int],
+    candidate: _TickRepeatCandidate,
+) -> bool:
+    body_start = boundaries[candidate.start_segment]
+    body_end = boundaries[candidate.start_segment + candidate.period]
+    reference = instructions[body_start:body_end]
+    for repetition in range(1, candidate.repetitions):
+        start_segment = candidate.start_segment + repetition * candidate.period
+        iteration = instructions[
+            boundaries[start_segment] : boundaries[start_segment + candidate.period]
+        ]
+        if len(iteration) != len(reference) or any(
+            _instruction_signature(left) != _instruction_signature(right)
+            for left, right in zip(reference, iteration)
+        ):
+            return False
+    return True
+
+
+def _instruction_signature(node: _InstructionNode) -> _InstructionSignature:
+    return (node.name, node.args, node.targets)
 
 
 def _parse_rec_lookbacks(targets: Sequence[str], line_no: int) -> tuple[int, ...]:

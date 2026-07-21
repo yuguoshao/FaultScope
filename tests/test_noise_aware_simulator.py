@@ -8,6 +8,7 @@ from types import MappingProxyType, SimpleNamespace
 from unittest import mock
 
 import faultscope
+import faultscope.io.stim as stim_io
 from faultscope.runtime import DemFaultScopeSimulator, FaultScopeSimulator, SampleBatch
 from faultscope.core import Circuit, NoiseLocation, Operation
 from faultscope.dem import (
@@ -4420,6 +4421,171 @@ M 0
             ],
         )
         self.assertNotIn("repeat", [operation.kind for operation in imported.circuit.operations])
+
+    def test_exact_tick_repeat_recovery_preserves_every_instruction(self) -> None:
+        cycle = """TICK
+H 0
+TICK
+CX 0 1
+TICK
+M 1
+R 1
+"""
+        source = "R 0 1\n" + cycle * 10 + "M 0\n"
+        original = stim_io._parse_stim_nodes(source)
+        recovered = stim_io._recover_exact_tick_repeat(original)
+        repeats = [node for node in recovered if isinstance(node, stim_io._RepeatNode)]
+
+        def expanded_signatures(nodes):
+            signatures = []
+            for node in nodes:
+                if isinstance(node, stim_io._RepeatNode):
+                    for _ in range(node.count):
+                        signatures.extend(expanded_signatures(node.body))
+                else:
+                    signatures.append((node.name, node.args, node.targets))
+            return signatures
+
+        self.assertEqual(len(repeats), 1)
+        self.assertEqual(repeats[0].count, 8)
+        self.assertEqual(expanded_signatures(recovered), expanded_signatures(original))
+
+    def test_exact_tick_repeat_recovery_rejects_changed_rounds(self) -> None:
+        cycle = """TICK
+H 0
+TICK
+M 1
+R 1
+"""
+        changed_cycles = {
+            "extra_clifford": """TICK
+H 0
+X 0
+TICK
+M 1
+R 1
+""",
+            "different_target": """TICK
+H 1
+TICK
+M 1
+R 1
+""",
+            "different_basis": """TICK
+H 0
+TICK
+MX 1
+R 1
+""",
+            "different_args": """TICK
+H 0
+TICK
+M(0) 1
+R 1
+""",
+            "extra_measurement": """TICK
+H 0
+TICK
+M 1
+M 0
+R 1
+""",
+        }
+        for name, changed_cycle in changed_cycles.items():
+            with self.subTest(name=name):
+                source = "R 0 1\n" + cycle * 4 + changed_cycle + cycle * 5 + "M 0\n"
+                imported = parse_stim_circuit(source)
+                self.assertNotIn(
+                    "repeat", [operation.kind for operation in imported.circuit.operations]
+                )
+
+    def test_exact_tick_repeat_recovery_rejects_side_effectful_bodies(self) -> None:
+        cycles = {
+            "noise": """TICK
+X_ERROR(0.125) 0
+M 0
+R 0
+""",
+            "detector": """TICK
+M 0
+DETECTOR rec[-1]
+R 0
+""",
+            "shift_coords": """TICK
+SHIFT_COORDS(0,0,1)
+M 0
+R 0
+""",
+            "qubit_coords": """TICK
+QUBIT_COORDS(0,0) 0
+M 0
+R 0
+""",
+            "observable": """TICK
+M 0
+OBSERVABLE_INCLUDE(0) rec[-1]
+R 0
+""",
+            "measurement_args": """TICK
+M(0) 0
+R 0
+""",
+        }
+        for name, cycle in cycles.items():
+            with self.subTest(name=name):
+                imported = parse_stim_circuit("R 0\n" + cycle * 10 + "M 0\n")
+                self.assertNotIn(
+                    "repeat", [operation.kind for operation in imported.circuit.operations]
+                )
+
+    def test_exact_tick_repeat_recovery_leaves_explicit_repeat_unchanged(self) -> None:
+        nodes = stim_io._parse_stim_nodes("REPEAT 10 {\nTICK\nM 0\nR 0\n}\n")
+
+        self.assertIs(stim_io._recover_exact_tick_repeat(nodes), nodes)
+
+    def test_normalized_flattened_surface_code_recovers_tick_repeat(self) -> None:
+        try:
+            import stim
+        except ImportError as exc:
+            self.skipTest(f"Stim is not installed: {exc}")
+        circuit = stim.Circuit.generated(
+            "surface_code:rotated_memory_z",
+            distance=10,
+            rounds=10,
+        )
+        skipped = {"QUBIT_COORDS", "SHIFT_COORDS", "DETECTOR", "OBSERVABLE_INCLUDE"}
+        source = "\n".join(
+            str(instruction)
+            for instruction in circuit.flattened()
+            if instruction.name not in skipped
+        )
+        with mock.patch.object(
+            stim_io,
+            "_recover_exact_tick_repeat",
+            side_effect=lambda nodes: nodes,
+        ):
+            expanded = parse_stim_circuit(source)
+        recovered = parse_stim_circuit(source)
+        repeats = [
+            operation for operation in recovered.circuit.operations if operation.kind == "repeat"
+        ]
+        expanded_sampler = compile_native_sampler(expanded.circuit)
+        recovered_sampler = compile_native_sampler(recovered.circuit)
+
+        self.assertEqual(len(repeats), 1)
+        self.assertEqual(repeats[0].repeat_count, 8)
+        self.assertEqual(recovered.measurement_keys, expanded.measurement_keys)
+        self.assertEqual(recovered_sampler.operation_count, expanded_sampler.operation_count)
+        self.assertLess(
+            recovered_sampler.stored_operation_count,
+            expanded_sampler.stored_operation_count,
+        )
+        self.assertEqual(expanded_sampler.loop_kernel_count, 0)
+        self.assertEqual(recovered_sampler.loop_kernel_count, 1)
+        self.assertEqual(
+            recovered_sampler.sample_measurements(shots=65, seed=441),
+            expanded_sampler.sample_measurements(shots=65, seed=441),
+        )
 
     def test_imports_repeat_blocks(self) -> None:
         imported = parse_stim_circuit(
