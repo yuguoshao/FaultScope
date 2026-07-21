@@ -4,8 +4,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use faultscope_core::{
-    collect_dem_event_plan, generate_dem_edges_from_event_plan, log_likelihood_ratio, Circuit,
-    ConcreteStabilizer, CorrectionMaskBatch, DecoderCorrectionBatch, DemHotspotEstimator, Detector,
+    collect_dem_event_plan, generate_dem_edges_from_event_plan, log_likelihood_ratio,
+    validate_decoder_detector_ids, validate_decoder_observable_ids, Circuit, ConcreteStabilizer,
+    CorrectionMaskBatch, DecoderCorrectionBatch, DemHotspotEstimator, Detector,
     DetectorBatchFormat, DetectorBatchView, DetectorErrorModelGenerator, DetectorMaskBatchView,
     FaultScopeNativeCorrectionBatchMutViewV4, FaultScopeNativeCorrectionBatchPayloadV4,
     FaultScopeNativeCorrectionMaskBatchMutViewV1, FaultScopeNativeDecoderFactoryV4,
@@ -45,6 +46,24 @@ fn graphlike_public_constructor_derives_canonical_weight() {
     assert_eq!(
         problem.edge(0).unwrap().weight(),
         log_likelihood_ratio(0.25)
+    );
+}
+
+#[test]
+fn decoder_id_validators_are_public_and_report_the_layout_kind() {
+    validate_decoder_detector_ids(&[]).unwrap();
+    validate_decoder_observable_ids(&[7, 3, 11]).unwrap();
+
+    let detector_error = validate_decoder_detector_ids(&[5, 8, 5]).unwrap_err();
+    assert_eq!(
+        detector_error.message(),
+        "decoder detector ids must be unique; duplicate detector id 5"
+    );
+
+    let observable_error = validate_decoder_observable_ids(&[2, 4, 2]).unwrap_err();
+    assert_eq!(
+        observable_error.message(),
+        "decoder observable ids must be unique; duplicate observable id 2"
     );
 }
 

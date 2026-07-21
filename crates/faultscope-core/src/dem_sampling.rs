@@ -1814,6 +1814,25 @@ mod tests {
     }
 
     #[test]
+    fn compiled_sampling_rejects_duplicate_detail_detector_layout() {
+        let simulator = DemHotspotEstimator::from_sampling_parts(
+            vec![1],
+            vec![2],
+            vec![edge(0.5, vec![1], vec![2])],
+        )
+        .unwrap();
+
+        let error = simulator
+            .compile_decoder_sampling_plan(&[1], &[2], DetectorBatchFormat::Packed, &[1, 1], false)
+            .unwrap_err();
+
+        assert_eq!(
+            error.message(),
+            "decoder detector ids must be unique; duplicate detector id 1"
+        );
+    }
+
+    #[test]
     fn compiled_sampling_rejects_duplicate_observable_layout() {
         let simulator = DemHotspotEstimator::from_sampling_parts(
             vec![1],

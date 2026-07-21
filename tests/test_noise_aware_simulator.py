@@ -4331,27 +4331,31 @@ class StimImportTests(unittest.TestCase):
                     parse_stim_circuit(source)
 
     def test_rejects_arguments_and_targets_disallowed_by_stim(self) -> None:
-        for source in (
-            "TICK(1)",
-            "TICK 0",
-            "SHIFT_COORDS 0",
-            "H(0.1) 0",
-            "S(0.1) 0",
-            "S_DAG(0.1) 0",
-            "SQRT_Z_DAG(0.1) 0",
-            "X(0.1) 0",
-            "Y(0.1) 0",
-            "Z(0.1) 0",
-            "CX(0.2) 0 1",
-            "CNOT(0.2) 0 1",
-            "CZ(0.2) 0 1",
-            "SWAP(0.2) 0 1",
-            "R(0.3) 0",
-            "RX(0.3) 0",
-            "RY(0.3) 0",
-        ):
-            with self.subTest(source=source):
-                with self.assertRaisesRegex(StimImportError, "line 1"):
+        cases = (
+            ("TICK(1)", "TICK", "arguments"),
+            ("TICK 0", "TICK", "targets"),
+            ("SHIFT_COORDS 0", "SHIFT_COORDS", "targets"),
+            ("H(0.1) 0", "H", "arguments"),
+            ("S(0.1) 0", "S", "arguments"),
+            ("S_DAG(0.1) 0", "S_DAG", "arguments"),
+            ("SQRT_Z_DAG(0.1) 0", "SQRT_Z_DAG", "arguments"),
+            ("X(0.1) 0", "X", "arguments"),
+            ("Y(0.1) 0", "Y", "arguments"),
+            ("Z(0.1) 0", "Z", "arguments"),
+            ("CX(0.2) 0 1", "CX", "arguments"),
+            ("CNOT(0.2) 0 1", "CNOT", "arguments"),
+            ("CZ(0.2) 0 1", "CZ", "arguments"),
+            ("SWAP(0.2) 0 1", "SWAP", "arguments"),
+            ("R(0.3) 0", "R", "arguments"),
+            ("RX(0.3) 0", "RX", "arguments"),
+            ("RY(0.3) 0", "RY", "arguments"),
+        )
+        for source, command, operand in cases:
+            with self.subTest(source=source, command=command, operand=operand):
+                with self.assertRaisesRegex(
+                    StimImportError,
+                    rf"^{command} does not accept {operand} on line 1$",
+                ):
                     parse_stim_circuit(source)
 
     def test_imports_relative_measurement_record_references(self) -> None:
