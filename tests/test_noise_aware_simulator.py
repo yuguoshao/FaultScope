@@ -2794,9 +2794,7 @@ class NativeDetectorErrorModelTests(unittest.TestCase):
         )
         self.assertEqual(result.shots, 8)
 
-        imported = parse_stim_circuit(
-            "M 0\nDETECTOR rec[-1]\nOBSERVABLE_INCLUDE(3) rec[-1]"
-        )
+        imported = parse_stim_circuit("M 0\nDETECTOR rec[-1]\nOBSERVABLE_INCLUDE(3) rec[-1]")
         imported_decoder = create_native_decoder(
             "no-correction",
             circuit=imported.circuit,
