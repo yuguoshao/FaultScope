@@ -318,6 +318,58 @@ fn one_qubit_pauli_channel_uses_stim_exact_independent_conversion_first() {
 }
 
 #[test]
+fn one_qubit_pauli_channel_iterative_fallback_preserves_xyz_symmetry() {
+    for disjoint in [
+        [0.1008, 0.1792, 0.2592],
+        [0.1792, 0.1008, 0.2592],
+        [0.1792, 0.2592, 0.1008],
+    ] {
+        let exact = noise_only_event_plan(
+            NoiseModel::PauliChannel(vec![
+                ("X".to_string(), disjoint[0]),
+                ("Y".to_string(), disjoint[1]),
+                ("Z".to_string(), disjoint[2]),
+            ]),
+            disjoint.iter().sum(),
+        )
+        .unwrap_or_else(|error| {
+            panic!("exact one-qubit Pauli channel {disjoint:?} was rejected: {error}")
+        });
+        assert!(exact
+            .fault_events
+            .iter()
+            .all(|event| event.sibling_semantics == DemFaultEventSiblingSemantics::Independent));
+
+        let mut independent = [0.0; 3];
+        for event in &exact.fault_events {
+            let DemEvent::Pauli(pauli) = &event.event else {
+                panic!("expected a Pauli event, got {:?}", event.event);
+            };
+            let index = match pauli.as_str() {
+                "X" => 0,
+                "Y" => 1,
+                "Z" => 2,
+                _ => panic!("unexpected one-qubit Pauli event {pauli}"),
+            };
+            independent[index] = event.probability;
+        }
+
+        let [x, y, z] = independent;
+        let reconstructed = [
+            x * (1.0 - y) * (1.0 - z) + (1.0 - x) * y * z,
+            y * (1.0 - x) * (1.0 - z) + (1.0 - y) * x * z,
+            z * (1.0 - x) * (1.0 - y) + (1.0 - z) * x * y,
+        ];
+        for (actual, expected) in reconstructed.into_iter().zip(disjoint) {
+            assert!(
+                (actual - expected).abs() < 1e-14,
+                "reconstructed probability {actual} did not match {expected} for {disjoint:?}"
+            );
+        }
+    }
+}
+
+#[test]
 fn approximated_pauli_channel_coalesces_disjoint_events_with_the_same_effect() {
     let operations = vec![
         Operation::Noise(NoiseLocation {
