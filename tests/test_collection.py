@@ -1484,8 +1484,8 @@ class CollectionTests(unittest.TestCase):
 
     def test_iter_collect_yields_each_task(self) -> None:
         tasks = [
-            DemCollectionTask(dem=_logical_edge_dem(), task_id="a"),
-            DemCollectionTask(dem=_logical_edge_dem(), task_id="b"),
+            DemCollectionTask(dem=_logical_edge_dem(), task_id="a", metadata={"case": "a"}),
+            DemCollectionTask(dem=_logical_edge_dem(), task_id="b", metadata={"case": "b"}),
         ]
 
         stats = list(
@@ -2094,6 +2094,36 @@ class CollectionTests(unittest.TestCase):
         self.assertEqual(second.shots, 8)
         self.assertEqual(second.errors, 8)
 
+    def test_duplicate_strong_ids_leave_existing_resume_file_unchanged(self) -> None:
+        dem = _logical_edge_dem()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "duplicate.csv"
+            _collect(
+                [DemCollectionTask(dem=dem, task_id="original")],
+                max_shots=2,
+                batch_size=2,
+                seed=17,
+                save_resume_filepath=path,
+            )
+            original = path.read_bytes()
+
+            with self.assertRaisesRegex(
+                ValueError,
+                r'duplicate collection strong_id .*task indices 0 \("dem-a"\) and 1 \("dem-b"\)',
+            ):
+                _collect(
+                    [
+                        DemCollectionTask(dem=dem, task_id="dem-a"),
+                        DemCollectionTask(dem=dem, task_id="dem-b"),
+                    ],
+                    max_shots=4,
+                    batch_size=2,
+                    seed=17,
+                    save_resume_filepath=path,
+                )
+
+            self.assertEqual(path.read_bytes(), original)
+
     def test_adaptive_stream_interruption_resumes_from_committed_calibration_delta(self) -> None:
         task = DemCollectionTask(dem=_logical_edge_dem(), task_id="adaptive-stream-resume")
 
@@ -2586,6 +2616,18 @@ class CollectionTests(unittest.TestCase):
         self.assertEqual(len(prepared), 2)
         self.assertEqual(compile_source.call_count, 1)
         self.assertIs(prepared[0]["sampler"], prepared[1]["sampler"])
+
+    def test_duplicate_decoder_fanout_is_rejected(self) -> None:
+        decoder = NativeNoCorrectionDecoder(observable_ids=(0,), detector_ids=(0,))
+
+        with self.assertRaisesRegex(ValueError, "duplicate collection strong_id"):
+            _collect(
+                [DemCollectionTask(dem=_graphlike_dem(), task_id="duplicate-fanout")],
+                max_shots=4,
+                batch_size=2,
+                seed=31,
+                decoders=(decoder, decoder),
+            )
 
     def test_fanout_preparation_cache_does_not_cross_collection_calls(self) -> None:
         task = DemCollectionTask(dem=_logical_edge_dem(0.25), task_id="local-cache")

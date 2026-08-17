@@ -146,6 +146,25 @@ pub(crate) fn collect_task_set_with_progress(
     collect_task_set_inner(tasks, run_options, existing_data, Some(progress_callback))
 }
 
+fn validate_unique_strong_ids(tasks: &[LogicalCollectionTask]) -> NpResult<()> {
+    if tasks.len() < 2 {
+        return Ok(());
+    }
+
+    let mut seen: HashMap<&str, (usize, &str)> = HashMap::with_capacity(tasks.len());
+    for (index, task) in tasks.iter().enumerate() {
+        if let Some((first_index, first_task_id)) =
+            seen.insert(task.strong_id.as_str(), (index, task.task_id.as_str()))
+        {
+            return Err(NpError::new(format!(
+                "duplicate collection strong_id {:?} at task indices {} ({:?}) and {} ({:?}); task_id is not part of collection identity",
+                task.strong_id, first_index, first_task_id, index, task.task_id
+            )));
+        }
+    }
+    Ok(())
+}
+
 fn collect_task_set_inner(
     tasks: Vec<LogicalCollectionTask>,
     run_options: DemLogicalCollectionRunOptions,
@@ -161,6 +180,7 @@ fn collect_task_set_inner(
         validate_task(task)?;
     }
     let stop_counter = validate_stop_counter_for_tasks(&tasks, &run_options)?;
+    validate_unique_strong_ids(&tasks)?;
 
     let mut results = vec![None; tasks.len()];
     let mut states = Vec::new();

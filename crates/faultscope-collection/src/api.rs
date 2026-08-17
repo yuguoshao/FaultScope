@@ -702,6 +702,9 @@ pub fn sample_forward_logical_error_stats(
     })
 }
 
+/// Collect detector-error-model logical-error tasks.
+///
+/// Returns an error before worker creation when two tasks share a `strong_id`.
 pub fn collect_dem_logical_error_tasks(
     tasks: Vec<DemLogicalCollectionTask>,
     run_options: DemLogicalCollectionRunOptions,
@@ -714,6 +717,9 @@ pub fn collect_dem_logical_error_tasks(
     )
 }
 
+/// Collect detector-error-model logical-error tasks and report committed deltas.
+///
+/// Returns an error before worker creation or progress when two tasks share a `strong_id`.
 pub fn collect_dem_logical_error_tasks_with_progress<F>(
     tasks: Vec<DemLogicalCollectionTask>,
     run_options: DemLogicalCollectionRunOptions,
@@ -733,6 +739,8 @@ where
 }
 
 /// Collect forward-circuit logical-error tasks.
+///
+/// Returns an error before worker creation when two tasks share a `strong_id`.
 pub fn collect_forward_logical_error_tasks(
     tasks: Vec<ForwardLogicalCollectionTask>,
     run_options: DemLogicalCollectionRunOptions,
@@ -746,6 +754,8 @@ pub fn collect_forward_logical_error_tasks(
 }
 
 /// Collect forward-circuit logical-error tasks and report committed deltas.
+///
+/// Returns an error before worker creation or progress when two tasks share a `strong_id`.
 pub fn collect_forward_logical_error_tasks_with_progress<F>(
     tasks: Vec<ForwardLogicalCollectionTask>,
     run_options: DemLogicalCollectionRunOptions,

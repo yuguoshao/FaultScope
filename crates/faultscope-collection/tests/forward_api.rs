@@ -96,6 +96,28 @@ fn fixed_forward_collection_is_worker_count_deterministic() {
 }
 
 #[test]
+fn forward_collection_rejects_duplicate_strong_ids() {
+    let program = forward_program(0.375);
+    let mut first = forward_task(program.clone());
+    first.task_id = "forward-a".to_string();
+    first.strong_id = "shared-forward-strong".to_string();
+    first.sampling_id = "shared-forward-sampling".to_string();
+    let mut second = forward_task(program);
+    second.task_id = "forward-b".to_string();
+    second.strong_id = first.strong_id.clone();
+    second.sampling_id = first.sampling_id.clone();
+
+    let err =
+        collect_forward_logical_error_tasks(vec![first, second], run_options(4), HashMap::new())
+            .unwrap_err();
+
+    assert_eq!(
+        err.message(),
+        "duplicate collection strong_id \"shared-forward-strong\" at task indices 0 (\"forward-a\") and 1 (\"forward-b\"); task_id is not part of collection identity"
+    );
+}
+
+#[test]
 fn forward_collection_runs_native_decoder_and_detailed_postselection() {
     let program = forward_program(1.0);
     let mut decoded = forward_task(program.clone());

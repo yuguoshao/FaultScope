@@ -237,6 +237,43 @@ class ForwardCollectionTests(unittest.TestCase):
         self.assertEqual(resumed.shots, 14)
         self.assertEqual(resumed.errors, 14)
 
+    def test_forward_duplicate_strong_ids_fail_before_resume_write(self) -> None:
+        circuit = forward_circuit(1.0)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            resume_path = Path(temp_dir) / "duplicate.csv"
+
+            with self.assertRaisesRegex(
+                ValueError,
+                r'duplicate collection strong_id .*task indices 0 \("forward-a"\) and 1 \("forward-b"\)',
+            ):
+                collect(
+                    [
+                        CollectionTask(circuit, task_id="forward-a"),
+                        CollectionTask(circuit, task_id="forward-b"),
+                    ],
+                    options=CollectionOptions(max_shots=4, batch_size=2),
+                    run_options=CollectionRunOptions(
+                        seed=1,
+                        save_resume_filepath=resume_path,
+                    ),
+                )
+
+            self.assertFalse(resume_path.exists())
+
+    def test_forward_metadata_distinguishes_otherwise_identical_tasks(self) -> None:
+        circuit = forward_circuit(1.0)
+        stats = collect(
+            [
+                CollectionTask(circuit, task_id="replica-a", metadata={"replica": 0}),
+                CollectionTask(circuit, task_id="replica-b", metadata={"replica": 1}),
+            ],
+            options=CollectionOptions(max_shots=4, batch_size=2),
+            run_options=CollectionRunOptions(seed=1, num_workers=2),
+        )
+
+        self.assertEqual([stat.shots for stat in stats], [4, 4])
+        self.assertNotEqual(stats[0].strong_id, stats[1].strong_id)
+
     def test_forward_adaptive_batching_reaches_exact_shot_cap(self) -> None:
         (stats,) = collect(
             [CollectionTask(forward_circuit(), task_id="forward-adaptive")],

@@ -1353,6 +1353,40 @@ fn collection_run_options(num_workers: usize) -> DemLogicalCollectionRunOptions 
 }
 
 #[test]
+fn logical_collection_rejects_duplicate_strong_ids_before_workers_or_progress() {
+    let tracker = Arc::new(InstanceTracker::default());
+    let decoder: Arc<dyn NativeDecoderFactory> =
+        Arc::new(WorkerOwnedDecoder::prototype(tracker.clone()));
+    let first = decoder_collection_task("duplicate-first", decoder.clone(), 8, false);
+    let mut second = decoder_collection_task("duplicate-second", decoder, 8, false);
+    second.strong_id = first.strong_id.clone();
+    second.sampling_id = first.sampling_id.clone();
+    let tasks = vec![first, second];
+    let expected = "duplicate collection strong_id \"duplicate-first-strong\" at task indices 0 (\"duplicate-first\") and 1 (\"duplicate-second\"); task_id is not part of collection identity";
+
+    let err =
+        collect_dem_logical_error_tasks(tasks.clone(), collection_run_options(4), HashMap::new())
+            .unwrap_err();
+    assert_eq!(err.message(), expected);
+
+    let mut progress_calls = 0;
+    let err = collect_dem_logical_error_tasks_with_progress(
+        tasks,
+        collection_run_options(4),
+        HashMap::new(),
+        |_| {
+            progress_calls += 1;
+            Ok(())
+        },
+    )
+    .unwrap_err();
+    assert_eq!(err.message(), expected);
+    assert_eq!(progress_calls, 0);
+    assert_eq!(tracker.created.load(Ordering::SeqCst), 0);
+    assert_eq!(tracker.decode_calls.load(Ordering::SeqCst), 0);
+}
+
+#[test]
 fn direct_counting_apis_accept_non_static_borrowed_workers() {
     let name = String::from("borrowed");
     let detector_ids = [0];

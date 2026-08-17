@@ -729,6 +729,15 @@ metadata, and decoder parameters does not affect identity. Task id, seed,
 `max_shots`, `max_errors`, batch sizing, and worker count remain excluded. Task
 metadata must be JSON serializable when using identity and CSV paths.
 
+Expanded tasks in one logical collection call must have unique `strong_id`
+values. Collection rejects a duplicate before starting sampling workers,
+emitting progress, or appending resume data. `task_id` is only a display label,
+so changing it does not create a separate collection identity. Use a genuinely
+different circuit/DEM, decoder, metadata value, postselection mask, or counter
+schema when tasks must be collected independently. A resume CSV produced by an
+older version from duplicate identities cannot be separated reliably and
+should be regenerated.
+
 Decoder objects must provide `strong_id_payload()` returning a JSON-serializable
 mapping. Bundled native decoders and official backend packages implement this
 protocol. The payload covers the effective backend, implementation fingerprint
