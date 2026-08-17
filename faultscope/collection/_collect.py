@@ -20,7 +20,6 @@ from faultscope.runtime.native import (
 )
 
 from faultscope.collection._types import (
-    CollectionData,
     CollectionCounterSchema,
     CollectionOptions,
     CollectionRunOptions,
@@ -222,13 +221,11 @@ def _run_collect(
         if run_options.save_resume_filepath is not None
         else None
     )
-    existing_data = CollectionData(existing.values())
 
     def on_stream_delta(item: Mapping[str, object]) -> None:
         stat = _task_stats_from_native(item)
         if resume_path is not None:
             write_stats_to_csv_file(resume_path, [stat], append=True)
-        existing_data.add_sample(stat)
         progress = Progress((stat,), _status_message(stat))
         if progress_sink is not None:
             progress_sink(progress)
