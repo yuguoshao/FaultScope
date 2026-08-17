@@ -53,8 +53,8 @@ API_SNAPSHOT = REPO_ROOT / "tests" / "public_api_contract.json"
 
 class ReleaseContractTests(unittest.TestCase):
     def test_python_distribution_version_is_v0_2(self) -> None:
-        self.assertEqual(faultscope.__version__, "0.2.5")
-        self.assertEqual(importlib.metadata.version("faultscope"), "0.2.5")
+        self.assertEqual(faultscope.__version__, "0.2.8")
+        self.assertEqual(importlib.metadata.version("faultscope"), "0.2.8")
 
     def test_package_contains_pep561_marker_and_native_stub(self) -> None:
         package_root = Path(faultscope.__file__).resolve().parent
@@ -275,7 +275,7 @@ class ReleaseContractTests(unittest.TestCase):
         ]
         self.assertEqual(undocumented, [])
 
-    def test_collection_strong_id_schema_v3_is_frozen(self) -> None:
+    def test_collection_strong_id_schema_v4_is_frozen(self) -> None:
         dem = DetectorErrorModel(
             detectors=(),
             observables=(LogicalObservable(id=0),),
@@ -296,7 +296,7 @@ class ReleaseContractTests(unittest.TestCase):
         )
         self.assertEqual(
             stats.strong_id,
-            "4122c57d8371d4edd3ef8ffaec67a4fc3a017456f8cf27afe6915a8cf2607113",
+            "47d3915dcad87b8f719a47a204e479f564e98acefd21d730accab5f0004b2de5",
         )
 
 

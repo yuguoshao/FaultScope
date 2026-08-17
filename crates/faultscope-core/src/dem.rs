@@ -9,9 +9,14 @@ mod indexed_parity;
 mod measurement_plan;
 mod product_path;
 
-use assembly::{assemble_dem_edge_refs, materialize_generated_dem_edges, DemFlipMasks};
-use event_plan::collect_dem_event_plan_from_program;
-pub use event_plan::{collect_dem_event_plan, DemEventPlan};
+use assembly::{
+    assemble_dem_edge_refs, coalesce_sibling_dem_edge_refs, materialize_generated_dem_edges,
+    DemFlipMasks,
+};
+use event_plan::collect_dem_event_plan_from_program_with_options;
+pub use event_plan::{
+    collect_dem_event_plan, collect_dem_event_plan_with_options, DemEventPlan, DemGenerationOptions,
+};
 use fallback_path::generate_fallback_dem_flip_masks_from_plan;
 use measurement_plan::{
     compile_dem_measurement_plan, compile_dem_measurement_plan_with_optional_declarations,
@@ -94,6 +99,21 @@ impl ValidatedDemCircuit {
                 .expect("DEM event plan must be initialized after set"),
         ))
     }
+
+    /// Return an event plan compiled with explicit disjoint-channel options.
+    #[doc(hidden)]
+    pub fn event_plan_with_options(
+        &self,
+        options: DemGenerationOptions,
+    ) -> NpResult<Arc<DemEventPlan>> {
+        if options == DemGenerationOptions::default() {
+            return self.event_plan();
+        }
+        Ok(Arc::new(collect_dem_event_plan_with_options(
+            &self.circuit.operations,
+            options,
+        )?))
+    }
 }
 
 impl DemEventPlan {
@@ -121,6 +141,21 @@ impl DetectorErrorModelGenerator {
         detectors: Option<Vec<Detector>>,
         observables: Option<Vec<LogicalObservable>>,
     ) -> NpResult<Self> {
+        Self::new_with_options(
+            circuit,
+            detectors,
+            observables,
+            DemGenerationOptions::default(),
+        )
+    }
+
+    /// Create a generator with explicit disjoint-channel handling options.
+    pub fn new_with_options(
+        circuit: Circuit,
+        detectors: Option<Vec<Detector>>,
+        observables: Option<Vec<LogicalObservable>>,
+        options: DemGenerationOptions,
+    ) -> NpResult<Self> {
         circuit.validate()?;
         let (circuit, program) = crate::program::expand_circuit(&circuit)?;
         let measurement_plan = compile_dem_measurement_plan_with_optional_declarations(
@@ -133,7 +168,7 @@ impl DetectorErrorModelGenerator {
         validate_detector_ids(&detectors)?;
         validate_observable_ids(&observables)?;
         validate_observables_for_n_qubits(circuit.n_qubits, &observables)?;
-        let event_plan = collect_dem_event_plan_from_program(program)?;
+        let event_plan = collect_dem_event_plan_from_program_with_options(program, options)?;
         Ok(Self {
             circuit: Arc::new(circuit),
             detectors,
@@ -200,7 +235,24 @@ impl DetectorErrorModelGenerator {
         detectors: Option<Vec<Detector>>,
         observables: Option<Vec<LogicalObservable>>,
     ) -> NpResult<Self> {
-        let event_plan = circuit.event_plan()?;
+        Self::new_with_validated_dem_circuit_generation_options(
+            circuit,
+            detectors,
+            observables,
+            DemGenerationOptions::default(),
+        )
+    }
+
+    /// Create a generator from a validated circuit with explicit
+    /// disjoint-channel handling options.
+    #[doc(hidden)]
+    pub fn new_with_validated_dem_circuit_generation_options(
+        circuit: &ValidatedDemCircuit,
+        detectors: Option<Vec<Detector>>,
+        observables: Option<Vec<LogicalObservable>>,
+        options: DemGenerationOptions,
+    ) -> NpResult<Self> {
+        let event_plan = circuit.event_plan_with_options(options)?;
         Self::new_with_prevalidated_shared_event_plan_options(
             circuit.shared_circuit(),
             detectors,
@@ -243,11 +295,13 @@ impl DetectorErrorModelGenerator {
     /// Generate detector/observable edge structure while deferring metadata clones.
     pub fn generate_lazy(&self) -> NpResult<LazyDetectorErrorModel> {
         let edges = self.generate_edge_refs()?;
+        let (edges, edge_overrides) = coalesce_sibling_dem_edge_refs(&self.event_plan, edges);
         Ok(LazyDetectorErrorModel {
             detectors: self.detectors.clone(),
             observables: self.observables.clone(),
             event_plan: self.event_plan.clone(),
             edges,
+            edge_overrides,
         })
     }
 
@@ -270,10 +324,27 @@ pub fn generate_dem_edges(
     detectors: &[Detector],
     observables: &[LogicalObservable],
 ) -> NpResult<Vec<DetectorErrorEdge>> {
+    generate_dem_edges_with_options(
+        n_qubits,
+        operations,
+        detectors,
+        observables,
+        DemGenerationOptions::default(),
+    )
+}
+
+/// Generate DEM edges with explicit disjoint-channel handling options.
+pub fn generate_dem_edges_with_options(
+    n_qubits: usize,
+    operations: &[Operation],
+    detectors: &[Detector],
+    observables: &[LogicalObservable],
+    options: DemGenerationOptions,
+) -> NpResult<Vec<DetectorErrorEdge>> {
     crate::model::validate_operations(n_qubits, operations)?;
     validate_observables_for_n_qubits(n_qubits, observables)?;
     let program = crate::program::expand_operations(operations, ExpansionMode::Dem)?;
-    let event_plan = collect_dem_event_plan_from_program(program)?;
+    let event_plan = collect_dem_event_plan_from_program_with_options(program, options)?;
     let measurement_plan =
         compile_dem_measurement_plan(&event_plan.program, detectors, observables)?;
     generate_dem_edges_from_compiled_plan(
@@ -311,7 +382,12 @@ fn generate_dem_edges_from_compiled_plan(
 ) -> NpResult<Vec<DetectorErrorEdge>> {
     let edges =
         generate_dem_edge_refs_from_compiled_plan(n_qubits, program, measurement_plan, event_plan)?;
-    Ok(materialize_generated_dem_edges(event_plan, edges))
+    let (edges, edge_overrides) = coalesce_sibling_dem_edge_refs(event_plan, edges);
+    Ok(materialize_generated_dem_edges(
+        event_plan,
+        edges,
+        &edge_overrides,
+    ))
 }
 
 fn generate_dem_edge_refs_from_compiled_plan(
@@ -469,11 +545,18 @@ struct GeneratedDemEdgeRef {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+struct GeneratedDemEdgeOverride {
+    probability: f64,
+    event: crate::DemEvent,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct LazyDetectorErrorModel {
     pub detectors: Vec<Detector>,
     pub observables: Vec<LogicalObservable>,
     pub event_plan: Arc<DemEventPlan>,
     edges: Vec<GeneratedDemEdgeRef>,
+    edge_overrides: HashMap<usize, GeneratedDemEdgeOverride>,
 }
 
 impl LazyDetectorErrorModel {
@@ -498,7 +581,11 @@ impl LazyDetectorErrorModel {
                     .iter()
                     .enumerate()
                     .map(|(edge_index, edge)| GraphlikeSourceEdge {
-                        probability: self.event_plan.fault_events[edge.event_index].probability,
+                        probability: self
+                            .edge_overrides
+                            .get(&edge_index)
+                            .map(|override_| override_.probability)
+                            .unwrap_or(self.event_plan.fault_events[edge.event_index].probability),
                         detectors: &edge.detectors,
                         observables: &edge.observables,
                         original_edge_index: edge_index,
@@ -515,11 +602,16 @@ impl LazyDetectorErrorModel {
             observables,
             event_plan,
             edges,
+            edge_overrides,
         } = self;
         let program_edges = edges
             .into_iter()
-            .map(|edge| DemProgramEdge {
-                probability: event_plan.fault_events[edge.event_index].probability,
+            .enumerate()
+            .map(|(edge_index, edge)| DemProgramEdge {
+                probability: edge_overrides
+                    .get(&edge_index)
+                    .map(|override_| override_.probability)
+                    .unwrap_or(event_plan.fault_events[edge.event_index].probability),
                 detectors: edge.detectors,
                 observables: edge.observables,
             })
@@ -539,17 +631,25 @@ impl LazyDetectorErrorModel {
     pub fn compile_hotspot_estimator(&self) -> DemHotspotEstimator {
         let mut edges = Vec::with_capacity(self.edges.len());
         let mut edge_metadata = Vec::with_capacity(self.edges.len());
-        for edge in &self.edges {
+        for (edge_index, edge) in self.edges.iter().enumerate() {
             let event = &self.event_plan.fault_events[edge.event_index];
             let location = &self.event_plan.program.noise_locations[event.noise_id];
             edges.push(DemProgramEdge {
-                probability: event.probability,
+                probability: self
+                    .edge_overrides
+                    .get(&edge_index)
+                    .map(|override_| override_.probability)
+                    .unwrap_or(event.probability),
                 detectors: edge.detectors.clone(),
                 observables: edge.observables.clone(),
             });
             edge_metadata.push(DemProgramEdgeMetadata {
                 location_id: location.location_id,
-                event: event.event.clone(),
+                event: self
+                    .edge_overrides
+                    .get(&edge_index)
+                    .map(|override_| override_.event.clone())
+                    .unwrap_or_else(|| event.event.clone()),
             });
         }
         DemHotspotEstimator::from_program_parts(
@@ -571,16 +671,25 @@ impl LazyDetectorErrorModel {
             edges: self
                 .edges
                 .iter()
-                .map(|edge| {
+                .enumerate()
+                .map(|(edge_index, edge)| {
                     let event = &self.event_plan.fault_events[edge.event_index];
                     let location = &self.event_plan.program.noise_locations[event.noise_id];
                     let catalog = &self.event_plan.program.location_catalog;
                     DetectorErrorEdge {
-                        probability: event.probability,
+                        probability: self
+                            .edge_overrides
+                            .get(&edge_index)
+                            .map(|override_| override_.probability)
+                            .unwrap_or(event.probability),
                         detectors: edge.detectors.clone(),
                         observables: edge.observables.clone(),
                         location_id: catalog.label(location.location_id).to_string(),
-                        event: event.event.clone(),
+                        event: self
+                            .edge_overrides
+                            .get(&edge_index)
+                            .map(|override_| override_.event.clone())
+                            .unwrap_or_else(|| event.event.clone()),
                         tags: catalog.tags(location.location_id).clone(),
                     }
                 })

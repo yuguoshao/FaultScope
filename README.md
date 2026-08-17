@@ -32,7 +32,7 @@ FaultScope `0.2.x` 支持 CPython 3.10–3.14。预构建 wheels 的目标平台
 manylinux x86_64/aarch64、macOS 11+ x86_64/arm64 和 Windows x86_64；源码构建需要
 Rust 1.85 或更新版本。
 
-当前 workspace 版本为 `0.2.5`。项目仍处于 pre-1.0，补丁版本也可能收口或重命名 Python/Rust
+当前 workspace 版本为 `0.2.8`。项目仍处于 pre-1.0，补丁版本也可能收口或重命名 Python/Rust
 API；native decoder ABI 则使用独立版本号管理。
 
 从源码 checkout 直接安装：
@@ -125,6 +125,16 @@ print(result.hotspot_table(top_k=5))
   传入 detector / observable 时，会读取 circuit 中的 `Operation.detector(...)` 和
   `Operation.observable_include(...)`。每个 generated edge 对应 detector error matrix
   \(H\) 的一列及其 logical observable flips。
+- `DetectorErrorModelGenerator.generate_artifact()` 返回
+  `GeneratedDetectorErrorModel`，把唯一 canonical sampling DEM 与可选的稀疏
+  `GraphlikeDecompositionHints` 封装在一起。原生线路生成目前不产生 hint；Stim `^` importer
+  可以填充该 sidecar，decoder 通过 artifact 编译 graphlike view。
+- Circuit→DEM 对 depolarizing noise 使用 Stim 同样的精确独立化参数，并先尝试把 one-qubit
+  `PauliChannel` 精确转换成独立 X/Y/Z mechanisms。不能完成这种转换的多分量 categorical channel
+  默认拒绝；只有显式传入 `approximate_disjoint_errors=True`（或概率阈值）才启用近似。Stim 风格
+  转换会先合并具有相同 detector/observable effect 的互斥分量，再把不同 effect classes 视为独立；
+  后一步会允许同一 shot 同时发生多个原本互斥的结果，因此需要精确保留物理联合分布时应使用
+  forward sampling。
 - `DemHotspotEstimator` 在 DEM 层采样，每条 DEM edge 按独立 Bernoulli instruction 处理，并把
   sampled edge vector 映射成 detector syndrome 和 logical observable flip record。
 - `faultscope.collection.Collector` 提供可复用的 threshold-style logical error-rate
@@ -142,7 +152,8 @@ print(result.hotspot_table(top_k=5))
   `python -m faultscope.backends install pymatching --dry-run` 查看安装步骤；FaultScope 不会在
   `import` 或 `estimate(...)` 时隐式联网、clone 或编译。
 - `mwpm` 仍可在 catalog/status 中发现，但外部 `faultscope-mwpm` 包还是 ABI v1，尚未迁移到
-  FaultScope native decoder ABI v3，因此目前不可安装；`bposd` 是 catalog/status 中不可安装、
+  FaultScope native decoder ABI V4，因此目前不可安装；`bpdecoder` 也暂时不可安装，等待 V4
+  迁移；`bposd` 是 catalog/status 中不可安装、
   未实现的预留项。通用 `install bposd --dry-run` 子命令会报告它不可用，但不会生成安装计划或
   步骤，也不会执行安装。
 - 开发中的 PyMatching 和 fusion-blossom backend 可在激活 venv 后通过
@@ -162,7 +173,7 @@ print(result.hotspot_table(top_k=5))
 | 查看原始 measurement/noise masks | Forward sampling |
 | 自定义 measurement-history loss | Forward estimate + `loss_mask_fn` |
 | detector-syndrome decoder | Forward 或 DEM estimate + decoder |
-| graphlike matching decoder | 原型用 `PyMatchingDecoder`；高性能路径安装 `faultscope-pymatching` 后使用 `NativePyMatchingDecoder`，或使用 `faultscope-fusion-blossom`；`mwpm` 等待 ABI v3 迁移 |
+| graphlike matching decoder | 原型用 `PyMatchingDecoder`；高性能路径安装 `faultscope-pymatching` 后使用 `NativePyMatchingDecoder`，或使用 `faultscope-fusion-blossom`；`mwpm` 等待 ABI V4 迁移 |
 | circuit 入口的 DEM 采样 | `DemFaultScopeSimulator(circuit)` |
 | DEM edge 级热点排序 | `DemFaultScopeSimulator` 或 `DemHotspotEstimator(dem)` |
 | 重复 detector syndrome sampling | `DemFaultScopeSimulator(circuit)` 或生成 DEM 后复用 DEM sampler |
@@ -209,7 +220,9 @@ FaultScope 当前产品路径是 packed batch engine，不暴露通用的 per-sh
 
 Stim/PyMatching 相关 benchmark 会在对应可选依赖安装后启用对照；
 surface-code decoder performance benchmark 会在安装 `faultscope-pymatching` 或
-`faultscope-fusion-blossom` 后额外输出对应 native path。传入
+`faultscope-fusion-blossom` 后额外输出对应 native path。该 benchmark 对每条 Stim
+`error` 保留一条 canonical FaultScope DEM edge；`^` 分组只用于编译当前
+uncorrelated graphlike decoder view，不会被独立采样。传入
 `--split-native-baseline` 可把 native no-correction packed-row baseline 与
 decoder 增量分开显示。需要比较不同 native decoder 的 mean-loss 时，使用
 `--same-seed-across-paths` 让同一个 distance/rate 点复用相同 seed。

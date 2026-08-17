@@ -328,10 +328,13 @@ fn make_task_state(
     let resume_shots = stats.shots;
     let remaining_shots = completion_options.max_shots.saturating_sub(stats.shots);
     if remaining_shots == 0 {
+        let prepared_plan = Arc::new(PreparedDemCountPlan::Logical(
+            task.sampler.compile_logical_count_plan(),
+        ));
         return Ok(TaskState {
             output_index,
             task: Arc::new(task),
-            prepared_plan: Arc::new(PreparedDemCountPlan::Generic),
+            prepared_plan,
             stats,
             completion_options,
             stop_counter,
@@ -374,8 +377,9 @@ fn make_task_state(
         adjusted
             .decoder
             .as_deref()
-            .map(|factory| factory.detector_ids()),
+            .map(|factory| (factory.detector_ids(), factory.batch_formats())),
         &count_options,
+        false,
     )?);
     Ok(TaskState {
         output_index,

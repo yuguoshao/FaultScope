@@ -16,9 +16,9 @@ from faultscope.decoders import (
 )
 from faultscope.dem import Detector, DetectorErrorEdge, DetectorErrorModel, LogicalObservable
 from faultscope.runtime import compile_native_dem_sampler
-from tests.native_backend_v3_helpers import (
+from tests.native_backend_v4_helpers import (
     assert_factory_failure_lifetimes,
-    assert_v3_worker_contract,
+    assert_v4_worker_contract,
 )
 
 BACKEND_SRC = Path(__file__).resolve().parents[1] / "backends" / "faultscope-pymatching" / "src"
@@ -118,6 +118,7 @@ class PyMatchingBackendPackageTests(unittest.TestCase):
         self.assertEqual(decoder.edge_count, 1)
         self.assertEqual(decoder.solver_edge_count, 1)
         self.assertEqual(decoder.build_summary["dem_edge_count"], 1)
+        self.assertEqual(decoder.build_summary["graphlike_edge_count"], 1)
         self.assertEqual(decoder.build_summary["solver_edge_count"], 1)
         self.assertEqual(decoder.python_decode_call_count, 0)
         self.assertIsNotNone(decoder.__faultscope_native_decoder_capsule__())
@@ -127,6 +128,29 @@ class PyMatchingBackendPackageTests(unittest.TestCase):
         self.assertEqual(payload["native_decoder_abi"], NATIVE_DECODER_PLUGIN_ABI)
         self.assertEqual(payload["parameters"], {})
         self.assertEqual(payload["solver"], decoder.build_summary)
+
+    @requires_native_backend
+    def test_public_from_graphlike_problem_preserves_parent_edge_counts(self) -> None:
+        dem = DetectorErrorModel(
+            detectors=(
+                Detector(id=0, measurement_keys=()),
+                Detector(id=1, measurement_keys=()),
+            ),
+            observables=(LogicalObservable(id=0),),
+            edges=(DetectorErrorEdge(0.2, (0, 1), (0,), "parent", "X"),),
+        )
+        problem = dem.compile_graphlike_problem(
+            decomposition={0: (((0,), (0,)), ((1,), ()))},
+        )
+
+        decoder = faultscope_pymatching.NativePyMatchingDecoder.from_graphlike_problem(problem)
+
+        self.assertEqual(decoder.edge_count, 1)
+        self.assertEqual(decoder.solver_edge_count, 2)
+        self.assertEqual(decoder.build_summary["dem_edge_count"], 1)
+        self.assertEqual(decoder.build_summary["graphlike_edge_count"], 2)
+        self.assertEqual(decoder.build_summary["solver_edge_count"], 2)
+        self.assertEqual(decoder.python_decode_call_count, 0)
 
     @requires_native_backend
     def test_backend_consumes_native_graphlike_capsule_without_python_edge_objects(self) -> None:
@@ -220,10 +244,10 @@ class PyMatchingBackendPackageTests(unittest.TestCase):
         )
 
     @requires_native_backend
-    def test_exact_v3_factory_creates_distinct_workers_and_fast_paths(self) -> None:
+    def test_exact_v4_factory_creates_distinct_workers_and_fast_paths(self) -> None:
         decoder = faultscope_pymatching.NativePyMatchingDecoder.from_dem(single_boundary_dem())
 
-        test_stats = assert_v3_worker_contract(self, decoder)
+        test_stats = assert_v4_worker_contract(self, decoder)
         self.assertEqual(test_stats.factory_drops, 0)
         del decoder
         gc.collect()
@@ -239,9 +263,9 @@ class PyMatchingBackendPackageTests(unittest.TestCase):
         test_stats.enable_decode_overlap()
         tasks = (
             {
-                "task_id": "pymatching-v3-workers",
-                "strong_id": "pymatching-v3-workers-strong",
-                "sampling_id": "pymatching-v3-workers-sampling",
+                "task_id": "pymatching-v4-workers",
+                "strong_id": "pymatching-v4-workers-strong",
+                "sampling_id": "pymatching-v4-workers-sampling",
                 "sampler": compile_native_dem_sampler(dem),
                 "decoder": decoder,
                 "metadata_json": "{}",
@@ -313,6 +337,9 @@ class PyMatchingBackendPackageTests(unittest.TestCase):
             )
             decoder = create_native_decoder("pymatching", dem=dem)
             friendly_decoder = NativePyMatchingDecoder.from_dem(dem)
+            friendly_problem_decoder = NativePyMatchingDecoder.from_graphlike_problem(
+                dem.compile_graphlike_problem()
+            )
             result = sampler.estimate(shots=2048, seed=101, decoder=decoder)
             mean_loss_result = sampler.estimate(
                 shots=2048,
@@ -323,6 +350,7 @@ class PyMatchingBackendPackageTests(unittest.TestCase):
 
         self.assertEqual(decoder.python_decode_call_count, 0)
         self.assertEqual(friendly_decoder.python_decode_call_count, 0)
+        self.assertEqual(friendly_problem_decoder.python_decode_call_count, 0)
         self.assertEqual(result.mean_loss, 0.0)
         self.assertEqual(mean_loss_result.mean_loss, 0.0)
         self.assertEqual(mean_loss_result.edge_sensitivities, {})
@@ -374,6 +402,35 @@ class PyMatchingBackendPackageTests(unittest.TestCase):
 
         self.assertEqual(corrections, {observable_id: mask for observable_id in range(65)})
         self.assertEqual(decoder.python_decode_call_count, 1)
+
+    @requires_native_backend
+    def test_decode_batch_masks_decodes_empty_syndromes_on_negative_weight_graph(self) -> None:
+        decoder = faultscope_pymatching.NativePyMatchingDecoder.from_dem(negative_cycle_dem())
+        batch = _Batch(
+            shots=6,
+            detectors={
+                0: (1 << 1) | (1 << 4),
+                1: (1 << 1) | (1 << 3),
+                2: (1 << 3) | (1 << 4),
+            },
+        )
+
+        corrections = decoder.decode_batch_masks(batch)
+
+        self.assertEqual(corrections, {0: 0b111101})
+
+    @requires_native_backend
+    def test_decode_batch_masks_decodes_empty_syndromes_above_64_observables(self) -> None:
+        decoder = faultscope_pymatching.NativePyMatchingDecoder.from_dem(
+            negative_cycle_dem(observable_count=65, logical_observable=64)
+        )
+        batch = _Batch(shots=5, detectors={0: 0, 1: 0, 2: 0})
+
+        corrections = decoder.decode_batch_masks(batch)
+
+        expected = {observable_id: 0 for observable_id in range(65)}
+        expected[64] = 0b11111
+        self.assertEqual(corrections, expected)
 
     @requires_native_backend
     def test_matches_python_pymatching_on_small_graph(self) -> None:
@@ -459,6 +516,22 @@ def many_observable_dem(observable_count: int) -> DetectorErrorModel:
                 location_id="edge0",
                 event="X",
             ),
+        ),
+    )
+
+
+def negative_cycle_dem(
+    *,
+    observable_count: int = 1,
+    logical_observable: int = 0,
+) -> DetectorErrorModel:
+    return DetectorErrorModel(
+        detectors=tuple(Detector(id=index, measurement_keys=()) for index in range(3)),
+        observables=tuple(LogicalObservable(id=index) for index in range(observable_count)),
+        edges=(
+            DetectorErrorEdge(0.9, (0, 1), (logical_observable,), "edge0", "X"),
+            DetectorErrorEdge(0.9, (1, 2), (), "edge1", "X"),
+            DetectorErrorEdge(0.9, (0, 2), (), "edge2", "X"),
         ),
     )
 

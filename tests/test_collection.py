@@ -2374,6 +2374,166 @@ class CollectionTests(unittest.TestCase):
             ],
         )
 
+    def test_circuit_decoder_fanout_compiles_and_materializes_source_once(self) -> None:
+        noise = NoiseLocation("fanout-x", BernoulliPauliNoise("X"), 1.0, (0,))
+        circuit = Circuit(
+            1,
+            (
+                Operation.noise(noise),
+                Operation.measure(0, key="m0"),
+                Operation.detector(("m0",), detector_id=0),
+                Operation.observable_include(0, ("m0",)),
+            ),
+        )
+        no_correction = NativeNoCorrectionDecoder(
+            observable_ids=(0,),
+            detector_ids=(0,),
+        )
+
+        with mock.patch.object(
+            collection_collect_module,
+            "_compile_task_sampler",
+            wraps=collection_collect_module._compile_task_sampler,
+        ) as compile_source:
+            stats = _collect(
+                [CollectionTask(circuit=circuit, task_id="circuit-fanout")],
+                max_shots=8,
+                batch_size=4,
+                seed=29,
+                decoders=(no_correction, "graphlike-detector-copy"),
+            )
+
+        self.assertEqual(compile_source.call_count, 1)
+        self.assertEqual(
+            [(stat.task_id, stat.decoder, stat.errors) for stat in stats],
+            [
+                ("circuit-fanout:no-correction", "no-correction", 8),
+                (
+                    "circuit-fanout:graphlike-detector-copy",
+                    "graphlike-detector-copy",
+                    0,
+                ),
+            ],
+        )
+
+    def test_decoder_fanout_prepares_source_once_and_shares_sampler(self) -> None:
+        dem = _graphlike_dem(0.25)
+        decoder = NativeNoCorrectionDecoder(observable_ids=(0,), detector_ids=(0,))
+        task = CollectionTask(dem=dem, task_id="shared")
+        options = CollectionOptions(max_shots=8, batch_size=4)
+        schema = CollectionCounterSchema()
+
+        with mock.patch.object(
+            collection_collect_module,
+            "_compile_task_sampler",
+            wraps=collection_collect_module._compile_task_sampler,
+        ) as compile_source:
+            prepared = collection_collect_module._prepare_native_tasks(
+                [task],
+                options,
+                (decoder, decoder),
+                schema,
+            )
+
+        self.assertEqual(len(prepared), 2)
+        self.assertEqual(compile_source.call_count, 1)
+        self.assertIs(prepared[0]["sampler"], prepared[1]["sampler"])
+
+    def test_fanout_preparation_cache_does_not_cross_collection_calls(self) -> None:
+        task = CollectionTask(dem=_logical_edge_dem(0.25), task_id="local-cache")
+        options = CollectionOptions(max_shots=2, batch_size=2)
+        schema = CollectionCounterSchema()
+
+        with mock.patch.object(
+            collection_collect_module,
+            "_compile_task_sampler",
+            wraps=collection_collect_module._compile_task_sampler,
+        ) as compile_source:
+            for _ in range(2):
+                collection_collect_module._prepare_native_tasks(
+                    [task],
+                    options,
+                    (),
+                    schema,
+                )
+
+        self.assertEqual(compile_source.call_count, 2)
+
+    def test_identity_v2_v4_domains_and_behavioral_inputs(self) -> None:
+        dem = _graphlike_dem(0.25)
+        options = CollectionOptions(max_shots=1, batch_size=1)
+        base_schema = CollectionCounterSchema()
+        reordered = collection_collect_module._prepare_native_tasks(
+            [
+                CollectionTask(dem=dem, metadata={"a": 1, "b": 2}),
+                CollectionTask(dem=dem, metadata={"b": 2, "a": 1}),
+            ],
+            options,
+            (),
+            base_schema,
+        )
+        self.assertEqual(reordered[0]["sampling_id"], reordered[1]["sampling_id"])
+        self.assertEqual(reordered[0]["strong_id"], reordered[1]["strong_id"])
+
+        counter_changed = collection_collect_module._prepare_native_tasks(
+            [CollectionTask(dem=dem, metadata={"a": 1, "b": 2})],
+            options,
+            (),
+            CollectionCounterSchema(count_detection_events=True),
+        )[0]
+        self.assertEqual(reordered[0]["sampling_id"], counter_changed["sampling_id"])
+        self.assertNotEqual(reordered[0]["strong_id"], counter_changed["strong_id"])
+
+        source_changed = collection_collect_module._prepare_native_tasks(
+            [CollectionTask(dem=_graphlike_dem(0.5), metadata={"a": 1, "b": 2})],
+            options,
+            (),
+            base_schema,
+        )[0]
+        mask_changed = collection_collect_module._prepare_native_tasks(
+            [
+                CollectionTask(
+                    dem=dem,
+                    metadata={"a": 1, "b": 2},
+                    postselection_mask=b"\x01",
+                )
+            ],
+            options,
+            (),
+            base_schema,
+        )[0]
+        decoder_changed = collection_collect_module._prepare_native_tasks(
+            [
+                CollectionTask(
+                    dem=dem,
+                    metadata={"a": 1, "b": 2},
+                    decoder=NativeNoCorrectionDecoder(
+                        observable_ids=(0,),
+                        detector_ids=(0,),
+                    ),
+                )
+            ],
+            options,
+            (),
+            base_schema,
+        )[0]
+        for changed in (source_changed, mask_changed, decoder_changed):
+            self.assertNotEqual(reordered[0]["sampling_id"], changed["sampling_id"])
+            self.assertNotEqual(reordered[0]["strong_id"], changed["strong_id"])
+
+        payload = {"same": "payload"}
+        source_domain = collection_collect_module.domain_digest(
+            schema="faultscope.collection.source_digest",
+            schema_version=1,
+            payload=payload,
+        )
+        decoder_domain = collection_collect_module.domain_digest(
+            schema="faultscope.collection.decoder_digest",
+            schema_version=1,
+            payload=payload,
+        )
+        self.assertNotEqual(source_domain, decoder_domain)
+
     def test_analysis_helpers_fit_and_predict_rates(self) -> None:
         stats = [
             TaskStats("a", 100, 10, 0, 0.1, "native", {"p": 0.1, "d": 3}, "a"),

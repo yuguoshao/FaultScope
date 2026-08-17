@@ -3,18 +3,57 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+import hashlib
 import json
 from typing import Any
 
 
-SAMPLING_ID_SCHEMA_VERSION = 1
-STRONG_ID_SCHEMA_VERSION = 3
+SAMPLING_ID_SCHEMA_VERSION = 2
+STRONG_ID_SCHEMA_VERSION = 4
+SOURCE_DIGEST_SCHEMA_VERSION = 1
+DECODER_DIGEST_SCHEMA_VERSION = 1
 
 
 def canonical_json(value: object) -> str:
     """Return the stable JSON encoding used by collection identities."""
 
     return json.dumps(value, sort_keys=True, separators=(",", ":"))
+
+
+def domain_digest(
+    *,
+    schema: str,
+    schema_version: int,
+    payload: object,
+) -> str:
+    """Hash a canonical payload under an explicit identity domain."""
+
+    envelope = {
+        "schema": schema,
+        "schema_version": schema_version,
+        "payload": payload,
+    }
+    return hashlib.sha256(canonical_json(envelope).encode("utf-8")).hexdigest()
+
+
+def source_identity_digest(payload: Mapping[str, object]) -> str:
+    """Return the domain-separated digest for a complete source payload."""
+
+    return domain_digest(
+        schema="faultscope.collection.source_digest",
+        schema_version=SOURCE_DIGEST_SCHEMA_VERSION,
+        payload=dict(payload),
+    )
+
+
+def decoder_identity_digest(payload: Mapping[str, object]) -> str:
+    """Return the domain-separated digest for a normalized decoder payload."""
+
+    return domain_digest(
+        schema="faultscope.collection.decoder_digest",
+        schema_version=DECODER_DIGEST_SCHEMA_VERSION,
+        payload=dict(payload),
+    )
 
 
 def canonical_mapping_payload(value: object, *, context: str) -> dict[str, object]:

@@ -2,10 +2,10 @@ use std::collections::HashMap;
 use std::time::Instant;
 
 use faultscope_core::{
-    logical_residual_loss_mask_native, packed_residual_failure_count, word_count,
-    CompiledDemLogicalCountPlan, CompiledDemSamplingPlan, CorrectionMaskBatch, DemBatch,
-    DemHotspotEstimator, DetectorEventShotBatchView, DetectorMaskBatchView, Mask,
-    NativeDecoderWorker, NpError, NpResult, PackedDetectorShotBatchView, SmallRng,
+    packed_residual_failure_count, validate_decoder_batch_formats, validate_decoder_detector_ids,
+    word_count, CompiledDemLogicalCountPlan, CompiledDemSamplingPlan, CorrectionMaskBatch,
+    DecoderCorrectionBatch, DemHotspotEstimator, DemSamplingResult, DetectorBatchFormat, Mask,
+    NativeDecoderWorker, NpError, NpResult, SmallRng,
 };
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -41,28 +41,62 @@ impl CountOptions<'_> {
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum PreparedDemCountPlan {
-    Generic,
     Logical(CompiledDemLogicalCountPlan),
     Decoder(CompiledDemSamplingPlan),
 }
 
 pub(crate) fn prepare_dem_count_plan(
     sampler: &DemHotspotEstimator,
-    detector_ids: Option<&[i64]>,
+    decoder_metadata: Option<(&[i64], &[DetectorBatchFormat])>,
     count_options: &CountOptions<'_>,
+    record_attribution: bool,
 ) -> NpResult<PreparedDemCountPlan> {
-    if count_options.uses_detailed_path() {
-        return Ok(PreparedDemCountPlan::Generic);
+    if let Some((detector_ids, batch_formats)) = decoder_metadata {
+        validate_decoder_detector_ids(detector_ids)?;
+        validate_decoder_batch_formats(batch_formats)?;
     }
-    match detector_ids {
-        Some(detector_ids) => Ok(sampler
-            .compile_sampling_plan(detector_ids, sampler.observable_ids())
-            .map(PreparedDemCountPlan::Decoder)
-            .unwrap_or(PreparedDemCountPlan::Generic)),
+    match decoder_metadata {
+        Some((detector_ids, batch_formats)) => Ok(PreparedDemCountPlan::Decoder(
+            sampler.compile_decoder_sampling_plan(
+                detector_ids,
+                sampler.observable_ids(),
+                batch_formats[0],
+                &detail_detector_ids(sampler, count_options),
+                record_attribution,
+            )?,
+        )),
+        None if count_options.uses_detailed_path() || record_attribution => Ok(
+            PreparedDemCountPlan::Decoder(sampler.compile_decoder_sampling_plan(
+                &[],
+                sampler.observable_ids(),
+                DetectorBatchFormat::Masks,
+                &detail_detector_ids(sampler, count_options),
+                record_attribution,
+            )?),
+        ),
         None => Ok(PreparedDemCountPlan::Logical(
             sampler.compile_logical_count_plan(),
         )),
     }
+}
+
+fn detail_detector_ids(
+    sampler: &DemHotspotEstimator,
+    count_options: &CountOptions<'_>,
+) -> Vec<i64> {
+    if count_options.count_detection_events {
+        return sampler.detector_ids().to_vec();
+    }
+    let Some(postselection_mask) = count_options.postselection_mask else {
+        return Vec::new();
+    };
+    sampler
+        .detector_ids()
+        .iter()
+        .copied()
+        .enumerate()
+        .filter_map(|(index, id)| packed_mask_bit(Some(postselection_mask), index).then_some(id))
+        .collect()
 }
 
 pub(crate) fn sample_dem_logical_error_stats_with_rng(
@@ -81,32 +115,35 @@ pub(crate) fn sample_dem_logical_error_stats_with_rng(
             decoder.name(),
         )?;
     }
-    let mut out = if count_options.uses_detailed_path() {
-        sample_detailed_batch(sampler, shots, rng, decoder, count_options)?
-    } else {
-        let errors = match decoder {
-            Some(decoder) => sample_dem_logical_error_count_with_decoder(
-                sampler,
-                shots,
-                rng,
-                decoder,
-                prepared_plan,
-            )?,
-            None => match prepared_plan {
-                PreparedDemCountPlan::Logical(plan) => {
-                    plan.sample_logical_error_count_with_rng(shots, rng)
+    let mut out = match (decoder, prepared_plan) {
+        (decoder, PreparedDemCountPlan::Decoder(plan)) => {
+            let sampled = plan.run_sampling_result_with_rng(shots, rng)?;
+            if count_options.uses_detailed_path() {
+                count_detailed_sampling_result(sampler, &sampled, decoder, count_options)?.stats
+            } else {
+                let decoder = decoder.ok_or_else(|| {
+                    NpError::new("decoder sampling plan requires a native decoder worker")
+                })?;
+                BatchStats {
+                    shots,
+                    errors: count_decoder_sampling_result(&sampled, decoder)?,
+                    discards: 0,
+                    seconds: 0.0,
+                    custom_counts: HashMap::new(),
                 }
-                PreparedDemCountPlan::Generic | PreparedDemCountPlan::Decoder(_) => sampler
-                    .compile_logical_count_plan()
-                    .sample_logical_error_count_with_rng(shots, rng),
-            },
-        };
-        BatchStats {
+            }
+        }
+        (None, PreparedDemCountPlan::Logical(plan)) => BatchStats {
             shots,
-            errors,
+            errors: plan.sample_logical_error_count_with_rng(shots, rng),
             discards: 0,
             seconds: 0.0,
             custom_counts: HashMap::new(),
+        },
+        (Some(_), PreparedDemCountPlan::Logical(_)) => {
+            return Err(NpError::new(
+                "native decoder worker cannot run with a logical-only sampling plan",
+            ));
         }
     };
     out.seconds = started
@@ -115,35 +152,13 @@ pub(crate) fn sample_dem_logical_error_stats_with_rng(
     Ok(out)
 }
 
-fn sample_detailed_batch(
+pub(crate) fn count_detailed_sampling_result(
     sampler: &DemHotspotEstimator,
-    shots: usize,
-    rng: &mut SmallRng,
-    decoder: Option<&mut dyn NativeDecoderWorker>,
-    count_options: &CountOptions<'_>,
-) -> NpResult<BatchStats> {
-    validate_mask_shape(
-        count_options.postselection_mask,
-        sampler.detector_ids().len(),
-        "postselection_mask",
-    )?;
-    validate_mask_shape(
-        count_options.postselected_observables_mask,
-        sampler.observable_ids().len(),
-        "postselected_observables_mask",
-    )?;
-
-    let batch = sampler.run_batch_with_rng(shots, rng, false);
-    Ok(count_detailed_batch(sampler, &batch, decoder, count_options)?.stats)
-}
-
-pub(crate) fn count_detailed_batch(
-    sampler: &DemHotspotEstimator,
-    batch: &DemBatch,
+    sampled: &DemSamplingResult,
     decoder: Option<&mut dyn NativeDecoderWorker>,
     count_options: &CountOptions<'_>,
 ) -> NpResult<DetailedBatchResult> {
-    let shots = batch.shots();
+    let shots = sampled.shots();
     if let Some(decoder) = decoder.as_deref() {
         validate_decoder_observable_layout(
             sampler.observable_ids(),
@@ -162,31 +177,29 @@ pub(crate) fn count_detailed_batch(
         "postselected_observables_mask",
     )?;
     let corrections = match decoder {
-        Some(decoder) => {
-            let detector_ids = decoder.detector_ids().to_vec();
-            let detector_masks = detector_mask_view_from_map(&batch.detectors, &detector_ids)?;
-            let view = DetectorMaskBatchView::new(&detector_ids, &detector_masks, shots)?;
-            decoder.decode_batch_checked(view)?
-        }
-        None => CorrectionMaskBatch::empty(shots),
+        Some(decoder) => Some(decoder.decode_batch_checked(sampled.syndrome())?),
+        None => None,
     };
-
-    let residuals = residual_masks(
-        &batch.observables,
-        &corrections,
+    let residuals = detailed_residual_batch(
+        sampled.observables(),
+        corrections,
         sampler.observable_ids(),
         shots,
-    );
+    )?;
     let mut loss_mask = Mask::zero(word_count(shots));
     let detector_discard_mask = detector_postselection_loss_mask(
-        &batch.detectors,
+        sampled,
         sampler.detector_ids(),
         shots,
         count_options.postselection_mask,
     )?;
     let mut custom_counts = HashMap::new();
     if count_options.count_detection_events {
-        let events = batch.detectors.values().map(Mask::bit_count).sum::<usize>();
+        let events = sampled
+            .detail_detector_masks()
+            .iter()
+            .map(Mask::bit_count)
+            .sum::<usize>();
         custom_counts.insert("detection_events".to_string(), events);
         custom_counts.insert(
             "detectors_checked".to_string(),
@@ -208,8 +221,8 @@ pub(crate) fn count_detailed_batch(
         let mut observable_discard = false;
         let mut logical_error = false;
         let mut combo = String::with_capacity(sampler.observable_ids().len());
-        for (index, (_, residual)) in residuals.iter().enumerate() {
-            let bit = mask_bit(residual, shot);
+        for index in 0..sampler.observable_ids().len() {
+            let bit = residuals.bit(index, shot);
             let postselected = packed_mask_bit(count_options.postselected_observables_mask, index);
             if bit && postselected {
                 observable_discard = true;
@@ -248,6 +261,82 @@ pub(crate) fn count_detailed_batch(
     })
 }
 
+enum DetailedResidualBatch {
+    Masks(Vec<Mask>),
+    Packed {
+        data: Vec<u8>,
+        observable_byte_count: usize,
+    },
+}
+
+impl DetailedResidualBatch {
+    fn bit(&self, observable: usize, shot: usize) -> bool {
+        match self {
+            Self::Masks(masks) => mask_bit(&masks[observable], shot),
+            Self::Packed {
+                data,
+                observable_byte_count,
+            } => {
+                data[shot * observable_byte_count + (observable >> 3)] & (1u8 << (observable & 7))
+                    != 0
+            }
+        }
+    }
+}
+
+fn detailed_residual_batch(
+    observables: &faultscope_core::DemObservableBatch,
+    corrections: Option<DecoderCorrectionBatch>,
+    observable_ids: &[i64],
+    shots: usize,
+) -> NpResult<DetailedResidualBatch> {
+    match (observables, corrections) {
+        (faultscope_core::DemObservableBatch::Masks(actual), None) => {
+            actual.validate_against(observable_ids, shots)?;
+            Ok(DetailedResidualBatch::Masks(actual.masks.clone()))
+        }
+        (faultscope_core::DemObservableBatch::Packed(actual), None) => {
+            actual.validate_against(observable_ids, shots)?;
+            Ok(DetailedResidualBatch::Packed {
+                data: actual.data.clone(),
+                observable_byte_count: actual.observable_byte_count,
+            })
+        }
+        (
+            faultscope_core::DemObservableBatch::Masks(actual),
+            Some(DecoderCorrectionBatch::Masks(correction)),
+        ) => {
+            actual.validate_against(observable_ids, shots)?;
+            correction.validate_against(observable_ids, shots)?;
+            Ok(DetailedResidualBatch::Masks(
+                residual_masks(actual, &correction, observable_ids, shots)
+                    .into_iter()
+                    .map(|(_, mask)| mask)
+                    .collect(),
+            ))
+        }
+        (
+            faultscope_core::DemObservableBatch::Packed(actual),
+            Some(DecoderCorrectionBatch::Packed(correction)),
+        ) => {
+            actual.validate_against(observable_ids, shots)?;
+            correction.validate_against(observable_ids, shots)?;
+            Ok(DetailedResidualBatch::Packed {
+                data: actual
+                    .data
+                    .iter()
+                    .zip(&correction.data)
+                    .map(|(actual, correction)| actual ^ correction)
+                    .collect(),
+                observable_byte_count: actual.observable_byte_count,
+            })
+        }
+        _ => Err(NpError::new(
+            "DEM observable truth layout does not match the decoder correction layout",
+        )),
+    }
+}
+
 pub(crate) fn validate_decoder_observable_layout(
     canonical_observable_ids: &[i64],
     decoder_observable_ids: &[i64],
@@ -262,113 +351,47 @@ pub(crate) fn validate_decoder_observable_layout(
     Ok(())
 }
 
-fn sample_dem_logical_error_count_with_decoder(
-    sampler: &DemHotspotEstimator,
-    shots: usize,
-    rng: &mut SmallRng,
+fn count_decoder_sampling_result(
+    sampled: &DemSamplingResult,
     decoder: &mut dyn NativeDecoderWorker,
-    prepared_plan: &PreparedDemCountPlan,
 ) -> NpResult<usize> {
-    if decoder.supports_detector_event_batch() {
-        let detector_ids = decoder.detector_ids().to_vec();
-        let fallback;
-        let plan = match prepared_plan {
-            PreparedDemCountPlan::Decoder(plan)
-                if plan.detector_ids() == detector_ids.as_slice()
-                    && plan.observable_ids() == sampler.observable_ids() =>
-            {
-                plan
+    let corrections = decoder.decode_batch_checked(sampled.syndrome())?;
+    match (sampled.observables(), corrections) {
+        (
+            faultscope_core::DemObservableBatch::Masks(actual),
+            DecoderCorrectionBatch::Masks(correction),
+        ) => {
+            let residuals = residual_masks(
+                actual,
+                &correction,
+                actual.observable_ids.as_slice(),
+                sampled.shots(),
+            );
+            let mut loss = Mask::zero(word_count(sampled.shots()));
+            for (_, residual) in residuals {
+                loss.or_assign(&residual);
             }
-            PreparedDemCountPlan::Generic
-            | PreparedDemCountPlan::Logical(_)
-            | PreparedDemCountPlan::Decoder(_) => {
-                fallback =
-                    sampler.compile_sampling_plan(&detector_ids, sampler.observable_ids())?;
-                &fallback
-            }
-        };
-        let event_batch = plan.run_detector_event_shot_batch_with_rng(shots, rng);
-        let detector_view = DetectorEventShotBatchView::new(
-            &detector_ids,
-            &event_batch.offsets,
-            &event_batch.events,
-            event_batch.shots,
-        )?;
-        let corrections = decoder.decode_detector_event_batch_checked(detector_view)?;
-        return packed_residual_failure_count(
-            &event_batch.observable_ids,
-            &event_batch.observable_data,
-            event_batch.observable_byte_count,
-            &corrections,
-            event_batch.shots,
-        );
+            loss.and_assign(sampled.all_mask());
+            Ok(loss.bit_count())
+        }
+        (
+            faultscope_core::DemObservableBatch::Packed(actual),
+            DecoderCorrectionBatch::Packed(correction),
+        ) => packed_residual_failure_count(
+            &actual.observable_ids,
+            &actual.data,
+            actual.observable_byte_count,
+            &correction,
+            actual.shots,
+        ),
+        _ => Err(NpError::new(
+            "DEM observable truth layout does not match the decoder correction layout",
+        )),
     }
-
-    if decoder.supports_packed_batch() {
-        let detector_ids = decoder.detector_ids().to_vec();
-        let fallback;
-        let plan = match prepared_plan {
-            PreparedDemCountPlan::Decoder(plan)
-                if plan.detector_ids() == detector_ids.as_slice()
-                    && plan.observable_ids() == sampler.observable_ids() =>
-            {
-                plan
-            }
-            PreparedDemCountPlan::Generic
-            | PreparedDemCountPlan::Logical(_)
-            | PreparedDemCountPlan::Decoder(_) => {
-                fallback =
-                    sampler.compile_sampling_plan(&detector_ids, sampler.observable_ids())?;
-                &fallback
-            }
-        };
-        let packed_batch = plan.run_packed_shot_batch_with_rng(shots, rng);
-        let detector_view = PackedDetectorShotBatchView::new(
-            &detector_ids,
-            &packed_batch.detector_data,
-            packed_batch.shots,
-        )?;
-        let corrections = decoder.decode_packed_batch_checked(detector_view)?;
-        return packed_residual_failure_count(
-            &packed_batch.observable_ids,
-            &packed_batch.observable_data,
-            packed_batch.observable_byte_count,
-            &corrections,
-            packed_batch.shots,
-        );
-    }
-
-    let batch = sampler.run_batch_with_rng(shots, rng, false);
-    let detector_ids = decoder.detector_ids().to_vec();
-    let detector_masks = detector_mask_view_from_map(&batch.detectors, &detector_ids)?;
-    let view = DetectorMaskBatchView::new(&detector_ids, &detector_masks, shots)?;
-    let corrections = decoder.decode_batch_checked(view)?;
-    let loss_mask = logical_residual_loss_mask_native(
-        &batch.observables,
-        &corrections,
-        sampler.observable_ids(),
-        batch.all_mask(),
-    );
-    Ok(loss_mask.bit_count())
-}
-
-fn detector_mask_view_from_map(
-    detectors: &HashMap<i64, Mask>,
-    detector_ids: &[i64],
-) -> NpResult<Vec<Mask>> {
-    detector_ids
-        .iter()
-        .map(|detector_id| {
-            detectors
-                .get(detector_id)
-                .cloned()
-                .ok_or_else(|| NpError::new(format!("missing detector id {detector_id}")))
-        })
-        .collect()
 }
 
 fn residual_masks(
-    observables: &HashMap<i64, Mask>,
+    observables: &CorrectionMaskBatch,
     corrections: &CorrectionMaskBatch,
     observable_ids: &[i64],
     shots: usize,
@@ -378,7 +401,7 @@ fn residual_masks(
     observable_ids
         .iter()
         .map(|observable_id| {
-            let actual = observables.get(observable_id).unwrap_or(&zero);
+            let actual = observables.get(*observable_id).unwrap_or(&zero);
             let correction = corrections.get(*observable_id).unwrap_or(&zero);
             let mut residual = actual.clone();
             residual.xor_assign(correction);
@@ -389,7 +412,7 @@ fn residual_masks(
 }
 
 fn detector_postselection_loss_mask(
-    detectors: &HashMap<i64, Mask>,
+    sampled: &DemSamplingResult,
     detector_ids: &[i64],
     shots: usize,
     postselection_mask: Option<&[u8]>,
@@ -400,8 +423,8 @@ fn detector_postselection_loss_mask(
     let mut discard = Mask::zero(word_count(shots));
     for (index, detector_id) in detector_ids.iter().enumerate() {
         if packed_mask_bit(Some(postselection_mask), index) {
-            let detector = detectors
-                .get(detector_id)
+            let detector = sampled
+                .detector_detail_mask(*detector_id)
                 .ok_or_else(|| NpError::new(format!("missing detector id {detector_id}")))?;
             discard.or_assign(detector);
         }
@@ -442,4 +465,170 @@ fn set_mask_bit(mask: &mut Mask, shot: usize) {
 fn packed_mask_bit(mask: Option<&[u8]>, index: usize) -> bool {
     mask.and_then(|mask| mask.get(index >> 3))
         .is_some_and(|byte| ((byte >> (index & 7)) & 1) != 0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct FormatZeroDecoder {
+        detector_ids: Vec<i64>,
+        observable_ids: Vec<i64>,
+        formats: Vec<DetectorBatchFormat>,
+    }
+
+    impl NativeDecoderWorker for FormatZeroDecoder {
+        fn name(&self) -> &str {
+            "format-zero"
+        }
+
+        fn detector_ids(&self) -> &[i64] {
+            &self.detector_ids
+        }
+
+        fn observable_ids(&self) -> &[i64] {
+            &self.observable_ids
+        }
+
+        fn batch_formats(&self) -> &[DetectorBatchFormat] {
+            &self.formats
+        }
+
+        fn decode_batch(
+            &mut self,
+            detectors: faultscope_core::DetectorBatchView<'_>,
+        ) -> NpResult<DecoderCorrectionBatch> {
+            match detectors {
+                faultscope_core::DetectorBatchView::Masks(view) => {
+                    Ok(DecoderCorrectionBatch::Masks(CorrectionMaskBatch::new(
+                        self.observable_ids.clone(),
+                        vec![Mask::zero(word_count(view.shots)); self.observable_ids.len()],
+                        view.shots,
+                    )?))
+                }
+                faultscope_core::DetectorBatchView::Packed(view) => {
+                    Ok(DecoderCorrectionBatch::Packed(
+                        faultscope_core::PackedObservableShotBatch::new(
+                            self.observable_ids.clone(),
+                            vec![0; view.shots * self.observable_ids.len().div_ceil(8)],
+                            view.shots,
+                        )?,
+                    ))
+                }
+                faultscope_core::DetectorBatchView::Events(view) => {
+                    Ok(DecoderCorrectionBatch::Packed(
+                        faultscope_core::PackedObservableShotBatch::new(
+                            self.observable_ids.clone(),
+                            vec![0; view.shots * self.observable_ids.len().div_ceil(8)],
+                            view.shots,
+                        )?,
+                    ))
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn prepared_plans_reject_duplicate_decoder_detector_ids() {
+        let sampler =
+            DemHotspotEstimator::from_sampling_parts(vec![10], vec![0], Vec::new()).unwrap();
+        let duplicate_ids = [10, 10];
+        let options = [
+            CountOptions::default(),
+            CountOptions {
+                count_detection_events: true,
+                ..CountOptions::default()
+            },
+        ];
+
+        for option in options {
+            let error = prepare_dem_count_plan(
+                &sampler,
+                Some((&duplicate_ids, &[DetectorBatchFormat::Masks])),
+                &option,
+                false,
+            )
+            .unwrap_err();
+            assert_eq!(
+                error.message(),
+                "decoder detector ids must be unique; duplicate detector id 10"
+            );
+        }
+    }
+
+    #[test]
+    fn detailed_counting_is_identical_for_masks_packed_and_events() {
+        let sampler = DemHotspotEstimator::from_sampling_parts(
+            vec![10, 20, 30],
+            vec![0, 1],
+            vec![
+                faultscope_core::DetectorErrorEdge {
+                    probability: 0.19,
+                    detectors: vec![10, 20],
+                    observables: vec![0],
+                    location_id: "a".to_string(),
+                    event: faultscope_core::DemEvent::Bool(true),
+                    tags: HashMap::new(),
+                },
+                faultscope_core::DetectorErrorEdge {
+                    probability: 0.43,
+                    detectors: vec![20, 30],
+                    observables: vec![1],
+                    location_id: "b".to_string(),
+                    event: faultscope_core::DemEvent::Bool(true),
+                    tags: HashMap::new(),
+                },
+                faultscope_core::DetectorErrorEdge {
+                    probability: 0.71,
+                    detectors: vec![10, 30],
+                    observables: vec![0, 1],
+                    location_id: "c".to_string(),
+                    event: faultscope_core::DemEvent::Bool(true),
+                    tags: HashMap::new(),
+                },
+            ],
+        )
+        .unwrap();
+        let postselection = [0b0000_0101];
+        let postselected_observables = [0b0000_0010];
+        let options = CountOptions {
+            postselection_mask: Some(&postselection),
+            postselected_observables_mask: Some(&postselected_observables),
+            count_observable_error_combos: true,
+            count_detection_events: true,
+        };
+        let mut expected: Option<(BatchStats, Mask, u64)> = None;
+        for format in DetectorBatchFormat::STABLE_ORDER {
+            let formats = [format];
+            let PreparedDemCountPlan::Decoder(plan) = prepare_dem_count_plan(
+                &sampler,
+                Some((sampler.detector_ids(), &formats)),
+                &options,
+                false,
+            )
+            .unwrap() else {
+                unreachable!()
+            };
+            assert_eq!(plan.format(), format);
+            assert_eq!(plan.detail_detector_ids(), sampler.detector_ids());
+            assert!(!plan.records_attribution());
+
+            let mut rng = SmallRng::new(0x1234_5678);
+            let sampled = plan.run_sampling_result_with_rng(129, &mut rng).unwrap();
+            let mut decoder = FormatZeroDecoder {
+                detector_ids: sampler.detector_ids().to_vec(),
+                observable_ids: sampler.observable_ids().to_vec(),
+                formats: formats.to_vec(),
+            };
+            let detailed =
+                count_detailed_sampling_result(&sampler, &sampled, Some(&mut decoder), &options)
+                    .unwrap();
+            let actual = (detailed.stats, detailed.loss_mask, rng.next_u64());
+            if let Some(expected) = &expected {
+                assert_eq!(&actual, expected);
+            } else {
+                expected = Some(actual);
+            }
+        }
+    }
 }

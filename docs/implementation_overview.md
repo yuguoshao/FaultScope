@@ -267,8 +267,14 @@ dJ_DEM / dp_e =
 - `hotspots: dict[str, float]`
 - `detector_graph_hotspots`
 
-DEM mode 采用普通 DEM 的独立 edge sampling 语义。它适合 detector-graph 或 decoder-level
-hotspot 扫描，但不保留原始 forward trajectory 中同一物理 location 下多个 Pauli event 的互斥采样语义。
+DEM mode 采用普通 DEM 的独立 edge sampling 语义。Circuit→DEM 对 uniform depolarizing
+channel 使用 Stim 风格的精确独立 factorization，因此保留 detector/observable 联合分布；
+one-qubit `PauliChannel` 也会先尝试 Stim 的 independent X/Y/Z conversion。无法走该路径的一般
+multi-component channel 默认拒绝，只有 `approximate_disjoint_errors` 显式开启时才把 categorical
+channel 转为 DEM。同 detector/observable effect 的分量先按互斥概率求和，不同 effect classes
+再作为独立 edges。后一步不保留原始 forward trajectory 的互斥采样语义，会允许同一 location
+的多个 effect classes 同时发生。当前 DEM schema 不存储 categorical group；要求一般关联噪声
+精确联合分布时使用 forward sampling。
 
 ## Stim Import Subset
 

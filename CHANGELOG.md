@@ -4,7 +4,7 @@ All notable changes to FaultScope are documented here. FaultScope is pre-1.0:
 unless a contract is explicitly versioned (such as the native decoder ABI),
 patch releases may make breaking API changes.
 
-## [0.2.5] - Unreleased
+## [0.2.8] - Unreleased
 
 ### Added
 
@@ -12,14 +12,40 @@ patch releases may make breaking API changes.
 - Native logical error-rate collection with deterministic multi-worker scheduling.
 - Immutable Python `Collector` configuration, CSV/resume, typed streaming progress,
   explicit raw/accepted logical rates, decoder fanout, and threshold analysis.
-- Pure factory/worker native decoder plugin ABI v2 and optional PyMatching and
+- Factory/worker native decoder plugin ABI V4 and optional PyMatching and
   fusion-blossom backends.
+- Optional graphlike decomposition hints for compiling canonical DEM hyperedges
+  without changing the sampled detector/observable joint distribution.
+- Model-bound `GraphlikeDecompositionHints` and `GeneratedDetectorErrorModel`
+  package the canonical sampling DEM with optional decoder-only structure;
+  native generators expose the forward-compatible `generate_artifact()` API.
 
 ### Changed
 
-- Native decoder plugins now use ABI v3. Decoder observable outputs must match
-  the sampler's complete canonical layout, packed padding must be zero, and ABI
-  v2 capsules/manifests are rejected without an adapter.
+- Circuit-to-DEM generation now follows Stim's disjoint-error policy. Uniform
+  one- and two-qubit depolarizing channels are reparameterized exactly into
+  independent DEM mechanisms, and one-qubit `PauliChannel` first attempts
+  Stim's independent X/Y/Z conversion. A multi-component channel that cannot
+  take that exact path is rejected by default and requires explicit
+  `approximate_disjoint_errors=True` (or a component-probability threshold).
+  Matching propagated effects are first combined by disjoint probability sum;
+  distinct effect classes are then treated as independent edges.
+- The surface-code decoder benchmark now samples one canonical FaultScope DEM
+  edge per Stim `error` instruction and passes separator groups only to decoder
+  construction through a typed artifact. Only instructions with actual
+  multi-component separators allocate sparse hints. Native backend summaries distinguish canonical DEM,
+  pre-merge graphlike, and post-merge solver edge counts.
+
+- Native decoder plugins now use the breaking ABI V4. Factories publish a
+  stable ordered Masks/Packed/Events preference list and workers expose one
+  tagged `decode_batch` callback. Masks input returns mask-major corrections;
+  Packed and Events input return packed rows. V1–V3 capsules/manifests are
+  rejected without an adapter.
+- DEM syndrome layout is independent of hotspot attribution. Sampling produces
+  the decoder's preferred layout directly while FaultScope records an optional
+  private edge-event sidecar; ordinary sampling allocates no attribution trace.
+  Detailed counting now uses one Logical or Decoder plan and a shared residual,
+  discard, combo, and loss-mask implementation across all formats.
 - Pauli and stabilizer validation now occurs once at Python and Rust public
   boundaries. Validated owning state and borrowed sparse-Pauli views are used
   by internal hot paths, avoiding repeated full-width scans and allocations for
@@ -56,6 +82,15 @@ patch releases may make breaking API changes.
 - The compiler throughput benchmark now preserves explicit Stim `REPEAT`
   blocks by default so it exercises the native Rust loop path; flattened input
   remains available as an explicit stress-test mode.
+- Collection decoder fan-out now compiles each shared circuit or DEM once and
+  reuses the immutable native sampler across the resulting decoder task views.
+- Collection sampling identities now use domain-separated source and decoder
+  digests (sampling schema v2, strong-id schema v4). Existing resume rows use
+  older ids and are intentionally not reused; task-derived random streams can
+  therefore differ after upgrading.
+- Native decoder detector layouts must contain unique ids. Built-in
+  constructors, composite children, ABI V4 factories, and DEM sampling plans
+  now reject duplicate detector ids instead of silently selecting one column.
 - Added `generate_dem_edges_from_event_plan`; the obsolete compatibility
   overload with an unused operations argument was removed.
 - Python forward decoders can bulk-select only their required packed
@@ -64,6 +99,11 @@ patch releases may make breaking API changes.
 
 ### Fixed
 
+- Circuit-generated DEM sampling now preserves the detector/observable joint
+  distribution of supported depolarizing channels instead of independently
+  sampling the mutually exclusive Pauli marginals. The surface-code Stim DEM
+  converter also preserves detector coordinates declared after error
+  instructions.
 - Graphlike decoding problems now treat edge probability as the authoritative
   value and derive the ABI/matching weight in core. The compatibility edge DTO
   no longer accepts an independently writable weight that could be non-finite
@@ -106,4 +146,4 @@ patch releases may make breaking API changes.
 - Generated type stubs now mark factory-only native classes, including
   `StabilizerState`, as unavailable for direct construction.
 
-[0.2.5]: https://github.com/yuguoshao/FaultScope/releases/tag/v0.2.5
+[0.2.8]: https://github.com/yuguoshao/FaultScope/releases/tag/v0.2.8

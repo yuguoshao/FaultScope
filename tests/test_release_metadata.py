@@ -65,7 +65,7 @@ class ReleaseMetadataTests(unittest.TestCase):
     def test_workspace_owns_version_and_msrv(self) -> None:
         workspace = _toml("Cargo.toml")["workspace"]
         package = workspace["package"]
-        self.assertEqual(package["version"], "0.2.5")
+        self.assertEqual(package["version"], "0.2.8")
         self.assertEqual(package["rust-version"], "1.85")
 
     def test_faultscope_workspace_packages_and_internal_dependencies_are_v0_2(self) -> None:
@@ -88,7 +88,7 @@ class ReleaseMetadataTests(unittest.TestCase):
             self.assertIs(manifest["package"]["version"]["workspace"], True, path)
             for dependency_name, dependency in manifest.get("dependencies", {}).items():
                 if dependency_name.startswith("faultscope-"):
-                    self.assertEqual(dependency["version"], "0.2.5", path)
+                    self.assertEqual(dependency["version"], "0.2.8", path)
 
         locked = _toml("Cargo.lock")["package"]
         locked_versions = {
@@ -97,7 +97,7 @@ class ReleaseMetadataTests(unittest.TestCase):
             if package["name"] in internal_packages
         }
         self.assertEqual(set(locked_versions), internal_packages)
-        self.assertEqual(set(locked_versions.values()), {"0.2.5"})
+        self.assertEqual(set(locked_versions.values()), {"0.2.8"})
 
     def test_python_metadata_uses_maturin_dynamic_version(self) -> None:
         project = _toml("pyproject.toml")["project"]
@@ -169,7 +169,7 @@ class ReleaseMetadataTests(unittest.TestCase):
     def test_published_path_dependencies_have_registry_versions(self) -> None:
         collection = _toml("crates/faultscope-collection/Cargo.toml")
         dependency = collection["dependencies"]["faultscope-core"]
-        self.assertEqual(dependency["version"], "0.2.5")
+        self.assertEqual(dependency["version"], "0.2.8")
         self.assertEqual(dependency["path"], "../faultscope-core")
 
     def test_all_python_extensions_use_abi3_py310(self) -> None:
@@ -188,15 +188,15 @@ class ReleaseMetadataTests(unittest.TestCase):
             "backends/faultscope-fusion-blossom/pyproject.toml",
         ):
             project = _toml(path)["project"]
-            self.assertIn("faultscope>=0.2.4,<0.3", project["dependencies"], path)
+            self.assertIn("faultscope>=0.2.8,<0.3", project["dependencies"], path)
 
-    def test_native_decoder_public_constants_are_coherent_for_abi_v3(self) -> None:
+    def test_native_decoder_public_constants_are_coherent_for_abi_v4(self) -> None:
         from faultscope import _native
         from faultscope.backends import NATIVE_DECODER_PLUGIN_ABI
         from faultscope.backends.registry import NATIVE_DECODER_ENTRY_POINT_GROUP
 
-        self.assertEqual(NATIVE_DECODER_PLUGIN_ABI, "faultscope.native_decoder_plugin.v3")
-        self.assertEqual(_native.NATIVE_DECODER_PLUGIN_ABI_VERSION, 3)
+        self.assertEqual(NATIVE_DECODER_PLUGIN_ABI, "faultscope.native_decoder_plugin.v4")
+        self.assertEqual(_native.NATIVE_DECODER_PLUGIN_ABI_VERSION, 4)
         self.assertEqual(_native.NATIVE_DECODER_PLUGIN_ABI, NATIVE_DECODER_PLUGIN_ABI)
         self.assertEqual(
             _native.NATIVE_DECODER_PLUGIN_ENTRY_POINT_GROUP,
@@ -207,53 +207,49 @@ class ReleaseMetadataTests(unittest.TestCase):
             _native.NATIVE_DECODER_PLUGIN_ENTRY_POINT_GROUP,
         )
 
-    def test_native_decoder_docs_define_only_the_v3_runtime_contract(self) -> None:
+    def test_native_decoder_docs_define_only_the_v4_runtime_contract(self) -> None:
         abi = (ROOT / "docs/native_decoder_abi.md").read_text()
         development = (ROOT / "docs/decoder_development.md").read_text()
         docs = abi + "\n" + development
 
         for required in (
-            "faultscope.native_decoder_plugin.v3",
+            "faultscope.native_decoder_plugin.v4",
             "faultscope.native_decoders",
             "__faultscope_native_decoder_capsule__",
-            "FaultScopeNativeDecoderFactoryV3",
-            "FaultScopeNativeDecoderWorkerV3",
-            "72 bytes",
-            "48 bytes",
-            "NATIVE_DECODER_FACTORY_FLAG_THREAD_SAFE",
-            "host-provided capacity",
+            "FaultScopeNativeDecoderFactoryV4",
+            "FaultScopeNativeDecoderWorkerV4",
+            "FaultScopeNativeDetectorBatchViewV4",
+            "FaultScopeNativeCorrectionBatchMutViewV4",
+            "FaultScopeNativeDecoderU32SliceV1",
+            "80",
+            "32",
+            "thread-safe factory flag",
+            "output descriptor and its capacity",
             "drop_factory_state",
             "drop_worker_state",
-            "error string",
-            "must not unwind or panic across FFI",
-            "factory cannot decode",
-            "exclusive worker",
-            "Canonical observable layout",
-            "Missing ids, extra ids, and reordered ids",
-            "unused high bits",
-            "collection task",
-            "one worker",
-            "estimate",
-            "debug",
-            "composite",
-            "thread-local worker cache",
-            "decoder pool or mutex",
-            "no runtime compatibility with ABI v2",
-            "Migrating a third-party ABI v2 backend",
-            "mwpm",
-            "not yet migrated",
-            "bposd",
+            "must not unwind across the C boundary",
+            "exclusive mutable objects",
+            "batch_formats",
+            "MASKS",
+            "PACKED",
+            "EVENTS",
+            "GF(2)",
             "reserved",
-            "public Python decoder classes are factory handles",
-            "workers are private",
+            "padding",
+            "DemAttributionTrace",
+            "V3 to V4 migration",
+            "mwpm",
+            "bpdecoder",
+            "bposd",
         ):
             self.assertIn(required, docs, required)
 
         for obsolete in (
-            "create_worker_state",
-            "debug fallback only",
-            "single-worker fallback",
-            "runtime ABI v1 fallback",
+            "FaultScopeNativeDecoderFactoryV3 {",
+            "FaultScopeNativeDecoderWorkerV3 {",
+            "fn supports_packed_batch",
+            "fn decode_packed_batch(",
+            "fn decode_detector_event_batch(",
         ):
             self.assertNotIn(obsolete, docs, obsolete)
 
@@ -265,9 +261,11 @@ class ReleaseMetadataTests(unittest.TestCase):
             "NativeDecoderFactory: Send + Sync",
             "NativeDecoderWorker: Send",
             "fn create_worker(&self) -> NpResult<Box<dyn NativeDecoderWorker>>",
+            "fn batch_formats(&self) -> &[DetectorBatchFormat]",
             "fn decode_batch(\n        &mut self,",
-            "fn decode_packed_batch(\n        &mut self,",
-            "fn decode_detector_event_batch(\n        &mut self,",
+            "DetectorBatchView<'_>",
+            "DecoderCorrectionBatch",
+            "one tagged `decode_batch`",
             "Arc<dyn NativeDecoderFactory>",
             "temporary worker",
             "per-thread/task worker",
@@ -282,6 +280,8 @@ class ReleaseMetadataTests(unittest.TestCase):
             "Arc<dyn NativeBatchDecoder",
             "fn decode_batch(\n        &self,",
             "fn decode_packed_batch(\n    &self,",
+            "fn decode_packed_batch(\n        &mut self,",
+            "fn decode_detector_event_batch(\n        &mut self,",
         ):
             self.assertNotIn(obsolete, development, obsolete)
 

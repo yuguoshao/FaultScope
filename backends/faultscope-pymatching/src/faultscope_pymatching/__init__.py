@@ -48,9 +48,14 @@ class NativePyMatchingDecoder:
 
     @staticmethod
     def from_dem(dem, *, options=None):
+        problem = dem.compile_graphlike_problem()
+        return NativePyMatchingDecoder.from_graphlike_problem(problem, options=options)
+
+    @staticmethod
+    def from_graphlike_problem(problem, *, options=None):
         _require_native_extension()
         parsed = _parse_options(options)
-        inner = _native.NativePyMatchingNativeDecoder.from_dem(dem)
+        inner = _native.NativePyMatchingNativeDecoder.from_graphlike_problem(problem)
         return NativePyMatchingDecoder(inner, options=parsed)
 
     @staticmethod

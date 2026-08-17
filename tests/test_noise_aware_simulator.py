@@ -4,10 +4,11 @@ import os
 import random
 import tempfile
 import unittest
-from types import SimpleNamespace
+from types import MappingProxyType, SimpleNamespace
 from unittest import mock
 
 import faultscope
+import faultscope.io.stim as stim_io
 from faultscope.runtime import DemFaultScopeSimulator, FaultScopeSimulator, SampleBatch
 from faultscope.core import Circuit, NoiseLocation, Operation
 from faultscope.dem import (
@@ -18,6 +19,8 @@ from faultscope.dem import (
     DetectorErrorModelGenerator,
     DetectorGraphEdgeHotspot,
     DetectorGraphHotspots,
+    GeneratedDetectorErrorModel,
+    GraphlikeDecompositionHints,
     GraphlikeDecodingProblem,
     IndexedDem,
     LogicalObservable,
@@ -445,6 +448,20 @@ class NoiseAwareSimulatorTests(unittest.TestCase):
         self.assertEqual(base_decoder.observable_ids, (1,))
         self.assertIn("NativeBatchDecoder", repr(base_decoder))
 
+    def test_native_no_correction_decoders_reject_duplicate_detector_ids(self) -> None:
+        constructors = (
+            lambda: NativeNoCorrectionDecoder(observable_ids=(0,), detector_ids=(5, 5)),
+            lambda: NativeBatchDecoder.no_correction(observable_ids=(0,), detector_ids=(5, 5)),
+        )
+
+        for construct in constructors:
+            with self.subTest(construct=construct):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    r"decoder detector ids must be unique; duplicate detector id 5",
+                ):
+                    construct()
+
     def test_native_backend_catalog_includes_reserved_decoders(self) -> None:
         catalog = {entry.name: entry for entry in official_native_decoder_backend_catalog()}
 
@@ -462,11 +479,12 @@ class NoiseAwareSimulatorTests(unittest.TestCase):
         self.assertEqual(catalog["mwpm"].package_name, "faultscope-mwpm")
         self.assertEqual(catalog["mwpm"].repo_url, "https://github.com/Quon-team/mwpm.rs.git")
         self.assertIn("ABI v1", catalog["mwpm"].description)
-        self.assertIn("FaultScope native decoder ABI v3", catalog["mwpm"].description)
+        self.assertIn("FaultScope native decoder ABI v4", catalog["mwpm"].description)
         self.assertIn("bpdecoder", catalog)
         self.assertEqual(catalog["bpdecoder"].problem_kind, "binary-linear")
-        self.assertTrue(catalog["bpdecoder"].installable)
+        self.assertFalse(catalog["bpdecoder"].installable)
         self.assertEqual(catalog["bpdecoder"].package_name, "faultscope-bpdecoder")
+        self.assertIn("native decoder ABI v4", catalog["bpdecoder"].description)
         self.assertIn("bposd", catalog)
         self.assertEqual(catalog["bposd"].problem_kind, "binary-linear")
         self.assertFalse(catalog["bposd"].installable)
@@ -525,7 +543,7 @@ class NoiseAwareSimulatorTests(unittest.TestCase):
                 NativePyMatchingDecoder.from_dem(dem)
         clear_native_decoder_plugin_cache()
 
-    def test_mwpm_backend_is_unavailable_pending_abi_v2_migration(self) -> None:
+    def test_mwpm_backend_is_unavailable_pending_abi_v4_migration(self) -> None:
         dem = DetectorErrorModel(
             detectors=(Detector(id=0, measurement_keys=()),),
             observables=(LogicalObservable(id=0),),
@@ -549,11 +567,11 @@ class NoiseAwareSimulatorTests(unittest.TestCase):
                 NativeMwpmDecoder.from_dem(dem)
             message = str(raised.exception)
             self.assertIn("ABI v1", message)
-            self.assertIn("FaultScope native decoder ABI v3", message)
+            self.assertIn("FaultScope native decoder ABI v4", message)
             self.assertNotIn("python -m faultscope.backends install mwpm", message)
         clear_native_decoder_plugin_cache()
 
-    def test_missing_bpdecoder_backend_has_install_hint(self) -> None:
+    def test_bpdecoder_backend_is_unavailable_pending_abi_v4_migration(self) -> None:
         dem = DetectorErrorModel(
             detectors=(Detector(id=0, measurement_keys=()),),
             observables=(LogicalObservable(id=0),),
@@ -573,11 +591,11 @@ class NoiseAwareSimulatorTests(unittest.TestCase):
             return_value=_FakeEntryPoints(()),
         ):
             clear_native_decoder_plugin_cache()
-            with self.assertRaisesRegex(
-                NativeDecoderBackendUnavailable,
-                "python -m faultscope.backends install bpdecoder",
-            ):
+            with self.assertRaises(NativeDecoderBackendUnavailable) as raised:
                 NativeBpDecoder.from_dem(dem)
+            message = str(raised.exception)
+            self.assertIn("FaultScope native decoder ABI v4", message)
+            self.assertNotIn("python -m faultscope.backends install bpdecoder", message)
         clear_native_decoder_plugin_cache()
 
     def test_reserved_bposd_backend_has_install_hint(self) -> None:
@@ -630,7 +648,7 @@ class NoiseAwareSimulatorTests(unittest.TestCase):
                 "name": "fusion-blossom",
                 "version": "test",
                 "source": "unit-test",
-                "abi_version": "faultscope.native_decoder_plugin.v3",
+                "abi_version": "faultscope.native_decoder_plugin.v4",
                 "decoders": {"fusion-blossom": MockFusionBlossomDecoder},
             }
 
@@ -728,7 +746,9 @@ class NoiseAwareSimulatorTests(unittest.TestCase):
                     )
                 self.assertFalse(os.listdir(tmpdir))
             self.assertIn("faultscope-bpdecoder", stdout.getvalue())
-            self.assertIn("pip install --upgrade faultscope-bpdecoder", stdout.getvalue())
+            self.assertIn("native decoder ABI v4", stdout.getvalue())
+            self.assertNotIn("FaultScope will install", stdout.getvalue())
+            self.assertNotIn("pip install", stdout.getvalue())
 
             stdout = io.StringIO()
             with tempfile.TemporaryDirectory() as tmpdir:
@@ -747,7 +767,7 @@ class NoiseAwareSimulatorTests(unittest.TestCase):
                     )
                 self.assertFalse(os.listdir(tmpdir))
             self.assertIn("ABI v1", stdout.getvalue())
-            self.assertIn("FaultScope native decoder ABI v3", stdout.getvalue())
+            self.assertIn("FaultScope native decoder ABI v4", stdout.getvalue())
             self.assertNotIn("FaultScope will install", stdout.getvalue())
             self.assertNotIn("python -m faultscope.backends install mwpm", stdout.getvalue())
             self.assertNotIn("pip install", stdout.getvalue())
@@ -772,9 +792,10 @@ class NoiseAwareSimulatorTests(unittest.TestCase):
             self.assertIn("faultscope-bposd", stdout.getvalue())
         clear_native_decoder_plugin_cache()
 
-    def test_post_install_plugin_manifest_abi_is_strict_v3(self) -> None:
-        expected = "faultscope.native_decoder_plugin.v3"
+    def test_post_install_plugin_manifest_abi_is_strict_v4(self) -> None:
+        expected = "faultscope.native_decoder_plugin.v4"
         for observed in (
+            "faultscope.native_decoder_plugin.v3",
             "faultscope.native_decoder_plugin.v2",
             "faultscope.native_decoder_plugin.v1",
             "wrong",
@@ -827,7 +848,7 @@ class NoiseAwareSimulatorTests(unittest.TestCase):
             self.assertTrue(status.installed)
             self.assertFalse(status.loadable)
             self.assertIn("faultscope.native_decoder_plugin.v1", status.error)
-            self.assertIn("faultscope.native_decoder_plugin.v3", status.error)
+            self.assertIn("faultscope.native_decoder_plugin.v4", status.error)
             self.assertNotIn("python -m faultscope.backends install mwpm", status.error)
         clear_native_decoder_plugin_cache()
 
@@ -837,7 +858,7 @@ class NoiseAwareSimulatorTests(unittest.TestCase):
                 "name": "backend-a",
                 "version": "test",
                 "source": "unit-test",
-                "abi_version": "faultscope.native_decoder_plugin.v3",
+                "abi_version": "faultscope.native_decoder_plugin.v4",
                 "decoders": {"fusion-blossom": object},
             }
 
@@ -846,7 +867,7 @@ class NoiseAwareSimulatorTests(unittest.TestCase):
                 "name": "backend-b",
                 "version": "test",
                 "source": "unit-test",
-                "abi_version": "faultscope.native_decoder_plugin.v3",
+                "abi_version": "faultscope.native_decoder_plugin.v4",
                 "decoders": {"fusion-blossom": object},
             }
 
@@ -872,7 +893,7 @@ class NoiseAwareSimulatorTests(unittest.TestCase):
                 "name": "missing-decoders",
                 "version": "test",
                 "source": "unit-test",
-                "abi_version": "faultscope.native_decoder_plugin.v3",
+                "abi_version": "faultscope.native_decoder_plugin.v4",
             }
 
         with mock.patch(
@@ -890,7 +911,7 @@ class NoiseAwareSimulatorTests(unittest.TestCase):
             return {
                 "name": "missing-version",
                 "source": "unit-test",
-                "abi_version": "faultscope.native_decoder_plugin.v3",
+                "abi_version": "faultscope.native_decoder_plugin.v4",
                 "decoders": {"missing-version": object},
             }
 
@@ -2136,7 +2157,7 @@ class NativeDetectorErrorModelTests(unittest.TestCase):
 
         self.assertEqual(faultscope_dem_error_edges(native), stim_dem_error_edges(stim_dem))
 
-    def test_native_dem_generator_splits_pauli_channel_edges(self) -> None:
+    def test_native_dem_generator_requires_opt_in_for_pauli_channel_approximation(self) -> None:
         self._require_native_dem()
         location = NoiseLocation(
             id="pc",
@@ -2154,14 +2175,180 @@ class NativeDetectorErrorModelTests(unittest.TestCase):
             ],
         )
 
-        native = generate_native_dem(circuit)
-        by_event = {edge.event: edge for edge in native.edges}
+        with self.assertRaisesRegex(
+            UnsupportedNativeCircuitError,
+            "multiple disjoint outcomes",
+        ):
+            generate_native_dem(circuit)
+        with self.assertRaises(UnsupportedNativeCircuitError):
+            generate_native_dem(circuit, approximate_disjoint_errors=0.29)
 
-        self.assertEqual(set(by_event), {"X", "Y"})
-        self.assertAlmostEqual(by_event["X"].probability, 0.1)
-        self.assertAlmostEqual(by_event["Y"].probability, 0.3)
-        self.assertEqual(by_event["Y"].detectors, (0,))
-        self.assertEqual(dict(by_event["Y"].tags), {"gate": "channel"})
+        tiny_circuit = Circuit(
+            n_qubits=2,
+            operations=[
+                Operation.noise(
+                    NoiseLocation(
+                        id="tiny_pc",
+                        model=PauliChannel({"XI": 1.0, "IX": 1.0}),
+                        rate=1e-20,
+                        qubits=(0, 1),
+                    )
+                )
+            ],
+        )
+        with self.assertRaises(UnsupportedNativeCircuitError):
+            generate_native_dem(tiny_circuit)
+
+        native = generate_native_dem(circuit, approximate_disjoint_errors=0.3)
+        self.assertEqual(len(native.edges), 1)
+        edge = native.edges[0]
+        self.assertEqual(edge.event, "X|Y")
+        self.assertAlmostEqual(edge.probability, 0.4)
+        self.assertEqual(edge.detectors, (0,))
+        self.assertEqual(dict(edge.tags), {"gate": "channel"})
+        batch = compile_native_dem_sampler(native).run_batch(shots=100_000, seed=5001)
+        self.assertAlmostEqual(batch.detectors[0].bit_count() / batch.shots, 0.4, delta=0.01)
+
+    def test_one_qubit_pauli_channel_uses_stim_exact_conversion_before_approximation(self) -> None:
+        self._require_native_dem()
+        circuit = Circuit(
+            n_qubits=1,
+            operations=[
+                Operation.noise(
+                    NoiseLocation(
+                        id="pc_exact",
+                        model=PauliChannel({"X": 2.0, "Y": 2.0, "Z": 1.0}),
+                        rate=0.5,
+                        qubits=(0,),
+                    )
+                ),
+                Operation.measure(0, key="m", basis="Z"),
+                Operation.detector(("m",), detector_id=0),
+            ],
+        )
+
+        native = generate_native_dem(circuit)
+        self.assertEqual(len(native.edges), 1)
+        self.assertEqual(native.edges[0].event, "X^Y")
+        self.assertAlmostEqual(native.edges[0].probability, 0.4)
+        batch = compile_native_dem_sampler(native).run_batch(shots=100_000, seed=5002)
+        self.assertAlmostEqual(batch.detectors[0].bit_count() / batch.shots, 0.4, delta=0.01)
+
+    def test_native_dem_depolarizing_sampling_matches_forward_joint_distribution(self) -> None:
+        self._require_native_dem()
+        rate = 0.6
+        shots = 100_000
+        location = NoiseLocation(
+            id="depol2",
+            model=TwoQubitDepolarizing(),
+            rate=rate,
+            qubits=(0, 1),
+        )
+        circuit = Circuit(
+            n_qubits=2,
+            operations=[
+                Operation.noise(location),
+                Operation.measure(0, key="m0", basis="Z"),
+                Operation.measure(1, key="m1", basis="Z"),
+                Operation.detector(("m0",), detector_id=0),
+                Operation.detector(("m1",), detector_id=1),
+                Operation.observable_include(0, ("m0",)),
+            ],
+        )
+
+        forward = compile_native_sampler(circuit).sample(shots=shots, seed=5101)
+        dem = generate_native_dem(circuit)
+        dem_batch = compile_native_dem_sampler(dem).run_batch(shots=shots, seed=5102)
+        all_mask = (1 << shots) - 1
+
+        def joint_rates(left: int, right: int) -> tuple[float, float, float, float]:
+            return (
+                ((~left & ~right) & all_mask).bit_count() / shots,
+                (left & ~right).bit_count() / shots,
+                ((~left & right) & all_mask).bit_count() / shots,
+                (left & right).bit_count() / shots,
+            )
+
+        expected = (0.52, 0.16, 0.16, 0.16)
+        forward_rates = joint_rates(forward.measurements["m0"], forward.measurements["m1"])
+        dem_rates = joint_rates(dem_batch.detectors[0], dem_batch.detectors[1])
+        for actual, target in zip(forward_rates, expected):
+            self.assertAlmostEqual(actual, target, delta=0.01)
+        for actual, target in zip(dem_rates, expected):
+            self.assertAlmostEqual(actual, target, delta=0.01)
+        for forward_rate, dem_rate in zip(forward_rates, dem_rates):
+            self.assertAlmostEqual(forward_rate, dem_rate, delta=0.01)
+        self.assertEqual(dem_batch.detectors[0], dem_batch.observables[0])
+
+    def test_pauli_channel_opt_in_has_stim_independent_approximation_semantics(self) -> None:
+        self._require_native_dem()
+        shots = 100_000
+        circuit = Circuit(
+            n_qubits=2,
+            operations=[
+                Operation.noise(
+                    NoiseLocation(
+                        id="channel",
+                        model=PauliChannel({"XI": 1.0, "IX": 1.0}),
+                        rate=0.4,
+                        qubits=(0, 1),
+                    )
+                ),
+                Operation.measure(0, key="m0", basis="Z"),
+                Operation.measure(1, key="m1", basis="Z"),
+                Operation.detector(("m0",), detector_id=0),
+                Operation.detector(("m1",), detector_id=1),
+            ],
+        )
+
+        with self.assertRaises(UnsupportedNativeCircuitError):
+            generate_native_dem(circuit)
+        dem = generate_native_dem(circuit, approximate_disjoint_errors=True)
+        explicit = compile_native_dem_sampler(dem).run_batch(shots=shots, seed=5202)
+        generator = compile_native_dem_generator(
+            circuit,
+            approximate_disjoint_errors=True,
+        )
+        generated = generator.compile_sampler(materialize_dem=False).run_batch(
+            shots=shots,
+            seed=5202,
+        )
+        direct = compile_native_dem_sampler_from_circuit(
+            circuit,
+            approximate_disjoint_errors=0.2,
+        ).run_batch(shots=shots, seed=5202)
+        direct_light = compile_native_dem_sampler_from_circuit(
+            circuit,
+            approximate_disjoint_errors=True,
+            materialize_dem=False,
+        ).run_batch(shots=shots, seed=5202)
+        simulator = DemFaultScopeSimulator(
+            circuit,
+            approximate_disjoint_errors=True,
+        )
+        simulated = simulator.run_batch(shots=shots, seed=5202)
+        forward = compile_native_sampler(circuit).sample(shots=shots, seed=5201)
+
+        self.assertEqual(generated.detectors, explicit.detectors)
+        self.assertEqual(direct.detectors, explicit.detectors)
+        self.assertEqual(direct_light.detectors, explicit.detectors)
+        self.assertEqual(simulated.detectors, explicit.detectors)
+        self.assertEqual((forward.measurements["m0"] & forward.measurements["m1"]).bit_count(), 0)
+        approximated_both_rate = (explicit.detectors[0] & explicit.detectors[1]).bit_count() / shots
+        self.assertAlmostEqual(approximated_both_rate, 0.04, delta=0.006)
+
+    def test_dem_approximation_option_rejects_invalid_values(self) -> None:
+        self._require_native_dem()
+        circuit = Circuit(n_qubits=0, operations=[])
+        for value in (-0.1, 1.1, float("nan"), float("inf")):
+            with self.subTest(value=value):
+                with self.assertRaises(UnsupportedNativeCircuitError):
+                    generate_native_dem(circuit, approximate_disjoint_errors=value)
+        with self.assertRaises(TypeError):
+            DetectorErrorModelGenerator(
+                circuit,
+                approximate_disjoint_errors="yes",
+            )
 
     def test_native_dem_reports_missing_extension(self) -> None:
         dem = DetectorErrorModel(detectors=(), observables=(), edges=())
@@ -2491,6 +2678,67 @@ class NativeDetectorErrorModelTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             bad.compile_graphlike_problem()
 
+    def test_graphlike_decomposition_keeps_one_canonical_sampling_event(self) -> None:
+        self._require_native_dem()
+        dem = DetectorErrorModel(
+            detectors=tuple(Detector(id=index, measurement_keys=()) for index in range(3)),
+            observables=(LogicalObservable(id=0),),
+            edges=(
+                DetectorErrorEdge(
+                    0.5,
+                    (0, 1, 2),
+                    (0,),
+                    "correlated",
+                    "X",
+                ),
+            ),
+        )
+        decomposition = MappingProxyType(
+            {
+                0: (
+                    ((2,), ()),
+                    ((1, 0), (0,)),
+                )
+            }
+        )
+
+        hints = GraphlikeDecompositionHints(dem, decomposition)
+        artifact = GeneratedDetectorErrorModel(dem, graphlike_hints=hints)
+        problem = artifact.compile_graphlike_problem()
+
+        self.assertIs(artifact.dem, dem)
+        self.assertIs(artifact.graphlike_hints, hints)
+        self.assertEqual(hints.components_by_edge, dict(decomposition))
+        self.assertEqual(problem.edge_count, 2)
+        self.assertEqual([edge.dem_edge_index for edge in problem.edges], [0, 0])
+        self.assertEqual([edge.probability for edge in problem.edges], [0.5, 0.5])
+        self.assertEqual(problem.edges[0].detectors, (2,))
+        self.assertEqual(problem.edges[0].fault_observables, ())
+        self.assertEqual(problem.edges[1].detectors, (1, 0))
+        self.assertEqual(problem.edges[1].fault_observables, (0,))
+
+        batch = compile_native_dem_sampler(dem).run_batch(
+            shots=257,
+            seed=123,
+            return_edge_events=False,
+        )
+        self.assertEqual(batch.detectors[0], batch.detectors[1])
+        self.assertEqual(batch.detectors[0], batch.detectors[2])
+        self.assertEqual(batch.detectors[0], batch.observables[0])
+
+        with self.assertRaisesRegex(ValueError, "does not reproduce"):
+            dem.compile_graphlike_problem(decomposition={0: (((0, 1), (0,)),)})
+        with self.assertRaisesRegex(ValueError, "does not reproduce"):
+            GraphlikeDecompositionHints(dem, {0: (((0, 1), (0,)),)})
+
+        equivalent_dem = DetectorErrorModel(
+            detectors=dem.detectors,
+            observables=dem.observables,
+            edges=dem.edges,
+        )
+        with self.assertRaisesRegex(ValueError, "different DetectorErrorModel instance"):
+            GeneratedDetectorErrorModel(equivalent_dem, graphlike_hints=hints)
+
     def test_native_dem_problem_views_canonicalize_ids_and_edge_parity(self) -> None:
         self._require_native_dem()
         dem = DetectorErrorModel(
@@ -2522,6 +2770,79 @@ class NativeDetectorErrorModelTests(unittest.TestCase):
         self.assertEqual(decoder.detector_ids, indexed.detector_ids)
         self.assertEqual(decoder.observable_ids, indexed.observable_ids)
 
+    def test_no_correction_decoder_from_circuit_infers_declarations(self) -> None:
+        self._require_native_dem()
+        circuit = Circuit(
+            n_qubits=1,
+            operations=[
+                Operation.measure(0, key="m", basis="Z"),
+                Operation.detector(("m",), detector_id=5),
+                Operation.observable_include(7, ("m",)),
+            ],
+        )
+
+        decoder = create_native_decoder("no-correction", circuit=circuit)
+        direct_decoder = NativeNoCorrectionDecoder.from_circuit(circuit)
+
+        self.assertEqual(decoder.detector_ids, (5,))
+        self.assertEqual(decoder.observable_ids, (7,))
+        self.assertEqual(direct_decoder.detector_ids, (5,))
+        self.assertEqual(direct_decoder.observable_ids, (7,))
+        result = compile_native_dem_sampler_from_circuit(circuit).estimate(
+            shots=8,
+            seed=37,
+            decoder=decoder,
+        )
+        self.assertEqual(result.shots, 8)
+
+        imported = parse_stim_circuit("M 0\nDETECTOR rec[-1]\nOBSERVABLE_INCLUDE(3) rec[-1]")
+        imported_decoder = create_native_decoder(
+            "no-correction",
+            circuit=imported.circuit,
+        )
+        self.assertEqual(imported_decoder.detector_ids, (0,))
+        self.assertEqual(imported_decoder.observable_ids, (3,))
+
+    def test_no_correction_decoder_from_circuit_preserves_explicit_empty_layouts(
+        self,
+    ) -> None:
+        self._require_native_dem()
+        circuit = Circuit(
+            n_qubits=1,
+            operations=[
+                Operation.measure(0, key="m", basis="Z"),
+                Operation.detector(("m",), detector_id=5),
+                Operation.observable_include(7, ("m",)),
+            ],
+        )
+
+        empty = create_native_decoder(
+            "no-correction",
+            circuit=circuit,
+            detectors=(),
+            observables=(),
+        )
+        detector_empty = create_native_decoder(
+            "no-correction",
+            circuit=circuit,
+            detectors=(),
+        )
+        observable_empty = create_native_decoder(
+            "no-correction",
+            circuit=circuit,
+            observables=(),
+        )
+
+        self.assertEqual((empty.detector_ids, empty.observable_ids), ((), ()))
+        self.assertEqual(
+            (detector_empty.detector_ids, detector_empty.observable_ids),
+            ((), (7,)),
+        )
+        self.assertEqual(
+            (observable_empty.detector_ids, observable_empty.observable_ids),
+            ((5,), ()),
+        )
+
     def test_native_dem_sampler_compiles_directly_from_circuit(self) -> None:
         self._require_native_dem()
         location = NoiseLocation(
@@ -2543,6 +2864,8 @@ class NativeDetectorErrorModelTests(unittest.TestCase):
         dem = generate_native_dem(circuit)
         regular_sampler = compile_native_dem_sampler(dem)
         generator = compile_native_dem_generator(circuit)
+        generated_artifact = generator.generate_artifact()
+        direct_artifact = DetectorErrorModelGenerator(circuit).generate_artifact()
         direct_sampler = compile_native_dem_sampler_from_circuit(circuit)
         direct_light_sampler = compile_native_dem_sampler_from_circuit(
             circuit,
@@ -2565,6 +2888,11 @@ class NativeDetectorErrorModelTests(unittest.TestCase):
         self.assertIsInstance(direct_sampler.dem, DetectorErrorModel)
         self.assertEqual(edge_rows(direct_sampler.dem), edge_rows(dem))
         self.assertEqual(edge_rows(generator.generate_dem()), edge_rows(dem))
+        self.assertIsInstance(generated_artifact, GeneratedDetectorErrorModel)
+        self.assertIsNone(generated_artifact.graphlike_hints)
+        self.assertEqual(edge_rows(generated_artifact.dem), edge_rows(dem))
+        self.assertEqual(edge_rows(direct_artifact.dem), edge_rows(dem))
+        self.assertEqual(generated_artifact.compile_graphlike_problem().edge_count, 1)
         self.assertIsNone(direct_light_sampler.dem)
 
         regular_batch = regular_sampler.run_batch(shots=256, seed=123)
@@ -2825,7 +3153,7 @@ class DetectorErrorModelTests(unittest.TestCase):
         self.assertAlmostEqual(graph.by_observable[0], 3.0)
         self.assertEqual(graph.top_edges(1)[0].location_id, "data_r0_q0")
 
-    def test_splits_location_sensitivity_across_pauli_channel_edges(self) -> None:
+    def test_projects_location_sensitivity_to_merged_pauli_channel_effect(self) -> None:
         location = NoiseLocation(
             id="pc",
             model=PauliChannel({"X": 1.0, "Y": 3.0}),
@@ -2840,12 +3168,15 @@ class DetectorErrorModelTests(unittest.TestCase):
                 Operation.detector(("m",), detector_id=0),
             ],
         )
-        dem = DetectorErrorModelGenerator(circuit).generate()
+        dem = DetectorErrorModelGenerator(
+            circuit,
+            approximate_disjoint_errors=True,
+        ).generate()
         graph = dem.project_sensitivities_to_detector_graph({"pc": 8.0})
         by_event = {edge.event: edge for edge in graph.edge_hotspots}
 
-        self.assertAlmostEqual(by_event["X"].sensitivity, 2.0)
-        self.assertAlmostEqual(by_event["Y"].sensitivity, 6.0)
+        self.assertEqual(set(by_event), {"X|Y"})
+        self.assertAlmostEqual(by_event["X|Y"].sensitivity, 8.0)
         self.assertAlmostEqual(graph.by_detector_edge[((0,), ())], 8.0)
 
     def test_circuit_detector_operations_generate_measurement_noise_dem(self) -> None:
@@ -4000,6 +4331,34 @@ class StimImportTests(unittest.TestCase):
                 with self.assertRaisesRegex(StimImportError, "line 1"):
                     parse_stim_circuit(source)
 
+    def test_rejects_arguments_and_targets_disallowed_by_stim(self) -> None:
+        cases = (
+            ("TICK(1)", "TICK", "arguments"),
+            ("TICK 0", "TICK", "targets"),
+            ("SHIFT_COORDS 0", "SHIFT_COORDS", "targets"),
+            ("H(0.1) 0", "H", "arguments"),
+            ("S(0.1) 0", "S", "arguments"),
+            ("S_DAG(0.1) 0", "S_DAG", "arguments"),
+            ("SQRT_Z_DAG(0.1) 0", "SQRT_Z_DAG", "arguments"),
+            ("X(0.1) 0", "X", "arguments"),
+            ("Y(0.1) 0", "Y", "arguments"),
+            ("Z(0.1) 0", "Z", "arguments"),
+            ("CX(0.2) 0 1", "CX", "arguments"),
+            ("CNOT(0.2) 0 1", "CNOT", "arguments"),
+            ("CZ(0.2) 0 1", "CZ", "arguments"),
+            ("SWAP(0.2) 0 1", "SWAP", "arguments"),
+            ("R(0.3) 0", "R", "arguments"),
+            ("RX(0.3) 0", "RX", "arguments"),
+            ("RY(0.3) 0", "RY", "arguments"),
+        )
+        for source, command, operand in cases:
+            with self.subTest(source=source, command=command, operand=operand):
+                with self.assertRaisesRegex(
+                    StimImportError,
+                    rf"^{command} does not accept {operand} on line 1$",
+                ):
+                    parse_stim_circuit(source)
+
     def test_imports_relative_measurement_record_references(self) -> None:
         imported = parse_stim_circuit(
             """
@@ -4062,6 +4421,171 @@ M 0
             ],
         )
         self.assertNotIn("repeat", [operation.kind for operation in imported.circuit.operations])
+
+    def test_exact_tick_repeat_recovery_preserves_every_instruction(self) -> None:
+        cycle = """TICK
+H 0
+TICK
+CX 0 1
+TICK
+M 1
+R 1
+"""
+        source = "R 0 1\n" + cycle * 10 + "M 0\n"
+        original = stim_io._parse_stim_nodes(source)
+        recovered = stim_io._recover_exact_tick_repeat(original)
+        repeats = [node for node in recovered if isinstance(node, stim_io._RepeatNode)]
+
+        def expanded_signatures(nodes):
+            signatures = []
+            for node in nodes:
+                if isinstance(node, stim_io._RepeatNode):
+                    for _ in range(node.count):
+                        signatures.extend(expanded_signatures(node.body))
+                else:
+                    signatures.append((node.name, node.args, node.targets))
+            return signatures
+
+        self.assertEqual(len(repeats), 1)
+        self.assertEqual(repeats[0].count, 8)
+        self.assertEqual(expanded_signatures(recovered), expanded_signatures(original))
+
+    def test_exact_tick_repeat_recovery_rejects_changed_rounds(self) -> None:
+        cycle = """TICK
+H 0
+TICK
+M 1
+R 1
+"""
+        changed_cycles = {
+            "extra_clifford": """TICK
+H 0
+X 0
+TICK
+M 1
+R 1
+""",
+            "different_target": """TICK
+H 1
+TICK
+M 1
+R 1
+""",
+            "different_basis": """TICK
+H 0
+TICK
+MX 1
+R 1
+""",
+            "different_args": """TICK
+H 0
+TICK
+M(0) 1
+R 1
+""",
+            "extra_measurement": """TICK
+H 0
+TICK
+M 1
+M 0
+R 1
+""",
+        }
+        for name, changed_cycle in changed_cycles.items():
+            with self.subTest(name=name):
+                source = "R 0 1\n" + cycle * 4 + changed_cycle + cycle * 5 + "M 0\n"
+                imported = parse_stim_circuit(source)
+                self.assertNotIn(
+                    "repeat", [operation.kind for operation in imported.circuit.operations]
+                )
+
+    def test_exact_tick_repeat_recovery_rejects_side_effectful_bodies(self) -> None:
+        cycles = {
+            "noise": """TICK
+X_ERROR(0.125) 0
+M 0
+R 0
+""",
+            "detector": """TICK
+M 0
+DETECTOR rec[-1]
+R 0
+""",
+            "shift_coords": """TICK
+SHIFT_COORDS(0,0,1)
+M 0
+R 0
+""",
+            "qubit_coords": """TICK
+QUBIT_COORDS(0,0) 0
+M 0
+R 0
+""",
+            "observable": """TICK
+M 0
+OBSERVABLE_INCLUDE(0) rec[-1]
+R 0
+""",
+            "measurement_args": """TICK
+M(0) 0
+R 0
+""",
+        }
+        for name, cycle in cycles.items():
+            with self.subTest(name=name):
+                imported = parse_stim_circuit("R 0\n" + cycle * 10 + "M 0\n")
+                self.assertNotIn(
+                    "repeat", [operation.kind for operation in imported.circuit.operations]
+                )
+
+    def test_exact_tick_repeat_recovery_leaves_explicit_repeat_unchanged(self) -> None:
+        nodes = stim_io._parse_stim_nodes("REPEAT 10 {\nTICK\nM 0\nR 0\n}\n")
+
+        self.assertIs(stim_io._recover_exact_tick_repeat(nodes), nodes)
+
+    def test_normalized_flattened_surface_code_recovers_tick_repeat(self) -> None:
+        try:
+            import stim
+        except ImportError as exc:
+            self.skipTest(f"Stim is not installed: {exc}")
+        circuit = stim.Circuit.generated(
+            "surface_code:rotated_memory_z",
+            distance=10,
+            rounds=10,
+        )
+        skipped = {"QUBIT_COORDS", "SHIFT_COORDS", "DETECTOR", "OBSERVABLE_INCLUDE"}
+        source = "\n".join(
+            str(instruction)
+            for instruction in circuit.flattened()
+            if instruction.name not in skipped
+        )
+        with mock.patch.object(
+            stim_io,
+            "_recover_exact_tick_repeat",
+            side_effect=lambda nodes: nodes,
+        ):
+            expanded = parse_stim_circuit(source)
+        recovered = parse_stim_circuit(source)
+        repeats = [
+            operation for operation in recovered.circuit.operations if operation.kind == "repeat"
+        ]
+        expanded_sampler = compile_native_sampler(expanded.circuit)
+        recovered_sampler = compile_native_sampler(recovered.circuit)
+
+        self.assertEqual(len(repeats), 1)
+        self.assertEqual(repeats[0].repeat_count, 8)
+        self.assertEqual(recovered.measurement_keys, expanded.measurement_keys)
+        self.assertEqual(recovered_sampler.operation_count, expanded_sampler.operation_count)
+        self.assertLess(
+            recovered_sampler.stored_operation_count,
+            expanded_sampler.stored_operation_count,
+        )
+        self.assertEqual(expanded_sampler.loop_kernel_count, 0)
+        self.assertEqual(recovered_sampler.loop_kernel_count, 1)
+        self.assertEqual(
+            recovered_sampler.sample_measurements(shots=65, seed=441),
+            expanded_sampler.sample_measurements(shots=65, seed=441),
+        )
 
     def test_imports_repeat_blocks(self) -> None:
         imported = parse_stim_circuit(

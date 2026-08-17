@@ -599,6 +599,22 @@ residual logical flips \(o\oplus C\)。
 instruction。运行 DEM sampler 时，每条 edge 会被独立采样一次，决定这一类错误机制在当前 shot
 是否发生。
 
+graphlike decomposition 不会创建第二个采样 DEM。对于 Stim 中形如
+`error(p) ... ^ ...` 的 instruction，FaultScope 保留一条 canonical edge 和一个 Bernoulli
+变量 \(f_j\)；`^` 分组保存在绑定该 canonical DEM 的稀疏
+`GraphlikeDecompositionHints` 中，并由 `GeneratedDetectorErrorModel.compile_graphlike_problem()`
+构造 decoder view。低层 `compile_graphlike_problem(decomposition=...)` 映射接口仅为向后兼容。
+编译后的多个 solver components 继承相同的父 `dem_edge_index` 和概率，但
+sampler 仍只采样一次父 edge，再同时翻转其完整 detector/observable support。因此 canonical DEM
+继续唯一地定义 \(P(s,o)\)。当前 matching backend 将这些 components 作为 uncorrelated
+graphlike approximation 构造求解器图；共享父索引保留来源关系，并不表示已经实现 correlated
+matching。
+
+FaultScope 原生 circuit→DEM generator 当前只生成 canonical DEM，尚不合成 graphlike hints；
+`generate_artifact()` 因此返回 `graphlike_hints=None`。没有 hint 的 edge 若在 GF(2) 约简后至多
+连接两个 detector，仍可直接交给 MWPM；超边则明确拒绝。未来 generator 只需填充同一个 artifact
+的稀疏 hint sidecar，sampler 和 backend 接口无需改变。
+
 一条 edge \(j\) 记录：
 
 \[
@@ -671,8 +687,52 @@ FaultScope 当前 DEM generation 走严格路径：不暴露 Stim 式 gauge dete
 detector 和 observable 声明必须能在 reference / injected propagation 中得到确定 effect；否则应该
 调整 detector 定义或先把随机自由度改写成确定的 syndrome relation。
 
-对 PauliChannel 或 depolarizing noise，一个 physical location 可能产生多条 DEM edges。每条 edge
-保留相同 `location_id`，event label 区分具体 Pauli event。
+对 depolarizing noise，一个 physical location 会编译出多个独立 latent Pauli mechanisms，而不是
+直接把互斥 Pauli 结果的 marginal probability 当成独立 edge probability。设作用于 \(n\) 个 qubit，
+\(N=4^n\)，原始 depolarizing rate 为 \(\lambda\)。FaultScope 与 Stim 一样，为每个非 identity
+Pauli 使用
+
+\[
+q_n(\lambda)
+=
+\frac{1-
+\left(1-\frac{N}{N-1}\lambda\right)^{2/N}}
+{2}.
+\]
+
+独立采样全部 \(N-1\) 个 factor 后，把发生的 Pauli 相乘；所得分布恰好是 identity 概率
+\(1-\lambda\)、每个非 identity Pauli 概率 \(\lambda/(N-1)\)。因此即使 materialized DEM
+含有多个同源 edge，其 detector/observable 联合分布仍与原始 depolarizing channel 一致。
+对全部 detector/observable 都没有 effect 的 factor 可以从 materialized DEM 省略，因为它不改变
+该联合分布。同一 location 内具有相同 detector/observable support 的 independent factors 会按
+GF(2) parity 合并，概率递推为 \(a\oplus b=a+b-2ab\)，event label 使用 `P_i^P_j`；不同
+location 的平行 edges 为保留 FaultScope attribution metadata 而不合并。因此生成文本和 edge
+count 仍可能与 Stim 的全局化简结果不同，但 \(P(s,o)\) 相同。
+
+这个实数独立分解只在 \(0\leq\lambda\leq(N-1)/N\) 存在，所以 single-qubit rate 大于
+\(3/4\) 或 two-qubit rate 大于 \(15/16\) 时，Circuit→DEM 会报错；forward sampler 仍可处理
+模型允许的 \([0,1]\) rate。
+
+一般 `PauliChannel({P_i:w_i})` 是 categorical channel，分量概率为
+\(p_i=\lambda w_i/\sum_jw_j\)。当正概率分量多于一个时，普通 DEM 的独立 instruction schema
+不一定能精确表示“至多选择一个”这一约束。与 Stim 1.16 一样，one-qubit channel 会先尝试求出
+独立 X/Y/Z Bernoulli probabilities \(a,b,c\)，使其 Pauli 乘积的 categorical 分布重新得到
+\((p_X,p_Y,p_Z)\)。求解成功时无需 opt-in，并且这些 independent factors 在 propagation 后按
+GF(2) parity 合并。`PAULI_CHANNEL_2` 以及更宽的 FaultScope channel 不做一般精确分解尝试。
+
+若上述路径不可用，Circuit→DEM 默认拒绝；显式设置 `approximate_disjoint_errors=True`，或把它
+设为 \([0,1]\) 内的阈值且所有 \(p_i\) 不超过该阈值，才会按 Stim 的 disjoint-error 方式继续转换。
+single-error propagation 后，具有完全相同 detector/observable support 的互斥分量先合并为一条
+edge，概率取这些 \(p_i\) 之和；不同 effect classes 再作为独立 DEM instructions。合并 edge 的
+event label 使用稳定的 `P_i|P_j` 形式。只有一个正概率分量的 channel 总是精确。
+
+Stim 风格的 one-qubit 求解以重建概率的绝对残差和小于 \(10^{-14}\) 为成功条件。因此非常小、
+数学上不能严格 factorize 的 channel 也可能被视作 numerically exact，低于该绝对容差的 effect
+可能不出现在 DEM 中。这是数值转换的局限，不是 categorical sampling 的精确表示；若这些极小
+概率仍然重要，应使用 forward sampling。
+
+所有由同一 location 生成的 edge 保留相同 `location_id`，event label 区分 latent/近似 Pauli
+mechanism。
 
 ## DEM 独立 edge sampling
 
@@ -697,8 +757,15 @@ F = \bigvee_a R_a.
 
 如果没有 decoder/correction，\(C_a=0\)。
 
-注意：DEM sampling 的多个 edges 独立采样；它符合普通 DEM 语义，但不保留同一 physical
-location 下多个 Pauli events 在 forward trajectory 中的互斥 categorical 关系。
+注意：手工构造或导入 DEM 时，每条 `error(p)` 始终是独立 Bernoulli instruction；相同
+`location_id`、相同 `dem_edge_index` 或 graphlike `^` decomposition 都不会建立额外采样关联。
+Circuit→DEM 对 depolarizing channel 使用上面的精确 factorization，因此不会丢失其
+detector/observable 联合分布；成功独立化的 one-qubit `PauliChannel` 在上述 \(10^{-14}\) 数值标准内
+也具有同样性质。显式近似 multi-component `PauliChannel` 时，同 effect 的分量已通过概率求和精确
+保留；不同 effect classes 之间仍会丢失 categorical 互斥关系，近似模型允许两个 effect classes
+以其概率乘积同时发生。FaultScope 当前 DEM schema 没有
+categorical/correlated error group，因而无法在普通 DEM sampler 中精确表示一般互斥 channel；
+需要这种精度时使用 forward sampling。
 
 ## DEM hotspot 公式
 
@@ -780,6 +847,12 @@ location sensitivity:
 \]
 
 DEM tag aggregations 按 `location_id` 聚合后的 \(\operatorname{hotspot}_l\) 计算。
+
+这里的 location sensitivity 是 edge-level derivative 的概率加权摘要，不自动应用
+Circuit→DEM 参数变换的 chain rule。尤其对于 depolarizing factorization，它不是
+\(dJ/d\lambda\)；对于 exact-factorized 或 opt-in `PauliChannel`，它分别描述转换后的 independent
+factor 或近似独立模型。若目标是原始 physical rate \(\lambda\) 的 score-function derivative，
+应使用 forward hotspot estimator。
 
 ## Detector graph 投影
 

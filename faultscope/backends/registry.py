@@ -97,7 +97,7 @@ OFFICIAL_BACKEND_CATALOG: dict[str, NativeDecoderBackendCatalogEntry] = {
         installable=False,
         description=(
             "The faultscope-mwpm package is still ABI v1 and is not yet migrated to "
-            "FaultScope native decoder ABI v3."
+            "FaultScope native decoder ABI v4."
         ),
     ),
     "bpdecoder": NativeDecoderBackendCatalogEntry(
@@ -107,8 +107,11 @@ OFFICIAL_BACKEND_CATALOG: dict[str, NativeDecoderBackendCatalogEntry] = {
         problem_kind="binary-linear",
         repo_url=None,
         default_rev=None,
-        installable=True,
-        description="Optional bpdecoder.rs BP-family binary-linear decoder backend.",
+        installable=False,
+        description=(
+            "The faultscope-bpdecoder package is temporarily unavailable while it is "
+            "migrated to FaultScope native decoder ABI v4."
+        ),
     ),
     "bposd": NativeDecoderBackendCatalogEntry(
         name="bposd",
@@ -218,7 +221,13 @@ def backend_unavailable_message(name: str) -> str:
         if entry.name == "mwpm":
             return (
                 f"{entry.decoder_class_name} is unavailable: `{entry.package_name}` is "
-                "still ABI v1 and is not yet migrated to FaultScope native decoder ABI v3"
+                "still ABI v1 and is not yet migrated to FaultScope native decoder ABI v4"
+                f"{details}."
+            )
+        if entry.name == "bpdecoder":
+            return (
+                f"{entry.decoder_class_name} is unavailable: `{entry.package_name}` is "
+                "temporarily disabled pending its FaultScope native decoder ABI v4 migration"
                 f"{details}."
             )
         return (

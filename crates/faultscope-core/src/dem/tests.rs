@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use super::event_plan::DemFaultEventSiblingSemantics;
 use super::*;
 use crate::{DemEvent, NoiseLocation, NoiseModel};
 
@@ -38,6 +39,361 @@ fn measurement_bit_flip_generates_detector_edge() {
     assert_eq!(edges[0].detectors, vec![0]);
     assert_eq!(edges[0].location_id, "m_noise");
     assert_eq!(edges[0].event, DemEvent::Bool(true));
+}
+
+fn noise_only_event_plan(model: NoiseModel, rate: f64) -> NpResult<DemEventPlan> {
+    let qubits = match &model {
+        NoiseModel::TwoQubitDepolarizing => vec![0, 1],
+        _ => vec![0],
+    };
+    collect_dem_event_plan(&[Operation::Noise(NoiseLocation {
+        id: "noise".to_string(),
+        model,
+        rate,
+        qubits,
+        tags: HashMap::new(),
+    })])
+}
+
+#[test]
+fn depolarizing_dem_events_use_stim_independent_reparameterization() {
+    let single = noise_only_event_plan(NoiseModel::SingleQubitDepolarizing, 0.3).unwrap();
+    let expected_single = (1.0 - (1.0_f64 - 4.0 * 0.3 / 3.0).sqrt()) / 2.0;
+    assert_eq!(single.fault_events.len(), 3);
+    assert!(single
+        .fault_events
+        .iter()
+        .all(|event| (event.probability - expected_single).abs() < 1e-15));
+    assert_eq!(
+        single
+            .fault_events
+            .iter()
+            .map(|event| event.event.clone())
+            .collect::<Vec<_>>(),
+        vec![
+            DemEvent::Pauli("X".to_string()),
+            DemEvent::Pauli("Y".to_string()),
+            DemEvent::Pauli("Z".to_string()),
+        ]
+    );
+
+    let two = noise_only_event_plan(NoiseModel::TwoQubitDepolarizing, 0.6).unwrap();
+    let expected_two = (1.0 - (1.0_f64 - 16.0 * 0.6 / 15.0).powf(1.0 / 8.0)) / 2.0;
+    assert_eq!(two.fault_events.len(), 15);
+    assert!(two
+        .fault_events
+        .iter()
+        .all(|event| (event.probability - expected_two).abs() < 1e-15));
+
+    let single_boundary = noise_only_event_plan(NoiseModel::SingleQubitDepolarizing, 0.75).unwrap();
+    assert!(single_boundary
+        .fault_events
+        .iter()
+        .all(|event| event.probability == 0.5));
+    let two_boundary = noise_only_event_plan(NoiseModel::TwoQubitDepolarizing, 0.9375).unwrap();
+    assert!(two_boundary
+        .fault_events
+        .iter()
+        .all(|event| event.probability == 0.5));
+
+    let tiny = noise_only_event_plan(NoiseModel::SingleQubitDepolarizing, 1e-20).unwrap();
+    assert!((tiny.fault_events[0].probability - 1e-20 / 3.0).abs() < 1e-35);
+
+    let generated = DetectorErrorModelGenerator::new(
+        Circuit {
+            n_qubits: 1,
+            operations: vec![
+                Operation::Noise(NoiseLocation {
+                    id: "depolarizing".to_string(),
+                    model: NoiseModel::SingleQubitDepolarizing,
+                    rate: 0.3,
+                    qubits: vec![0],
+                    tags: HashMap::new(),
+                }),
+                Operation::Measure {
+                    qubit: 0,
+                    key: Some("m".to_string()),
+                    basis: "Z".to_string(),
+                    noise: None,
+                },
+                Operation::Detector {
+                    detector_id: Some(0),
+                    measurement_keys: vec!["m".to_string()],
+                    coords: Vec::new(),
+                },
+            ],
+        },
+        None,
+        None,
+    )
+    .unwrap()
+    .generate()
+    .unwrap();
+    assert_eq!(generated.edges.len(), 1);
+    assert!((generated.edges[0].probability - 0.2).abs() < 1e-15);
+    assert_eq!(generated.edges[0].event, DemEvent::Pauli("X^Y".to_string()));
+}
+
+#[test]
+fn depolarizing_dem_generation_rejects_rates_above_exact_mixing_limit() {
+    let single = noise_only_event_plan(NoiseModel::SingleQubitDepolarizing, 0.750_001).unwrap_err();
+    assert!(single
+        .message()
+        .contains("largest rate representable exactly"));
+
+    let two = noise_only_event_plan(NoiseModel::TwoQubitDepolarizing, 0.937_501).unwrap_err();
+    assert!(two.message().contains("largest rate representable exactly"));
+}
+
+#[test]
+fn pauli_channel_dem_generation_requires_explicit_disjoint_approximation() {
+    let operations = [Operation::Noise(NoiseLocation {
+        id: "channel".to_string(),
+        model: NoiseModel::PauliChannel(vec![("X".to_string(), 1.0), ("Y".to_string(), 3.0)]),
+        rate: 0.4,
+        qubits: vec![0],
+        tags: HashMap::new(),
+    })];
+
+    let strict = collect_dem_event_plan(&operations).unwrap_err();
+    assert!(strict.message().contains("multiple disjoint outcomes"));
+    assert!(strict.message().contains("approximate_disjoint_errors"));
+
+    let tiny_operations = [Operation::Noise(NoiseLocation {
+        id: "tiny_channel".to_string(),
+        model: NoiseModel::PauliChannel(vec![("XI".to_string(), 1.0), ("IX".to_string(), 1.0)]),
+        rate: 1e-20,
+        qubits: vec![0, 1],
+        tags: HashMap::new(),
+    })];
+    assert!(collect_dem_event_plan(&tiny_operations).is_err());
+    assert!(collect_dem_event_plan_with_options(
+        &tiny_operations,
+        DemGenerationOptions::new(1e-22).unwrap(),
+    )
+    .is_err());
+
+    let underflow_rate_operations = [Operation::Noise(NoiseLocation {
+        id: "underflow_rate_channel".to_string(),
+        model: NoiseModel::PauliChannel(vec![("XI".to_string(), 1.0), ("IX".to_string(), 3.0)]),
+        rate: f64::from_bits(1),
+        qubits: vec![0, 1],
+        tags: HashMap::new(),
+    })];
+    assert!(collect_dem_event_plan(&underflow_rate_operations).is_err());
+
+    let smallest_weight = f64::from_bits(1);
+    let subnormal_weight_operations = [Operation::Noise(NoiseLocation {
+        id: "subnormal_weight_channel".to_string(),
+        model: NoiseModel::PauliChannel(vec![
+            ("X".to_string(), smallest_weight),
+            ("Y".to_string(), smallest_weight),
+        ]),
+        rate: 0.4,
+        qubits: vec![0],
+        tags: HashMap::new(),
+    })];
+    assert!(collect_dem_event_plan(&subnormal_weight_operations).is_err());
+    let subnormal_approximated = collect_dem_event_plan_with_options(
+        &subnormal_weight_operations,
+        DemGenerationOptions::new(0.2).unwrap(),
+    )
+    .unwrap();
+    assert!(subnormal_approximated
+        .fault_events
+        .iter()
+        .all(|event| event.probability == 0.2));
+
+    let below_threshold =
+        collect_dem_event_plan_with_options(&operations, DemGenerationOptions::new(0.29).unwrap())
+            .unwrap_err();
+    assert!(below_threshold.message().contains("probability 0.3"));
+
+    let approximated =
+        collect_dem_event_plan_with_options(&operations, DemGenerationOptions::new(0.3).unwrap())
+            .unwrap();
+    assert_eq!(approximated.fault_events.len(), 2);
+    assert!((approximated.fault_events[0].probability - 0.1).abs() < 1e-15);
+    assert!((approximated.fault_events[1].probability - 0.3).abs() < 1e-15);
+}
+
+#[test]
+fn pauli_channel_single_effect_remains_exact_in_strict_mode() {
+    let single = noise_only_event_plan(
+        NoiseModel::PauliChannel(vec![("X".to_string(), 2.0), ("Y".to_string(), 0.0)]),
+        0.4,
+    )
+    .unwrap();
+    assert_eq!(single.fault_events.len(), 1);
+    assert_eq!(
+        single.fault_events[0].event,
+        DemEvent::Pauli("X".to_string())
+    );
+    assert!((single.fault_events[0].probability - 0.4).abs() < 1e-15);
+
+    let duplicate = noise_only_event_plan(
+        NoiseModel::PauliChannel(vec![("X".to_string(), 1.0), ("X".to_string(), 3.0)]),
+        0.4,
+    )
+    .unwrap();
+    assert_eq!(duplicate.fault_events.len(), 1);
+    assert!((duplicate.fault_events[0].probability - 0.4).abs() < 1e-15);
+}
+
+#[test]
+fn one_qubit_pauli_channel_uses_stim_exact_independent_conversion_first() {
+    let exact = noise_only_event_plan(
+        NoiseModel::PauliChannel(vec![
+            ("X".to_string(), 2.0),
+            ("Y".to_string(), 2.0),
+            ("Z".to_string(), 1.0),
+        ]),
+        0.5,
+    )
+    .unwrap();
+    assert_eq!(exact.fault_events.len(), 3);
+    assert!(exact
+        .fault_events
+        .iter()
+        .all(|event| { event.sibling_semantics == DemFaultEventSiblingSemantics::Independent }));
+    let independent = exact
+        .fault_events
+        .iter()
+        .map(|event| event.probability)
+        .collect::<Vec<_>>();
+    let [x, y, z] = [independent[0], independent[1], independent[2]];
+    let disjoint_x = x * (1.0 - y) * (1.0 - z) + (1.0 - x) * y * z;
+    let disjoint_y = y * (1.0 - x) * (1.0 - z) + (1.0 - y) * x * z;
+    let disjoint_z = z * (1.0 - x) * (1.0 - y) + (1.0 - z) * x * y;
+    assert!((disjoint_x - 0.2).abs() < 1e-14);
+    assert!((disjoint_y - 0.2).abs() < 1e-14);
+    assert!((disjoint_z - 0.1).abs() < 1e-14);
+
+    let generated = DetectorErrorModelGenerator::new(
+        Circuit {
+            n_qubits: 1,
+            operations: vec![
+                Operation::Noise(NoiseLocation {
+                    id: "channel".to_string(),
+                    model: NoiseModel::PauliChannel(vec![
+                        ("X".to_string(), 2.0),
+                        ("Y".to_string(), 2.0),
+                        ("Z".to_string(), 1.0),
+                    ]),
+                    rate: 0.5,
+                    qubits: vec![0],
+                    tags: HashMap::new(),
+                }),
+                Operation::Measure {
+                    qubit: 0,
+                    key: Some("m".to_string()),
+                    basis: "Z".to_string(),
+                    noise: None,
+                },
+                Operation::Detector {
+                    detector_id: Some(0),
+                    measurement_keys: vec!["m".to_string()],
+                    coords: Vec::new(),
+                },
+            ],
+        },
+        None,
+        None,
+    )
+    .unwrap()
+    .generate()
+    .unwrap();
+    assert_eq!(generated.edges.len(), 1);
+    assert!((generated.edges[0].probability - 0.4).abs() < 1e-14);
+    assert_eq!(generated.edges[0].event, DemEvent::Pauli("X^Y".to_string()));
+
+    // Stim's solver accepts residuals below 1e-14.  This intentionally means
+    // a tiny non-factorable PAULI_CHANNEL_1 can be treated as numerically exact.
+    let numerically_exact = noise_only_event_plan(
+        NoiseModel::PauliChannel(vec![("X".to_string(), 1.0), ("Y".to_string(), 1.0)]),
+        1e-20,
+    )
+    .unwrap();
+    assert!(numerically_exact.fault_events.is_empty());
+}
+
+#[test]
+fn approximated_pauli_channel_coalesces_disjoint_events_with_the_same_effect() {
+    let operations = vec![
+        Operation::Noise(NoiseLocation {
+            id: "channel".to_string(),
+            model: NoiseModel::PauliChannel(vec![("X".to_string(), 1.0), ("Y".to_string(), 3.0)]),
+            rate: 0.4,
+            qubits: vec![0],
+            tags: HashMap::new(),
+        }),
+        Operation::Measure {
+            qubit: 0,
+            key: Some("m".to_string()),
+            basis: "Z".to_string(),
+            noise: None,
+        },
+        Operation::Detector {
+            detector_id: Some(0),
+            measurement_keys: vec!["m".to_string()],
+            coords: Vec::new(),
+        },
+    ];
+    let options = DemGenerationOptions::new(0.3).unwrap();
+    let generator = DetectorErrorModelGenerator::new_with_options(
+        Circuit {
+            n_qubits: 1,
+            operations: operations.clone(),
+        },
+        None,
+        None,
+        options,
+    )
+    .unwrap();
+
+    let generated = generator.generate().unwrap();
+    assert_eq!(generated.edges.len(), 1);
+    assert!((generated.edges[0].probability - 0.4).abs() < 1e-15);
+    assert_eq!(generated.edges[0].detectors, vec![0]);
+    assert_eq!(generated.edges[0].event, DemEvent::Pauli("X|Y".to_string()));
+
+    let standalone = generate_dem_edges_with_options(
+        1,
+        &operations,
+        &[Detector {
+            id: 0,
+            measurement_keys: vec!["m".to_string()],
+            coords: Vec::new(),
+        }],
+        &[],
+        options,
+    )
+    .unwrap();
+    assert_eq!(standalone, generated.edges);
+
+    let reused_plan = generate_dem_edges_from_event_plan(
+        1,
+        &[Detector {
+            id: 0,
+            measurement_keys: vec!["m".to_string()],
+            coords: Vec::new(),
+        }],
+        &[],
+        &generator.event_plan,
+    )
+    .unwrap();
+    assert_eq!(reused_plan, generated.edges);
+}
+
+#[test]
+fn dem_generation_options_validate_probability_threshold() {
+    for threshold in [-0.1, 1.1, f64::NAN, f64::INFINITY] {
+        assert!(DemGenerationOptions::new(threshold).is_err());
+    }
+    assert_eq!(
+        DemGenerationOptions::default().approximate_disjoint_errors_threshold(),
+        0.0
+    );
 }
 
 #[test]
