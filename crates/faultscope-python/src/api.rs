@@ -37,6 +37,36 @@ fn indexed_measurement_mask<'a>(
         .ok_or_else(|| PyValueError::new_err(format!("unknown measurement key {key:?}")))
 }
 
+fn packed_sampler_declaration_ids(
+    program: &faultscope_core::SamplerProgram,
+) -> (Vec<i64>, Vec<i64>) {
+    let mut detector_ids = Vec::new();
+    let mut observable_ids = Vec::new();
+    let mut seen_detector_ids = HashSet::new();
+    let mut seen_observable_ids = HashSet::new();
+    for operation in program.operations() {
+        match operation {
+            faultscope_core::SamplerOperation::Detector { detector_id, .. } => {
+                if seen_detector_ids.insert(*detector_id) {
+                    detector_ids.push(*detector_id);
+                }
+            }
+            faultscope_core::SamplerOperation::ObservableInclude { observable_id, .. }
+                if seen_observable_ids.insert(*observable_id) =>
+            {
+                observable_ids.push(*observable_id);
+            }
+            _ => {}
+        }
+    }
+    for observable in program.compiled_observables() {
+        if seen_observable_ids.insert(observable.id) {
+            observable_ids.push(observable.id);
+        }
+    }
+    (detector_ids, observable_ids)
+}
+
 /// Bit-packed forward circuit simulator and hotspot estimator.
 #[pyclass(name = "FaultScopeSimulator", module = "faultscope._native")]
 pub(crate) struct PyFaultScopeSimulator {
@@ -75,6 +105,16 @@ impl NativePackedSampler {
     #[getter]
     pub(crate) fn stored_operation_count(&self) -> usize {
         self.program.stored_operation_count()
+    }
+
+    #[getter]
+    pub(crate) fn detector_ids(&self) -> Vec<i64> {
+        packed_sampler_declaration_ids(&self.program).0
+    }
+
+    #[getter]
+    pub(crate) fn observable_ids(&self) -> Vec<i64> {
+        packed_sampler_declaration_ids(&self.program).1
     }
 
     #[getter]
@@ -1461,6 +1501,168 @@ pub(crate) fn compile_sampler(
     native_packed_sampler_from_circuit(py, circuit, observables)
 }
 
+fn without_collection_declarations(
+    operations: &[faultscope_core::Operation],
+    replace_detectors: bool,
+    replace_observables: bool,
+) -> Vec<faultscope_core::Operation> {
+    operations
+        .iter()
+        .filter_map(|operation| match operation {
+            faultscope_core::Operation::Detector { .. }
+            | faultscope_core::Operation::DetectorRec { .. }
+                if replace_detectors =>
+            {
+                None
+            }
+            faultscope_core::Operation::ObservableInclude { .. }
+            | faultscope_core::Operation::ObservableIncludeRec { .. }
+                if replace_observables =>
+            {
+                None
+            }
+            faultscope_core::Operation::Repeat { count, body } => {
+                Some(faultscope_core::Operation::Repeat {
+                    count: *count,
+                    body: without_collection_declarations(
+                        body,
+                        replace_detectors,
+                        replace_observables,
+                    ),
+                })
+            }
+            _ => Some(operation.clone()),
+        })
+        .collect()
+}
+
+fn validate_collection_declaration_measurements(
+    n_qubits: usize,
+    operations: &[faultscope_core::Operation],
+    detectors: Option<&[DemDetectorSpec]>,
+    observables: &[DemObservableSpec],
+) -> PyResult<()> {
+    let detectors_have_measurements = detectors.is_some_and(|detectors| {
+        detectors
+            .iter()
+            .any(|detector| !detector.measurement_keys.is_empty())
+    });
+    let observables_have_measurements = observables
+        .iter()
+        .any(|observable| !observable.measurement_keys.is_empty());
+    if !detectors_have_measurements && !observables_have_measurements {
+        return Ok(());
+    }
+    let measurement_operations = without_collection_declarations(operations, true, true);
+    let base_program =
+        faultscope_core::compile_sampler_program_ref(n_qubits, &measurement_operations, Vec::new())
+            .map_err(|err| PyValueError::new_err(err.to_string()))?;
+    let measurement_keys = base_program
+        .measurement_keys()
+        .iter()
+        .map(String::as_str)
+        .collect::<HashSet<_>>();
+    for detector in detectors.into_iter().flatten() {
+        for key in &detector.measurement_keys {
+            if !measurement_keys.contains(key.as_str()) {
+                return Err(PyValueError::new_err(format!(
+                    "unknown measurement key {key:?} in detector {}",
+                    detector.id
+                )));
+            }
+        }
+    }
+    for observable in observables {
+        for key in &observable.measurement_keys {
+            if !measurement_keys.contains(key.as_str()) {
+                return Err(PyValueError::new_err(format!(
+                    "unknown measurement key {key:?} in logical observable {}",
+                    observable.id
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+#[pyfunction]
+#[pyo3(signature = (circuit, detectors=None, observables=None))]
+pub(crate) fn compile_collection_sampler(
+    py: Python<'_>,
+    circuit: &Bound<'_, PyAny>,
+    detectors: Option<&Bound<'_, PyAny>>,
+    observables: Option<&Bound<'_, PyAny>>,
+) -> PyResult<NativePackedSampler> {
+    let replace_detectors = detectors.is_some_and(|items| !items.is_none());
+    let replace_observables = observables.is_some_and(|items| !items.is_none());
+    if !replace_detectors && !replace_observables {
+        return native_packed_sampler_from_circuit(py, circuit, None);
+    }
+
+    let py_observables = py_tuple_from_optional_sequence(py, observables)?;
+    let detectors = match detectors {
+        Some(items) if !items.is_none() => Some(parse_dem_detector_sequence(items)?),
+        _ => None,
+    };
+    let observables = match observables {
+        Some(items) if !items.is_none() => Some(parse_dem_observable_sequence(items)?),
+        _ => None,
+    };
+    let native_circuit = circuit.extract::<PyRef<'_, PyCircuit>>().ok();
+    let cached_core_circuit = native_circuit
+        .as_ref()
+        .and_then(|circuit| circuit.core_circuit.as_ref());
+    let fallback_core_circuit;
+    let core_circuit = match cached_core_circuit {
+        Some(core_circuit) => core_circuit.circuit(),
+        None => {
+            fallback_core_circuit = parse_core_circuit_object(circuit)?;
+            &fallback_core_circuit
+        }
+    };
+    let mut operations = without_collection_declarations(
+        &core_circuit.operations,
+        replace_detectors,
+        replace_observables,
+    );
+    validate_collection_declaration_measurements(
+        core_circuit.n_qubits,
+        &core_circuit.operations,
+        detectors.as_deref(),
+        observables.as_deref().unwrap_or_default(),
+    )?;
+    if let Some(detectors) = detectors {
+        operations.extend(detectors.into_iter().map(|detector| {
+            faultscope_core::Operation::Detector {
+                detector_id: Some(detector.id),
+                measurement_keys: detector.measurement_keys,
+                coords: detector.coords,
+            }
+        }));
+    }
+    let observables = observables.unwrap_or_default();
+    let program = std::sync::Arc::new(
+        faultscope_core::compile_sampler_program_ref(
+            core_circuit.n_qubits,
+            &operations,
+            observables,
+        )
+        .map_err(|err| PyValueError::new_err(err.to_string()))?,
+    );
+    let py_noise_locations = if program.noise_locations().is_empty() {
+        Vec::new()
+    } else {
+        parse_py_noise_locations(circuit, &program)?
+    };
+
+    Ok(NativePackedSampler {
+        py_circuit: circuit.clone().unbind(),
+        py_observables,
+        program,
+        py_noise_locations,
+    })
+}
+
 fn native_packed_sampler_from_circuit(
     py: Python<'_>,
     circuit: &Bound<'_, PyAny>,
@@ -1842,12 +2044,18 @@ pub(crate) fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<NativeDemBatch>()?;
     module.add_class::<PyDemHotspotEstimator>()?;
     module.add_function(wrap_pyfunction!(compile_sampler, module)?)?;
+    module.add_function(wrap_pyfunction!(compile_collection_sampler, module)?)?;
     module.add_function(wrap_pyfunction!(generate_dem, module)?)?;
     module.add_function(wrap_pyfunction!(available_native_decoders, module)?)?;
     module.add_function(wrap_pyfunction!(compile_dem_generator, module)?)?;
     module.add_function(wrap_pyfunction!(generate_and_compile_dem_sampler, module)?)?;
     module.add_function(wrap_pyfunction!(compile_generated_dem_sampler, module)?)?;
     module.add_function(wrap_pyfunction!(compile_dem_sampler, module)?)?;
+    module.add_function(wrap_pyfunction!(
+        _collect_forward_logical_error_stats_many,
+        module
+    )?)?;
+    module.add_function(wrap_pyfunction!(_collect_forward_hotspots_many, module)?)?;
     module.add_function(wrap_pyfunction!(
         _collect_dem_logical_error_stats_many,
         module

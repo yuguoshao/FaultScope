@@ -1,4 +1,4 @@
-//! Global scheduler for native DEM logical collection.
+//! Global scheduler for native logical collection.
 //!
 //! A run owns one worker pool capped by `DemLogicalCollectionRunOptions::num_workers`.
 //! Fixed-size tasks are split into deterministic batch work items; the main
@@ -16,16 +16,15 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use crate::api::{
     stop_error_count, task_is_complete, validate_observable_combo_mask_for_task,
     validate_stop_counter_for_tasks, validate_task, DemLogicalCollectionOptions,
-    DemLogicalCollectionRunOptions, DemLogicalCollectionStats, DemLogicalCollectionTask,
+    DemLogicalCollectionRunOptions, DemLogicalCollectionStats, LogicalCollectionTask,
     ValidatedStopCounter,
 };
 use crate::counting::{
-    prepare_dem_count_plan, sample_dem_logical_error_stats_with_rng, BatchStats, CountOptions,
-    PreparedDemCountPlan,
+    prepare_count_plan, sample_logical_error_stats, BatchStats, CountOptions, PreparedCountPlan,
 };
 use crate::worker_decoder::WorkerDecoderCache;
 use crate::worker_executor::{execute_with_context, WorkerExecutor};
-use faultscope_core::{NativeDecoderWorker, NpError, NpResult, SmallRng};
+use faultscope_core::{NativeDecoderWorker, NpError, NpResult};
 
 #[derive(Clone)]
 struct BatchWork {
@@ -34,19 +33,19 @@ struct BatchWork {
     shots: usize,
     seed: Option<u64>,
     seed_stream: usize,
-    task: Arc<DemLogicalCollectionTask>,
+    task: Arc<LogicalCollectionTask>,
     run_options: Arc<DemLogicalCollectionRunOptions>,
-    prepared_plan: Arc<PreparedDemCountPlan>,
+    prepared_plan: Arc<PreparedCountPlan>,
 }
 
 #[derive(Clone)]
 struct AdaptiveCalibrationWork {
     state_index: usize,
-    task: Arc<DemLogicalCollectionTask>,
+    task: Arc<LogicalCollectionTask>,
     run_options: Arc<DemLogicalCollectionRunOptions>,
     stop_counter: ValidatedStopCounter,
     seed_stream: usize,
-    prepared_plan: Arc<PreparedDemCountPlan>,
+    prepared_plan: Arc<PreparedCountPlan>,
 }
 
 struct AdaptiveCalibrationResult {
@@ -89,8 +88,8 @@ enum TaskPhase {
 
 struct TaskState {
     output_index: usize,
-    task: Arc<DemLogicalCollectionTask>,
-    prepared_plan: Arc<PreparedDemCountPlan>,
+    task: Arc<LogicalCollectionTask>,
+    prepared_plan: Arc<PreparedCountPlan>,
     stats: DemLogicalCollectionStats,
     completion_options: DemLogicalCollectionOptions,
     stop_counter: ValidatedStopCounter,
@@ -129,7 +128,7 @@ impl TaskState {
 }
 
 pub(crate) fn collect_task_set(
-    tasks: Vec<DemLogicalCollectionTask>,
+    tasks: Vec<LogicalCollectionTask>,
     run_options: DemLogicalCollectionRunOptions,
     existing_data: HashMap<String, DemLogicalCollectionStats>,
 ) -> NpResult<Vec<DemLogicalCollectionStats>> {
@@ -139,7 +138,7 @@ pub(crate) fn collect_task_set(
 pub(crate) type ProgressCallback<'a> = dyn FnMut(&DemLogicalCollectionStats) -> NpResult<()> + 'a;
 
 pub(crate) fn collect_task_set_with_progress(
-    tasks: Vec<DemLogicalCollectionTask>,
+    tasks: Vec<LogicalCollectionTask>,
     run_options: DemLogicalCollectionRunOptions,
     existing_data: HashMap<String, DemLogicalCollectionStats>,
     progress_callback: &mut ProgressCallback<'_>,
@@ -148,7 +147,7 @@ pub(crate) fn collect_task_set_with_progress(
 }
 
 fn collect_task_set_inner(
-    tasks: Vec<DemLogicalCollectionTask>,
+    tasks: Vec<LogicalCollectionTask>,
     run_options: DemLogicalCollectionRunOptions,
     existing_data: HashMap<String, DemLogicalCollectionStats>,
     mut progress_callback: Option<&mut ProgressCallback<'_>>,
@@ -180,7 +179,9 @@ fn collect_task_set_inner(
                     task.metadata_json.clone(),
                 )
             })
-            .unwrap_or_else(|| DemLogicalCollectionStats::empty_for_task(&task, counter_schema));
+            .unwrap_or_else(|| {
+                DemLogicalCollectionStats::empty_for_logical_task(&task, counter_schema)
+            });
         if task_is_complete(&stats, &task.options, &stop_counter)? {
             results[output_index] = Some(stats);
             continue;
@@ -319,7 +320,7 @@ fn worker_error_context(work: &Work) -> String {
 
 fn make_task_state(
     output_index: usize,
-    task: DemLogicalCollectionTask,
+    task: LogicalCollectionTask,
     stats: DemLogicalCollectionStats,
     run_options: &DemLogicalCollectionRunOptions,
     stop_counter: ValidatedStopCounter,
@@ -328,9 +329,14 @@ fn make_task_state(
     let resume_shots = stats.shots;
     let remaining_shots = completion_options.max_shots.saturating_sub(stats.shots);
     if remaining_shots == 0 {
-        let prepared_plan = Arc::new(PreparedDemCountPlan::Logical(
-            task.sampler.compile_logical_count_plan(),
-        ));
+        let prepared_plan = Arc::new(prepare_count_plan(
+            &task.sampler,
+            task.decoder
+                .as_deref()
+                .map(|factory| (factory.detector_ids(), factory.batch_formats())),
+            &CountOptions::default(),
+            false,
+        )?);
         return Ok(TaskState {
             output_index,
             task: Arc::new(task),
@@ -372,7 +378,7 @@ fn make_task_state(
         count_observable_error_combos: run_options.count_observable_error_combos,
         count_detection_events: run_options.count_detection_events,
     };
-    let prepared_plan = Arc::new(prepare_dem_count_plan(
+    let prepared_plan = Arc::new(prepare_count_plan(
         &adjusted.sampler,
         adjusted
             .decoder
@@ -402,10 +408,10 @@ fn make_task_state(
 }
 
 fn adjusted_task_for_remaining(
-    mut task: DemLogicalCollectionTask,
+    mut task: LogicalCollectionTask,
     stats: &DemLogicalCollectionStats,
     stop_counter: &ValidatedStopCounter,
-) -> NpResult<DemLogicalCollectionTask> {
+) -> NpResult<LogicalCollectionTask> {
     let remaining_shots = task.options.max_shots.saturating_sub(stats.shots);
     task.options.max_shots = remaining_shots;
     task.options.min_shots = task.options.min_shots.saturating_sub(stats.shots);
@@ -658,17 +664,17 @@ fn run_batch_work(
     work: BatchWork,
     decoder: Option<&mut dyn NativeDecoderWorker>,
 ) -> NpResult<WorkResult> {
-    let mut rng = SmallRng::new(batch_seed(work.seed, work.seed_stream, work.ordinal));
+    let seed = batch_seed(work.seed, work.seed_stream, work.ordinal);
     let count_options = CountOptions {
         postselection_mask: work.task.postselection_mask.as_deref(),
         postselected_observables_mask: work.task.postselected_observables_mask.as_deref(),
         count_observable_error_combos: work.run_options.count_observable_error_combos,
         count_detection_events: work.run_options.count_detection_events,
     };
-    let stats = sample_dem_logical_error_stats_with_rng(
+    let stats = sample_logical_error_stats(
         &work.task.sampler,
         work.shots,
-        &mut rng,
+        seed,
         decoder,
         None,
         &count_options,
@@ -702,16 +708,17 @@ fn run_adaptive_calibration_work(
 }
 
 fn calibrate_adaptive_task(
-    task: &DemLogicalCollectionTask,
+    task: &LogicalCollectionTask,
     mut decoder: Option<&mut dyn NativeDecoderWorker>,
     run_options: &DemLogicalCollectionRunOptions,
     stop_counter: &ValidatedStopCounter,
     seed_stream: usize,
-    prepared_plan: &PreparedDemCountPlan,
+    prepared_plan: &PreparedCountPlan,
     delta_tx: Option<&mpsc::Sender<NpResult<WorkResult>>>,
 ) -> NpResult<AdaptiveCalibrationResult> {
     validate_task(task)?;
-    let mut stats = DemLogicalCollectionStats::empty_for_task(task, run_options.counter_schema());
+    let mut stats =
+        DemLogicalCollectionStats::empty_for_logical_task(task, run_options.counter_schema());
     let mut shots_done = 0usize;
     let mut batch_ordinal = 0usize;
     let mut observations = Vec::with_capacity(3);
@@ -737,22 +744,22 @@ fn calibrate_adaptive_task(
 
     while shots_done < task.options.max_shots && batch_ordinal < 3 {
         batch_shots = batch_shots.min(task.options.max_shots - shots_done).max(1);
-        let mut rng = SmallRng::new(batch_seed(seed, seed_stream, batch_ordinal));
+        let batch_seed = batch_seed(seed, seed_stream, batch_ordinal);
         let batch_started = Instant::now();
         let batch_stats = match decoder.as_mut() {
-            Some(decoder) => sample_dem_logical_error_stats_with_rng(
+            Some(decoder) => sample_logical_error_stats(
                 &task.sampler,
                 batch_shots,
-                &mut rng,
+                batch_seed,
                 Some(&mut **decoder),
                 Some(batch_started),
                 &count_options,
                 prepared_plan,
             )?,
-            None => sample_dem_logical_error_stats_with_rng(
+            None => sample_logical_error_stats(
                 &task.sampler,
                 batch_shots,
-                &mut rng,
+                batch_seed,
                 None,
                 Some(batch_started),
                 &count_options,
@@ -797,7 +804,7 @@ fn calibrate_adaptive_task(
 }
 
 fn stats_delta_from_batch(
-    task: &DemLogicalCollectionTask,
+    task: &LogicalCollectionTask,
     batch_stats: BatchStats,
     seconds: f64,
     counter_schema: crate::api::DemLogicalCounterSchema,
@@ -907,7 +914,7 @@ fn task_seed_stream(resume_shots: usize, phase: usize) -> usize {
 }
 
 pub(crate) fn task_run_seed(
-    task: &DemLogicalCollectionTask,
+    task: &LogicalCollectionTask,
     run_options: &DemLogicalCollectionRunOptions,
 ) -> Option<u64> {
     task.options.seed.or_else(|| {
@@ -941,7 +948,7 @@ fn fixed_batch_specs_for_size(shots: usize, batch_size: usize) -> Vec<usize> {
 
 fn validate_existing_stats_for_task(
     stats: &DemLogicalCollectionStats,
-    task: &DemLogicalCollectionTask,
+    task: &LogicalCollectionTask,
     counter_schema: crate::api::DemLogicalCounterSchema,
 ) -> NpResult<()> {
     stats.validate_counter_schema()?;

@@ -2,11 +2,14 @@ use std::collections::HashMap;
 use std::time::Instant;
 
 use faultscope_core::{
-    packed_residual_failure_count, validate_decoder_batch_formats, validate_decoder_detector_ids,
+    convert_detector_batch, packed_residual_failure_count, run_sampler_program,
+    select_detector_batch_format, validate_decoder_batch_formats, validate_decoder_detector_ids,
     word_count, CompiledDemLogicalCountPlan, CompiledDemSamplingPlan, CorrectionMaskBatch,
-    DecoderCorrectionBatch, DemHotspotEstimator, DemSamplingResult, DetectorBatchFormat, Mask,
-    NativeDecoderWorker, NpError, NpResult, SmallRng,
+    DecoderCorrectionBatch, DemHotspotEstimator, DemSamplingResult, DetectorBatchFormat,
+    DetectorMaskBatchView, Mask, NativeDecoderWorker, NpError, NpResult, RuntimeState, SmallRng,
 };
+
+use crate::api::{CollectionSampler, ForwardSamplerView};
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub(crate) struct BatchStats {
@@ -31,7 +34,7 @@ pub(crate) struct CountOptions<'a> {
 }
 
 impl CountOptions<'_> {
-    fn uses_detailed_path(&self) -> bool {
+    pub(crate) fn uses_detailed_path(&self) -> bool {
         self.postselection_mask.is_some()
             || self.postselected_observables_mask.is_some()
             || self.count_observable_error_combos
@@ -43,6 +46,97 @@ impl CountOptions<'_> {
 pub(crate) enum PreparedDemCountPlan {
     Logical(CompiledDemLogicalCountPlan),
     Decoder(CompiledDemSamplingPlan),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct PreparedForwardCountPlan {
+    decoder_detector_ids: Vec<i64>,
+    decoder_format: Option<DetectorBatchFormat>,
+    record_events: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum PreparedCountPlan {
+    Dem(PreparedDemCountPlan),
+    Forward(PreparedForwardCountPlan),
+}
+
+pub(crate) fn prepare_count_plan(
+    sampler: &CollectionSampler,
+    decoder_metadata: Option<(&[i64], &[DetectorBatchFormat])>,
+    count_options: &CountOptions<'_>,
+    record_attribution: bool,
+) -> NpResult<PreparedCountPlan> {
+    match sampler {
+        CollectionSampler::Dem(sampler) => Ok(PreparedCountPlan::Dem(prepare_dem_count_plan(
+            sampler,
+            decoder_metadata,
+            count_options,
+            record_attribution,
+        )?)),
+        CollectionSampler::Forward(_) => Ok(PreparedCountPlan::Forward(
+            prepare_forward_count_plan(decoder_metadata, record_attribution)?,
+        )),
+    }
+}
+
+pub(crate) fn prepare_forward_count_plan(
+    decoder_metadata: Option<(&[i64], &[DetectorBatchFormat])>,
+    record_attribution: bool,
+) -> NpResult<PreparedForwardCountPlan> {
+    let (decoder_detector_ids, decoder_format) = match decoder_metadata {
+        Some((detector_ids, formats)) => {
+            validate_decoder_detector_ids(detector_ids)?;
+            validate_decoder_batch_formats(formats)?;
+            let format = select_detector_batch_format(formats, &[DetectorBatchFormat::Masks])?;
+            (detector_ids.to_vec(), Some(format))
+        }
+        None => (Vec::new(), None),
+    };
+    Ok(PreparedForwardCountPlan {
+        decoder_detector_ids,
+        decoder_format,
+        record_events: record_attribution,
+    })
+}
+
+pub(crate) fn sample_logical_error_stats(
+    sampler: &CollectionSampler,
+    shots: usize,
+    seed: u64,
+    decoder: Option<&mut dyn NativeDecoderWorker>,
+    started: Option<Instant>,
+    count_options: &CountOptions<'_>,
+    prepared_plan: &PreparedCountPlan,
+) -> NpResult<BatchStats> {
+    match (sampler, prepared_plan) {
+        (CollectionSampler::Dem(sampler), PreparedCountPlan::Dem(plan)) => {
+            let mut rng = SmallRng::new(seed);
+            sample_dem_logical_error_stats_with_rng(
+                sampler,
+                shots,
+                &mut rng,
+                decoder,
+                started,
+                count_options,
+                plan,
+            )
+        }
+        (CollectionSampler::Forward(sampler), PreparedCountPlan::Forward(plan)) => {
+            sample_forward_logical_error_stats(
+                sampler.view(),
+                shots,
+                seed,
+                decoder,
+                started,
+                count_options,
+                plan,
+            )
+        }
+        _ => Err(NpError::new(
+            "collection sampler and prepared count plan do not match",
+        )),
+    }
 }
 
 pub(crate) fn prepare_dem_count_plan(
@@ -150,6 +244,237 @@ pub(crate) fn sample_dem_logical_error_stats_with_rng(
         .map(|started| started.elapsed().as_secs_f64())
         .unwrap_or(0.0);
     Ok(out)
+}
+
+pub(crate) struct ForwardDetailedBatchResult {
+    pub(crate) state: RuntimeState,
+    pub(crate) detailed: DetailedBatchResult,
+}
+
+pub(crate) fn sample_forward_detailed_batch(
+    sampler: ForwardSamplerView<'_>,
+    shots: usize,
+    seed: u64,
+    decoder: Option<&mut dyn NativeDecoderWorker>,
+    count_options: &CountOptions<'_>,
+    prepared_plan: &PreparedForwardCountPlan,
+) -> NpResult<ForwardDetailedBatchResult> {
+    let state = run_sampler_program(
+        sampler.program(),
+        shots,
+        Some(seed),
+        prepared_plan.record_events,
+    )?;
+    let corrections =
+        forward_corrections(&state, sampler.observable_ids(), decoder, prepared_plan)?;
+    let residuals = forward_residual_masks(&state, sampler.observable_ids(), &corrections)?;
+    let detailed = count_forward_masks(
+        &state,
+        sampler.detector_ids(),
+        sampler.observable_ids(),
+        residuals,
+        count_options,
+    )?;
+    Ok(ForwardDetailedBatchResult { state, detailed })
+}
+
+pub(crate) fn sample_forward_logical_error_stats(
+    sampler: ForwardSamplerView<'_>,
+    shots: usize,
+    seed: u64,
+    decoder: Option<&mut dyn NativeDecoderWorker>,
+    started: Option<Instant>,
+    count_options: &CountOptions<'_>,
+    prepared_plan: &PreparedForwardCountPlan,
+) -> NpResult<BatchStats> {
+    let state = run_sampler_program(
+        sampler.program(),
+        shots,
+        Some(seed),
+        prepared_plan.record_events,
+    )?;
+    let corrections =
+        forward_corrections(&state, sampler.observable_ids(), decoder, prepared_plan)?;
+    let residuals = forward_residual_masks(&state, sampler.observable_ids(), &corrections)?;
+    let mut out = if count_options.uses_detailed_path() {
+        count_forward_masks(
+            &state,
+            sampler.detector_ids(),
+            sampler.observable_ids(),
+            residuals,
+            count_options,
+        )?
+        .stats
+    } else {
+        let mut loss = Mask::zero(word_count(shots));
+        for residual in residuals {
+            loss.or_assign(&residual);
+        }
+        loss.and_assign(state.all_mask());
+        BatchStats {
+            shots,
+            errors: loss.bit_count(),
+            discards: 0,
+            seconds: 0.0,
+            custom_counts: HashMap::new(),
+        }
+    };
+    out.seconds = started
+        .map(|started| started.elapsed().as_secs_f64())
+        .unwrap_or(0.0);
+    Ok(out)
+}
+
+fn forward_corrections(
+    state: &RuntimeState,
+    observable_ids: &[i64],
+    decoder: Option<&mut dyn NativeDecoderWorker>,
+    prepared_plan: &PreparedForwardCountPlan,
+) -> NpResult<CorrectionMaskBatch> {
+    let Some(decoder) = decoder else {
+        return Ok(CorrectionMaskBatch::empty(state.shots()));
+    };
+    validate_decoder_observable_layout(observable_ids, decoder.observable_ids(), decoder.name())?;
+    let masks = prepared_plan
+        .decoder_detector_ids
+        .iter()
+        .map(|detector_id| {
+            state
+                .detectors
+                .get(detector_id)
+                .cloned()
+                .ok_or_else(|| NpError::new(format!("missing detector id {detector_id}")))
+        })
+        .collect::<NpResult<Vec<_>>>()?;
+    let view =
+        DetectorMaskBatchView::new(&prepared_plan.decoder_detector_ids, &masks, state.shots())?;
+    let format = prepared_plan.decoder_format.ok_or_else(|| {
+        NpError::new("forward decoder count plan is missing a negotiated detector format")
+    })?;
+    let negotiated = convert_detector_batch(view.into(), format)?;
+    let corrections = decoder
+        .decode_batch_checked(negotiated.view())?
+        .into_masks()?;
+    corrections.validate_against(observable_ids, state.shots())?;
+    Ok(corrections)
+}
+
+fn forward_residual_masks(
+    state: &RuntimeState,
+    observable_ids: &[i64],
+    corrections: &CorrectionMaskBatch,
+) -> NpResult<Vec<Mask>> {
+    let zero = Mask::zero(word_count(state.shots()));
+    observable_ids
+        .iter()
+        .map(|observable_id| {
+            let actual = state.observables.get(observable_id).ok_or_else(|| {
+                NpError::new(format!("missing logical observable id {observable_id}"))
+            })?;
+            let correction = corrections.get(*observable_id).unwrap_or(&zero);
+            let mut residual = actual.clone();
+            residual.xor_assign(correction);
+            residual.clear_unused(state.shots());
+            Ok(residual)
+        })
+        .collect()
+}
+
+fn count_forward_masks(
+    state: &RuntimeState,
+    detector_ids: &[i64],
+    observable_ids: &[i64],
+    residuals: Vec<Mask>,
+    count_options: &CountOptions<'_>,
+) -> NpResult<DetailedBatchResult> {
+    let shots = state.shots();
+    validate_mask_shape(
+        count_options.postselection_mask,
+        detector_ids.len(),
+        "postselection_mask",
+    )?;
+    validate_mask_shape(
+        count_options.postselected_observables_mask,
+        observable_ids.len(),
+        "postselected_observables_mask",
+    )?;
+    let mut detector_discard_mask = count_options
+        .postselection_mask
+        .map(|_| Mask::zero(word_count(shots)));
+    if let Some(discard) = detector_discard_mask.as_mut() {
+        for (index, detector_id) in detector_ids.iter().enumerate() {
+            if packed_mask_bit(count_options.postselection_mask, index) {
+                let detector = state
+                    .detectors
+                    .get(detector_id)
+                    .ok_or_else(|| NpError::new(format!("missing detector id {detector_id}")))?;
+                discard.or_assign(detector);
+            }
+        }
+        discard.clear_unused(shots);
+    }
+
+    let mut custom_counts = HashMap::new();
+    if count_options.count_detection_events {
+        let mut events = 0usize;
+        for detector_id in detector_ids {
+            events += state
+                .detectors
+                .get(detector_id)
+                .ok_or_else(|| NpError::new(format!("missing detector id {detector_id}")))?
+                .bit_count();
+        }
+        custom_counts.insert("detection_events".to_string(), events);
+        custom_counts.insert("detectors_checked".to_string(), shots * detector_ids.len());
+    }
+
+    let mut loss_mask = Mask::zero(word_count(shots));
+    let mut errors = 0usize;
+    let mut discards = 0usize;
+    for shot in 0..shots {
+        if detector_discard_mask
+            .as_ref()
+            .is_some_and(|mask| mask_bit(mask, shot))
+        {
+            discards += 1;
+            continue;
+        }
+        let mut observable_discard = false;
+        let mut logical_error = false;
+        let mut combo = String::with_capacity(observable_ids.len());
+        for (index, residual) in residuals.iter().enumerate() {
+            let bit = mask_bit(residual, shot);
+            let postselected = packed_mask_bit(count_options.postselected_observables_mask, index);
+            observable_discard |= bit && postselected;
+            logical_error |= bit && !postselected;
+            if count_options.count_observable_error_combos {
+                combo.push(if bit { 'E' } else { '_' });
+            }
+        }
+        if observable_discard {
+            discards += 1;
+            continue;
+        }
+        if logical_error {
+            errors += 1;
+            set_mask_bit(&mut loss_mask, shot);
+            if count_options.count_observable_error_combos {
+                *custom_counts
+                    .entry(format!("obs_mistake_mask={combo}"))
+                    .or_insert(0) += 1;
+            }
+        }
+    }
+    Ok(DetailedBatchResult {
+        stats: BatchStats {
+            shots,
+            errors,
+            discards,
+            seconds: 0.0,
+            custom_counts,
+        },
+        loss_mask,
+    })
 }
 
 pub(crate) fn count_detailed_sampling_result(

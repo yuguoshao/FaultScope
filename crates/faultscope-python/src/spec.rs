@@ -589,7 +589,10 @@ pub(crate) fn parse_dem_detector_sequence(
     for item in items {
         let detector = parse_dem_detector_object(item.bind(py))?;
         if !seen.insert(detector.id) {
-            return Err(PyValueError::new_err("detector ids must be unique"));
+            return Err(PyValueError::new_err(format!(
+                "detector ids must be unique; duplicate detector id {}",
+                detector.id
+            )));
         }
         out.push(detector);
     }
@@ -617,9 +620,10 @@ pub(crate) fn parse_dem_observable_sequence(
     for item in items {
         let observable = parse_dem_observable_object(item.bind(py))?;
         if !seen.insert(observable.id) {
-            return Err(PyValueError::new_err(
-                "logical observable ids must be unique",
-            ));
+            return Err(PyValueError::new_err(format!(
+                "logical observable ids must be unique; duplicate observable id {}",
+                observable.id
+            )));
         }
         out.push(observable);
     }

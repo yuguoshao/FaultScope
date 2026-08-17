@@ -8,7 +8,7 @@ use faultscope_core::{CompiledDemSamplingPlan, NativeDecoderWorker, NpError, NpR
 use crate::api::{
     task_is_complete, validate_stop_counter_for_tasks, validate_task, DemLogicalCollectionOptions,
     DemLogicalCollectionRunOptions, DemLogicalCollectionStats, DemLogicalCollectionTask,
-    ValidatedStopCounter,
+    LogicalCollectionTask, ValidatedStopCounter,
 };
 use crate::counting::{
     count_detailed_sampling_result, prepare_dem_count_plan, CountOptions, PreparedDemCountPlan,
@@ -80,7 +80,7 @@ impl HotspotWorkQueue {
         let tasks = tasks
             .into_iter()
             .map(|task| {
-                let seed = task_run_seed(&task, &run_options);
+                let seed = task_run_seed(&LogicalCollectionTask::from(task.clone()), &run_options);
                 let count_options = CountOptions {
                     postselection_mask: task.postselection_mask.as_deref(),
                     postselected_observables_mask: task.postselected_observables_mask.as_deref(),
@@ -163,15 +163,20 @@ pub fn collect_dem_hotspot_tasks(
     }
     let counter_schema = run_options.counter_schema();
     counter_schema.validate()?;
-    for task in &tasks {
-        validate_task(task)?;
+    let logical_tasks = tasks
+        .iter()
+        .cloned()
+        .map(LogicalCollectionTask::from)
+        .collect::<Vec<_>>();
+    for (task, logical_task) in tasks.iter().zip(&logical_tasks) {
+        validate_task(logical_task)?;
         if task.options.max_batch_seconds.is_some() {
             return Err(NpError::new(
                 "hotspot collection does not support adaptive batch sizing",
             ));
         }
     }
-    let stop_counter = validate_stop_counter_for_tasks(&tasks, &run_options)?;
+    let stop_counter = validate_stop_counter_for_tasks(&logical_tasks, &run_options)?;
     if tasks.is_empty() {
         return Ok(Vec::new());
     }
@@ -179,8 +184,10 @@ pub fn collect_dem_hotspot_tasks(
     let run_options = Arc::new(run_options);
     let mut states = tasks
         .iter()
-        .map(|task| {
-            let stats = DemLogicalCollectionStats::empty_for_task(task, counter_schema);
+        .zip(&logical_tasks)
+        .map(|(task, logical_task)| {
+            let stats =
+                DemLogicalCollectionStats::empty_for_logical_task(logical_task, counter_schema);
             let complete = task_is_complete(&stats, &task.options, &stop_counter)?;
             Ok(HotspotCommitState {
                 stats,

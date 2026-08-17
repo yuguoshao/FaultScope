@@ -228,10 +228,9 @@ class CollectionRunOptions:
             raise ValueError("num_workers must be positive")
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, init=False)
 class CollectionTask:
-    circuit: Any | None = None
-    dem: Any | None = None
+    circuit: Any
     detectors: tuple[Any, ...] | None = None
     observables: tuple[Any, ...] | None = None
     decoder: object | str | None = None
@@ -242,9 +241,48 @@ class CollectionTask:
     postselection_mask: bytes | bytearray | memoryview | None = None
     postselected_observables_mask: bytes | bytearray | memoryview | None = None
 
+    def __init__(
+        self,
+        circuit: Any = None,
+        *,
+        detectors: tuple[Any, ...] | None = None,
+        observables: tuple[Any, ...] | None = None,
+        decoder: object | str | None = None,
+        decoder_options: Mapping[str, object] | None = None,
+        metadata: Mapping[str, object] | None = None,
+        collection_options: CollectionOptions | None = None,
+        task_id: str | None = None,
+        postselection_mask: bytes | bytearray | memoryview | None = None,
+        postselected_observables_mask: bytes | bytearray | memoryview | None = None,
+        **legacy: object,
+    ) -> None:
+        if "dem" in legacy:
+            raise TypeError(
+                "CollectionTask no longer accepts dem; use "
+                "faultscope.collection.dem.DemCollectionTask(dem=...)"
+            )
+        if legacy:
+            name = next(iter(legacy))
+            raise TypeError(f"CollectionTask got an unexpected keyword argument {name!r}")
+        object.__setattr__(self, "circuit", circuit)
+        object.__setattr__(self, "detectors", None if detectors is None else tuple(detectors))
+        object.__setattr__(self, "observables", None if observables is None else tuple(observables))
+        object.__setattr__(self, "decoder", decoder)
+        object.__setattr__(self, "decoder_options", decoder_options)
+        object.__setattr__(self, "metadata", metadata)
+        object.__setattr__(self, "collection_options", collection_options)
+        object.__setattr__(self, "task_id", task_id)
+        object.__setattr__(self, "postselection_mask", postselection_mask)
+        object.__setattr__(
+            self,
+            "postselected_observables_mask",
+            postselected_observables_mask,
+        )
+        self.__post_init__()
+
     def __post_init__(self) -> None:
-        if (self.circuit is None) == (self.dem is None):
-            raise ValueError("CollectionTask requires exactly one of circuit or dem")
+        if self.circuit is None:
+            raise ValueError("CollectionTask requires circuit")
         if self.collection_options is not None and not isinstance(
             self.collection_options, CollectionOptions
         ):
@@ -442,7 +480,7 @@ class TaskStats:
 class HotspotCollectionResult:
     stats: TaskStats
     batch_stats: tuple[TaskStats, ...]
-    edge_sensitivities: tuple[float, ...]
+    location_sensitivities: Mapping[str, float]
 
 
 @dataclass(frozen=True)

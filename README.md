@@ -138,8 +138,11 @@ print(result.hotspot_table(top_k=5))
 - `DemHotspotEstimator` 在 DEM 层采样，每条 DEM edge 按独立 Bernoulli instruction 处理，并把
   sampled edge vector 映射成 detector syndrome 和 logical observable flip record。
 - `faultscope.collection.Collector` 提供可复用的 threshold-style logical error-rate
-  collection 配置；`collect(...)` 是一次性薄封装。Rust 负责 native sampler/decoder 调度和
-  计数，Python 负责任务解析、strong id 和 CSV resume。
+  collection 配置；`CollectionTask(circuit=...)` 直接执行 packed Forward runtime，
+  `collect(...)` 是一次性薄封装。Rust 负责 native sampler/decoder 调度和计数，Python
+  负责任务解析、strong id 和 CSV resume。字符串 decoder 只在准备阶段从 circuit 生成一次
+  DEM 来构造静态 decoding problem，shots 不经过 DEM sampler。显式 DEM collection 已隔离到
+  `faultscope.collection.dem.DemCollectionTask` / `DemCollector`，主模块和 CLI 不再接受 DEM task。
 - `NativeNoCorrectionDecoder` 和后续 native decoder handle 可通过
   `estimate(..., decoder=decoder)` 自动走 native fast path；传入 Python loss/correction
   callback 时回退到兼容路径。普通 Python decoder 或 subclass 不会自动获得 native hot path；
@@ -173,6 +176,8 @@ print(result.hotspot_table(top_k=5))
 | 查看原始 measurement/noise masks | Forward sampling |
 | 自定义 measurement-history loss | Forward estimate + `loss_mask_fn` |
 | detector-syndrome decoder | Forward 或 DEM estimate + decoder |
+| threshold-style logical collection | `faultscope.collection.CollectionTask(circuit=...)`（Forward） |
+| legacy 显式 DEM collection | `faultscope.collection.dem`（library only） |
 | graphlike matching decoder | 原型用 `PyMatchingDecoder`；高性能路径安装 `faultscope-pymatching` 后使用 `NativePyMatchingDecoder`，或使用 `faultscope-fusion-blossom`；`mwpm` 等待 ABI V4 迁移 |
 | circuit 入口的 DEM 采样 | `DemFaultScopeSimulator(circuit)` |
 | DEM edge 级热点排序 | `DemFaultScopeSimulator` 或 `DemHotspotEstimator(dem)` |

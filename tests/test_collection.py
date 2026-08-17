@@ -21,6 +21,7 @@ from typing import get_type_hints
 
 import faultscope
 import faultscope.collection._collect as collection_collect_module
+import faultscope.collection._dem_collect as dem_collection_collect_module
 from faultscope import (
     Circuit,
     Detector,
@@ -32,6 +33,7 @@ from faultscope import (
     NativeNoCorrectionDecoder,
     Operation,
     BernoulliPauliNoise,
+    PauliChannel,
     NoiseLocation,
 )
 from faultscope.collection import (
@@ -52,6 +54,13 @@ from faultscope.collection import (
     iter_progress as public_iter_progress,
     read_stats_from_csv_files,
     write_stats_to_csv_file,
+)
+from faultscope.collection.dem import (
+    DemCollectionTask,
+    DemCollector,
+    collect as dem_public_collect,
+    iter_collect as dem_public_iter_collect,
+    iter_progress as dem_public_iter_progress,
 )
 from faultscope.collection.analysis import (
     error_rate_points,
@@ -122,7 +131,7 @@ def _native_counter_schema(
 
 
 def _collect(
-    tasks: Iterable[CollectionTask],
+    tasks: Iterable[CollectionTask | DemCollectionTask],
     *,
     options: CollectionOptions | None = None,
     max_shots: int | None = None,
@@ -169,7 +178,44 @@ def _collect(
         custom_error_count_key=custom_error_count_key,
         decoders=decoder_tuple,
     )
-    return public_collect(tasks, options=effective_options, run_options=run_options)
+    return _dispatch_collect(tasks, options=effective_options, run_options=run_options)
+
+
+def _dispatch_collect(
+    tasks: Iterable[CollectionTask | DemCollectionTask],
+    *,
+    options: CollectionOptions | None = None,
+    run_options: CollectionRunOptions | None = None,
+) -> list[TaskStats]:
+    task_list = list(tasks)
+    target = dem_public_collect if _uses_dem_tasks(task_list) else public_collect
+    return target(task_list, options=options, run_options=run_options)
+
+
+def _dispatch_iter_collect(
+    tasks: Iterable[CollectionTask | DemCollectionTask],
+    *,
+    options: CollectionOptions | None = None,
+    run_options: CollectionRunOptions | None = None,
+) -> Iterator[TaskStats]:
+    task_list = list(tasks)
+    target = dem_public_iter_collect if _uses_dem_tasks(task_list) else public_iter_collect
+    yield from target(task_list, options=options, run_options=run_options)
+
+
+def _dispatch_iter_progress(
+    tasks: Iterable[CollectionTask | DemCollectionTask],
+    *,
+    options: CollectionOptions | None = None,
+    run_options: CollectionRunOptions | None = None,
+) -> Iterator[Progress]:
+    task_list = list(tasks)
+    target = dem_public_iter_progress if _uses_dem_tasks(task_list) else public_iter_progress
+    yield from target(task_list, options=options, run_options=run_options)
+
+
+def _uses_dem_tasks(tasks: list[CollectionTask | DemCollectionTask]) -> bool:
+    return bool(tasks) and all(isinstance(task, DemCollectionTask) for task in tasks)
 
 
 class CollectionTests(unittest.TestCase):
@@ -489,14 +535,17 @@ class CollectionTests(unittest.TestCase):
             tuple(field.name for field in fields(CollectionOptions)), tuple(parameters)
         )
 
-    def test_task_requires_exactly_one_source(self) -> None:
+    def test_task_types_are_hard_split_by_source(self) -> None:
         dem = _logical_edge_dem()
-        CollectionTask(dem=dem)
+        DemCollectionTask(dem=dem)
+        CollectionTask(Circuit(1, (Operation.measure(0, key="m0"),)))
 
-        with self.assertRaisesRegex(ValueError, "exactly one"):
+        with self.assertRaisesRegex(ValueError, "requires circuit"):
             CollectionTask()
-        with self.assertRaisesRegex(ValueError, "exactly one"):
-            CollectionTask(dem=dem, circuit=Circuit(1, (Operation.measure(0, key="m0"),)))
+        with self.assertRaisesRegex(TypeError, "faultscope.collection.dem.DemCollectionTask"):
+            CollectionTask(dem=dem)
+        with self.assertRaisesRegex(ValueError, "requires dem"):
+            DemCollectionTask(dem=None)
 
     def test_task_stats_rates_have_explicit_denominators(self) -> None:
         stats = TaskStats(
@@ -854,7 +903,7 @@ class CollectionTests(unittest.TestCase):
 
     def test_collect_reports_all_logical_edge_failures(self) -> None:
         stats = _collect(
-            [CollectionTask(dem=_logical_edge_dem(), task_id="logical")],
+            [DemCollectionTask(dem=_logical_edge_dem(), task_id="logical")],
             max_shots=16,
             batch_size=5,
             seed=1,
@@ -869,7 +918,7 @@ class CollectionTests(unittest.TestCase):
         self.assertTrue(stats[0].strong_id)
 
     def test_counter_flags_change_strong_id_but_not_sampling_identity_or_samples(self) -> None:
-        task = CollectionTask(dem=_logical_edge_dem(0.375), task_id="schema-identity")
+        task = DemCollectionTask(dem=_logical_edge_dem(0.375), task_id="schema-identity")
         options = CollectionOptions(max_shots=256, batch_size=32)
         schemas = [
             CollectionCounterSchema(
@@ -880,7 +929,8 @@ class CollectionTests(unittest.TestCase):
             for count_detection in (False, True)
         ]
         native_tasks = [
-            collection_collect_module._native_task(task, 0, options, schema) for schema in schemas
+            dem_collection_collect_module._native_task(task, 0, options, schema)
+            for schema in schemas
         ]
         stats = [
             _collect(
@@ -903,7 +953,7 @@ class CollectionTests(unittest.TestCase):
         self.assertEqual([stat.counter_schema for stat in stats], schemas)
 
     def test_custom_stop_key_does_not_change_strong_id(self) -> None:
-        task = CollectionTask(dem=_graphlike_dem(0.25), task_id="stop-key-identity")
+        task = DemCollectionTask(dem=_graphlike_dem(0.25), task_id="stop-key-identity")
         common = dict(
             max_shots=32,
             batch_size=8,
@@ -925,7 +975,7 @@ class CollectionTests(unittest.TestCase):
         decoder = NativeGraphlikeDetectorCopyDecoder.from_dem(dem)
 
         stats = _collect(
-            [CollectionTask(dem=dem, decoder=decoder, task_id="corrected")],
+            [DemCollectionTask(dem=dem, decoder=decoder, task_id="corrected")],
             max_shots=32,
             batch_size=8,
             seed=2,
@@ -949,8 +999,8 @@ class CollectionTests(unittest.TestCase):
 
         stats = _collect(
             [
-                CollectionTask(dem=dem, decoder=no_correction, task_id="uncorrected"),
-                CollectionTask(dem=dem, decoder=correcting, task_id="corrected"),
+                DemCollectionTask(dem=dem, decoder=no_correction, task_id="uncorrected"),
+                DemCollectionTask(dem=dem, decoder=correcting, task_id="corrected"),
             ],
             max_shots=4,
             batch_size=4,
@@ -996,13 +1046,13 @@ class CollectionTests(unittest.TestCase):
     def test_string_and_equivalent_object_decoder_share_strong_id(self) -> None:
         dem = _graphlike_dem()
         by_name = _collect(
-            [CollectionTask(dem=dem, decoder="graphlike-detector-copy")],
+            [DemCollectionTask(dem=dem, decoder="graphlike-detector-copy")],
             max_shots=1,
             seed=26,
         )[0]
         by_object = _collect(
             [
-                CollectionTask(
+                DemCollectionTask(
                     dem=dem,
                     decoder=NativeGraphlikeDetectorCopyDecoder.from_dem(dem),
                 )
@@ -1031,12 +1081,12 @@ class CollectionTests(unittest.TestCase):
             )
 
         first = _collect(
-            [CollectionTask(dem=tagged_dem({"round": 1, "gate": 2}))],
+            [DemCollectionTask(dem=tagged_dem({"round": 1, "gate": 2}))],
             max_shots=1,
             seed=23,
         )[0]
         second = _collect(
-            [CollectionTask(dem=tagged_dem({"gate": 2, "round": 1}))],
+            [DemCollectionTask(dem=tagged_dem({"gate": 2, "round": 1}))],
             max_shots=1,
             seed=23,
         )[0]
@@ -1108,13 +1158,13 @@ class CollectionTests(unittest.TestCase):
             with self.subTest(decoder=type(decoder).__name__):
                 with self.assertRaisesRegex(TypeError, message):
                     _collect(
-                        [CollectionTask(dem=_graphlike_dem(), decoder=decoder)],
+                        [DemCollectionTask(dem=_graphlike_dem(), decoder=decoder)],
                         max_shots=1,
                     )
 
     def test_max_errors_stops_after_completed_batch(self) -> None:
         stats = _collect(
-            [CollectionTask(dem=_logical_edge_dem())],
+            [DemCollectionTask(dem=_logical_edge_dem())],
             max_shots=10,
             max_errors=1,
             batch_size=4,
@@ -1127,7 +1177,7 @@ class CollectionTests(unittest.TestCase):
     def test_task_options_do_not_reset_call_batch_size_by_default(self) -> None:
         stats = _collect(
             [
-                CollectionTask(
+                DemCollectionTask(
                     dem=_logical_edge_dem(),
                     collection_options=CollectionOptions(max_errors=1),
                 )
@@ -1189,9 +1239,9 @@ class CollectionTests(unittest.TestCase):
         self.assertIsNone(last_overlay_wins.max_errors)
 
     def test_explicit_none_clears_task_error_limit(self) -> None:
-        stats = public_collect(
+        stats = _dispatch_collect(
             [
-                CollectionTask(
+                DemCollectionTask(
                     dem=_logical_edge_dem(),
                     collection_options=CollectionOptions(max_errors=None),
                 )
@@ -1204,13 +1254,13 @@ class CollectionTests(unittest.TestCase):
         self.assertEqual(stats.errors, 4)
 
     def test_explicit_none_max_shots_fails_before_task_compilation(self) -> None:
-        task = CollectionTask(
+        task = DemCollectionTask(
             dem=_logical_edge_dem(),
             collection_options=CollectionOptions(max_shots=None),
         )
-        with mock.patch("faultscope.collection._collect._compile_task_sampler") as compile_task:
+        with mock.patch("faultscope.collection._dem_collect._compile_task_sampler") as compile_task:
             with self.assertRaisesRegex(ValueError, "max_shots is required"):
-                public_collect(
+                _dispatch_collect(
                     [task],
                     options=CollectionOptions(max_shots=4),
                 )
@@ -1225,11 +1275,11 @@ class CollectionTests(unittest.TestCase):
         sampler = RustCoreSampler()
         with (
             mock.patch(
-                "faultscope.collection._collect._compile_task_sampler",
-                return_value=(sampler, dem),
+                "faultscope.collection._dem_collect._compile_task_sampler",
+                return_value=sampler,
             ),
             mock.patch(
-                "faultscope.collection._collect._collect_dem_logical_error_stats_many",
+                "faultscope.collection._dem_collect._collect_dem_logical_error_stats_many",
                 return_value=[
                     {
                         "task_id": "native-core",
@@ -1247,7 +1297,7 @@ class CollectionTests(unittest.TestCase):
             ) as collect_native,
         ):
             stats = _collect(
-                [CollectionTask(dem=dem, task_id="native-core")],
+                [DemCollectionTask(dem=dem, task_id="native-core")],
                 max_shots=11,
                 max_errors=5,
                 batch_size=4,
@@ -1269,7 +1319,7 @@ class CollectionTests(unittest.TestCase):
         self.assertEqual(stats.seconds, 0.25)
 
     def test_same_seed_repeats_probabilistic_collection(self) -> None:
-        task = CollectionTask(dem=_logical_edge_dem(probability=0.375))
+        task = DemCollectionTask(dem=_logical_edge_dem(probability=0.375))
 
         first = _collect([task], max_shots=256, batch_size=64, seed=123)[0]
         second = _collect([task], max_shots=256, batch_size=64, seed=123)[0]
@@ -1298,14 +1348,14 @@ class CollectionTests(unittest.TestCase):
 
         with self.assertRaisesRegex(TypeError, "native decoder"):
             _collect(
-                [CollectionTask(dem=_graphlike_dem(), decoder=decoder)],
+                [DemCollectionTask(dem=_graphlike_dem(), decoder=decoder)],
                 max_shots=8,
                 batch_size=8,
                 seed=4,
             )
         self.assertEqual(decoder.calls, 0)
 
-    def test_circuit_task_compiles_to_dem_sampler(self) -> None:
+    def test_circuit_task_runs_forward_sampler(self) -> None:
         noise = NoiseLocation("x0", BernoulliPauliNoise("X"), 1.0, (0,))
         circuit = Circuit(
             1,
@@ -1336,14 +1386,110 @@ class CollectionTests(unittest.TestCase):
         self.assertEqual(stats.errors, 6)
         self.assertTrue(stats.strong_id)
 
+    def test_forward_collection_does_not_generate_dem_without_string_decoder(self) -> None:
+        noise = NoiseLocation("pc", PauliChannel({"X": 1.0, "Y": 3.0}), 0.4, (0,))
+        circuit = Circuit(
+            1,
+            (
+                Operation.noise(noise),
+                Operation.measure(0, key="m"),
+                Operation.detector(("m",), detector_id=0),
+                Operation.observable_include(0, ("m",)),
+            ),
+        )
+
+        with self.assertRaisesRegex(
+            faultscope.UnsupportedNativeCircuitError,
+            "multiple disjoint outcomes",
+        ):
+            faultscope.generate_native_dem(circuit)
+        with mock.patch.object(
+            collection_collect_module,
+            "generate_native_dem",
+            side_effect=AssertionError("forward sampling unexpectedly generated a DEM"),
+        ):
+            no_decoder = _collect(
+                [CollectionTask(circuit=circuit, task_id="categorical-forward")],
+                max_shots=64,
+                batch_size=16,
+                seed=901,
+            )[0]
+            native_decoder = _collect(
+                [
+                    CollectionTask(
+                        circuit=circuit,
+                        decoder=NativeNoCorrectionDecoder(
+                            detector_ids=(0,),
+                            observable_ids=(0,),
+                        ),
+                        task_id="categorical-forward-native-decoder",
+                    )
+                ],
+                max_shots=64,
+                batch_size=16,
+                seed=901,
+            )[0]
+
+        self.assertEqual(no_decoder.shots, 64)
+        self.assertEqual(native_decoder.shots, 64)
+        self.assertGreaterEqual(no_decoder.errors, 0)
+        self.assertGreaterEqual(native_decoder.errors, 0)
+
+    def test_string_decoder_builds_one_static_dem_but_tasks_keep_forward_sampler(self) -> None:
+        noise = NoiseLocation("fanout-x", BernoulliPauliNoise("X"), 0.25, (0,))
+        circuit = Circuit(
+            1,
+            (
+                Operation.noise(noise),
+                Operation.measure(0, key="m"),
+                Operation.detector(("m",), detector_id=0),
+                Operation.observable_include(0, ("m",)),
+            ),
+        )
+        task = CollectionTask(circuit=circuit, task_id="string-decoder")
+        with (
+            mock.patch.object(
+                collection_collect_module,
+                "_compile_task_sampler",
+                wraps=collection_collect_module._compile_task_sampler,
+            ) as compile_source,
+            mock.patch.object(
+                collection_collect_module,
+                "generate_native_dem",
+                wraps=collection_collect_module.generate_native_dem,
+            ) as generate_dem,
+        ):
+            prepared = collection_collect_module._prepare_native_tasks(
+                [task],
+                CollectionOptions(max_shots=4, batch_size=2),
+                ("graphlike-detector-copy", "graphlike-detector-copy"),
+                CollectionCounterSchema(),
+            )
+
+        self.assertEqual(compile_source.call_count, 1)
+        self.assertEqual(generate_dem.call_count, 1)
+        self.assertTrue(
+            all(isinstance(item["sampler"], faultscope.NativePackedSampler) for item in prepared)
+        )
+
+    def test_collection_exports_do_not_reexport_legacy_dem_types(self) -> None:
+        import faultscope.collection as collection
+        import faultscope.collection.dem as dem_collection
+
+        self.assertFalse(hasattr(collection, "DemCollectionTask"))
+        self.assertFalse(hasattr(collection, "DemCollector"))
+        self.assertFalse(hasattr(faultscope, "DemCollectionTask"))
+        self.assertIs(dem_collection.DemCollectionTask, DemCollectionTask)
+        self.assertIs(dem_collection.DemCollector, DemCollector)
+
     def test_iter_collect_yields_each_task(self) -> None:
         tasks = [
-            CollectionTask(dem=_logical_edge_dem(), task_id="a"),
-            CollectionTask(dem=_logical_edge_dem(), task_id="b"),
+            DemCollectionTask(dem=_logical_edge_dem(), task_id="a"),
+            DemCollectionTask(dem=_logical_edge_dem(), task_id="b"),
         ]
 
         stats = list(
-            public_iter_collect(
+            _dispatch_iter_collect(
                 tasks,
                 options=CollectionOptions(max_shots=3, batch_size=2),
                 run_options=CollectionRunOptions(seed=6),
@@ -1354,15 +1500,17 @@ class CollectionTests(unittest.TestCase):
         self.assertEqual([stat.errors for stat in stats], [3, 3])
 
     def test_collector_matches_functional_wrappers(self) -> None:
-        tasks = [CollectionTask(dem=_logical_edge_dem(), task_id="collector")]
+        tasks = [DemCollectionTask(dem=_logical_edge_dem(), task_id="collector")]
         options = CollectionOptions(max_shots=8, batch_size=2)
         run_options = CollectionRunOptions(seed=7, num_workers=2)
 
-        direct = Collector(options=options, run_options=run_options).collect(tasks)
-        wrapped = public_collect(tasks, options=options, run_options=run_options)
-        final_items = list(Collector(options=options, run_options=run_options).iter_collect(tasks))
+        direct = DemCollector(options=options, run_options=run_options).collect(tasks)
+        wrapped = _dispatch_collect(tasks, options=options, run_options=run_options)
+        final_items = list(
+            DemCollector(options=options, run_options=run_options).iter_collect(tasks)
+        )
         progress_items = list(
-            Collector(options=options, run_options=run_options).iter_progress(tasks)
+            DemCollector(options=options, run_options=run_options).iter_progress(tasks)
         )
 
         self.assertEqual(
@@ -1383,12 +1531,12 @@ class CollectionTests(unittest.TestCase):
         self.assertEqual(tuple(inspect.signature(public_iter_collect).parameters), expected)
         self.assertEqual(tuple(inspect.signature(public_iter_progress).parameters), expected)
         with self.assertRaises(TypeError):
-            public_collect([CollectionTask(dem=_logical_edge_dem())], max_shots=1)
+            _dispatch_collect([DemCollectionTask(dem=_logical_edge_dem())], max_shots=1)
 
     def test_num_workers_keeps_result_order(self) -> None:
         tasks = [
-            CollectionTask(dem=_logical_edge_dem(probability=0.25), task_id="a"),
-            CollectionTask(dem=_logical_edge_dem(probability=0.5), task_id="b"),
+            DemCollectionTask(dem=_logical_edge_dem(probability=0.25), task_id="a"),
+            DemCollectionTask(dem=_logical_edge_dem(probability=0.5), task_id="b"),
         ]
 
         stats = _collect(tasks, max_shots=128, batch_size=16, seed=8, num_workers=2)
@@ -1397,7 +1545,7 @@ class CollectionTests(unittest.TestCase):
         self.assertEqual([stat.shots for stat in stats], [128, 128])
 
     def test_num_workers_parallelizes_single_task_without_changing_stats(self) -> None:
-        task = CollectionTask(dem=_logical_edge_dem(probability=0.375), task_id="single")
+        task = DemCollectionTask(dem=_logical_edge_dem(probability=0.375), task_id="single")
 
         serial = _collect([task], max_shots=256, batch_size=16, seed=123, num_workers=1)[0]
         parallel = _collect([task], max_shots=256, batch_size=16, seed=123, num_workers=4)[0]
@@ -1410,7 +1558,7 @@ class CollectionTests(unittest.TestCase):
 
     def test_adaptive_num_workers_completes_single_task_with_exact_shot_cap(self) -> None:
         stats = _collect(
-            [CollectionTask(dem=_logical_edge_dem(), task_id="adaptive-single")],
+            [DemCollectionTask(dem=_logical_edge_dem(), task_id="adaptive-single")],
             max_shots=64,
             batch_size=8,
             start_batch_size=1,
@@ -1426,9 +1574,9 @@ class CollectionTests(unittest.TestCase):
 
     def test_num_workers_parallelizes_multiple_tasks_without_changing_stats(self) -> None:
         tasks = [
-            CollectionTask(dem=_logical_edge_dem(probability=0.25), task_id="a"),
-            CollectionTask(dem=_logical_edge_dem(probability=0.375), task_id="b"),
-            CollectionTask(dem=_logical_edge_dem(probability=0.5), task_id="c"),
+            DemCollectionTask(dem=_logical_edge_dem(probability=0.25), task_id="a"),
+            DemCollectionTask(dem=_logical_edge_dem(probability=0.375), task_id="b"),
+            DemCollectionTask(dem=_logical_edge_dem(probability=0.5), task_id="c"),
         ]
 
         serial = _collect(tasks, max_shots=256, batch_size=16, seed=124, num_workers=1)
@@ -1448,7 +1596,7 @@ class CollectionTests(unittest.TestCase):
     def test_postselection_discards_detector_events(self) -> None:
         stats = _collect(
             [
-                CollectionTask(
+                DemCollectionTask(
                     dem=_graphlike_dem(),
                     task_id="post",
                     postselection_mask=bytes([0b1]),
@@ -1466,7 +1614,7 @@ class CollectionTests(unittest.TestCase):
 
     def test_custom_counts_are_reported(self) -> None:
         stats = _collect(
-            [CollectionTask(dem=_graphlike_dem(), task_id="counts")],
+            [DemCollectionTask(dem=_graphlike_dem(), task_id="counts")],
             max_shots=4,
             batch_size=4,
             seed=10,
@@ -1480,7 +1628,7 @@ class CollectionTests(unittest.TestCase):
 
     def test_detection_schema_preserves_fixed_zero_counters(self) -> None:
         stats = _collect(
-            [CollectionTask(dem=_logical_edge_dem(0.0), task_id="zero-detection")],
+            [DemCollectionTask(dem=_logical_edge_dem(0.0), task_id="zero-detection")],
             max_shots=4,
             batch_size=2,
             seed=10,
@@ -1497,7 +1645,7 @@ class CollectionTests(unittest.TestCase):
         )
 
     def test_zero_error_limit_returns_and_persists_schema_complete_empty_stats(self) -> None:
-        task = CollectionTask(dem=_graphlike_dem(), task_id="zero-limit")
+        task = DemCollectionTask(dem=_graphlike_dem(), task_id="zero-limit")
         with tempfile.TemporaryDirectory() as temp_dir:
             path = Path(temp_dir) / "zero-limit.csv"
             fixed = _collect(
@@ -1538,7 +1686,7 @@ class CollectionTests(unittest.TestCase):
     def test_invalid_custom_stop_keys_fail_before_resume_write_even_without_max_errors(
         self,
     ) -> None:
-        base = CollectionTask(dem=_two_observable_dem(), task_id="invalid-stop")
+        base = DemCollectionTask(dem=_two_observable_dem(), task_id="invalid-stop")
         cases = (
             ("typo", base, "detection_event", False, False),
             ("detection-disabled", base, "detection_events", False, False),
@@ -1550,7 +1698,7 @@ class CollectionTests(unittest.TestCase):
             ("all-underscores", base, "obs_mistake_mask=__", True, False),
             (
                 "postselected-error",
-                CollectionTask(
+                DemCollectionTask(
                     dem=_two_observable_dem(),
                     task_id="postselected-stop",
                     postselected_observables_mask=b"\x01",
@@ -1580,7 +1728,7 @@ class CollectionTests(unittest.TestCase):
 
     def test_valid_absent_combo_is_zero_and_fixed_detection_keys_can_stop(self) -> None:
         combo_stats = _collect(
-            [CollectionTask(dem=_two_observable_dem(), task_id="zero-combo")],
+            [DemCollectionTask(dem=_two_observable_dem(), task_id="zero-combo")],
             max_shots=5,
             max_errors=1,
             batch_size=2,
@@ -1589,7 +1737,7 @@ class CollectionTests(unittest.TestCase):
             custom_error_count_key="obs_mistake_mask=_E",
         )[0]
         detector_stats = _collect(
-            [CollectionTask(dem=_graphlike_dem(), task_id="detector-stop")],
+            [DemCollectionTask(dem=_graphlike_dem(), task_id="detector-stop")],
             max_shots=10,
             max_errors=3,
             batch_size=2,
@@ -1611,13 +1759,13 @@ class CollectionTests(unittest.TestCase):
         )
 
         fast = _collect(
-            [CollectionTask(dem=dem, task_id="fast")],
+            [DemCollectionTask(dem=dem, task_id="fast")],
             max_shots=4,
             batch_size=4,
             seed=11,
         )[0]
         detailed = _collect(
-            [CollectionTask(dem=dem, task_id="detailed")],
+            [DemCollectionTask(dem=dem, task_id="detailed")],
             max_shots=4,
             batch_size=4,
             seed=11,
@@ -1626,7 +1774,7 @@ class CollectionTests(unittest.TestCase):
         )[0]
         selected = _collect(
             [
-                CollectionTask(
+                DemCollectionTask(
                     dem=dem,
                     task_id="selected",
                     postselection_mask=bytes([1]),
@@ -1647,7 +1795,7 @@ class CollectionTests(unittest.TestCase):
         self.assertEqual((selected.errors, selected.discards), (0, 4))
 
     def test_save_resume_filepath_skips_completed_task(self) -> None:
-        task = CollectionTask(dem=_logical_edge_dem(), task_id="resume")
+        task = DemCollectionTask(dem=_logical_edge_dem(), task_id="resume")
         with tempfile.TemporaryDirectory() as temp_dir:
             path = f"{temp_dir}/stats.csv"
             first = _collect(
@@ -1674,7 +1822,7 @@ class CollectionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             path = Path(temp_dir) / "identity-resume.csv"
             first = _collect(
-                [CollectionTask(dem=dem, task_id="first-label")],
+                [DemCollectionTask(dem=dem, task_id="first-label")],
                 max_shots=2,
                 batch_size=2,
                 seed=46,
@@ -1683,7 +1831,7 @@ class CollectionTests(unittest.TestCase):
                 count_detection_events=True,
             )[0]
             partial = _collect(
-                [CollectionTask(dem=dem, task_id="renamed-label")],
+                [DemCollectionTask(dem=dem, task_id="renamed-label")],
                 max_shots=4,
                 batch_size=2,
                 seed=46,
@@ -1693,7 +1841,7 @@ class CollectionTests(unittest.TestCase):
             )[0]
             before_completed_resume = path.read_bytes()
             completed = _collect(
-                [CollectionTask(dem=dem, task_id="completed-label")],
+                [DemCollectionTask(dem=dem, task_id="completed-label")],
                 max_shots=4,
                 batch_size=2,
                 seed=46,
@@ -1724,7 +1872,7 @@ class CollectionTests(unittest.TestCase):
         self.assertEqual(after_completed_resume, before_completed_resume)
 
     def test_switching_counter_schema_collects_a_fresh_full_sample(self) -> None:
-        task = CollectionTask(dem=_graphlike_dem(0.5), task_id="schema-switch")
+        task = DemCollectionTask(dem=_graphlike_dem(0.5), task_id="schema-switch")
         with tempfile.TemporaryDirectory() as temp_dir:
             path = Path(temp_dir) / "schema-switch.csv"
             plain = _collect(
@@ -1754,14 +1902,14 @@ class CollectionTests(unittest.TestCase):
         )
 
     def test_matching_resume_identity_rejects_missing_schema_before_native_collection(self) -> None:
-        task = CollectionTask(dem=_logical_edge_dem(), task_id="missing-schema")
+        task = DemCollectionTask(dem=_logical_edge_dem(), task_id="missing-schema")
         collected = _collect([task], max_shots=4, batch_size=4, seed=45)[0]
         forged = collected.with_edits(counter_schema=None)
         with tempfile.TemporaryDirectory() as temp_dir:
             path = Path(temp_dir) / "missing-schema.csv"
             write_stats_to_csv_file(path, [forged])
             with mock.patch.object(
-                collection_collect_module,
+                dem_collection_collect_module,
                 "_collect_dem_logical_error_stats_many",
             ) as native_collect:
                 with self.assertRaisesRegex(ValueError, "counter schema"):
@@ -1824,7 +1972,7 @@ class CollectionTests(unittest.TestCase):
                 read_stats_from_csv_files(mixed)
 
     def test_resume_file_header_and_second_run_appends_no_duplicate_rows(self) -> None:
-        task = CollectionTask(dem=_logical_edge_dem(), task_id="resume-header")
+        task = DemCollectionTask(dem=_logical_edge_dem(), task_id="resume-header")
         with tempfile.TemporaryDirectory() as temp_dir:
             path = f"{temp_dir}/stats.csv"
             _collect(
@@ -1865,7 +2013,7 @@ class CollectionTests(unittest.TestCase):
         self.assertEqual(second_rows, first_rows)
 
     def test_existing_data_filepaths_count_towards_limits(self) -> None:
-        task = CollectionTask(dem=_logical_edge_dem(), task_id="existing")
+        task = DemCollectionTask(dem=_logical_edge_dem(), task_id="existing")
         with tempfile.TemporaryDirectory() as temp_dir:
             path = f"{temp_dir}/stats.csv"
             _collect([task], max_shots=5, batch_size=5, seed=12, save_resume_filepath=path)
@@ -1910,7 +2058,7 @@ class CollectionTests(unittest.TestCase):
             path = Path(temp_dir) / "v1.csv"
             write_stats_to_csv_file(path, [legacy])
             stats = _collect(
-                [CollectionTask(dem=dem, metadata=metadata)],
+                [DemCollectionTask(dem=dem, metadata=metadata)],
                 max_shots=3,
                 batch_size=3,
                 seed=25,
@@ -1922,7 +2070,7 @@ class CollectionTests(unittest.TestCase):
         self.assertNotEqual(stats.strong_id, legacy_id)
 
     def test_resume_file_does_not_duplicate_parallel_collection(self) -> None:
-        task = CollectionTask(dem=_logical_edge_dem(), task_id="parallel-resume")
+        task = DemCollectionTask(dem=_logical_edge_dem(), task_id="parallel-resume")
         with tempfile.TemporaryDirectory() as temp_dir:
             path = f"{temp_dir}/stats.csv"
             first = _collect(
@@ -1947,7 +2095,7 @@ class CollectionTests(unittest.TestCase):
         self.assertEqual(second.errors, 8)
 
     def test_adaptive_stream_interruption_resumes_from_committed_calibration_delta(self) -> None:
-        task = CollectionTask(dem=_logical_edge_dem(), task_id="adaptive-stream-resume")
+        task = DemCollectionTask(dem=_logical_edge_dem(), task_id="adaptive-stream-resume")
 
         with tempfile.TemporaryDirectory() as temp_dir:
             path = Path(temp_dir) / "adaptive-resume.csv"
@@ -1963,7 +2111,7 @@ class CollectionTests(unittest.TestCase):
                 num_workers=4,
                 save_resume_filepath=path,
             )
-            iterator = public_iter_progress(
+            iterator = _dispatch_iter_progress(
                 [task],
                 options=options,
                 run_options=run_options,
@@ -1991,7 +2139,7 @@ class CollectionTests(unittest.TestCase):
 
     def test_adaptive_parallel_collection_uses_custom_stop_counter(self) -> None:
         stats = _collect(
-            [CollectionTask(dem=_graphlike_dem(), task_id="adaptive-custom-stop")],
+            [DemCollectionTask(dem=_graphlike_dem(), task_id="adaptive-custom-stop")],
             max_shots=20,
             max_errors=6,
             batch_size=4,
@@ -2008,7 +2156,7 @@ class CollectionTests(unittest.TestCase):
         self.assertEqual(stats.custom_counts["detection_events"], 9)
 
     def test_invalid_stop_key_is_consistent_for_serial_parallel_adaptive_and_progress(self) -> None:
-        task = CollectionTask(dem=_graphlike_dem(), task_id="invalid-paths")
+        task = DemCollectionTask(dem=_graphlike_dem(), task_id="invalid-paths")
         fixed = CollectionOptions(max_shots=4, batch_size=2)
         adaptive = CollectionOptions(
             max_shots=4,
@@ -2024,7 +2172,7 @@ class CollectionTests(unittest.TestCase):
         ):
             with self.subTest(name=name):
                 with self.assertRaisesRegex(ValueError, "requires count_detection_events"):
-                    public_collect(
+                    _dispatch_collect(
                         [task],
                         options=options,
                         run_options=CollectionRunOptions(
@@ -2036,7 +2184,7 @@ class CollectionTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "requires count_detection_events"):
             list(
-                public_iter_progress(
+                _dispatch_iter_progress(
                     [task],
                     options=fixed,
                     run_options=CollectionRunOptions(
@@ -2048,8 +2196,8 @@ class CollectionTests(unittest.TestCase):
 
     def test_iter_progress_receives_incremental_stats(self) -> None:
         progress = list(
-            public_iter_progress(
-                [CollectionTask(dem=_logical_edge_dem(), task_id="progress")],
+            _dispatch_iter_progress(
+                [DemCollectionTask(dem=_logical_edge_dem(), task_id="progress")],
                 options=CollectionOptions(max_shots=4, batch_size=4),
                 run_options=CollectionRunOptions(seed=13),
             )
@@ -2067,11 +2215,11 @@ class CollectionTests(unittest.TestCase):
         self.assertEqual(progress_hints["return"], Iterator[Progress])
 
     def test_stream_progress_yields_batch_deltas_and_writes_resume_rows(self) -> None:
-        task = CollectionTask(dem=_logical_edge_dem(), task_id="stream")
+        task = DemCollectionTask(dem=_logical_edge_dem(), task_id="stream")
         with tempfile.TemporaryDirectory() as temp_dir:
             path = Path(temp_dir) / "stream.csv"
             progress = list(
-                public_iter_progress(
+                _dispatch_iter_progress(
                     [task],
                     options=CollectionOptions(max_shots=10, batch_size=4),
                     run_options=CollectionRunOptions(
@@ -2094,8 +2242,8 @@ class CollectionTests(unittest.TestCase):
 
     def test_stream_detection_deltas_keep_fixed_zero_counters(self) -> None:
         progress = list(
-            public_iter_progress(
-                [CollectionTask(dem=_logical_edge_dem(0.0), task_id="stream-zero")],
+            _dispatch_iter_progress(
+                [DemCollectionTask(dem=_logical_edge_dem(0.0), task_id="stream-zero")],
                 options=CollectionOptions(max_shots=3, batch_size=2),
                 run_options=CollectionRunOptions(
                     seed=22,
@@ -2113,11 +2261,11 @@ class CollectionTests(unittest.TestCase):
         )
 
     def test_stream_persists_before_yield(self) -> None:
-        task = CollectionTask(dem=_logical_edge_dem(), task_id="ordered-stream")
+        task = DemCollectionTask(dem=_logical_edge_dem(), task_id="ordered-stream")
 
         with tempfile.TemporaryDirectory() as temp_dir:
             path = Path(temp_dir) / "ordered.csv"
-            iterator = public_iter_progress(
+            iterator = _dispatch_iter_progress(
                 [task],
                 options=CollectionOptions(max_shots=1, batch_size=1),
                 run_options=CollectionRunOptions(
@@ -2137,11 +2285,11 @@ class CollectionTests(unittest.TestCase):
         self.assertEqual(progress.new_stats[0].shots, 1)
 
     def test_stream_resume_survives_iterator_interruption(self) -> None:
-        task = CollectionTask(dem=_logical_edge_dem(), task_id="interrupt")
+        task = DemCollectionTask(dem=_logical_edge_dem(), task_id="interrupt")
 
         with tempfile.TemporaryDirectory() as temp_dir:
             path = Path(temp_dir) / "resume.csv"
-            iterator = public_iter_progress(
+            iterator = _dispatch_iter_progress(
                 [task],
                 options=CollectionOptions(max_shots=6, batch_size=3),
                 run_options=CollectionRunOptions(
@@ -2166,7 +2314,7 @@ class CollectionTests(unittest.TestCase):
         self.assertEqual(resumed.errors, 6)
 
     def test_stream_progress_objects_are_not_retained_after_next_item(self) -> None:
-        task = CollectionTask(dem=_logical_edge_dem(), task_id="retention")
+        task = DemCollectionTask(dem=_logical_edge_dem(), task_id="retention")
 
         def native_item(shots: int) -> dict[str, object]:
             return {
@@ -2191,11 +2339,11 @@ class CollectionTests(unittest.TestCase):
             return [native_item(2)]
 
         with mock.patch.object(
-            collection_collect_module,
+            dem_collection_collect_module,
             "_collect_dem_logical_error_stats_many",
             side_effect=fake_native_collect,
         ):
-            iterator = public_iter_progress(
+            iterator = _dispatch_iter_progress(
                 [task],
                 options=CollectionOptions(max_shots=2, batch_size=1),
             )
@@ -2209,7 +2357,7 @@ class CollectionTests(unittest.TestCase):
             iterator.close()
 
     def test_stream_close_while_yielded_cancels_before_future_callbacks(self) -> None:
-        task = CollectionTask(dem=_logical_edge_dem(), task_id="close-race")
+        task = DemCollectionTask(dem=_logical_edge_dem(), task_id="close-race")
         producer_returned_from_first = threading.Event()
         real_condition = threading.Condition
 
@@ -2266,17 +2414,17 @@ class CollectionTests(unittest.TestCase):
 
         with (
             mock.patch.object(
-                collection_collect_module,
+                dem_collection_collect_module,
                 "_collect_dem_logical_error_stats_many",
                 side_effect=fake_native_collect,
             ),
             mock.patch.object(
-                collection_collect_module.threading,
+                dem_collection_collect_module.threading,
                 "Condition",
                 RaceCondition,
             ),
         ):
-            iterator = public_iter_progress(
+            iterator = _dispatch_iter_progress(
                 [task],
                 options=CollectionOptions(max_shots=2, batch_size=1),
             )
@@ -2285,7 +2433,7 @@ class CollectionTests(unittest.TestCase):
             iterator.close()
 
     def test_stream_close_cancels_and_joins_producer(self) -> None:
-        task = CollectionTask(dem=_logical_edge_dem(), task_id="close-stream")
+        task = DemCollectionTask(dem=_logical_edge_dem(), task_id="close-stream")
         created_threads: list[threading.Thread] = []
         real_thread = threading.Thread
 
@@ -2318,17 +2466,17 @@ class CollectionTests(unittest.TestCase):
 
         with (
             mock.patch.object(
-                collection_collect_module,
+                dem_collection_collect_module,
                 "_collect_dem_logical_error_stats_many",
                 side_effect=fake_native_collect,
             ),
             mock.patch.object(
-                collection_collect_module.threading,
+                dem_collection_collect_module.threading,
                 "Thread",
                 side_effect=make_thread,
             ),
         ):
-            iterator = public_iter_progress(
+            iterator = _dispatch_iter_progress(
                 [task],
                 options=CollectionOptions(max_shots=3, batch_size=1),
             )
@@ -2341,13 +2489,13 @@ class CollectionTests(unittest.TestCase):
 
     def test_private_progress_sink_returns_final_stats(self) -> None:
         progress: list[Progress] = []
-        collector = Collector(
+        collector = DemCollector(
             options=CollectionOptions(max_shots=4, batch_size=4),
             run_options=CollectionRunOptions(seed=14),
         )
 
         stats = collector._collect_with_progress(
-            [CollectionTask(dem=_logical_edge_dem(), task_id="printed")],
+            [DemCollectionTask(dem=_logical_edge_dem(), task_id="printed")],
             progress.append,
         )
 
@@ -2359,7 +2507,7 @@ class CollectionTests(unittest.TestCase):
         no_correction = NativeNoCorrectionDecoder(observable_ids=(0,), detector_ids=(0,))
 
         stats = _collect(
-            [CollectionTask(dem=dem, task_id="fanout")],
+            [DemCollectionTask(dem=dem, task_id="fanout")],
             max_shots=8,
             batch_size=4,
             seed=23,
@@ -2419,16 +2567,16 @@ class CollectionTests(unittest.TestCase):
     def test_decoder_fanout_prepares_source_once_and_shares_sampler(self) -> None:
         dem = _graphlike_dem(0.25)
         decoder = NativeNoCorrectionDecoder(observable_ids=(0,), detector_ids=(0,))
-        task = CollectionTask(dem=dem, task_id="shared")
+        task = DemCollectionTask(dem=dem, task_id="shared")
         options = CollectionOptions(max_shots=8, batch_size=4)
         schema = CollectionCounterSchema()
 
         with mock.patch.object(
-            collection_collect_module,
+            dem_collection_collect_module,
             "_compile_task_sampler",
-            wraps=collection_collect_module._compile_task_sampler,
+            wraps=dem_collection_collect_module._compile_task_sampler,
         ) as compile_source:
-            prepared = collection_collect_module._prepare_native_tasks(
+            prepared = dem_collection_collect_module._prepare_native_tasks(
                 [task],
                 options,
                 (decoder, decoder),
@@ -2440,17 +2588,17 @@ class CollectionTests(unittest.TestCase):
         self.assertIs(prepared[0]["sampler"], prepared[1]["sampler"])
 
     def test_fanout_preparation_cache_does_not_cross_collection_calls(self) -> None:
-        task = CollectionTask(dem=_logical_edge_dem(0.25), task_id="local-cache")
+        task = DemCollectionTask(dem=_logical_edge_dem(0.25), task_id="local-cache")
         options = CollectionOptions(max_shots=2, batch_size=2)
         schema = CollectionCounterSchema()
 
         with mock.patch.object(
-            collection_collect_module,
+            dem_collection_collect_module,
             "_compile_task_sampler",
-            wraps=collection_collect_module._compile_task_sampler,
+            wraps=dem_collection_collect_module._compile_task_sampler,
         ) as compile_source:
             for _ in range(2):
-                collection_collect_module._prepare_native_tasks(
+                dem_collection_collect_module._prepare_native_tasks(
                     [task],
                     options,
                     (),
@@ -2463,10 +2611,10 @@ class CollectionTests(unittest.TestCase):
         dem = _graphlike_dem(0.25)
         options = CollectionOptions(max_shots=1, batch_size=1)
         base_schema = CollectionCounterSchema()
-        reordered = collection_collect_module._prepare_native_tasks(
+        reordered = dem_collection_collect_module._prepare_native_tasks(
             [
-                CollectionTask(dem=dem, metadata={"a": 1, "b": 2}),
-                CollectionTask(dem=dem, metadata={"b": 2, "a": 1}),
+                DemCollectionTask(dem=dem, metadata={"a": 1, "b": 2}),
+                DemCollectionTask(dem=dem, metadata={"b": 2, "a": 1}),
             ],
             options,
             (),
@@ -2475,8 +2623,8 @@ class CollectionTests(unittest.TestCase):
         self.assertEqual(reordered[0]["sampling_id"], reordered[1]["sampling_id"])
         self.assertEqual(reordered[0]["strong_id"], reordered[1]["strong_id"])
 
-        counter_changed = collection_collect_module._prepare_native_tasks(
-            [CollectionTask(dem=dem, metadata={"a": 1, "b": 2})],
+        counter_changed = dem_collection_collect_module._prepare_native_tasks(
+            [DemCollectionTask(dem=dem, metadata={"a": 1, "b": 2})],
             options,
             (),
             CollectionCounterSchema(count_detection_events=True),
@@ -2484,15 +2632,15 @@ class CollectionTests(unittest.TestCase):
         self.assertEqual(reordered[0]["sampling_id"], counter_changed["sampling_id"])
         self.assertNotEqual(reordered[0]["strong_id"], counter_changed["strong_id"])
 
-        source_changed = collection_collect_module._prepare_native_tasks(
-            [CollectionTask(dem=_graphlike_dem(0.5), metadata={"a": 1, "b": 2})],
+        source_changed = dem_collection_collect_module._prepare_native_tasks(
+            [DemCollectionTask(dem=_graphlike_dem(0.5), metadata={"a": 1, "b": 2})],
             options,
             (),
             base_schema,
         )[0]
-        mask_changed = collection_collect_module._prepare_native_tasks(
+        mask_changed = dem_collection_collect_module._prepare_native_tasks(
             [
-                CollectionTask(
+                DemCollectionTask(
                     dem=dem,
                     metadata={"a": 1, "b": 2},
                     postselection_mask=b"\x01",
@@ -2502,9 +2650,9 @@ class CollectionTests(unittest.TestCase):
             (),
             base_schema,
         )[0]
-        decoder_changed = collection_collect_module._prepare_native_tasks(
+        decoder_changed = dem_collection_collect_module._prepare_native_tasks(
             [
-                CollectionTask(
+                DemCollectionTask(
                     dem=dem,
                     metadata={"a": 1, "b": 2},
                     decoder=NativeNoCorrectionDecoder(
@@ -2580,7 +2728,7 @@ class CollectionTests(unittest.TestCase):
             merged = temp / "merged.csv"
             plot = temp / "plot.png"
             factory.write_text(
-                "from faultscope import DetectorErrorEdge, DetectorErrorModel, LogicalObservable\n"
+                "from faultscope import BernoulliPauliNoise, Circuit, NoiseLocation, Operation\n"
                 "from faultscope.collection import CollectionTask\n"
                 "def make_task(probability=1.0, distance=3, enabled=True, config=None):\n"
                 "    assert isinstance(probability, float), type(probability)\n"
@@ -2590,8 +2738,9 @@ class CollectionTests(unittest.TestCase):
                 "    assert enabled is True, enabled\n"
                 "    assert isinstance(config, dict), type(config)\n"
                 "    assert config == {'label': 'smoke'}, config\n"
-                "    dem = DetectorErrorModel(detectors=(), observables=(LogicalObservable(0),), edges=(DetectorErrorEdge(probability, (), (0,), 'edge', 'L'),))\n"
-                "    return CollectionTask(dem=dem, task_id='cli-single', metadata={'p': probability, 'd': distance, 'enabled': enabled, 'config': config})\n"
+                "    noise = NoiseLocation('edge', BernoulliPauliNoise('X'), probability, (0,))\n"
+                "    circuit = Circuit(1, (Operation.noise(noise), Operation.measure(0, key='m'), Operation.observable_include(0, ('m',))))\n"
+                "    return CollectionTask(circuit=circuit, task_id='cli-single', metadata={'p': probability, 'd': distance, 'enabled': enabled, 'config': config})\n"
             )
 
             result = self._run_collection_cli(
@@ -2666,7 +2815,7 @@ class CollectionTests(unittest.TestCase):
             factory = temp / "factory.py"
             collected = temp / "collected.csv"
             factory.write_text(
-                "from faultscope import DetectorErrorEdge, DetectorErrorModel, LogicalObservable\n"
+                "from faultscope import BernoulliPauliNoise, Circuit, NoiseLocation, Operation\n"
                 "from faultscope.collection import CollectionTask\n"
                 "def make_task(probability=1.0, distance=3, enabled=True, config=None):\n"
                 "    assert isinstance(probability, float), type(probability)\n"
@@ -2676,8 +2825,9 @@ class CollectionTests(unittest.TestCase):
                 "    assert enabled is True, enabled\n"
                 "    assert isinstance(config, dict), type(config)\n"
                 "    assert config == {'label': 'smoke'}, config\n"
-                "    dem = DetectorErrorModel(detectors=(), observables=(LogicalObservable(0),), edges=(DetectorErrorEdge(probability, (), (0,), 'edge', 'L'),))\n"
-                "    return CollectionTask(dem=dem, task_id='cli-single', metadata={'p': probability, 'd': distance, 'enabled': enabled, 'config': config})\n"
+                "    noise = NoiseLocation('edge', BernoulliPauliNoise('X'), probability, (0,))\n"
+                "    circuit = Circuit(1, (Operation.noise(noise), Operation.measure(0, key='m'), Operation.observable_include(0, ('m',))))\n"
+                "    return CollectionTask(circuit=circuit, task_id='cli-single', metadata={'p': probability, 'd': distance, 'enabled': enabled, 'config': config})\n"
             )
             args = collection_main._parser().parse_args(
                 [
@@ -2713,6 +2863,30 @@ class CollectionTests(unittest.TestCase):
             ):
                 with self.assertRaises(AssertionError):
                     collection_main._cmd_collect(args)
+
+    def test_collection_cli_rejects_legacy_dem_task(self) -> None:
+        from faultscope.collection import __main__ as collection_main
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            factory = Path(temp_dir) / "dem_factory.py"
+            factory.write_text(
+                "from faultscope import DetectorErrorModel\n"
+                "from faultscope.collection.dem import DemCollectionTask\n"
+                "def make_task():\n"
+                "    return DemCollectionTask(dem=DetectorErrorModel((), (), ()))\n"
+            )
+            args = collection_main._parser().parse_args(
+                [
+                    "collect",
+                    "--tasks-factory",
+                    f"{factory}:make_task",
+                    "--max-shots",
+                    "1",
+                ]
+            )
+
+            with self.assertRaisesRegex(TypeError, "only from faultscope.collection.dem"):
+                collection_main._cmd_collect(args)
 
     def test_plot_error_rates_missing_matplotlib_has_install_hint(self) -> None:
         original_import = builtins.__import__

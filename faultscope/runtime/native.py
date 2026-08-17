@@ -54,6 +54,31 @@ def compile_native_sampler(
         raise UnsupportedNativeCircuitError(str(exc)) from exc
 
 
+def compile_native_collection_sampler(
+    circuit: Circuit,
+    *,
+    detectors: Any | None = None,
+    observables: Any | None = None,
+) -> NativePackedSampler:
+    """Compile a circuit with collection detector/observable override semantics.
+
+    ``None`` keeps declarations embedded in the circuit. An explicit iterable,
+    including an empty one, replaces the corresponding embedded declarations.
+    """
+
+    detectors_value = None if detectors is None else tuple(detectors)
+    observables_value = None if observables is None else tuple(observables)
+    try:
+        native_mod = importlib.import_module("faultscope._native")
+        return native_mod.compile_collection_sampler(
+            circuit,
+            detectors_value,
+            observables_value,
+        )
+    except Exception as exc:
+        raise UnsupportedNativeCircuitError(str(exc)) from exc
+
+
 def generate_native_dem(
     circuit: Circuit,
     *,
