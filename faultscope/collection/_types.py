@@ -535,22 +535,58 @@ def write_stats_to_csv_file(
 ) -> None:
     path = Path(filepath)
     path.parent.mkdir(parents=True, exist_ok=True)
-    write_header = not append or not path.exists() or path.stat().st_size == 0
-    if append and not write_header:
-        with path.open(newline="") as existing_file:
-            existing_header = tuple(next(csv.reader(existing_file), ()))
-        if existing_header != COLLECTION_CSV_FIELDS:
-            raise ValueError(f"collection CSV header does not match in {path}")
-    with path.open("a" if append else "w", newline="") as f:
+    if append:
+        with _CollectionCsvAppender(path) as appender:
+            appender.write(stats)
+        return
+    with path.open("w", newline="") as f:
         writer = csv.DictWriter(
             f,
             fieldnames=COLLECTION_CSV_FIELDS,
             extrasaction="ignore",
         )
-        if write_header:
-            writer.writeheader()
+        writer.writeheader()
         for stat in stats:
             writer.writerow(stat.to_csv_row())
+
+
+class _CollectionCsvAppender:
+    """Validate an append target once and keep it open for streamed deltas."""
+
+    def __init__(self, filepath: str | Path) -> None:
+        self.path = Path(filepath)
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._file = self.path.open("a+", newline="")
+        try:
+            self._file.seek(0)
+            existing_header = tuple(next(csv.reader(self._file), ()))
+            if existing_header and existing_header != COLLECTION_CSV_FIELDS:
+                raise ValueError(f"collection CSV header does not match in {self.path}")
+            self._file.seek(0, io.SEEK_END)
+            self._writer = csv.DictWriter(
+                self._file,
+                fieldnames=COLLECTION_CSV_FIELDS,
+                extrasaction="ignore",
+            )
+            if not existing_header:
+                self._writer.writeheader()
+        except BaseException:
+            self._file.close()
+            raise
+
+    def write(self, stats: Iterable[TaskStats]) -> None:
+        for stat in stats:
+            self._writer.writerow(stat.to_csv_row())
+        self._file.flush()
+
+    def close(self) -> None:
+        self._file.close()
+
+    def __enter__(self) -> _CollectionCsvAppender:
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        self.close()
 
 
 def _canonical_json(value: object) -> str:

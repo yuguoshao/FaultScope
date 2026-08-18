@@ -741,7 +741,7 @@ impl NativePackedBatch {
 pub(crate) struct NativeDemSampler {
     pub(crate) observables: Vec<i64>,
     pub(crate) edge_count: usize,
-    pub(crate) simulator: CoreDemHotspotEstimator,
+    pub(crate) simulator: std::sync::Arc<CoreDemHotspotEstimator>,
     pub(crate) py_dem: Option<Py<PyAny>>,
 }
 
@@ -1885,7 +1885,7 @@ fn native_dem_sampler_from_core_generator(
     Ok(NativeDemSampler {
         observables,
         edge_count,
-        simulator,
+        simulator: std::sync::Arc::new(simulator),
         py_dem,
     })
 }
@@ -1952,7 +1952,7 @@ fn native_dem_sampler_from_parts(
     Ok(NativeDemSampler {
         observables,
         edge_count,
-        simulator,
+        simulator: std::sync::Arc::new(simulator),
         py_dem,
     })
 }

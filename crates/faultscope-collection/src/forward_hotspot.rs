@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::sync::mpsc;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -17,7 +16,7 @@ use crate::counting::{
 };
 use crate::scheduler::{batch_seed, next_batch_size, task_run_seed};
 use crate::worker_decoder::WorkerDecoderCache;
-use crate::worker_executor::WorkerExecutor;
+use crate::worker_executor::{WorkSender, WorkerExecutor};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ForwardHotspotCollectionResult {
@@ -277,7 +276,7 @@ fn schedule_forward_hotspot_work(
     work_queue: &mut ForwardHotspotWorkQueue,
     states: &mut [ForwardHotspotCommitState],
     worker_count: usize,
-    work_tx: &mpsc::Sender<ForwardHotspotWork>,
+    work_tx: &WorkSender<ForwardHotspotWork>,
     in_flight: &mut usize,
 ) -> NpResult<()> {
     while *in_flight < worker_count {
@@ -308,7 +307,7 @@ fn fixed_hotspot_batch_count(options: DemLogicalCollectionOptions) -> usize {
 }
 
 fn run_forward_hotspot_batch(
-    work: ForwardHotspotWork,
+    work: &ForwardHotspotWork,
     decoder: Option<&mut dyn NativeDecoderWorker>,
 ) -> NpResult<ForwardHotspotBatchResult> {
     let started = Instant::now();

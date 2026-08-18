@@ -33,12 +33,12 @@ from faultscope.collection._identity import (
     source_identity_payload,
 )
 from faultscope.collection._types import (
+    _CollectionCsvAppender,
     CollectionCounterSchema,
     CollectionOptions,
     CollectionRunOptions,
     Progress,
     TaskStats,
-    write_stats_to_csv_file,
 )
 from faultscope.decoders import create_native_decoder
 from faultscope.runtime import compile_native_dem_sampler
@@ -48,6 +48,7 @@ from faultscope.runtime import compile_native_dem_sampler
 class _PreparedDemSource:
     sampler: Any
     dem: Any
+    source_digest: str
 
 
 class _DemPreparationContext:
@@ -63,6 +64,9 @@ class _DemPreparationContext:
         source = _PreparedDemSource(
             sampler=_compile_task_sampler(task),
             dem=task.dem,
+            source_digest=source_identity_digest(
+                source_identity_payload(circuit=None, dem=task.dem)
+            ),
         )
         entries.append((task.dem, source))
         return source
@@ -180,32 +184,43 @@ def _run_collect(
         if run_options.save_resume_filepath is not None
         else None
     )
+    resume_writer: _CollectionCsvAppender | None = None
+
+    def append_resume(stat: TaskStats) -> None:
+        nonlocal resume_writer
+        if resume_path is None:
+            return
+        if resume_writer is None:
+            resume_writer = _CollectionCsvAppender(resume_path)
+        resume_writer.write((stat,))
 
     def on_stream_delta(item: Mapping[str, object]) -> None:
         stat = _task_stats_from_native(item)
-        if resume_path is not None:
-            write_stats_to_csv_file(resume_path, [stat], append=True)
+        append_resume(stat)
         if progress_sink is not None:
             progress_sink(Progress((stat,), _status_message(stat)))
 
-    native_stats = _collect_dem_logical_error_stats_many(
-        native_tasks,
-        num_workers=run_options.num_workers,
-        seed=run_options.seed,
-        count_observable_error_combos=run_options.count_observable_error_combos,
-        count_detection_events=run_options.count_detection_events,
-        custom_error_count_key=run_options.custom_error_count_key,
-        existing_stats=[_native_stats_from_task_stats(stat) for stat in existing.values()],
-        progress_callback=on_stream_delta if progress_sink is not None else None,
-    )
-    final_stats = [_task_stats_from_native(item) for item in native_stats]
-    if progress_sink is None:
-        for stat in final_stats:
-            if resume_path is not None:
+    try:
+        native_stats = _collect_dem_logical_error_stats_many(
+            native_tasks,
+            num_workers=run_options.num_workers,
+            seed=run_options.seed,
+            count_observable_error_combos=run_options.count_observable_error_combos,
+            count_detection_events=run_options.count_detection_events,
+            custom_error_count_key=run_options.custom_error_count_key,
+            existing_stats=[_native_stats_from_task_stats(stat) for stat in existing.values()],
+            progress_callback=on_stream_delta if progress_sink is not None else None,
+        )
+        final_stats = [_task_stats_from_native(item) for item in native_stats]
+        if progress_sink is None:
+            for stat in final_stats:
                 delta = _stats_delta(stat, existing.get(stat.strong_id))
                 if delta is not None:
-                    write_stats_to_csv_file(resume_path, [delta], append=True)
-    return final_stats
+                    append_resume(delta)
+        return final_stats
+    finally:
+        if resume_writer is not None:
+            resume_writer.close()
 
 
 def _run_collect_hotspots(
@@ -391,7 +406,11 @@ def _native_task(
     if options.max_shots is None:
         raise ValueError("max_shots is required")
     if source is None:
-        source = _PreparedDemSource(_compile_task_sampler(task), task.dem)
+        source = _PreparedDemSource(
+            _compile_task_sampler(task),
+            task.dem,
+            source_identity_digest(source_identity_payload(circuit=None, dem=task.dem)),
+        )
     decoder = (
         create_native_decoder(task.decoder, dem=source.dem, options=task.decoder_options)
         if isinstance(task.decoder, str)
@@ -402,7 +421,7 @@ def _native_task(
     postselection_mask = _bytes_or_none(task.postselection_mask)
     postselected_observables_mask = _bytes_or_none(task.postselected_observables_mask)
     sampling_id, strong_id = _task_identities(
-        task=task,
+        source_digest=source.source_digest,
         decoder=decoder,
         decoder_name=decoder_name,
         metadata=metadata,
@@ -433,7 +452,7 @@ def _native_task(
 
 def _task_identities(
     *,
-    task: DemCollectionTask,
+    source_digest: str,
     decoder: object | None,
     decoder_name: str | None,
     metadata: Mapping[str, object],
@@ -441,7 +460,6 @@ def _task_identities(
     postselected_observables_mask: bytes | None,
     counter_schema: CollectionCounterSchema,
 ) -> tuple[str, str]:
-    source_digest = source_identity_digest(source_identity_payload(circuit=None, dem=task.dem))
     decoder_digest = decoder_identity_digest(
         decoder_identity_payload(decoder, decoder_name=decoder_name)
     )

@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::time::Instant;
 
@@ -35,8 +36,8 @@ pub(crate) struct CountOptions<'a> {
 
 impl CountOptions<'_> {
     pub(crate) fn uses_detailed_path(&self) -> bool {
-        self.postselection_mask.is_some()
-            || self.postselected_observables_mask.is_some()
+        packed_mask_has_any(self.postselection_mask)
+            || packed_mask_has_any(self.postselected_observables_mask)
             || self.count_observable_error_combos
             || self.count_detection_events
     }
@@ -428,43 +429,16 @@ fn count_forward_masks(
         custom_counts.insert("detectors_checked".to_string(), shots * detector_ids.len());
     }
 
-    let mut loss_mask = Mask::zero(word_count(shots));
-    let mut errors = 0usize;
-    let mut discards = 0usize;
-    for shot in 0..shots {
-        if detector_discard_mask
-            .as_ref()
-            .is_some_and(|mask| mask_bit(mask, shot))
-        {
-            discards += 1;
-            continue;
-        }
-        let mut observable_discard = false;
-        let mut logical_error = false;
-        let mut combo = String::with_capacity(observable_ids.len());
-        for (index, residual) in residuals.iter().enumerate() {
-            let bit = mask_bit(residual, shot);
-            let postselected = packed_mask_bit(count_options.postselected_observables_mask, index);
-            observable_discard |= bit && postselected;
-            logical_error |= bit && !postselected;
-            if count_options.count_observable_error_combos {
-                combo.push(if bit { 'E' } else { '_' });
-            }
-        }
-        if observable_discard {
-            discards += 1;
-            continue;
-        }
-        if logical_error {
-            errors += 1;
-            set_mask_bit(&mut loss_mask, shot);
-            if count_options.count_observable_error_combos {
-                *custom_counts
-                    .entry(format!("obs_mistake_mask={combo}"))
-                    .or_insert(0) += 1;
-            }
-        }
-    }
+    let residuals = DetailedResidualBatch::Masks(Cow::Owned(residuals));
+    let (errors, discards, loss_mask) = count_residual_batch(
+        &residuals,
+        observable_ids.len(),
+        shots,
+        detector_discard_mask.as_ref(),
+        count_options.postselected_observables_mask,
+        count_options.count_observable_error_combos,
+        &mut custom_counts,
+    );
     Ok(DetailedBatchResult {
         stats: BatchStats {
             shots,
@@ -511,7 +485,6 @@ pub(crate) fn count_detailed_sampling_result(
         sampler.observable_ids(),
         shots,
     )?;
-    let mut loss_mask = Mask::zero(word_count(shots));
     let detector_discard_mask = detector_postselection_loss_mask(
         sampled,
         sampler.detector_ids(),
@@ -532,47 +505,15 @@ pub(crate) fn count_detailed_sampling_result(
         );
     }
 
-    let mut errors = 0usize;
-    let mut discards = 0usize;
-    for shot in 0..shots {
-        if detector_discard_mask
-            .as_ref()
-            .is_some_and(|mask| mask_bit(mask, shot))
-        {
-            discards += 1;
-            continue;
-        }
-
-        let mut observable_discard = false;
-        let mut logical_error = false;
-        let mut combo = String::with_capacity(sampler.observable_ids().len());
-        for index in 0..sampler.observable_ids().len() {
-            let bit = residuals.bit(index, shot);
-            let postselected = packed_mask_bit(count_options.postselected_observables_mask, index);
-            if bit && postselected {
-                observable_discard = true;
-            }
-            if bit && !postselected {
-                logical_error = true;
-            }
-            if count_options.count_observable_error_combos {
-                combo.push(if bit { 'E' } else { '_' });
-            }
-        }
-        if observable_discard {
-            discards += 1;
-            continue;
-        }
-        if logical_error {
-            errors += 1;
-            set_mask_bit(&mut loss_mask, shot);
-            if count_options.count_observable_error_combos {
-                *custom_counts
-                    .entry(format!("obs_mistake_mask={combo}"))
-                    .or_insert(0) += 1;
-            }
-        }
-    }
+    let (errors, discards, loss_mask) = count_residual_batch(
+        &residuals,
+        sampler.observable_ids().len(),
+        shots,
+        detector_discard_mask.as_ref(),
+        count_options.postselected_observables_mask,
+        count_options.count_observable_error_combos,
+        &mut custom_counts,
+    );
 
     Ok(DetailedBatchResult {
         stats: BatchStats {
@@ -586,15 +527,15 @@ pub(crate) fn count_detailed_sampling_result(
     })
 }
 
-enum DetailedResidualBatch {
-    Masks(Vec<Mask>),
+enum DetailedResidualBatch<'a> {
+    Masks(Cow<'a, [Mask]>),
     Packed {
-        data: Vec<u8>,
+        data: Cow<'a, [u8]>,
         observable_byte_count: usize,
     },
 }
 
-impl DetailedResidualBatch {
+impl DetailedResidualBatch<'_> {
     fn bit(&self, observable: usize, shot: usize) -> bool {
         match self {
             Self::Masks(masks) => mask_bit(&masks[observable], shot),
@@ -609,21 +550,21 @@ impl DetailedResidualBatch {
     }
 }
 
-fn detailed_residual_batch(
-    observables: &faultscope_core::DemObservableBatch,
+fn detailed_residual_batch<'a>(
+    observables: &'a faultscope_core::DemObservableBatch,
     corrections: Option<DecoderCorrectionBatch>,
     observable_ids: &[i64],
     shots: usize,
-) -> NpResult<DetailedResidualBatch> {
+) -> NpResult<DetailedResidualBatch<'a>> {
     match (observables, corrections) {
         (faultscope_core::DemObservableBatch::Masks(actual), None) => {
             actual.validate_against(observable_ids, shots)?;
-            Ok(DetailedResidualBatch::Masks(actual.masks.clone()))
+            Ok(DetailedResidualBatch::Masks(Cow::Borrowed(&actual.masks)))
         }
         (faultscope_core::DemObservableBatch::Packed(actual), None) => {
             actual.validate_against(observable_ids, shots)?;
             Ok(DetailedResidualBatch::Packed {
-                data: actual.data.clone(),
+                data: Cow::Borrowed(&actual.data),
                 observable_byte_count: actual.observable_byte_count,
             })
         }
@@ -633,12 +574,12 @@ fn detailed_residual_batch(
         ) => {
             actual.validate_against(observable_ids, shots)?;
             correction.validate_against(observable_ids, shots)?;
-            Ok(DetailedResidualBatch::Masks(
+            Ok(DetailedResidualBatch::Masks(Cow::Owned(
                 residual_masks(actual, &correction, observable_ids, shots)
                     .into_iter()
                     .map(|(_, mask)| mask)
                     .collect(),
-            ))
+            )))
         }
         (
             faultscope_core::DemObservableBatch::Packed(actual),
@@ -647,12 +588,14 @@ fn detailed_residual_batch(
             actual.validate_against(observable_ids, shots)?;
             correction.validate_against(observable_ids, shots)?;
             Ok(DetailedResidualBatch::Packed {
-                data: actual
-                    .data
-                    .iter()
-                    .zip(&correction.data)
-                    .map(|(actual, correction)| actual ^ correction)
-                    .collect(),
+                data: Cow::Owned(
+                    actual
+                        .data
+                        .iter()
+                        .zip(&correction.data)
+                        .map(|(actual, correction)| actual ^ correction)
+                        .collect(),
+                ),
                 observable_byte_count: actual.observable_byte_count,
             })
         }
@@ -660,6 +603,167 @@ fn detailed_residual_batch(
             "DEM observable truth layout does not match the decoder correction layout",
         )),
     }
+}
+
+fn count_residual_batch(
+    residuals: &DetailedResidualBatch<'_>,
+    observable_count: usize,
+    shots: usize,
+    detector_discard_mask: Option<&Mask>,
+    postselected_observables_mask: Option<&[u8]>,
+    count_observable_error_combos: bool,
+    custom_counts: &mut HashMap<String, usize>,
+) -> (usize, usize, Mask) {
+    if count_observable_error_combos {
+        if observable_count == 1 {
+            let (errors, discards, loss) = count_residual_batch(
+                residuals,
+                observable_count,
+                shots,
+                detector_discard_mask,
+                postselected_observables_mask,
+                false,
+                custom_counts,
+            );
+            if errors != 0 {
+                *custom_counts
+                    .entry("obs_mistake_mask=E".to_string())
+                    .or_insert(0) += errors;
+            }
+            return (errors, discards, loss);
+        }
+        return count_residual_combos(
+            residuals,
+            observable_count,
+            shots,
+            detector_discard_mask,
+            postselected_observables_mask,
+            custom_counts,
+        );
+    }
+
+    match residuals {
+        DetailedResidualBatch::Masks(masks) => {
+            let mut discard = detector_discard_mask
+                .cloned()
+                .unwrap_or_else(|| Mask::zero(word_count(shots)));
+            let mut loss = Mask::zero(word_count(shots));
+            for (index, residual) in masks.iter().enumerate() {
+                if packed_mask_bit(postselected_observables_mask, index) {
+                    discard.or_assign(residual);
+                } else {
+                    loss.or_assign(residual);
+                }
+            }
+            discard.clear_unused(shots);
+            for (loss_word, discard_word) in loss.words.iter_mut().zip(&discard.words) {
+                *loss_word &= !discard_word;
+            }
+            loss.clear_unused(shots);
+            (loss.bit_count(), discard.bit_count(), loss)
+        }
+        DetailedResidualBatch::Packed {
+            data,
+            observable_byte_count,
+        } => {
+            let mut discard = detector_discard_mask
+                .cloned()
+                .unwrap_or_else(|| Mask::zero(word_count(shots)));
+            let mut loss = Mask::zero(word_count(shots));
+            for shot in 0..shots {
+                if mask_bit(&discard, shot) {
+                    continue;
+                }
+                let start = shot * observable_byte_count;
+                let row = &data[start..start + observable_byte_count];
+                let mut observable_discard = false;
+                let mut logical_error = false;
+                for (byte_index, bits) in row.iter().copied().enumerate() {
+                    let postselected = postselected_observables_mask
+                        .and_then(|mask| mask.get(byte_index))
+                        .copied()
+                        .unwrap_or(0);
+                    observable_discard |= bits & postselected != 0;
+                    logical_error |= bits & !postselected != 0;
+                }
+                if observable_discard {
+                    set_mask_bit(&mut discard, shot);
+                } else if logical_error {
+                    set_mask_bit(&mut loss, shot);
+                }
+            }
+            discard.clear_unused(shots);
+            loss.clear_unused(shots);
+            (loss.bit_count(), discard.bit_count(), loss)
+        }
+    }
+}
+
+fn count_residual_combos(
+    residuals: &DetailedResidualBatch<'_>,
+    observable_count: usize,
+    shots: usize,
+    detector_discard_mask: Option<&Mask>,
+    postselected_observables_mask: Option<&[u8]>,
+    custom_counts: &mut HashMap<String, usize>,
+) -> (usize, usize, Mask) {
+    let mut discard = detector_discard_mask
+        .cloned()
+        .unwrap_or_else(|| Mask::zero(word_count(shots)));
+    let mut loss = Mask::zero(word_count(shots));
+    let use_numeric_combos = observable_count <= u64::BITS as usize;
+    let mut numeric_combos = HashMap::<u64, usize>::new();
+    for shot in 0..shots {
+        if mask_bit(&discard, shot) {
+            continue;
+        }
+        let mut observable_discard = false;
+        let mut logical_error = false;
+        let mut combo_bits = 0u64;
+        for index in 0..observable_count {
+            let bit = residuals.bit(index, shot);
+            let postselected = packed_mask_bit(postselected_observables_mask, index);
+            observable_discard |= bit && postselected;
+            logical_error |= bit && !postselected;
+            if use_numeric_combos && bit {
+                combo_bits |= 1u64 << index;
+            }
+        }
+        if observable_discard {
+            set_mask_bit(&mut discard, shot);
+            continue;
+        }
+        if !logical_error {
+            continue;
+        }
+
+        set_mask_bit(&mut loss, shot);
+        if use_numeric_combos {
+            *numeric_combos.entry(combo_bits).or_insert(0) += 1;
+        } else {
+            let mut combo = String::with_capacity("obs_mistake_mask=".len() + observable_count);
+            combo.push_str("obs_mistake_mask=");
+            for index in 0..observable_count {
+                combo.push(if residuals.bit(index, shot) { 'E' } else { '_' });
+            }
+            *custom_counts.entry(combo).or_insert(0) += 1;
+        }
+    }
+    for (combo_bits, count) in numeric_combos {
+        let mut combo = String::with_capacity("obs_mistake_mask=".len() + observable_count);
+        combo.push_str("obs_mistake_mask=");
+        for index in 0..observable_count {
+            combo.push(if combo_bits & (1u64 << index) != 0 {
+                'E'
+            } else {
+                '_'
+            });
+        }
+        *custom_counts.entry(combo).or_insert(0) += count;
+    }
+    discard.clear_unused(shots);
+    loss.clear_unused(shots);
+    (loss.bit_count(), discard.bit_count(), loss)
 }
 
 pub(crate) fn validate_decoder_observable_layout(
@@ -792,9 +896,85 @@ fn packed_mask_bit(mask: Option<&[u8]>, index: usize) -> bool {
         .is_some_and(|byte| ((byte >> (index & 7)) & 1) != 0)
 }
 
+fn packed_mask_has_any(mask: Option<&[u8]>) -> bool {
+    mask.is_some_and(|mask| mask.iter().any(|byte| *byte != 0))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn zero_masks_do_not_force_detailed_counting() {
+        let zero = [0u8];
+        let selected = [1u8];
+
+        assert!(!CountOptions {
+            postselection_mask: Some(&zero),
+            postselected_observables_mask: Some(&zero),
+            ..CountOptions::default()
+        }
+        .uses_detailed_path());
+        assert!(CountOptions {
+            postselection_mask: Some(&selected),
+            ..CountOptions::default()
+        }
+        .uses_detailed_path());
+        assert!(CountOptions {
+            postselected_observables_mask: Some(&selected),
+            ..CountOptions::default()
+        }
+        .uses_detailed_path());
+    }
+
+    #[test]
+    fn residual_counting_matches_for_mask_and_packed_layouts() {
+        let detector_discard = Mask {
+            words: vec![0b00_1001],
+        };
+        let postselected = [0b0000_0010];
+        let mask_residuals = DetailedResidualBatch::Masks(Cow::Owned(vec![
+            Mask {
+                words: vec![0b01_0011],
+            },
+            Mask {
+                words: vec![0b10_0110],
+            },
+        ]));
+        let packed_residuals = DetailedResidualBatch::Packed {
+            data: Cow::Owned(vec![0b01, 0b11, 0b10, 0b00, 0b01, 0b10]),
+            observable_byte_count: 1,
+        };
+
+        for residuals in [&mask_residuals, &packed_residuals] {
+            let mut counts = HashMap::new();
+            let (errors, discards, loss) = count_residual_batch(
+                residuals,
+                2,
+                6,
+                Some(&detector_discard),
+                Some(&postselected),
+                false,
+                &mut counts,
+            );
+            assert_eq!((errors, discards), (1, 5));
+            assert_eq!(loss.words, vec![0b01_0000]);
+            assert!(counts.is_empty());
+
+            let (errors, discards, loss) = count_residual_batch(
+                residuals,
+                2,
+                6,
+                Some(&detector_discard),
+                Some(&postselected),
+                true,
+                &mut counts,
+            );
+            assert_eq!((errors, discards), (1, 5));
+            assert_eq!(loss.words, vec![0b01_0000]);
+            assert_eq!(counts.get("obs_mistake_mask=E_"), Some(&1));
+        }
+    }
 
     struct FormatZeroDecoder {
         detector_ids: Vec<i64>,

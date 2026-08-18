@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::sync::mpsc;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -15,7 +14,7 @@ use crate::counting::{
 };
 use crate::scheduler::{batch_seed, next_batch_size, task_run_seed};
 use crate::worker_decoder::WorkerDecoderCache;
-use crate::worker_executor::WorkerExecutor;
+use crate::worker_executor::{WorkSender, WorkerExecutor};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct DemHotspotCollectionResult {
@@ -253,7 +252,7 @@ fn schedule_hotspot_work(
     work_queue: &mut HotspotWorkQueue,
     states: &mut [HotspotCommitState],
     worker_count: usize,
-    work_tx: &mpsc::Sender<HotspotWork>,
+    work_tx: &WorkSender<HotspotWork>,
     in_flight: &mut usize,
 ) -> NpResult<()> {
     while *in_flight < worker_count {
@@ -284,7 +283,7 @@ fn fixed_hotspot_batch_count(options: crate::api::DemLogicalCollectionOptions) -
 }
 
 fn run_hotspot_batch(
-    work: HotspotWork,
+    work: &HotspotWork,
     decoder: Option<&mut dyn NativeDecoderWorker>,
 ) -> NpResult<HotspotBatchResult> {
     let started = Instant::now();

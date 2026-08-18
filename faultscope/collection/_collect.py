@@ -7,7 +7,7 @@ from dataclasses import dataclass, replace
 import json
 from pathlib import Path
 import threading
-from typing import Any
+from typing import Any, cast
 
 from faultscope._native import (
     _collect_forward_hotspots_many,
@@ -20,6 +20,7 @@ from faultscope.runtime.native import (
 )
 
 from faultscope.collection._types import (
+    _CollectionCsvAppender,
     CollectionCounterSchema,
     CollectionOptions,
     CollectionRunOptions,
@@ -28,7 +29,6 @@ from faultscope.collection._types import (
     Progress,
     TaskStats,
     read_stats_from_csv_files,
-    write_stats_to_csv_file,
 )
 from faultscope.collection._identity import (
     SAMPLING_ID_SCHEMA_VERSION,
@@ -56,6 +56,7 @@ class _PreparedSource:
     circuit: Any
     detectors: tuple[Any, ...] | None
     observables: tuple[Any, ...] | None
+    source_digest: str
     _dem: Any = _UNPREPARED_DEM
 
     def decoder_dem(self) -> Any:
@@ -90,6 +91,13 @@ class _PreparationContext:
             circuit=task.circuit,
             detectors=task.detectors,
             observables=task.observables,
+            source_digest=source_identity_digest(
+                forward_source_identity_payload(
+                    circuit=task.circuit,
+                    detectors=task.detectors,
+                    observables=task.observables,
+                )
+            ),
         )
         entries.append((references, source))
         return source
@@ -221,35 +229,45 @@ def _run_collect(
         if run_options.save_resume_filepath is not None
         else None
     )
+    resume_writer: _CollectionCsvAppender | None = None
+
+    def append_resume(stat: TaskStats) -> None:
+        nonlocal resume_writer
+        if resume_path is None:
+            return
+        if resume_writer is None:
+            resume_writer = _CollectionCsvAppender(resume_path)
+        resume_writer.write((stat,))
 
     def on_stream_delta(item: Mapping[str, object]) -> None:
         stat = _task_stats_from_native(item)
-        if resume_path is not None:
-            write_stats_to_csv_file(resume_path, [stat], append=True)
+        append_resume(stat)
         progress = Progress((stat,), _status_message(stat))
         if progress_sink is not None:
             progress_sink(progress)
 
-    native_stats = _collect_forward_logical_error_stats_many(
-        native_tasks,
-        num_workers=run_options.num_workers,
-        seed=run_options.seed,
-        count_observable_error_combos=run_options.count_observable_error_combos,
-        count_detection_events=run_options.count_detection_events,
-        custom_error_count_key=run_options.custom_error_count_key,
-        existing_stats=[_native_stats_from_task_stats(stat) for stat in existing.values()],
-        progress_callback=on_stream_delta if progress_sink is not None else None,
-    )
-    final_stats = [_task_stats_from_native(item) for item in native_stats]
+    try:
+        native_stats = _collect_forward_logical_error_stats_many(
+            native_tasks,
+            num_workers=run_options.num_workers,
+            seed=run_options.seed,
+            count_observable_error_combos=run_options.count_observable_error_combos,
+            count_detection_events=run_options.count_detection_events,
+            custom_error_count_key=run_options.custom_error_count_key,
+            existing_stats=[_native_stats_from_task_stats(stat) for stat in existing.values()],
+            progress_callback=on_stream_delta if progress_sink is not None else None,
+        )
+        final_stats = [_task_stats_from_native(item) for item in native_stats]
 
-    if progress_sink is None:
-        for stat in final_stats:
-            if resume_path is not None:
+        if progress_sink is None:
+            for stat in final_stats:
                 delta = _stats_delta(stat, existing.get(stat.strong_id))
                 if delta is not None:
-                    write_stats_to_csv_file(resume_path, [delta], append=True)
-
-    return final_stats
+                    append_resume(delta)
+        return final_stats
+    finally:
+        if resume_writer is not None:
+            resume_writer.close()
 
 
 def _run_collect_hotspots(
@@ -433,6 +451,13 @@ def _native_task(
             circuit=task.circuit,
             detectors=task.detectors,
             observables=task.observables,
+            source_digest=source_identity_digest(
+                forward_source_identity_payload(
+                    circuit=task.circuit,
+                    detectors=task.detectors,
+                    observables=task.observables,
+                )
+            ),
         )
     sampler = source.sampler
     decoder = _resolve_decoder(task, source)
@@ -443,7 +468,7 @@ def _native_task(
     postselection_mask = _bytes_or_none(task.postselection_mask)
     postselected_observables_mask = _bytes_or_none(task.postselected_observables_mask)
     sampling_id, strong_id = _task_identities(
-        task=task,
+        source_digest=source.source_digest,
         decoder=decoder,
         decoder_name=decoder_name,
         metadata=metadata,
@@ -539,7 +564,7 @@ def _decoder_name(decoder: object | str | None) -> str | None:
 
 def _task_identities(
     *,
-    task: CollectionTask,
+    source_digest: str,
     decoder: object | None,
     decoder_name: str | None,
     metadata: Mapping[str, object],
@@ -547,13 +572,6 @@ def _task_identities(
     postselected_observables_mask: bytes | None,
     counter_schema: CollectionCounterSchema,
 ) -> tuple[str, str]:
-    source_digest = source_identity_digest(
-        forward_source_identity_payload(
-            circuit=task.circuit,
-            detectors=task.detectors,
-            observables=task.observables,
-        )
-    )
     decoder_digest = decoder_identity_digest(
         decoder_identity_payload(decoder, decoder_name=decoder_name)
     )
@@ -602,15 +620,15 @@ def _task_stats_from_native(item: Mapping[str, object]) -> TaskStats:
     raw_custom_counts = item.get("custom_counts", {})
     if not isinstance(raw_custom_counts, Mapping):
         raise TypeError("native custom_counts must be a mapping")
-    custom_counts = {str(key): int(str(value)) for key, value in raw_custom_counts.items()}
+    custom_counts = {str(key): int(value) for key, value in raw_custom_counts.items()}
     counter_schema = CollectionCounterSchema._from_payload(item.get("counter_schema"))
     return TaskStats(
         task_id=str(item["task_id"]),
         strong_id=str(item["strong_id"]),
-        shots=int(str(item["shots"])),
-        errors=int(str(item["errors"])),
-        discards=int(str(item["discards"])),
-        seconds=float(str(item["seconds"])),
+        shots=int(cast(Any, item["shots"])),
+        errors=int(cast(Any, item["errors"])),
+        discards=int(cast(Any, item["discards"])),
+        seconds=float(cast(Any, item["seconds"])),
         decoder=item["decoder"] if isinstance(item["decoder"], str) else None,
         metadata=dict(metadata),
         custom_counts=custom_counts,
@@ -621,7 +639,7 @@ def _task_stats_from_native(item: Mapping[str, object]) -> TaskStats:
 def _location_sensitivities_from_native(value: object) -> dict[str, float]:
     if not isinstance(value, Mapping):
         raise TypeError("native location_sensitivities must be a mapping")
-    return {str(key): float(str(sensitivity)) for key, sensitivity in value.items()}
+    return {str(key): float(sensitivity) for key, sensitivity in value.items()}
 
 
 def _read_existing_stats(

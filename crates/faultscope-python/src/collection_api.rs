@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use crate::*;
 use pyo3::exceptions::PyRuntimeError;
 
@@ -346,7 +344,7 @@ fn py_dem_collection_task_to_rust(
 ) -> PyResult<faultscope_collection::DemLogicalCollectionTask> {
     let sampler_value = required_item(dict, "sampler")?;
     let sampler = sampler_value.extract::<PyRef<'_, NativeDemSampler>>()?;
-    let sampler = Arc::new(sampler.simulator.clone());
+    let sampler = sampler.simulator.clone();
 
     let decoder = optional_item(dict, "decoder")?;
     let decoder = match decoder {
