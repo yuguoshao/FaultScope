@@ -738,10 +738,11 @@ Expanded tasks in one logical collection call must have unique `strong_id`
 values. Collection rejects a duplicate before starting sampling workers,
 emitting progress, or appending resume data. `task_id` is only a display label,
 so changing it does not create a separate collection identity. Use a genuinely
-different circuit/DEM, decoder, metadata value, postselection mask, or counter
-schema when tasks must be collected independently. A resume CSV produced by an
-older version from duplicate identities cannot be separated reliably and
-should be regenerated.
+different Forward circuit or declaration override, decoder, metadata value,
+postselection mask, or counter schema when main-module tasks must be collected
+independently. Legacy `faultscope.collection.dem` tasks use their explicit DEM
+source instead. A resume CSV produced by an older version from duplicate
+identities cannot be separated reliably and should be regenerated.
 
 Decoder objects must provide `strong_id_payload()` returning a JSON-serializable
 mapping. Bundled native decoders and official backend packages implement this
