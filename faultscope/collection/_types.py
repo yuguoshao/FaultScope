@@ -9,7 +9,7 @@ from pathlib import Path
 from dataclasses import dataclass, field, replace
 import math
 from collections.abc import Iterable, Iterator
-from typing import Any, ClassVar, Mapping
+from typing import Any, ClassVar, Mapping, cast
 
 
 COLLECTION_COUNTER_SCHEMA_VERSION = 1
@@ -101,7 +101,7 @@ class CollectionCounterSchema:
         )
 
 
-@dataclass(frozen=True, init=False)
+@dataclass(frozen=True, init=False, eq=False)
 class CollectionOptions:
     _MAX_SHOTS_EXPLICIT: ClassVar[int] = 1 << 0
     _MAX_ERRORS_EXPLICIT: ClassVar[int] = 1 << 1
@@ -111,6 +111,15 @@ class CollectionOptions:
     _MAX_BATCH_SECONDS_EXPLICIT: ClassVar[int] = 1 << 5
     _MIN_SHOTS_EXPLICIT: ClassVar[int] = 1 << 6
     _explicit_mask: ClassVar[int] = 0
+    _OPTION_EXPLICIT_BITS: ClassVar[Mapping[str, int]] = {
+        "max_shots": _MAX_SHOTS_EXPLICIT,
+        "max_errors": _MAX_ERRORS_EXPLICIT,
+        "batch_size": _BATCH_SIZE_EXPLICIT,
+        "start_batch_size": _START_BATCH_SIZE_EXPLICIT,
+        "max_batch_size": _MAX_BATCH_SIZE_EXPLICIT,
+        "max_batch_seconds": _MAX_BATCH_SECONDS_EXPLICIT,
+        "min_shots": _MIN_SHOTS_EXPLICIT,
+    }
 
     max_shots: int | None = None
     max_errors: int | None = None
@@ -161,6 +170,109 @@ class CollectionOptions:
         else:
             explicit_mask |= self._MIN_SHOTS_EXPLICIT
 
+        self._initialize(
+            max_shots=max_shots,
+            max_errors=max_errors,
+            batch_size=batch_size,
+            start_batch_size=start_batch_size,
+            max_batch_size=max_batch_size,
+            max_batch_seconds=max_batch_seconds,
+            min_shots=min_shots,
+            explicit_mask=explicit_mask,
+        )
+
+    def with_edits(self, **changes: object) -> CollectionOptions:
+        """Return validated options while preserving explicit override intent."""
+
+        if not changes:
+            return self
+        unknown = changes.keys() - self._OPTION_EXPLICIT_BITS.keys()
+        if unknown:
+            unexpected = min(unknown)
+            raise TypeError(
+                f"CollectionOptions.with_edits() got an unexpected keyword argument {unexpected!r}"
+            )
+        explicit_mask = self._explicit_mask
+        for field_name in changes:
+            explicit_mask |= self._OPTION_EXPLICIT_BITS[field_name]
+        return type(self)._from_values(
+            max_shots=cast(int | None, changes.get("max_shots", self.max_shots)),
+            max_errors=cast(int | None, changes.get("max_errors", self.max_errors)),
+            batch_size=cast(int, changes.get("batch_size", self.batch_size)),
+            start_batch_size=cast(
+                int | None,
+                changes.get("start_batch_size", self.start_batch_size),
+            ),
+            max_batch_size=cast(
+                int | None,
+                changes.get("max_batch_size", self.max_batch_size),
+            ),
+            max_batch_seconds=cast(
+                float | None,
+                changes.get("max_batch_seconds", self.max_batch_seconds),
+            ),
+            min_shots=cast(int, changes.get("min_shots", self.min_shots)),
+            explicit_mask=explicit_mask,
+        )
+
+    def _comparison_key(self) -> tuple[object, ...]:
+        return (
+            self.max_shots,
+            self.max_errors,
+            self.batch_size,
+            self.start_batch_size,
+            self.max_batch_size,
+            self.max_batch_seconds,
+            self.min_shots,
+            self._explicit_mask,
+        )
+
+    def __eq__(self, other: object) -> bool:
+        if other.__class__ is not self.__class__:
+            return NotImplemented
+        return self._comparison_key() == other._comparison_key()
+
+    def __hash__(self) -> int:
+        return hash(self._comparison_key())
+
+    @classmethod
+    def _from_values(
+        cls,
+        *,
+        max_shots: int | None,
+        max_errors: int | None,
+        batch_size: int,
+        start_batch_size: int | None,
+        max_batch_size: int | None,
+        max_batch_seconds: float | None,
+        min_shots: int,
+        explicit_mask: int,
+    ) -> CollectionOptions:
+        result = object.__new__(cls)
+        result._initialize(
+            max_shots=max_shots,
+            max_errors=max_errors,
+            batch_size=batch_size,
+            start_batch_size=start_batch_size,
+            max_batch_size=max_batch_size,
+            max_batch_seconds=max_batch_seconds,
+            min_shots=min_shots,
+            explicit_mask=explicit_mask,
+        )
+        return result
+
+    def _initialize(
+        self,
+        *,
+        max_shots: int | None,
+        max_errors: int | None,
+        batch_size: int,
+        start_batch_size: int | None,
+        max_batch_size: int | None,
+        max_batch_seconds: float | None,
+        min_shots: int,
+        explicit_mask: int,
+    ) -> None:
         object.__setattr__(self, "max_shots", max_shots)
         object.__setattr__(self, "max_errors", max_errors)
         object.__setattr__(self, "batch_size", batch_size)
@@ -228,10 +340,9 @@ class CollectionRunOptions:
             raise ValueError("num_workers must be positive")
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, init=False)
 class CollectionTask:
-    circuit: Any | None = None
-    dem: Any | None = None
+    circuit: Any
     detectors: tuple[Any, ...] | None = None
     observables: tuple[Any, ...] | None = None
     decoder: object | str | None = None
@@ -242,9 +353,48 @@ class CollectionTask:
     postselection_mask: bytes | bytearray | memoryview | None = None
     postselected_observables_mask: bytes | bytearray | memoryview | None = None
 
+    def __init__(
+        self,
+        circuit: Any = None,
+        *,
+        detectors: tuple[Any, ...] | None = None,
+        observables: tuple[Any, ...] | None = None,
+        decoder: object | str | None = None,
+        decoder_options: Mapping[str, object] | None = None,
+        metadata: Mapping[str, object] | None = None,
+        collection_options: CollectionOptions | None = None,
+        task_id: str | None = None,
+        postselection_mask: bytes | bytearray | memoryview | None = None,
+        postselected_observables_mask: bytes | bytearray | memoryview | None = None,
+        **legacy: object,
+    ) -> None:
+        if "dem" in legacy:
+            raise TypeError(
+                "CollectionTask no longer accepts dem; use "
+                "faultscope.collection.dem.DemCollectionTask(dem=...)"
+            )
+        if legacy:
+            name = next(iter(legacy))
+            raise TypeError(f"CollectionTask got an unexpected keyword argument {name!r}")
+        object.__setattr__(self, "circuit", circuit)
+        object.__setattr__(self, "detectors", None if detectors is None else tuple(detectors))
+        object.__setattr__(self, "observables", None if observables is None else tuple(observables))
+        object.__setattr__(self, "decoder", decoder)
+        object.__setattr__(self, "decoder_options", decoder_options)
+        object.__setattr__(self, "metadata", metadata)
+        object.__setattr__(self, "collection_options", collection_options)
+        object.__setattr__(self, "task_id", task_id)
+        object.__setattr__(self, "postselection_mask", postselection_mask)
+        object.__setattr__(
+            self,
+            "postselected_observables_mask",
+            postselected_observables_mask,
+        )
+        self.__post_init__()
+
     def __post_init__(self) -> None:
-        if (self.circuit is None) == (self.dem is None):
-            raise ValueError("CollectionTask requires exactly one of circuit or dem")
+        if self.circuit is None:
+            raise ValueError("CollectionTask requires circuit")
         if self.collection_options is not None and not isinstance(
             self.collection_options, CollectionOptions
         ):
@@ -442,7 +592,7 @@ class TaskStats:
 class HotspotCollectionResult:
     stats: TaskStats
     batch_stats: tuple[TaskStats, ...]
-    edge_sensitivities: tuple[float, ...]
+    location_sensitivities: Mapping[str, float]
 
 
 @dataclass(frozen=True)
@@ -497,22 +647,64 @@ def write_stats_to_csv_file(
 ) -> None:
     path = Path(filepath)
     path.parent.mkdir(parents=True, exist_ok=True)
-    write_header = not append or not path.exists() or path.stat().st_size == 0
-    if append and not write_header:
-        with path.open(newline="") as existing_file:
-            existing_header = tuple(next(csv.reader(existing_file), ()))
-        if existing_header != COLLECTION_CSV_FIELDS:
-            raise ValueError(f"collection CSV header does not match in {path}")
-    with path.open("a" if append else "w", newline="") as f:
+    if append:
+        with _CollectionCsvAppender(path) as appender:
+            appender.write(stats)
+        return
+    with path.open("w", newline="") as f:
         writer = csv.DictWriter(
             f,
             fieldnames=COLLECTION_CSV_FIELDS,
             extrasaction="ignore",
         )
-        if write_header:
-            writer.writeheader()
+        writer.writeheader()
         for stat in stats:
             writer.writerow(stat.to_csv_row())
+
+
+class _CollectionCsvAppender:
+    """Validate an append target once and keep it open for streamed deltas."""
+
+    def __init__(self, filepath: str | Path) -> None:
+        self.path = Path(filepath)
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._file = self.path.open("a+", newline="")
+        try:
+            self._file.seek(0)
+            existing_header = tuple(next(csv.reader(self._file), ()))
+            if existing_header and existing_header != COLLECTION_CSV_FIELDS:
+                raise ValueError(f"collection CSV header does not match in {self.path}")
+            self._file.seek(0, io.SEEK_END)
+            if existing_header and self._file.tell() > 0:
+                with self.path.open("rb") as tail_file:
+                    tail_file.seek(-1, io.SEEK_END)
+                    final_byte = tail_file.read(1)
+                if final_byte not in (b"\n", b"\r"):
+                    self._file.write("\n")
+            self._writer = csv.DictWriter(
+                self._file,
+                fieldnames=COLLECTION_CSV_FIELDS,
+                extrasaction="ignore",
+            )
+            if not existing_header:
+                self._writer.writeheader()
+        except BaseException:
+            self._file.close()
+            raise
+
+    def write(self, stats: Iterable[TaskStats]) -> None:
+        for stat in stats:
+            self._writer.writerow(stat.to_csv_row())
+        self._file.flush()
+
+    def close(self) -> None:
+        self._file.close()
+
+    def __enter__(self) -> _CollectionCsvAppender:
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        self.close()
 
 
 def _canonical_json(value: object) -> str:

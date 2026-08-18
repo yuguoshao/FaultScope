@@ -386,7 +386,7 @@ fn try_disjoint_to_independent_xyz_errors(x: f64, y: f64, z: f64) -> Option<[f64
 
             let derivative_x = not_yz - yz;
             let derivative_y = not_xz - xz;
-            let derivative_z = not_xy - xz;
+            let derivative_z = not_xy - xy;
             independent_x -= error_x / derivative_x;
             independent_y -= error_y / derivative_y;
             independent_z -= error_z / derivative_z;

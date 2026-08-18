@@ -10,6 +10,7 @@ import unittest
 import faultscope
 import faultscope.backends
 import faultscope.collection
+import faultscope.collection.dem as collection_dem
 import faultscope.core
 import faultscope.decoders
 import faultscope.dem
@@ -45,6 +46,11 @@ from faultscope.collection import (
     read_stats_from_csv_files,
     write_stats_to_csv_file,
 )
+from faultscope.collection.dem import (
+    DemCollectionTask,
+    DemCollector,
+    DemHotspotCollectionResult,
+)
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -53,8 +59,8 @@ API_SNAPSHOT = REPO_ROOT / "tests" / "public_api_contract.json"
 
 class ReleaseContractTests(unittest.TestCase):
     def test_python_distribution_version_is_v0_2(self) -> None:
-        self.assertEqual(faultscope.__version__, "0.2.8")
-        self.assertEqual(importlib.metadata.version("faultscope"), "0.2.8")
+        self.assertEqual(faultscope.__version__, "0.2.9")
+        self.assertEqual(importlib.metadata.version("faultscope"), "0.2.9")
 
     def test_package_contains_pep561_marker_and_native_stub(self) -> None:
         package_root = Path(faultscope.__file__).resolve().parent
@@ -75,6 +81,7 @@ class ReleaseContractTests(unittest.TestCase):
             "faultscope": faultscope,
             "faultscope.backends": faultscope.backends,
             "faultscope.collection": faultscope.collection,
+            "faultscope.collection.dem": collection_dem,
             "faultscope.core": faultscope.core,
             "faultscope.decoders": faultscope.decoders,
             "faultscope.dem": faultscope.dem,
@@ -101,6 +108,10 @@ class ReleaseContractTests(unittest.TestCase):
             collect_hotspots: ("tasks", "options", "run_options"),
             iter_collect: ("tasks", "options", "run_options"),
             iter_progress: ("tasks", "options", "run_options"),
+            collection_dem.collect: ("tasks", "options", "run_options"),
+            collection_dem.collect_hotspots: ("tasks", "options", "run_options"),
+            collection_dem.iter_collect: ("tasks", "options", "run_options"),
+            collection_dem.iter_progress: ("tasks", "options", "run_options"),
             analyze_thresholds: (
                 "stats",
                 "x_key",
@@ -161,7 +172,6 @@ class ReleaseContractTests(unittest.TestCase):
             Collector: ("options", "run_options"),
             CollectionTask: (
                 "circuit",
-                "dem",
                 "detectors",
                 "observables",
                 "decoder",
@@ -185,6 +195,22 @@ class ReleaseContractTests(unittest.TestCase):
                 "counter_schema",
             ),
             HotspotCollectionResult: (
+                "stats",
+                "batch_stats",
+                "location_sensitivities",
+            ),
+            DemCollector: ("options", "run_options"),
+            DemCollectionTask: (
+                "dem",
+                "decoder",
+                "decoder_options",
+                "metadata",
+                "collection_options",
+                "task_id",
+                "postselection_mask",
+                "postselected_observables_mask",
+            ),
+            DemHotspotCollectionResult: (
                 "stats",
                 "batch_stats",
                 "edge_sensitivities",
@@ -252,6 +278,10 @@ class ReleaseContractTests(unittest.TestCase):
             ["collect", "collect_hotspots", "iter_collect", "iter_progress"],
         )
         self.assertEqual(
+            sorted(name for name in DemCollector.__dict__ if not name.startswith("_")),
+            ["collect", "collect_hotspots", "iter_collect", "iter_progress"],
+        )
+        self.assertEqual(
             sorted(name for name in ThresholdAnalysisResult.__dict__ if not name.startswith("_")),
             ["to_dict"],
         )
@@ -289,8 +319,8 @@ class ReleaseContractTests(unittest.TestCase):
                 ),
             ),
         )
-        (stats,) = collect(
-            [CollectionTask(dem=dem, metadata={"d": 3, "p": 0.01}, task_id="golden")],
+        (stats,) = collection_dem.collect(
+            [DemCollectionTask(dem=dem, metadata={"d": 3, "p": 0.01}, task_id="golden")],
             options=CollectionOptions(max_shots=1),
             run_options=CollectionRunOptions(seed=7),
         )

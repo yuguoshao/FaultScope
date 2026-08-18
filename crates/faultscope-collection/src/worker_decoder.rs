@@ -25,11 +25,11 @@ impl WorkerDecoderCache {
         let Some(factory) = factory else {
             return Ok(None);
         };
-        validate_decoder_detector_ids(factory.detector_ids())?;
-        validate_decoder_batch_formats(factory.batch_formats())?;
         let worker = match self.instances.entry(task_key) {
             Entry::Occupied(entry) => entry.into_mut(),
             Entry::Vacant(entry) => {
+                validate_decoder_detector_ids(factory.detector_ids())?;
+                validate_decoder_batch_formats(factory.batch_formats())?;
                 let instance = factory.create_worker().map_err(|err| {
                     NpError::new(format!(
                         "failed to create worker for task key {task_key} backend `{}`: {}",

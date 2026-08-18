@@ -502,16 +502,16 @@ metadata reject them with `ValueError`.
 ## Logical Error-Rate Collection
 
 `faultscope.collection` is the threshold-style sampling entry point. It collects
-`shots`, `errors`, `discards`, and elapsed seconds for one or more DEM-oriented
-tasks. The hot path stays native: Rust owns DEM sampling, native decoder calls,
-batch scheduling, postselection, and counting. Python owns task construction,
-strong ids, CSV resume files, and `TaskStats` wrappers.
+`shots`, `errors`, `discards`, and elapsed seconds by executing one or more
+circuits directly with the packed Forward runtime. The hot path stays native:
+Rust owns circuit sampling, native decoder calls, batch scheduling,
+postselection, and counting. Python owns task construction, strong ids, CSV
+resume files, and `TaskStats` wrappers.
 
-For an existing `DetectorErrorModel`, create a `CollectionTask` with `dem=...`
-and configure a reusable `Collector`:
+Create a circuit task and configure a reusable `Collector`:
 
 ```python
-from faultscope import DetectorErrorEdge, DetectorErrorModel, LogicalObservable
+from faultscope import BernoulliPauliNoise, Circuit, NoiseLocation, Operation
 from faultscope.collection import (
     Collector,
     CollectionOptions,
@@ -519,17 +519,15 @@ from faultscope.collection import (
     CollectionTask,
 )
 
-dem = DetectorErrorModel(
-    detectors=(),
-    observables=(LogicalObservable(id=0),),
-    edges=(
-        DetectorErrorEdge(
-            probability=0.125,
-            detectors=(),
-            observables=(0,),
-            location_id="logical_edge",
-            event="L",
+circuit = Circuit(
+    1,
+    (
+        Operation.noise(
+            NoiseLocation("logical_x", BernoulliPauliNoise("X"), 0.125, (0,))
         ),
+        Operation.measure(0, key="m"),
+        Operation.detector(("m",), detector_id=0),
+        Operation.observable_include(0, ("m",)),
     ),
 )
 
@@ -543,7 +541,7 @@ collector = Collector(
     run_options=CollectionRunOptions(seed=1),
 )
 stats = collector.collect(
-    [CollectionTask(dem=dem, task_id="p=0.125", metadata={"p": 0.125})]
+    [CollectionTask(circuit=circuit, task_id="p=0.125", metadata={"p": 0.125})]
 )[0]
 
 print(
@@ -555,22 +553,17 @@ print(
 )
 ```
 
-A task may also start from a circuit. In that case FaultScope compiles a
-materialized DEM sampler from the circuit, using embedded detector and
-observable declarations unless explicit `detectors=` or `observables=` are
-provided:
+`CollectionTask` requires `circuit`. `detectors=None` and `observables=None`
+retain declarations embedded in the circuit; an explicit sequence replaces the
+corresponding embedded declarations, and an explicit empty sequence clears
+them. The collection adapter derives detector and observable ids from the
+compiled sampler once, preserving declaration order for decoder validation,
+postselection, and custom counters. Collection does not generate a DEM when no
+decoder is used or when an already constructed native decoder is supplied. A
+decoder name may generate one cached DEM during task preparation solely to
+construct its static decoding problem; every shot still executes the Forward
+circuit.
 
-```python
-from faultscope.collection import CollectionOptions, CollectionRunOptions, CollectionTask, collect
-
-stats = collect(
-    [CollectionTask(circuit=circuit, task_id="from-circuit")],
-    options=CollectionOptions(max_shots=20_000, batch_size=2_000),
-    run_options=CollectionRunOptions(seed=2),
-)
-```
-
-Each `CollectionTask` must provide exactly one of `dem` or `circuit`.
 `max_shots` is required after combining the Collector's base options with each
 task's `collection_options`. The final batch is capped so collection never exceeds
 `max_shots`. `max_errors` stops only after both it and `min_shots` are reached;
@@ -584,21 +577,26 @@ an inherited error limit and `max_batch_seconds=None` disables inherited
 adaptive batching. Collection count options reject booleans and fractional
 values, and adaptive batch seconds must be finite and positive.
 
-Use `collect_hotspots(...)` (or `Collector.collect_hotspots(...)`) when the same
-run must also return ordered per-batch `TaskStats` and shot-weighted DEM edge
-sensitivities. This path keeps edge-event masks, decoding, residual counting,
-and sensitivity calculation inside Rust. CSV partial resume is intentionally
-unsupported for hotspot collection.
+Derive an existing option set with `options.with_edits(...)`; supplied fields
+remain explicit even when equal to their defaults. Do not use
+`dataclasses.replace()` with `CollectionOptions`, because it cannot preserve the
+explicit-override information.
 
-Native decoders can be passed directly or resolved by name:
+Use `collect_hotspots(...)` (or `Collector.collect_hotspots(...)`) when the same
+run must also return ordered per-batch `TaskStats` and shot-weighted physical
+location sensitivities in `HotspotCollectionResult.location_sensitivities`.
+This path records Forward noise-event masks and keeps decoding, residual
+counting, and sensitivity calculation inside Rust. CSV partial resume is
+intentionally unsupported for hotspot collection.
+
+Native decoders can be passed directly or resolved by name. A string decoder
+uses a circuit-derived DEM only as its construction-time static problem:
 
 ```python
-from faultscope import NativeGraphlikeDetectorCopyDecoder
 from faultscope.collection import CollectionTask, collect
 
-decoder = NativeGraphlikeDetectorCopyDecoder.from_dem(dem)
 stats = collect(
-    [CollectionTask(dem=dem, decoder=decoder)],
+    [CollectionTask(circuit=circuit, decoder="graphlike-detector-copy")],
     options=CollectionOptions(max_shots=10_000, batch_size=1_000),
     run_options=CollectionRunOptions(seed=3),
 )
@@ -607,6 +605,27 @@ stats = collect(
 The default collection API is native-only. Python decoders are still useful for
 `estimate(...)` prototypes, but `faultscope.collection` rejects them because it
 does not move detector batches or correction masks through Python.
+
+### Legacy Explicit DEM Collection
+
+Direct DEM sampling is intentionally isolated from the main collection API and
+has no CLI command. Existing DEM workflows can use the legacy library module:
+
+```python
+from faultscope.collection import CollectionOptions, CollectionRunOptions
+from faultscope.collection.dem import DemCollectionTask, DemCollector
+
+dem_stats = DemCollector(
+    options=CollectionOptions(max_shots=10_000, batch_size=1_000),
+    run_options=CollectionRunOptions(seed=3),
+).collect([DemCollectionTask(dem=dem)])
+```
+
+The legacy module also provides `collect`, `iter_collect`, `iter_progress`, and
+`collect_hotspots`; its hotspot result retains `edge_sensitivities`. DEM task
+types are not re-exported from `faultscope.collection` or top-level
+`faultscope`. Passing `dem=` to `CollectionTask` raises a migration error that
+points to `faultscope.collection.dem.DemCollectionTask`.
 
 Use `num_workers` to enable the Rust global worker pool. With fixed-size
 batches, one large task and many independent tasks both share the same worker
@@ -700,16 +719,30 @@ write_stats_to_csv_file("merged.csv", data.values())
 ```
 
 Collection v3 separates an internal `sampling_id` from the public `strong_id`.
-The sampling id hashes canonical circuit/effective DEM data, the resolved
-decoder fingerprint, metadata, and postselection masks; Rust uses it to derive
-task-local random streams. The strong id hashes that sampling id plus the full
-counter schema. Consequently, changing either count flag starts a separate
-resume identity but replays the same seeded random samples. Changing a legal
+Forward sampling ids use a `forward_circuit` source payload containing the
+circuit and the `None`/explicit detector and observable declarations. Explicit
+DEM tasks retain their legacy DEM source payload, so their existing ids remain
+stable while a Forward task can never collide with an old circuit-to-DEM id.
+The sampling id also hashes the resolved decoder fingerprint, metadata, and
+postselection masks; Rust uses it to derive task-local random streams. The
+strong id hashes that sampling id plus the full counter schema. Consequently,
+changing either count flag starts a separate resume identity but replays the
+same seeded random samples. Changing a legal
 `custom_error_count_key` does not change the strong id, so the same schema's
 history remains reusable. Mapping keys are sorted, so insertion order in tags,
 metadata, and decoder parameters does not affect identity. Task id, seed,
 `max_shots`, `max_errors`, batch sizing, and worker count remain excluded. Task
 metadata must be JSON serializable when using identity and CSV paths.
+
+Expanded tasks in one logical collection call must have unique `strong_id`
+values. Collection rejects a duplicate before starting sampling workers,
+emitting progress, or appending resume data. `task_id` is only a display label,
+so changing it does not create a separate collection identity. Use a genuinely
+different Forward circuit or declaration override, decoder, metadata value,
+postselection mask, or counter schema when main-module tasks must be collected
+independently. Legacy `faultscope.collection.dem` tasks use their explicit DEM
+source instead. A resume CSV produced by an older version from duplicate
+identities cannot be separated reliably and should be regenerated.
 
 Decoder objects must provide `strong_id_payload()` returning a JSON-serializable
 mapping. Bundled native decoders and official backend packages implement this
@@ -735,15 +768,14 @@ one strong id, or a missing fixed detection counter. It does not backfill a
 counter subset or superset.
 
 Postselection masks are bytes-like bit-packed masks over the sampler's canonical
-detector or observable order: explicit declaration order followed by ids first
-encountered in DEM edges. Edge targets use GF(2) parity, so repeated ids cancel
-in pairs. A fired postselected detector discards the shot before logical error
-counting. A nonzero residual on a postselected observable also discards the
-shot. Logical error rate uses accepted shots:
+detector or observable declaration order. A fired postselected detector
+discards the shot before logical error counting. A nonzero residual on a
+postselected observable also discards the shot. Logical error rate uses accepted
+shots:
 
 ```python
 task = CollectionTask(
-    dem=dem,
+    circuit=circuit,
     postselection_mask=bytes([0b0000_0001]),
     postselected_observables_mask=None,
 )
@@ -753,7 +785,7 @@ Optional custom counts are accumulated in `TaskStats.custom_counts`:
 
 ```python
 stats = collect(
-    [CollectionTask(dem=dem)],
+    [CollectionTask(circuit=circuit)],
     options=CollectionOptions(max_shots=10_000, batch_size=1_000),
     run_options=CollectionRunOptions(
         count_observable_error_combos=True,
@@ -789,7 +821,7 @@ Decoder fanout expands tasks that do not already specify a decoder:
 
 ```python
 stats = collect(
-    [CollectionTask(dem=dem, task_id="surface-d3")],
+    [CollectionTask(circuit=circuit, task_id="surface-d3")],
     options=CollectionOptions(max_shots=20_000, batch_size=1_000),
     run_options=CollectionRunOptions(
         decoders=("no-correction", "graphlike-detector-copy"),
@@ -801,7 +833,8 @@ Tasks with their own `decoder=` keep it. When multiple fanout decoders are
 provided, generated task ids append the decoder name, for example
 `surface-d3:graphlike-detector-copy`.
 
-The module also has a small command line interface:
+The module also has a small Forward-only command line interface. The task
+factory must return `CollectionTask(circuit=...)`; there is no DEM CLI:
 
 ```bash
 python -m faultscope.collection collect \

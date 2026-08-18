@@ -1,21 +1,20 @@
 use std::collections::HashMap;
-use std::sync::mpsc;
 use std::sync::Arc;
 use std::time::Instant;
 
 use faultscope_core::{CompiledDemSamplingPlan, NativeDecoderWorker, NpError, NpResult, SmallRng};
 
 use crate::api::{
-    task_is_complete, validate_stop_counter_for_tasks, validate_task, DemLogicalCollectionOptions,
-    DemLogicalCollectionRunOptions, DemLogicalCollectionStats, DemLogicalCollectionTask,
-    ValidatedStopCounter,
+    task_is_complete, validate_stop_counter_for_tasks, validate_task, validate_unique_strong_ids,
+    DemLogicalCollectionOptions, DemLogicalCollectionRunOptions, DemLogicalCollectionStats,
+    DemLogicalCollectionTask, LogicalCollectionTask, ValidatedStopCounter,
 };
 use crate::counting::{
     count_detailed_sampling_result, prepare_dem_count_plan, CountOptions, PreparedDemCountPlan,
 };
-use crate::scheduler::{batch_seed, next_batch_size, task_run_seed};
+use crate::scheduler::{batch_seed, next_batch_size, resolve_run_seed, task_run_seed};
 use crate::worker_decoder::WorkerDecoderCache;
-use crate::worker_executor::WorkerExecutor;
+use crate::worker_executor::{WorkSender, WorkerExecutor};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct DemHotspotCollectionResult {
@@ -29,7 +28,7 @@ struct HotspotWork {
     task_index: usize,
     ordinal: usize,
     shots: usize,
-    seed: Option<u64>,
+    seed: u64,
     task: Arc<DemLogicalCollectionTask>,
     run_options: Arc<DemLogicalCollectionRunOptions>,
     prepared_plan: Arc<CompiledDemSamplingPlan>,
@@ -56,7 +55,7 @@ struct HotspotCommitState {
 
 struct HotspotTaskCursor {
     task: Arc<DemLogicalCollectionTask>,
-    seed: Option<u64>,
+    seed: u64,
     shots_scheduled: usize,
     next_ordinal: usize,
     prepared_plan: Arc<CompiledDemSamplingPlan>,
@@ -73,6 +72,7 @@ impl HotspotWorkQueue {
     fn new(
         tasks: Vec<DemLogicalCollectionTask>,
         run_options: Arc<DemLogicalCollectionRunOptions>,
+        run_seed: u64,
     ) -> NpResult<Self> {
         let total_batches = tasks.iter().fold(0usize, |total, task| {
             total.saturating_add(fixed_hotspot_batch_count(task.options))
@@ -80,7 +80,7 @@ impl HotspotWorkQueue {
         let tasks = tasks
             .into_iter()
             .map(|task| {
-                let seed = task_run_seed(&task, &run_options);
+                let seed = task_run_seed(&LogicalCollectionTask::from(task.clone()), run_seed);
                 let count_options = CountOptions {
                     postselection_mask: task.postselection_mask.as_deref(),
                     postselected_observables_mask: task.postselected_observables_mask.as_deref(),
@@ -163,15 +163,21 @@ pub fn collect_dem_hotspot_tasks(
     }
     let counter_schema = run_options.counter_schema();
     counter_schema.validate()?;
-    for task in &tasks {
-        validate_task(task)?;
+    let logical_tasks = tasks
+        .iter()
+        .cloned()
+        .map(LogicalCollectionTask::from)
+        .collect::<Vec<_>>();
+    for (task, logical_task) in tasks.iter().zip(&logical_tasks) {
+        validate_task(logical_task)?;
         if task.options.max_batch_seconds.is_some() {
             return Err(NpError::new(
                 "hotspot collection does not support adaptive batch sizing",
             ));
         }
     }
-    let stop_counter = validate_stop_counter_for_tasks(&tasks, &run_options)?;
+    let stop_counter = validate_stop_counter_for_tasks(&logical_tasks, &run_options)?;
+    validate_unique_strong_ids(&logical_tasks)?;
     if tasks.is_empty() {
         return Ok(Vec::new());
     }
@@ -179,8 +185,10 @@ pub fn collect_dem_hotspot_tasks(
     let run_options = Arc::new(run_options);
     let mut states = tasks
         .iter()
-        .map(|task| {
-            let stats = DemLogicalCollectionStats::empty_for_task(task, counter_schema);
+        .zip(&logical_tasks)
+        .map(|(task, logical_task)| {
+            let stats =
+                DemLogicalCollectionStats::empty_for_logical_task(logical_task, counter_schema);
             let complete = task_is_complete(&stats, &task.options, &stop_counter)?;
             Ok(HotspotCommitState {
                 stats,
@@ -198,7 +206,8 @@ pub fn collect_dem_hotspot_tasks(
     if states.iter().all(|state| state.complete) {
         return states.into_iter().map(finish_hotspot_state).collect();
     }
-    let mut work_queue = HotspotWorkQueue::new(tasks, run_options.clone())?;
+    let run_seed = resolve_run_seed(run_options.seed);
+    let mut work_queue = HotspotWorkQueue::new(tasks, run_options.clone(), run_seed)?;
     let worker_count = run_options.num_workers.min(work_queue.total_batches).max(1);
     let executor = WorkerExecutor::new(
         worker_count,
@@ -246,7 +255,7 @@ fn schedule_hotspot_work(
     work_queue: &mut HotspotWorkQueue,
     states: &mut [HotspotCommitState],
     worker_count: usize,
-    work_tx: &mpsc::Sender<HotspotWork>,
+    work_tx: &WorkSender<HotspotWork>,
     in_flight: &mut usize,
 ) -> NpResult<()> {
     while *in_flight < worker_count {
@@ -277,7 +286,7 @@ fn fixed_hotspot_batch_count(options: crate::api::DemLogicalCollectionOptions) -
 }
 
 fn run_hotspot_batch(
-    work: HotspotWork,
+    work: &HotspotWork,
     decoder: Option<&mut dyn NativeDecoderWorker>,
 ) -> NpResult<HotspotBatchResult> {
     let started = Instant::now();

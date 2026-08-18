@@ -3,15 +3,17 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use crate::counting::{
-    prepare_dem_count_plan, sample_dem_logical_error_stats_with_rng,
+    prepare_dem_count_plan, prepare_forward_count_plan, sample_dem_logical_error_stats_with_rng,
+    sample_forward_logical_error_stats as sample_forward_logical_error_stats_batch,
     validate_decoder_observable_layout, validate_mask_shape, CountOptions,
 };
 use crate::scheduler::{
-    batch_seed, collect_task_set, collect_task_set_with_progress, next_batch_size,
+    batch_seed, collect_task_set, collect_task_set_with_progress, next_batch_size, resolve_run_seed,
 };
 use faultscope_core::{
     validate_decoder_batch_formats, validate_decoder_detector_ids, DemHotspotEstimator,
-    DetectorBatchFormat, NativeDecoderFactory, NativeDecoderWorker, NpError, NpResult, SmallRng,
+    DetectorBatchFormat, NativeDecoderFactory, NativeDecoderWorker, NpError, NpResult,
+    SamplerOperation, SamplerProgram, SmallRng,
 };
 
 pub const DEM_LOGICAL_COUNTER_SCHEMA_VERSION: u32 = 1;
@@ -95,6 +97,24 @@ pub struct DemLogicalCollectionStats {
 impl DemLogicalCollectionStats {
     pub fn empty_for_task(
         task: &DemLogicalCollectionTask,
+        counter_schema: DemLogicalCounterSchema,
+    ) -> Self {
+        Self {
+            task_id: task.task_id.clone(),
+            strong_id: task.strong_id.clone(),
+            decoder: task.decoder_name.clone(),
+            metadata_json: task.metadata_json.clone(),
+            shots: 0,
+            errors: 0,
+            discards: 0,
+            seconds: 0.0,
+            counter_schema,
+            custom_counts: counter_schema.empty_custom_counts(),
+        }
+    }
+
+    pub(crate) fn empty_for_logical_task(
+        task: &LogicalCollectionTask,
         counter_schema: DemLogicalCounterSchema,
     ) -> Self {
         Self {
@@ -203,6 +223,195 @@ pub struct DemLogicalCollectionTask {
     pub postselected_observables_mask: Option<Vec<u8>>,
 }
 
+/// A forward-circuit logical-error collection task.
+#[derive(Clone)]
+pub struct ForwardLogicalCollectionTask {
+    pub task_id: String,
+    pub strong_id: String,
+    pub sampling_id: String,
+    pub sampler: Arc<SamplerProgram>,
+    pub decoder: Option<Arc<dyn NativeDecoderFactory>>,
+    pub decoder_name: Option<String>,
+    pub metadata_json: String,
+    pub options: DemLogicalCollectionOptions,
+    pub postselection_mask: Option<Vec<u8>>,
+    pub postselected_observables_mask: Option<Vec<u8>>,
+}
+
+#[derive(Clone)]
+pub(crate) enum CollectionSampler {
+    Dem(Arc<DemHotspotEstimator>),
+    Forward(Arc<ForwardCollectionSampler>),
+}
+
+#[derive(Debug)]
+pub(crate) struct ForwardCollectionSampler {
+    program: Arc<SamplerProgram>,
+    detector_ids: Vec<i64>,
+    observable_ids: Vec<i64>,
+}
+
+impl ForwardCollectionSampler {
+    fn new(program: Arc<SamplerProgram>) -> Self {
+        let (detector_ids, observable_ids) = forward_sampler_layout(&program);
+        Self {
+            program,
+            detector_ids,
+            observable_ids,
+        }
+    }
+
+    pub(crate) fn program(&self) -> &SamplerProgram {
+        &self.program
+    }
+
+    pub(crate) fn detector_ids(&self) -> &[i64] {
+        &self.detector_ids
+    }
+
+    pub(crate) fn observable_ids(&self) -> &[i64] {
+        &self.observable_ids
+    }
+
+    pub(crate) fn view(&self) -> ForwardSamplerView<'_> {
+        ForwardSamplerView::new(&self.program, &self.detector_ids, &self.observable_ids)
+    }
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct ForwardSamplerView<'a> {
+    program: &'a SamplerProgram,
+    detector_ids: &'a [i64],
+    observable_ids: &'a [i64],
+}
+
+impl<'a> ForwardSamplerView<'a> {
+    pub(crate) fn new(
+        program: &'a SamplerProgram,
+        detector_ids: &'a [i64],
+        observable_ids: &'a [i64],
+    ) -> Self {
+        Self {
+            program,
+            detector_ids,
+            observable_ids,
+        }
+    }
+
+    pub(crate) fn program(self) -> &'a SamplerProgram {
+        self.program
+    }
+
+    pub(crate) fn detector_ids(self) -> &'a [i64] {
+        self.detector_ids
+    }
+
+    pub(crate) fn observable_ids(self) -> &'a [i64] {
+        self.observable_ids
+    }
+}
+
+pub(crate) fn forward_sampler_layout(program: &SamplerProgram) -> (Vec<i64>, Vec<i64>) {
+    let mut detector_ids = Vec::new();
+    let mut observable_ids = Vec::new();
+    let mut seen_detector_ids = HashSet::new();
+    let mut seen_observable_ids = HashSet::new();
+    for operation in program.operations() {
+        match operation {
+            SamplerOperation::Detector { detector_id, .. } => {
+                if seen_detector_ids.insert(*detector_id) {
+                    detector_ids.push(*detector_id);
+                }
+            }
+            SamplerOperation::ObservableInclude { observable_id, .. }
+                if seen_observable_ids.insert(*observable_id) =>
+            {
+                observable_ids.push(*observable_id);
+            }
+            _ => {}
+        }
+    }
+    for observable in program.compiled_observables() {
+        if seen_observable_ids.insert(observable.id) {
+            observable_ids.push(observable.id);
+        }
+    }
+    (detector_ids, observable_ids)
+}
+
+impl CollectionSampler {
+    pub(crate) fn detector_ids(&self) -> &[i64] {
+        match self {
+            Self::Dem(sampler) => sampler.detector_ids(),
+            Self::Forward(sampler) => sampler.detector_ids(),
+        }
+    }
+
+    pub(crate) fn observable_ids(&self) -> &[i64] {
+        match self {
+            Self::Dem(sampler) => sampler.observable_ids(),
+            Self::Forward(sampler) => sampler.observable_ids(),
+        }
+    }
+
+    fn description(&self) -> &'static str {
+        match self {
+            Self::Dem(_) => "DEM sampler",
+            Self::Forward(_) => "forward sampler",
+        }
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct LogicalCollectionTask {
+    pub(crate) task_id: String,
+    pub(crate) strong_id: String,
+    pub(crate) sampling_id: String,
+    pub(crate) sampler: CollectionSampler,
+    pub(crate) decoder: Option<Arc<dyn NativeDecoderFactory>>,
+    pub(crate) decoder_name: Option<String>,
+    pub(crate) metadata_json: String,
+    pub(crate) options: DemLogicalCollectionOptions,
+    pub(crate) postselection_mask: Option<Vec<u8>>,
+    pub(crate) postselected_observables_mask: Option<Vec<u8>>,
+}
+
+impl From<DemLogicalCollectionTask> for LogicalCollectionTask {
+    fn from(task: DemLogicalCollectionTask) -> Self {
+        Self {
+            task_id: task.task_id,
+            strong_id: task.strong_id,
+            sampling_id: task.sampling_id,
+            sampler: CollectionSampler::Dem(task.sampler),
+            decoder: task.decoder,
+            decoder_name: task.decoder_name,
+            metadata_json: task.metadata_json,
+            options: task.options,
+            postselection_mask: task.postselection_mask,
+            postselected_observables_mask: task.postselected_observables_mask,
+        }
+    }
+}
+
+impl From<ForwardLogicalCollectionTask> for LogicalCollectionTask {
+    fn from(task: ForwardLogicalCollectionTask) -> Self {
+        Self {
+            task_id: task.task_id,
+            strong_id: task.strong_id,
+            sampling_id: task.sampling_id,
+            sampler: CollectionSampler::Forward(Arc::new(ForwardCollectionSampler::new(
+                task.sampler,
+            ))),
+            decoder: task.decoder,
+            decoder_name: task.decoder_name,
+            metadata_json: task.metadata_json,
+            options: task.options,
+            postselection_mask: task.postselection_mask,
+            postselected_observables_mask: task.postselected_observables_mask,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DemLogicalCollectionRunOptions {
     pub num_workers: usize,
@@ -228,8 +437,10 @@ pub fn collect_dem_logical_error_stats(
 ) -> NpResult<DemLogicalCollectionStats> {
     validate_collection_options(options)?;
     if let Some(decoder) = decoder.as_deref() {
-        validate_decoder_layout_against_sampler(
-            sampler,
+        validate_decoder_layout(
+            sampler.detector_ids(),
+            sampler.observable_ids(),
+            "DEM sampler",
             decoder.name(),
             decoder.detector_ids(),
             decoder.observable_ids(),
@@ -244,6 +455,7 @@ pub fn collect_dem_logical_error_stats(
     let mut batch_ordinal = 0usize;
     let mut last_batch: Option<(usize, f64)> = None;
     if !collection_limits_reached(options, shots_done, errors) {
+        let run_seed = resolve_run_seed(options.seed);
         let count_options = CountOptions::default();
         let prepared_plan = prepare_dem_count_plan(
             sampler,
@@ -256,7 +468,7 @@ pub fn collect_dem_logical_error_stats(
 
         while !collection_limits_reached(options, shots_done, errors) {
             let batch_shots = next_batch_size(options, shots_done, last_batch);
-            let mut batch_rng = SmallRng::new(batch_seed(options.seed, 0, batch_ordinal));
+            let mut batch_rng = SmallRng::new(batch_seed(run_seed, 0, batch_ordinal));
             let batch_started = Instant::now();
             let batch_stats = match decoder.as_mut() {
                 Some(decoder) => sample_dem_logical_error_stats_with_rng(
@@ -344,14 +556,173 @@ pub fn sample_dem_logical_error_stats(
     })
 }
 
+/// Collect logical-error statistics by repeatedly executing a forward sampler program.
+pub fn collect_forward_logical_error_stats(
+    program: &SamplerProgram,
+    options: DemLogicalCollectionOptions,
+    mut decoder: Option<&mut dyn NativeDecoderWorker>,
+) -> NpResult<DemLogicalCollectionStats> {
+    validate_collection_options(options)?;
+    let (detector_ids, observable_ids) = forward_sampler_layout(program);
+    let sampler = ForwardSamplerView::new(program, &detector_ids, &observable_ids);
+    if let Some(decoder) = decoder.as_deref() {
+        validate_decoder_layout(
+            &detector_ids,
+            &observable_ids,
+            "forward sampler",
+            decoder.name(),
+            decoder.detector_ids(),
+            decoder.observable_ids(),
+            decoder.batch_formats(),
+        )?;
+    }
+
+    let decoder_name = decoder.as_ref().map(|decoder| decoder.name().to_string());
+    let started = Instant::now();
+    let mut shots_done = 0usize;
+    let mut errors = 0usize;
+    let mut batch_ordinal = 0usize;
+    let mut last_batch: Option<(usize, f64)> = None;
+    if !collection_limits_reached(options, shots_done, errors) {
+        let run_seed = resolve_run_seed(options.seed);
+        let count_options = CountOptions::default();
+        let prepared_plan = prepare_forward_count_plan(
+            decoder
+                .as_deref()
+                .map(|worker| (worker.detector_ids(), worker.batch_formats())),
+            false,
+        )?;
+
+        while !collection_limits_reached(options, shots_done, errors) {
+            let batch_shots = next_batch_size(options, shots_done, last_batch);
+            let seed = batch_seed(run_seed, 0, batch_ordinal);
+            let batch_started = Instant::now();
+            let batch_stats = match decoder.as_mut() {
+                Some(decoder) => sample_forward_logical_error_stats_batch(
+                    sampler,
+                    batch_shots,
+                    seed,
+                    Some(&mut **decoder),
+                    None,
+                    &count_options,
+                    &prepared_plan,
+                )?,
+                None => sample_forward_logical_error_stats_batch(
+                    sampler,
+                    batch_shots,
+                    seed,
+                    None,
+                    None,
+                    &count_options,
+                    &prepared_plan,
+                )?,
+            };
+            let elapsed = batch_started.elapsed().as_secs_f64();
+            shots_done += batch_stats.shots;
+            errors += batch_stats.errors;
+            last_batch = Some((batch_shots, elapsed));
+            batch_ordinal += 1;
+        }
+    }
+
+    Ok(DemLogicalCollectionStats {
+        task_id: String::new(),
+        strong_id: String::new(),
+        decoder: decoder_name,
+        metadata_json: "null".to_string(),
+        shots: shots_done,
+        errors,
+        discards: 0,
+        seconds: started.elapsed().as_secs_f64(),
+        counter_schema: DemLogicalCounterSchema::default(),
+        custom_counts: HashMap::new(),
+    })
+}
+
+/// Execute one seeded forward batch and return its logical-error statistics.
+pub fn sample_forward_logical_error_stats(
+    program: &SamplerProgram,
+    shots: usize,
+    seed: Option<u64>,
+    mut decoder: Option<&mut dyn NativeDecoderWorker>,
+) -> NpResult<DemLogicalCollectionStats> {
+    if shots == 0 {
+        return Err(NpError::new("shots must be positive"));
+    }
+    let (detector_ids, observable_ids) = forward_sampler_layout(program);
+    let sampler = ForwardSamplerView::new(program, &detector_ids, &observable_ids);
+    if let Some(decoder) = decoder.as_deref() {
+        validate_decoder_layout(
+            &detector_ids,
+            &observable_ids,
+            "forward sampler",
+            decoder.name(),
+            decoder.detector_ids(),
+            decoder.observable_ids(),
+            decoder.batch_formats(),
+        )?;
+    }
+    let started = Instant::now();
+    let decoder_name = decoder.as_ref().map(|decoder| decoder.name().to_string());
+    let count_options = CountOptions::default();
+    let prepared_plan = prepare_forward_count_plan(
+        decoder
+            .as_deref()
+            .map(|worker| (worker.detector_ids(), worker.batch_formats())),
+        false,
+    )?;
+    let batch = match decoder.as_mut() {
+        Some(decoder) => sample_forward_logical_error_stats_batch(
+            sampler,
+            shots,
+            seed.unwrap_or(0x95f2_04dc_4291_a715),
+            Some(&mut **decoder),
+            Some(started),
+            &count_options,
+            &prepared_plan,
+        )?,
+        None => sample_forward_logical_error_stats_batch(
+            sampler,
+            shots,
+            seed.unwrap_or(0x95f2_04dc_4291_a715),
+            None,
+            Some(started),
+            &count_options,
+            &prepared_plan,
+        )?,
+    };
+    Ok(DemLogicalCollectionStats {
+        task_id: String::new(),
+        strong_id: String::new(),
+        decoder: decoder_name,
+        metadata_json: "null".to_string(),
+        shots: batch.shots,
+        errors: batch.errors,
+        discards: batch.discards,
+        seconds: batch.seconds,
+        counter_schema: DemLogicalCounterSchema::default(),
+        custom_counts: batch.custom_counts,
+    })
+}
+
+/// Collect detector-error-model logical-error tasks.
+///
+/// Returns an error before worker creation when two tasks share a `strong_id`.
 pub fn collect_dem_logical_error_tasks(
     tasks: Vec<DemLogicalCollectionTask>,
     run_options: DemLogicalCollectionRunOptions,
     existing_data: HashMap<String, DemLogicalCollectionStats>,
 ) -> NpResult<Vec<DemLogicalCollectionStats>> {
-    collect_task_set(tasks, run_options, existing_data)
+    collect_task_set(
+        tasks.into_iter().map(LogicalCollectionTask::from).collect(),
+        run_options,
+        existing_data,
+    )
 }
 
+/// Collect detector-error-model logical-error tasks and report committed deltas.
+///
+/// Returns an error before worker creation or progress when two tasks share a `strong_id`.
 pub fn collect_dem_logical_error_tasks_with_progress<F>(
     tasks: Vec<DemLogicalCollectionTask>,
     run_options: DemLogicalCollectionRunOptions,
@@ -362,10 +733,51 @@ where
     F: FnMut(&DemLogicalCollectionStats) -> NpResult<()>,
 {
     let mut progress_callback = progress_callback;
-    collect_task_set_with_progress(tasks, run_options, existing_data, &mut progress_callback)
+    collect_task_set_with_progress(
+        tasks.into_iter().map(LogicalCollectionTask::from).collect(),
+        run_options,
+        existing_data,
+        &mut progress_callback,
+    )
 }
 
-pub(crate) fn validate_task(task: &DemLogicalCollectionTask) -> NpResult<()> {
+/// Collect forward-circuit logical-error tasks.
+///
+/// Returns an error before worker creation when two tasks share a `strong_id`.
+pub fn collect_forward_logical_error_tasks(
+    tasks: Vec<ForwardLogicalCollectionTask>,
+    run_options: DemLogicalCollectionRunOptions,
+    existing_data: HashMap<String, DemLogicalCollectionStats>,
+) -> NpResult<Vec<DemLogicalCollectionStats>> {
+    collect_task_set(
+        tasks.into_iter().map(LogicalCollectionTask::from).collect(),
+        run_options,
+        existing_data,
+    )
+}
+
+/// Collect forward-circuit logical-error tasks and report committed deltas.
+///
+/// Returns an error before worker creation or progress when two tasks share a `strong_id`.
+pub fn collect_forward_logical_error_tasks_with_progress<F>(
+    tasks: Vec<ForwardLogicalCollectionTask>,
+    run_options: DemLogicalCollectionRunOptions,
+    existing_data: HashMap<String, DemLogicalCollectionStats>,
+    progress_callback: F,
+) -> NpResult<Vec<DemLogicalCollectionStats>>
+where
+    F: FnMut(&DemLogicalCollectionStats) -> NpResult<()>,
+{
+    let mut progress_callback = progress_callback;
+    collect_task_set_with_progress(
+        tasks.into_iter().map(LogicalCollectionTask::from).collect(),
+        run_options,
+        existing_data,
+        &mut progress_callback,
+    )
+}
+
+pub(crate) fn validate_task(task: &LogicalCollectionTask) -> NpResult<()> {
     validate_collection_options(task.options)?;
     validate_mask_shape(
         task.postselection_mask.as_deref(),
@@ -378,8 +790,10 @@ pub(crate) fn validate_task(task: &DemLogicalCollectionTask) -> NpResult<()> {
         "postselected_observables_mask",
     )?;
     if let Some(decoder) = &task.decoder {
-        validate_decoder_layout_against_sampler(
-            &task.sampler,
+        validate_decoder_layout(
+            task.sampler.detector_ids(),
+            task.sampler.observable_ids(),
+            task.sampler.description(),
             decoder.name(),
             decoder.detector_ids(),
             decoder.observable_ids(),
@@ -395,28 +809,52 @@ pub(crate) fn validate_task(task: &DemLogicalCollectionTask) -> NpResult<()> {
     Ok(())
 }
 
-fn validate_decoder_layout_against_sampler(
-    sampler: &DemHotspotEstimator,
+pub(crate) fn validate_unique_strong_ids(tasks: &[LogicalCollectionTask]) -> NpResult<()> {
+    if tasks.len() < 2 {
+        return Ok(());
+    }
+
+    let mut seen: HashMap<&str, (usize, &str)> = HashMap::with_capacity(tasks.len());
+    for (index, task) in tasks.iter().enumerate() {
+        if let Some((first_index, first_task_id)) =
+            seen.insert(task.strong_id.as_str(), (index, task.task_id.as_str()))
+        {
+            return Err(NpError::new(format!(
+                "duplicate collection strong_id {:?} at task indices {} ({:?}) and {} ({:?}); task_id is not part of collection identity",
+                task.strong_id, first_index, first_task_id, index, task.task_id
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn validate_decoder_layout(
+    sampler_detector_ids: &[i64],
+    sampler_observable_ids: &[i64],
+    sampler_description: &str,
     decoder_name: &str,
     detector_ids: &[i64],
     observable_ids: &[i64],
     batch_formats: &[DetectorBatchFormat],
 ) -> NpResult<()> {
     validate_decoder_detector_ids(detector_ids)?;
-    let sampler_detector_ids = sampler
-        .detector_ids()
-        .iter()
-        .copied()
-        .collect::<HashSet<_>>();
+    let sampler_detector_ids = sampler_detector_ids.iter().copied().collect::<HashSet<_>>();
     for &detector_id in detector_ids {
         if !sampler_detector_ids.contains(&detector_id) {
-            return Err(NpError::new(format!(
-                "decoder DEM sampler requested detector id {detector_id}, but it is not declared by the DEM"
-            )));
+            let message = if sampler_description == "DEM sampler" {
+                format!(
+                    "decoder DEM sampler requested detector id {detector_id}, but it is not declared by the DEM"
+                )
+            } else {
+                format!(
+                    "decoder {decoder_name} requested detector id {detector_id}, but it is not declared by the {sampler_description}"
+                )
+            };
+            return Err(NpError::new(message));
         }
     }
     validate_decoder_batch_formats(batch_formats)?;
-    validate_decoder_observable_layout(sampler.observable_ids(), observable_ids, decoder_name)
+    validate_decoder_observable_layout(sampler_observable_ids, observable_ids, decoder_name)
 }
 
 fn validate_collection_options(options: DemLogicalCollectionOptions) -> NpResult<()> {
@@ -463,7 +901,7 @@ pub(crate) enum ValidatedStopCounter {
 }
 
 pub(crate) fn validate_stop_counter_for_tasks(
-    tasks: &[DemLogicalCollectionTask],
+    tasks: &[LogicalCollectionTask],
     run_options: &DemLogicalCollectionRunOptions,
 ) -> NpResult<ValidatedStopCounter> {
     let schema = run_options.counter_schema();
@@ -562,7 +1000,7 @@ fn validate_observable_combo_mask_syntax(mask: &str) -> NpResult<()> {
 
 pub(crate) fn validate_observable_combo_mask_for_task(
     mask: &str,
-    task: &DemLogicalCollectionTask,
+    task: &LogicalCollectionTask,
 ) -> NpResult<()> {
     let observable_count = task.sampler.observable_ids().len();
     if mask.len() != observable_count {

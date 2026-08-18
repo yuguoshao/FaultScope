@@ -723,9 +723,11 @@ from faultscope.collection import (
     COLLECTION_CSV_HEADER,
     CollectionCounterSchema,
     CollectionData,
+    Collector,
     CollectionOptions,
     CollectionRunOptions,
     CollectionTask,
+    HotspotCollectionResult,
     Progress,
     TaskStats,
     FiniteSizeScalingFit,
@@ -735,7 +737,9 @@ from faultscope.collection import (
     ThresholdPoint,
     analyze_thresholds,
     collect,
+    collect_hotspots,
     iter_collect,
+    iter_progress,
     plot_threshold_analysis,
     read_stats_from_csv_files,
     write_stats_to_csv_file,
@@ -779,6 +783,13 @@ default, while an explicit `None` clears an inherited nullable value. Clearing
 `max_shots` is allowed during option merging but collection then fails with
 `max_shots is required` before compiling the task.
 
+Use `options.with_edits(batch_size=10_000, max_errors=None)` to derive options
+without losing which fields are explicit overrides. The method preserves prior
+override intent and marks every supplied field explicit, including values equal
+to their defaults. `dataclasses.replace()` is not supported for
+`CollectionOptions` because it replays every dataclass field and cannot preserve
+this distinction.
+
 `CollectionRunOptions` is a frozen dataclass:
 
 ```text
@@ -803,8 +814,8 @@ internal sampling id.
 
 ```text
 CollectionTask(
-    circuit: Circuit | None = None,
-    dem: DetectorErrorModel | None = None,
+    circuit: Circuit,
+    *,
     detectors: tuple[Detector, ...] | None = None,
     observables: tuple[LogicalObservable, ...] | None = None,
     decoder: object | str | None = None,
@@ -817,27 +828,38 @@ CollectionTask(
 )
 ```
 
-Exactly one of `circuit` or `dem` is required. Circuit tasks compile a
-materialized native DEM sampler, using embedded declarations unless explicit
-`detectors` or `observables` are supplied. String decoders are resolved with
-`create_native_decoder(name, dem=dem, options=decoder_options)`. Object decoders
-must be native decoder handles; Python decoders are rejected by collection.
-Every decoder object must also implement
+`circuit` is required. Passing `dem=` raises a migration error pointing to
+`faultscope.collection.dem.DemCollectionTask`. `detectors=None` and
+`observables=None` use declarations embedded in the circuit. An explicit
+sequence replaces the corresponding embedded declarations, and an explicit
+empty sequence clears them. The resulting declarations are compiled into the
+`SamplerProgram`; their stable declaration order defines the detector and
+observable layouts used by decoder validation, postselection, and counters.
+
+Collection shots execute the circuit directly with the packed Forward runtime.
+No DEM is generated when the task has no decoder or supplies an already
+constructed native decoder. A string decoder causes one circuit-derived DEM to
+be generated and cached during task preparation solely to construct the
+decoder's static problem; all shots still use the Forward sampler. Object
+decoders must be native decoder handles; Python decoders are rejected by
+collection. Every decoder object must also implement
 `strong_id_payload() -> Mapping[str, object]` and return JSON-serializable stable
 identity data. Missing or invalid payloads fail before resume lookup or native
 scheduling.
 
-Collection identity uses the v3 resume contract and is split into two hashes.
-The internal sampling id uses its own schema and contains the canonical
-circuit/DEM source, resolved decoder payload, metadata, and both postselection
-masks. Rust derives task-local random streams from this id. The public v3
-`strong_id` hashes the sampling id together with the complete counter schema.
-Changing either count flag therefore creates a separate resume identity while
-preserving the same seeded random samples. `custom_error_count_key`, task id,
-seed, shot/error limits, batch sizing, and worker count are excluded from both
-identities. Decoder payloads still include effective normalized options and
-solver structure; canonical encoding preserves sequence order, sorts mapping
-keys, and never uses `repr(...)`.
+Collection identity uses the v3 CSV/resume contract and is split into a sampling
+id (schema v2) and a public `strong_id` (schema v4). A Forward source digest has
+the `forward_circuit` kind and contains the circuit plus the `None`/explicit
+detector and observable declarations; `None` and an explicit empty sequence are
+therefore distinct. The sampling id combines that source digest with the
+resolved decoder digest, metadata, and both postselection masks. Rust derives
+task-local random streams from this id. The `strong_id` hashes the sampling id
+together with the complete counter schema. Changing either count flag creates a
+separate resume identity while preserving the same seeded random samples.
+`custom_error_count_key`, task id, seed, shot/error limits, batch sizing, and
+worker count are excluded from both identities. Decoder payloads include
+effective normalized options and solver structure; canonical encoding preserves
+sequence order, sorts mapping keys, and never uses `repr(...)`.
 
 `CollectionCounterSchema` is a public frozen dataclass:
 
@@ -933,6 +955,21 @@ collect(tasks, *, options=None, run_options=None) -> list[TaskStats]
 collect_hotspots(tasks, *, options=None, run_options=None) -> list[HotspotCollectionResult]
 ```
 
+`HotspotCollectionResult` is a frozen dataclass with Forward semantics:
+
+```text
+HotspotCollectionResult(
+    stats: TaskStats,
+    batch_stats: tuple[TaskStats, ...],
+    location_sensitivities: Mapping[str, float],
+)
+```
+
+`location_sensitivities` is keyed by physical noise-location id and is
+shot-weighted across all committed batches. Forward hotspot collection records
+noise-event masks; ordinary collection does not. Hotspot collection does not
+support CSV partial resume or adaptive batch sizing.
+
 The functions are one-shot wrappers around `Collector`. Sampling options come
 from the Collector and are overlaid by each task's `collection_options`. The
 final batch is capped to the remaining shot budget. `max_errors` and
@@ -940,7 +977,7 @@ final batch is capped to the remaining shot budget. `max_errors` and
 
 `num_workers` defaults to `1`. With fixed batch settings, the Rust scheduler can
 parallelize both multiple tasks and a single large task. Fixed seed plus fixed
-batch settings gives deterministic stats, ordered hotspot batches, and edge
+batch settings gives deterministic stats, ordered hotspot batches, and location
 sensitivities independent of worker count.
 Adaptive tasks using `max_batch_seconds` execute two or three serial calibration
 batches, freeze the median-throughput batch estimate, and parallelize the
@@ -959,6 +996,57 @@ emitted or counted.
 objects. Tasks with `decoder is None` are expanded once per fanout decoder;
 tasks that already specify `decoder=` keep their own decoder. String decoders
 are resolved through `create_native_decoder(...)`.
+
+### Legacy DEM Collection
+
+Explicit detector-error-model sampling is isolated in
+`faultscope.collection.dem` and is not re-exported from
+`faultscope.collection` or top-level `faultscope`. It is a library-only legacy
+path; the collection CLI accepts Forward circuit tasks only.
+
+```python
+from faultscope.collection.dem import (
+    DemCollectionTask,
+    DemCollector,
+    DemHotspotCollectionResult,
+    collect,
+    collect_hotspots,
+    iter_collect,
+    iter_progress,
+)
+```
+
+`DemCollectionTask` is a frozen dataclass:
+
+```text
+DemCollectionTask(
+    dem: DetectorErrorModel,
+    decoder: object | str | None = None,
+    decoder_options: Mapping[str, object] | None = None,
+    metadata: Mapping[str, object] | None = None,
+    collection_options: CollectionOptions | None = None,
+    task_id: str | None = None,
+    postselection_mask: bytes | bytearray | memoryview | None = None,
+    postselected_observables_mask: bytes | bytearray | memoryview | None = None,
+)
+```
+
+`DemCollector` exposes the same `collect`, `collect_hotspots`, `iter_collect`,
+and `iter_progress` methods as `Collector` but samples the supplied DEM directly.
+Its hotspot result retains edge semantics:
+
+```text
+DemHotspotCollectionResult(
+    stats: TaskStats,
+    batch_stats: tuple[TaskStats, ...],
+    edge_sensitivities: tuple[float, ...],
+)
+```
+
+The legacy module reuses `CollectionOptions`, `CollectionRunOptions`,
+`CollectionCounterSchema`, `TaskStats`, and the CSV helpers. Explicit DEM source
+payloads retain their existing identity, while a Forward `forward_circuit`
+source cannot collide with an old circuit-to-DEM identity.
 
 `save_resume_filepath` and `existing_data_filepaths` use CSV rows with this
 header:
@@ -1223,6 +1311,48 @@ let simulator = FaultScopeSimulator::new(circuit, Vec::new())?;
 let batch = simulator.run_batch(1024, Some(1), true)?;
 let estimate = simulator.estimate_from_loss(&batch, &batch.measurements["m0"], None, 10)?;
 ```
+
+The Rust collection crate is `faultscope-collection`. Its primary public API
+accepts a compiled `SamplerProgram` or `ForwardLogicalCollectionTask` and keeps
+all shot sampling on the Forward runtime:
+
+```rust
+use faultscope_collection::{
+    collect_forward_hotspot_tasks,
+    collect_forward_logical_error_stats,
+    collect_forward_logical_error_tasks,
+    collect_forward_logical_error_tasks_with_progress,
+    sample_forward_logical_error_stats,
+    ForwardHotspotCollectionResult,
+    ForwardLogicalCollectionTask,
+    LogicalCollectionOptions,
+    LogicalCollectionRunOptions,
+    LogicalCollectionStats,
+    LogicalCounterSchema,
+    LOGICAL_COUNTER_SCHEMA_VERSION,
+};
+```
+
+`ForwardHotspotCollectionResult` contains `stats`, ordered `batch_stats`, and
+`location_sensitivities: HashMap<String, f64>`. The neutral `Logical*` names are
+public aliases for the options, run options, stats, and counter schema shared by
+both collection runtimes.
+
+The explicit DEM APIs remain available as a legacy Rust path:
+
+```text
+DemLogicalCollectionTask
+collect_dem_logical_error_stats(...)
+sample_dem_logical_error_stats(...)
+collect_dem_logical_error_tasks(...)
+collect_dem_logical_error_tasks_with_progress(...)
+collect_dem_hotspot_tasks(...) -> Vec<DemHotspotCollectionResult>
+```
+
+`DemHotspotCollectionResult` retains `edge_sensitivities: Vec<f64>`. Forward
+callers should use the `collect_forward_*` functions; the scheduler, stop
+conditions, progress protocol, decoder worker cache, and shared `Logical*`
+schemas are common to both paths.
 
 Validation failures return `NpError` in Rust and usually become `ValueError` or
 `UnsupportedNativeCircuitError` through the public Python wrappers.

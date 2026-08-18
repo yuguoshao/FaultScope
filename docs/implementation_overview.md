@@ -158,6 +158,27 @@ event_count = popcount(event_mask)
 该 runtime 支持确定和随机 Pauli measurement，只要后续电路不依赖单个 shot 的测量结果选择不同操作。
 FaultScope 当前不暴露通用 per-shot adaptive branching simulator。
 
+## Collection Runtime
+
+`faultscope.collection` 和 collection CLI 只接受
+`CollectionTask(circuit=...)`。任务把 circuit 以及可选的 detector/observable
+声明覆盖编译为同一个 `SamplerProgram`，再由 `NativePackedSampler` 直接执行
+Forward shots。`None` 使用 circuit 内嵌声明；显式序列（包括空序列）替换对应声明。
+编译后的 detector/observable ID 顺序同时用于 decoder layout 校验、postselection
+和详细 counters。一次 collection 调用内，共享同一 source 的 decoder fan-out 复用
+已编译 sampler。
+
+普通 collection 不记录 noise-event attribution masks。无 decoder 或直接传入已构造
+native decoder 时不会生成 DEM；字符串 decoder 仅在任务准备阶段按 source 生成并缓存
+一次 DEM，用于构造静态解码问题，shot sampling 仍始终走 Forward runtime。Rust
+`faultscope-collection` scheduler 负责 batch、worker、停止条件、按 task/batch 派生 seed
+以及 decoder worker cache，因此固定 batch 和 seed 时不依赖 worker 数。
+
+Forward hotspot collection 在同一 packed runtime 上开启 noise-event masks，并按 shot
+加权聚合所有 batch 的 physical location sensitivity。显式 DEM sampling 是独立的 legacy
+路径：`faultscope.collection.dem.DemCollectionTask` 使用 DEM sampler，hotspot 返回 edge
+sensitivity；这些类型不从主 collection 模块或顶层 `faultscope` 导出，也没有 DEM CLI。
+
 ## Detector Error Model
 
 `DetectorErrorModelGenerator` 使用 `Detector` 和 `LogicalObservable` 声明生成 DEM。`Detector`

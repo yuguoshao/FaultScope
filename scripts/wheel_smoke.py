@@ -6,7 +6,16 @@ from __future__ import annotations
 import argparse
 
 import faultscope
-from faultscope import Detector, DetectorErrorEdge, DetectorErrorModel, LogicalObservable
+from faultscope import (
+    BernoulliPauliNoise,
+    Circuit,
+    Detector,
+    DetectorErrorEdge,
+    DetectorErrorModel,
+    LogicalObservable,
+    NoiseLocation,
+    Operation,
+)
 from faultscope.collection import (
     CollectionOptions,
     CollectionRunOptions,
@@ -17,18 +26,20 @@ from faultscope.decoders import available_native_decoders, create_native_decoder
 from faultscope.runtime import compile_native_dem_sampler
 
 
-def _logical_edge_dem() -> DetectorErrorModel:
-    return DetectorErrorModel(
-        detectors=(),
-        observables=(LogicalObservable(id=0),),
-        edges=(
-            DetectorErrorEdge(
-                probability=1.0,
-                detectors=(),
-                observables=(0,),
-                location_id="logical",
-                event="L",
+def _logical_edge_circuit() -> Circuit:
+    return Circuit(
+        1,
+        (
+            Operation.noise(
+                NoiseLocation(
+                    "logical",
+                    BernoulliPauliNoise("X"),
+                    1.0,
+                    (0,),
+                )
             ),
+            Operation.measure(0, key="m"),
+            Operation.observable_include(0, ("m",)),
         ),
     )
 
@@ -55,7 +66,7 @@ def main() -> int:
     args = parser.parse_args()
 
     stats = collect(
-        [CollectionTask(dem=_logical_edge_dem(), task_id="wheel-smoke")],
+        [CollectionTask(circuit=_logical_edge_circuit(), task_id="wheel-smoke")],
         options=CollectionOptions(max_shots=8),
         run_options=CollectionRunOptions(seed=1),
     )[0]

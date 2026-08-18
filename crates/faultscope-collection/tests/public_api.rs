@@ -1353,6 +1353,86 @@ fn collection_run_options(num_workers: usize) -> DemLogicalCollectionRunOptions 
 }
 
 #[test]
+fn logical_collection_rejects_duplicate_strong_ids_before_workers_or_progress() {
+    let tracker = Arc::new(InstanceTracker::default());
+    let decoder: Arc<dyn NativeDecoderFactory> =
+        Arc::new(WorkerOwnedDecoder::prototype(tracker.clone()));
+    let first = decoder_collection_task("duplicate-first", decoder.clone(), 8, false);
+    let mut second = decoder_collection_task("duplicate-second", decoder, 8, false);
+    second.strong_id = first.strong_id.clone();
+    second.sampling_id = first.sampling_id.clone();
+    let tasks = vec![first, second];
+    let expected = "duplicate collection strong_id \"duplicate-first-strong\" at task indices 0 (\"duplicate-first\") and 1 (\"duplicate-second\"); task_id is not part of collection identity";
+
+    let err =
+        collect_dem_logical_error_tasks(tasks.clone(), collection_run_options(4), HashMap::new())
+            .unwrap_err();
+    assert_eq!(err.message(), expected);
+
+    let mut progress_calls = 0;
+    let err = collect_dem_logical_error_tasks_with_progress(
+        tasks,
+        collection_run_options(4),
+        HashMap::new(),
+        |_| {
+            progress_calls += 1;
+            Ok(())
+        },
+    )
+    .unwrap_err();
+    assert_eq!(err.message(), expected);
+    assert_eq!(progress_calls, 0);
+    assert_eq!(tracker.created.load(Ordering::SeqCst), 0);
+    assert_eq!(tracker.decode_calls.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn dem_hotspot_rejects_duplicate_strong_ids_before_workers() {
+    let tracker = Arc::new(InstanceTracker::default());
+    let decoder: Arc<dyn NativeDecoderFactory> =
+        Arc::new(WorkerOwnedDecoder::prototype(tracker.clone()));
+    let first = decoder_collection_task("hotspot-duplicate-first", decoder.clone(), 8, false);
+    let mut second = decoder_collection_task("hotspot-duplicate-second", decoder, 8, false);
+    second.strong_id = first.strong_id.clone();
+    second.sampling_id = first.sampling_id.clone();
+
+    let err =
+        collect_dem_hotspot_tasks(vec![first, second], collection_run_options(4)).unwrap_err();
+
+    assert_eq!(
+        err.message(),
+        "duplicate collection strong_id \"hotspot-duplicate-first-strong\" at task indices 0 (\"hotspot-duplicate-first\") and 1 (\"hotspot-duplicate-second\"); task_id is not part of collection identity"
+    );
+    assert_eq!(tracker.created.load(Ordering::SeqCst), 0);
+    assert_eq!(tracker.decode_calls.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn dem_collection_rejects_nonzero_mask_padding_bits_before_workers() {
+    let tracker = Arc::new(InstanceTracker::default());
+    let decoder: Arc<dyn NativeDecoderFactory> =
+        Arc::new(WorkerOwnedDecoder::prototype(tracker.clone()));
+    let base = decoder_collection_task("padding-bits", decoder, 8, false);
+
+    for (name, detector_mask, observable_mask) in [
+        ("postselection_mask", Some(vec![0x80]), None),
+        ("postselected_observables_mask", None, Some(vec![0x80])),
+    ] {
+        let mut task = base.clone();
+        task.postselection_mask = detector_mask;
+        task.postselected_observables_mask = observable_mask;
+        let err =
+            collect_dem_logical_error_tasks(vec![task], collection_run_options(1), HashMap::new())
+                .unwrap_err();
+        assert_eq!(
+            err.message(),
+            format!("{name} has non-zero unused padding bits in its final byte")
+        );
+    }
+    assert_eq!(tracker.created.load(Ordering::SeqCst), 0);
+}
+
+#[test]
 fn direct_counting_apis_accept_non_static_borrowed_workers() {
     let name = String::from("borrowed");
     let detector_ids = [0];
@@ -2154,7 +2234,7 @@ fn validates_options_and_repeats_seeded_runs() {
 }
 
 #[test]
-fn parallel_task_collection_is_seed_order_stable() {
+fn parallel_task_collection_run_seed_is_worker_count_stable() {
     let task_a = DemLogicalCollectionTask {
         task_id: "a".to_string(),
         strong_id: "a-strong".to_string(),
@@ -2168,7 +2248,7 @@ fn parallel_task_collection_is_seed_order_stable() {
             min_shots: 0,
             max_errors: None,
             batch_size: 25,
-            seed: Some(19),
+            seed: None,
             start_batch_size: None,
             max_batch_size: None,
             max_batch_seconds: None,
@@ -2189,7 +2269,7 @@ fn parallel_task_collection_is_seed_order_stable() {
             min_shots: 0,
             max_errors: None,
             batch_size: 20,
-            seed: Some(23),
+            seed: None,
             start_batch_size: None,
             max_batch_size: None,
             max_batch_seconds: None,

@@ -22,7 +22,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from faultscope import DetectorErrorEdge, DetectorErrorModel, LogicalObservable
+from faultscope import BernoulliPauliNoise, Circuit, NoiseLocation, Operation
 from faultscope.collection import (
     CollectionOptions,
     CollectionRunOptions,
@@ -209,7 +209,7 @@ def _median_collection_time(
     for repeat in range(repeats):
         tasks = [
             CollectionTask(
-                dem=_logical_edge_dem(probability),
+                circuit=_logical_edge_circuit(probability),
                 task_id=f"task-{index}",
                 metadata={"index": index},
             )
@@ -236,18 +236,20 @@ def _median_collection_time(
     return statistics.median(timings), last_errors, last_discards
 
 
-def _logical_edge_dem(probability: float) -> DetectorErrorModel:
-    return DetectorErrorModel(
-        detectors=(),
-        observables=(LogicalObservable(id=0),),
-        edges=(
-            DetectorErrorEdge(
-                probability=probability,
-                detectors=(),
-                observables=(0,),
-                location_id="logical_edge",
-                event="L",
+def _logical_edge_circuit(probability: float) -> Circuit:
+    return Circuit(
+        1,
+        (
+            Operation.noise(
+                NoiseLocation(
+                    "logical_edge",
+                    BernoulliPauliNoise("X"),
+                    probability,
+                    (0,),
+                )
             ),
+            Operation.measure(0, key="m"),
+            Operation.observable_include(0, ("m",)),
         ),
     )
 

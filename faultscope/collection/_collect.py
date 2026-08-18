@@ -5,19 +5,23 @@ from __future__ import annotations
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass, replace
 import json
+import os
 from pathlib import Path
 import threading
-from typing import Any
+from typing import Any, cast
 
-from faultscope._native import _collect_dem_hotspots_many, _collect_dem_logical_error_stats_many
+from faultscope._native import (
+    _collect_forward_hotspots_many,
+    _collect_forward_logical_error_stats_many,
+)
 from faultscope.decoders import create_native_decoder
-from faultscope.runtime import (
-    compile_native_dem_sampler,
-    compile_native_dem_sampler_from_circuit,
+from faultscope.runtime.native import (
+    compile_native_collection_sampler,
+    generate_native_dem,
 )
 
 from faultscope.collection._types import (
-    CollectionData,
+    _CollectionCsvAppender,
     CollectionCounterSchema,
     CollectionOptions,
     CollectionRunOptions,
@@ -26,7 +30,6 @@ from faultscope.collection._types import (
     Progress,
     TaskStats,
     read_stats_from_csv_files,
-    write_stats_to_csv_file,
 )
 from faultscope.collection._identity import (
     SAMPLING_ID_SCHEMA_VERSION,
@@ -34,8 +37,8 @@ from faultscope.collection._identity import (
     decoder_identity_digest,
     decoder_identity_payload,
     domain_digest,
+    forward_source_identity_payload,
     source_identity_digest,
-    source_identity_payload,
 )
 
 
@@ -43,12 +46,28 @@ from faultscope.collection._identity import (
 # Native sampling, decoding, batch scheduling, and counting stay in Rust.
 
 
-@dataclass(frozen=True)
+_UNPREPARED_DEM = object()
+
+
+@dataclass
 class _PreparedSource:
-    """Immutable sampler and DEM shared by task views of one source."""
+    """Forward sampler plus a lazily generated decoder-only DEM."""
 
     sampler: Any
-    dem: Any
+    circuit: Any
+    detectors: tuple[Any, ...] | None
+    observables: tuple[Any, ...] | None
+    source_digest: str
+    _dem: Any = _UNPREPARED_DEM
+
+    def decoder_dem(self) -> Any:
+        if self._dem is _UNPREPARED_DEM:
+            self._dem = generate_native_dem(
+                self.circuit,
+                detectors=self.detectors,
+                observables=self.observables,
+            )
+        return self._dem
 
 
 class _PreparationContext:
@@ -61,18 +80,26 @@ class _PreparationContext:
         ] = {}
 
     def prepare_source(self, task: CollectionTask) -> _PreparedSource:
-        references: tuple[object, ...]
-        if task.dem is not None:
-            references = (task.dem,)
-        else:
-            references = (task.circuit, task.detectors, task.observables)
+        references: tuple[object, ...] = (task.circuit, task.detectors, task.observables)
         key = tuple(id(reference) for reference in references)
         entries = self._sources.setdefault(key, [])
         for held_references, source in entries:
             if all(current is held for current, held in zip(references, held_references)):
                 return source
-        sampler, dem = _compile_task_sampler(task)
-        source = _PreparedSource(sampler=sampler, dem=dem)
+        sampler = _compile_task_sampler(task)
+        source = _PreparedSource(
+            sampler=sampler,
+            circuit=task.circuit,
+            detectors=task.detectors,
+            observables=task.observables,
+            source_digest=source_identity_digest(
+                forward_source_identity_payload(
+                    circuit=task.circuit,
+                    detectors=task.detectors,
+                    observables=task.observables,
+                )
+            ),
+        )
         entries.append((references, source))
         return source
 
@@ -104,7 +131,7 @@ class Collector:
         yield from self.collect(tasks)
 
     def collect_hotspots(self, tasks: Iterable[CollectionTask]) -> list[HotspotCollectionResult]:
-        """Collect logical statistics and shot-weighted edge sensitivities."""
+        """Collect logical statistics and shot-weighted location sensitivities."""
 
         return _run_collect_hotspots(tasks, self.options, self.run_options)
 
@@ -154,7 +181,7 @@ def collect_hotspots(
     options: CollectionOptions | None = None,
     run_options: CollectionRunOptions | None = None,
 ) -> list[HotspotCollectionResult]:
-    """Collect logical statistics and shot-weighted edge sensitivities."""
+    """Collect logical statistics and shot-weighted location sensitivities."""
 
     return Collector(options=options, run_options=run_options).collect_hotspots(tasks)
 
@@ -177,9 +204,24 @@ def _run_collect(
     *,
     progress_sink: Callable[[Progress], object] | None = None,
 ) -> list[TaskStats]:
+    return _run_collect_materialized(
+        list(tasks),
+        options,
+        run_options,
+        progress_sink=progress_sink,
+    )
+
+
+def _run_collect_materialized(
+    tasks: list[CollectionTask],
+    options: CollectionOptions,
+    run_options: CollectionRunOptions,
+    *,
+    progress_sink: Callable[[Progress], object] | None = None,
+) -> list[TaskStats]:
     counter_schema = _counter_schema_from_run_options(run_options)
     native_tasks = _prepare_native_tasks(
-        list(tasks),
+        tasks,
         options,
         run_options.decoders,
         counter_schema,
@@ -203,37 +245,45 @@ def _run_collect(
         if run_options.save_resume_filepath is not None
         else None
     )
-    existing_data = CollectionData(existing.values())
+    resume_writer: _CollectionCsvAppender | None = None
+
+    def append_resume(stat: TaskStats) -> None:
+        nonlocal resume_writer
+        if resume_path is None:
+            return
+        if resume_writer is None:
+            resume_writer = _CollectionCsvAppender(resume_path)
+        resume_writer.write((stat,))
 
     def on_stream_delta(item: Mapping[str, object]) -> None:
         stat = _task_stats_from_native(item)
-        if resume_path is not None:
-            write_stats_to_csv_file(resume_path, [stat], append=True)
-        existing_data.add_sample(stat)
+        append_resume(stat)
         progress = Progress((stat,), _status_message(stat))
         if progress_sink is not None:
             progress_sink(progress)
 
-    native_stats = _collect_dem_logical_error_stats_many(
-        native_tasks,
-        num_workers=run_options.num_workers,
-        seed=run_options.seed,
-        count_observable_error_combos=run_options.count_observable_error_combos,
-        count_detection_events=run_options.count_detection_events,
-        custom_error_count_key=run_options.custom_error_count_key,
-        existing_stats=[_native_stats_from_task_stats(stat) for stat in existing.values()],
-        progress_callback=on_stream_delta if progress_sink is not None else None,
-    )
-    final_stats = [_task_stats_from_native(item) for item in native_stats]
+    try:
+        native_stats = _collect_forward_logical_error_stats_many(
+            native_tasks,
+            num_workers=run_options.num_workers,
+            seed=run_options.seed,
+            count_observable_error_combos=run_options.count_observable_error_combos,
+            count_detection_events=run_options.count_detection_events,
+            custom_error_count_key=run_options.custom_error_count_key,
+            existing_stats=[_native_stats_from_task_stats(stat) for stat in existing.values()],
+            progress_callback=on_stream_delta if progress_sink is not None else None,
+        )
+        final_stats = [_task_stats_from_native(item) for item in native_stats]
 
-    if progress_sink is None:
-        for stat in final_stats:
-            if resume_path is not None:
+        if progress_sink is None:
+            for stat in final_stats:
                 delta = _stats_delta(stat, existing.get(stat.strong_id))
                 if delta is not None:
-                    write_stats_to_csv_file(resume_path, [delta], append=True)
-
-    return final_stats
+                    append_resume(delta)
+        return final_stats
+    finally:
+        if resume_writer is not None:
+            resume_writer.close()
 
 
 def _run_collect_hotspots(
@@ -250,7 +300,7 @@ def _run_collect_hotspots(
         run_options.decoders,
         counter_schema,
     )
-    native_results = _collect_dem_hotspots_many(
+    native_results = _collect_forward_hotspots_many(
         native_tasks,
         num_workers=run_options.num_workers,
         seed=run_options.seed,
@@ -262,7 +312,9 @@ def _run_collect_hotspots(
         HotspotCollectionResult(
             stats=_task_stats_from_native(item["stats"]),
             batch_stats=tuple(_task_stats_from_native(stat) for stat in item["batch_stats"]),
-            edge_sensitivities=tuple(float(value) for value in item["edge_sensitivities"]),
+            location_sensitivities=_location_sensitivities_from_native(
+                item["location_sensitivities"]
+            ),
         )
         for item in native_results
     ]
@@ -277,6 +329,7 @@ def _iter_collect_stream(
     options: CollectionOptions,
     run_options: CollectionRunOptions,
 ) -> Iterator[Progress]:
+    task_list = list(tasks)
     condition = threading.Condition()
     pending: Progress | None = None
     failure: BaseException | None = None
@@ -302,8 +355,8 @@ def _iter_collect_stream(
     def worker() -> None:
         nonlocal failure, done
         try:
-            _run_collect(
-                tasks,
+            _run_collect_materialized(
+                task_list,
                 options,
                 run_options,
                 progress_sink=progress_bridge,
@@ -410,10 +463,21 @@ def _native_task(
     if options.max_shots is None:
         raise ValueError("max_shots is required")
     if source is None:
-        sampler, dem = _compile_task_sampler(task)
-    else:
-        sampler, dem = source.sampler, source.dem
-    decoder = _resolve_decoder(task, dem)
+        source = _PreparedSource(
+            sampler=_compile_task_sampler(task),
+            circuit=task.circuit,
+            detectors=task.detectors,
+            observables=task.observables,
+            source_digest=source_identity_digest(
+                forward_source_identity_payload(
+                    circuit=task.circuit,
+                    detectors=task.detectors,
+                    observables=task.observables,
+                )
+            ),
+        )
+    sampler = source.sampler
+    decoder = _resolve_decoder(task, source)
     decoder_name = _decoder_name(decoder if decoder is not None else task.decoder)
     metadata = dict(task.metadata or {})
     metadata_json = _canonical_json(metadata)
@@ -421,8 +485,7 @@ def _native_task(
     postselection_mask = _bytes_or_none(task.postselection_mask)
     postselected_observables_mask = _bytes_or_none(task.postselected_observables_mask)
     sampling_id, strong_id = _task_identities(
-        task=task,
-        dem=dem,
+        source_digest=source.source_digest,
         decoder=decoder,
         decoder_name=decoder_name,
         metadata=metadata,
@@ -451,27 +514,22 @@ def _native_task(
     }
 
 
-def _compile_task_sampler(task: CollectionTask) -> tuple[Any, Any]:
-    if task.dem is not None:
-        sampler = compile_native_dem_sampler(task.dem)
-        return sampler, task.dem
+def _compile_task_sampler(task: CollectionTask) -> Any:
     circuit = task.circuit
     if circuit is None:
-        raise ValueError("collection task requires a circuit or DEM")
-    sampler = compile_native_dem_sampler_from_circuit(
+        raise ValueError("collection task requires a circuit")
+    return compile_native_collection_sampler(
         circuit,
         detectors=task.detectors,
         observables=task.observables,
-        materialize_dem=True,
     )
-    return sampler, sampler.dem
 
 
-def _resolve_decoder(task: CollectionTask, dem: Any) -> object | None:
+def _resolve_decoder(task: CollectionTask, source: _PreparedSource) -> object | None:
     if isinstance(task.decoder, str):
         return create_native_decoder(
             task.decoder,
-            dem=dem,
+            dem=source.decoder_dem(),
             options=task.decoder_options,
         )
     return task.decoder
@@ -485,6 +543,11 @@ def _prepare_native_tasks(
 ) -> list[dict[str, object]]:
     """Compile each source once, then prepare its decoder task views."""
 
+    if any(not isinstance(task, CollectionTask) for task in tasks):
+        raise TypeError(
+            "faultscope.collection accepts only CollectionTask(circuit=...); "
+            "use faultscope.collection.dem for DemCollectionTask objects"
+        )
     context = _PreparationContext()
     task_list = _expand_tasks_for_decoders(tasks, decoders)
     native_tasks: list[dict[str, object]] = []
@@ -518,8 +581,7 @@ def _decoder_name(decoder: object | str | None) -> str | None:
 
 def _task_identities(
     *,
-    task: CollectionTask,
-    dem: Any,
+    source_digest: str,
     decoder: object | None,
     decoder_name: str | None,
     metadata: Mapping[str, object],
@@ -527,7 +589,6 @@ def _task_identities(
     postselected_observables_mask: bytes | None,
     counter_schema: CollectionCounterSchema,
 ) -> tuple[str, str]:
-    source_digest = source_identity_digest(source_identity_payload(circuit=task.circuit, dem=dem))
     decoder_digest = decoder_identity_digest(
         decoder_identity_payload(decoder, decoder_name=decoder_name)
     )
@@ -576,15 +637,15 @@ def _task_stats_from_native(item: Mapping[str, object]) -> TaskStats:
     raw_custom_counts = item.get("custom_counts", {})
     if not isinstance(raw_custom_counts, Mapping):
         raise TypeError("native custom_counts must be a mapping")
-    custom_counts = {str(key): int(str(value)) for key, value in raw_custom_counts.items()}
+    custom_counts = {str(key): int(value) for key, value in raw_custom_counts.items()}
     counter_schema = CollectionCounterSchema._from_payload(item.get("counter_schema"))
     return TaskStats(
         task_id=str(item["task_id"]),
         strong_id=str(item["strong_id"]),
-        shots=int(str(item["shots"])),
-        errors=int(str(item["errors"])),
-        discards=int(str(item["discards"])),
-        seconds=float(str(item["seconds"])),
+        shots=int(cast(Any, item["shots"])),
+        errors=int(cast(Any, item["errors"])),
+        discards=int(cast(Any, item["discards"])),
+        seconds=float(cast(Any, item["seconds"])),
         decoder=item["decoder"] if isinstance(item["decoder"], str) else None,
         metadata=dict(metadata),
         custom_counts=custom_counts,
@@ -592,16 +653,76 @@ def _task_stats_from_native(item: Mapping[str, object]) -> TaskStats:
     )
 
 
+def _location_sensitivities_from_native(value: object) -> dict[str, float]:
+    if not isinstance(value, Mapping):
+        raise TypeError("native location_sensitivities must be a mapping")
+    return {str(key): float(sensitivity) for key, sensitivity in value.items()}
+
+
 def _read_existing_stats(
     existing_data_filepaths: Iterable[str | Path],
     save_resume_filepath: str | Path | None,
 ) -> dict[str, TaskStats]:
-    paths = [Path(path) for path in existing_data_filepaths]
+    paths: list[Path] = []
+    seen_lexical_paths: set[str] = set()
+    seen_file_identities: set[tuple[object, ...]] = set()
+
+    def append_unique(
+        path: Path,
+        *,
+        known_stat: os.stat_result | None = None,
+    ) -> None:
+        lexical_path = _lexical_path_key(path)
+        if lexical_path in seen_lexical_paths:
+            return
+        seen_lexical_paths.add(lexical_path)
+        identity = _path_identity(path, known_stat=known_stat)
+        if identity in seen_file_identities:
+            return
+        seen_file_identities.add(identity)
+        paths.append(path)
+
+    for filepath in existing_data_filepaths:
+        append_unique(Path(filepath))
     if save_resume_filepath is not None:
         resume = Path(save_resume_filepath)
-        if resume.exists() and resume not in paths:
-            paths.append(resume)
+        if _lexical_path_key(resume) not in seen_lexical_paths:
+            try:
+                resume_stat = resume.stat()
+            except OSError:
+                pass
+            else:
+                append_unique(resume, known_stat=resume_stat)
     return {stat.strong_id: stat for stat in read_stats_from_csv_files(paths)}
+
+
+def _lexical_path_key(path: Path) -> str:
+    return os.path.normcase(os.path.abspath(os.fspath(path)))
+
+
+def _path_identity(
+    path: Path,
+    *,
+    known_stat: os.stat_result | None = None,
+) -> tuple[object, ...]:
+    file_stat = known_stat
+    if file_stat is None:
+        try:
+            file_stat = path.stat()
+        except OSError:
+            return ("path", _normalized_path_key(path))
+    inode = int(file_stat.st_ino)
+    if inode != 0:
+        return ("inode", int(file_stat.st_dev), inode)
+    return ("path", _normalized_path_key(path))
+
+
+def _normalized_path_key(path: Path) -> str:
+    try:
+        resolved = path.resolve(strict=False)
+    except (OSError, RuntimeError):
+        return _lexical_path_key(path)
+    return os.path.normcase(os.fspath(resolved))
 
 
 def _native_stats_from_task_stats(stat: TaskStats) -> dict[str, object]:

@@ -1,4 +1,4 @@
-//! Global scheduler for native DEM logical collection.
+//! Global scheduler for native logical collection.
 //!
 //! A run owns one worker pool capped by `DemLogicalCollectionRunOptions::num_workers`.
 //! Fixed-size tasks are split into deterministic batch work items; the main
@@ -11,42 +11,54 @@
 use std::collections::HashMap;
 use std::sync::mpsc;
 use std::sync::Arc;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use crate::api::{
     stop_error_count, task_is_complete, validate_observable_combo_mask_for_task,
-    validate_stop_counter_for_tasks, validate_task, DemLogicalCollectionOptions,
-    DemLogicalCollectionRunOptions, DemLogicalCollectionStats, DemLogicalCollectionTask,
-    ValidatedStopCounter,
+    validate_stop_counter_for_tasks, validate_task, validate_unique_strong_ids,
+    DemLogicalCollectionOptions, DemLogicalCollectionRunOptions, DemLogicalCollectionStats,
+    LogicalCollectionTask, ValidatedStopCounter,
 };
 use crate::counting::{
-    prepare_dem_count_plan, sample_dem_logical_error_stats_with_rng, BatchStats, CountOptions,
-    PreparedDemCountPlan,
+    prepare_count_plan, sample_logical_error_stats, BatchStats, CountOptions, PreparedCountPlan,
 };
 use crate::worker_decoder::WorkerDecoderCache;
-use crate::worker_executor::{execute_with_context, WorkerExecutor};
-use faultscope_core::{NativeDecoderWorker, NpError, NpResult, SmallRng};
+use crate::worker_executor::{execute_with_context, WorkSender, WorkerExecutor};
+use faultscope_core::{NativeDecoderWorker, NpError, NpResult};
+
+// Amortize scheduler/channel overhead without changing progress granularity or
+// doing substantially more work after an error stop. Every constituent batch
+// keeps its original ordinal-derived seed.
+const MAX_BATCHES_PER_WORK_ITEM: usize = 1024;
+const TARGET_SHOTS_PER_WORK_ITEM: usize = 640_000;
+
+#[derive(Clone, Copy)]
+struct SeedStream {
+    task_seed: u64,
+    stream: usize,
+}
 
 #[derive(Clone)]
 struct BatchWork {
     state_index: usize,
-    ordinal: usize,
-    shots: usize,
-    seed: Option<u64>,
+    first_ordinal: usize,
+    batch_count: usize,
+    specs: FixedBatchSpecs,
+    seed: u64,
     seed_stream: usize,
-    task: Arc<DemLogicalCollectionTask>,
+    task: Arc<LogicalCollectionTask>,
     run_options: Arc<DemLogicalCollectionRunOptions>,
-    prepared_plan: Arc<PreparedDemCountPlan>,
+    prepared_plan: Arc<PreparedCountPlan>,
 }
 
 #[derive(Clone)]
 struct AdaptiveCalibrationWork {
     state_index: usize,
-    task: Arc<DemLogicalCollectionTask>,
+    task: Arc<LogicalCollectionTask>,
     run_options: Arc<DemLogicalCollectionRunOptions>,
     stop_counter: ValidatedStopCounter,
-    seed_stream: usize,
-    prepared_plan: Arc<PreparedDemCountPlan>,
+    seed_stream: SeedStream,
+    prepared_plan: Arc<PreparedCountPlan>,
 }
 
 struct AdaptiveCalibrationResult {
@@ -63,6 +75,7 @@ enum WorkResult {
     Batch {
         state_index: usize,
         ordinal: usize,
+        batch_count: usize,
         stats: BatchStats,
     },
     AdaptiveDelta {
@@ -73,6 +86,11 @@ enum WorkResult {
         state_index: usize,
         result: AdaptiveCalibrationResult,
     },
+}
+
+struct CompletedBatch {
+    batch_count: usize,
+    stats: BatchStats,
 }
 
 impl WorkResult {
@@ -87,20 +105,73 @@ enum TaskPhase {
     Complete,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct FixedBatchSpecs {
+    total_shots: usize,
+    first_batch: usize,
+    regular_batch: usize,
+    len: usize,
+}
+
+impl FixedBatchSpecs {
+    fn new(total_shots: usize, first_batch: usize, regular_batch: usize) -> Self {
+        if total_shots == 0 {
+            return Self::default();
+        }
+        let first_batch = first_batch.min(total_shots).max(1);
+        let regular_batch = regular_batch.max(1);
+        let len = 1 + (total_shots - first_batch).div_ceil(regular_batch);
+        Self {
+            total_shots,
+            first_batch,
+            regular_batch,
+            len,
+        }
+    }
+
+    fn get(&self, ordinal: usize) -> Option<usize> {
+        if ordinal >= self.len {
+            return None;
+        }
+        if ordinal == 0 {
+            return Some(self.first_batch);
+        }
+        let remaining_after_first = self.total_shots - self.first_batch;
+        let consumed = (ordinal - 1) * self.regular_batch;
+        Some((remaining_after_first - consumed).min(self.regular_batch))
+    }
+
+    fn len(&self) -> usize {
+        self.len
+    }
+
+    fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    #[cfg(test)]
+    fn iter(&self) -> impl Iterator<Item = usize> + '_ {
+        (0..self.len).map(|ordinal| {
+            self.get(ordinal)
+                .expect("fixed batch ordinal below len must exist")
+        })
+    }
+}
+
 struct TaskState {
     output_index: usize,
-    task: Arc<DemLogicalCollectionTask>,
-    prepared_plan: Arc<PreparedDemCountPlan>,
+    task: Arc<LogicalCollectionTask>,
+    prepared_plan: Arc<PreparedCountPlan>,
     stats: DemLogicalCollectionStats,
     completion_options: DemLogicalCollectionOptions,
     stop_counter: ValidatedStopCounter,
-    specs: Vec<usize>,
+    specs: FixedBatchSpecs,
     next_scheduled: usize,
     next_committed: usize,
-    pending: HashMap<usize, BatchStats>,
+    pending: HashMap<usize, CompletedBatch>,
     in_flight: usize,
     phase: TaskPhase,
-    seed: Option<u64>,
+    seed: u64,
     resume_shots: usize,
     started: Option<Instant>,
     committed_elapsed: Duration,
@@ -129,7 +200,7 @@ impl TaskState {
 }
 
 pub(crate) fn collect_task_set(
-    tasks: Vec<DemLogicalCollectionTask>,
+    tasks: Vec<LogicalCollectionTask>,
     run_options: DemLogicalCollectionRunOptions,
     existing_data: HashMap<String, DemLogicalCollectionStats>,
 ) -> NpResult<Vec<DemLogicalCollectionStats>> {
@@ -139,7 +210,7 @@ pub(crate) fn collect_task_set(
 pub(crate) type ProgressCallback<'a> = dyn FnMut(&DemLogicalCollectionStats) -> NpResult<()> + 'a;
 
 pub(crate) fn collect_task_set_with_progress(
-    tasks: Vec<DemLogicalCollectionTask>,
+    tasks: Vec<LogicalCollectionTask>,
     run_options: DemLogicalCollectionRunOptions,
     existing_data: HashMap<String, DemLogicalCollectionStats>,
     progress_callback: &mut ProgressCallback<'_>,
@@ -148,7 +219,7 @@ pub(crate) fn collect_task_set_with_progress(
 }
 
 fn collect_task_set_inner(
-    tasks: Vec<DemLogicalCollectionTask>,
+    tasks: Vec<LogicalCollectionTask>,
     run_options: DemLogicalCollectionRunOptions,
     existing_data: HashMap<String, DemLogicalCollectionStats>,
     mut progress_callback: Option<&mut ProgressCallback<'_>>,
@@ -162,6 +233,8 @@ fn collect_task_set_inner(
         validate_task(task)?;
     }
     let stop_counter = validate_stop_counter_for_tasks(&tasks, &run_options)?;
+    validate_unique_strong_ids(&tasks)?;
+    let run_seed = resolve_run_seed(run_options.seed);
 
     let mut results = vec![None; tasks.len()];
     let mut states = Vec::new();
@@ -180,7 +253,9 @@ fn collect_task_set_inner(
                     task.metadata_json.clone(),
                 )
             })
-            .unwrap_or_else(|| DemLogicalCollectionStats::empty_for_task(&task, counter_schema));
+            .unwrap_or_else(|| {
+                DemLogicalCollectionStats::empty_for_logical_task(&task, counter_schema)
+            });
         if task_is_complete(&stats, &task.options, &stop_counter)? {
             results[output_index] = Some(stats);
             continue;
@@ -190,6 +265,7 @@ fn collect_task_set_inner(
             task,
             stats,
             &run_options,
+            run_seed,
             stop_counter.clone(),
         )?;
         if state.is_complete() {
@@ -203,7 +279,13 @@ fn collect_task_set_inner(
         return collect_results(results);
     }
 
-    if run_options.num_workers == 1
+    let runnable_capacity = states.iter().fold(0usize, |capacity, state| {
+        capacity.saturating_add(state.potential_capacity(run_options.num_workers))
+    });
+    let worker_count = run_options.num_workers.min(runnable_capacity).max(1);
+    let coalesce_batches = progress_callback.is_none();
+
+    if worker_count == 1
         && states
             .iter()
             .all(|state| matches!(state.phase, TaskPhase::Parallel { .. }))
@@ -218,10 +300,6 @@ fn collect_task_set_inner(
         return collect_results(results);
     }
 
-    let runnable_capacity = states.iter().fold(0usize, |capacity, state| {
-        capacity.saturating_add(state.potential_capacity(run_options.num_workers))
-    });
-    let worker_count = run_options.num_workers.min(runnable_capacity).max(1);
     let run_options = Arc::new(run_options);
     let executor = WorkerExecutor::new(
         worker_count,
@@ -247,6 +325,7 @@ fn collect_task_set_inner(
         worker_count,
         executor.sender(),
         &run_options,
+        coalesce_batches,
         &mut in_flight,
     )?;
 
@@ -269,6 +348,7 @@ fn collect_task_set_inner(
                 worker_count,
                 work_tx,
                 &run_options,
+                coalesce_batches,
                 in_flight,
             )
         },
@@ -319,18 +399,25 @@ fn worker_error_context(work: &Work) -> String {
 
 fn make_task_state(
     output_index: usize,
-    task: DemLogicalCollectionTask,
+    task: LogicalCollectionTask,
     stats: DemLogicalCollectionStats,
     run_options: &DemLogicalCollectionRunOptions,
+    run_seed: u64,
     stop_counter: ValidatedStopCounter,
 ) -> NpResult<TaskState> {
     let completion_options = task.options;
+    let seed = task_run_seed(&task, run_seed);
     let resume_shots = stats.shots;
     let remaining_shots = completion_options.max_shots.saturating_sub(stats.shots);
     if remaining_shots == 0 {
-        let prepared_plan = Arc::new(PreparedDemCountPlan::Logical(
-            task.sampler.compile_logical_count_plan(),
-        ));
+        let prepared_plan = Arc::new(prepare_count_plan(
+            &task.sampler,
+            task.decoder
+                .as_deref()
+                .map(|factory| (factory.detector_ids(), factory.batch_formats())),
+            &CountOptions::default(),
+            false,
+        )?);
         return Ok(TaskState {
             output_index,
             task: Arc::new(task),
@@ -338,13 +425,13 @@ fn make_task_state(
             stats,
             completion_options,
             stop_counter,
-            specs: Vec::new(),
+            specs: FixedBatchSpecs::default(),
             next_scheduled: 0,
             next_committed: 0,
             pending: HashMap::new(),
             in_flight: 0,
             phase: TaskPhase::Complete,
-            seed: None,
+            seed,
             resume_shots,
             started: None,
             committed_elapsed: Duration::ZERO,
@@ -354,7 +441,7 @@ fn make_task_state(
     let adjusted = adjusted_task_for_remaining(task, &stats, &stop_counter)?;
     let adaptive = adjusted.options.max_batch_seconds.is_some();
     let specs = if adaptive {
-        Vec::new()
+        FixedBatchSpecs::default()
     } else {
         fixed_batch_specs(adjusted.options)
     };
@@ -365,14 +452,13 @@ fn make_task_state(
             seed_stream: task_seed_stream(resume_shots, 0),
         }
     };
-    let seed = task_run_seed(&adjusted, run_options);
     let count_options = CountOptions {
         postselection_mask: adjusted.postselection_mask.as_deref(),
         postselected_observables_mask: adjusted.postselected_observables_mask.as_deref(),
         count_observable_error_combos: run_options.count_observable_error_combos,
         count_detection_events: run_options.count_detection_events,
     };
-    let prepared_plan = Arc::new(prepare_dem_count_plan(
+    let prepared_plan = Arc::new(prepare_count_plan(
         &adjusted.sampler,
         adjusted
             .decoder
@@ -402,10 +488,10 @@ fn make_task_state(
 }
 
 fn adjusted_task_for_remaining(
-    mut task: DemLogicalCollectionTask,
+    mut task: LogicalCollectionTask,
     stats: &DemLogicalCollectionStats,
     stop_counter: &ValidatedStopCounter,
-) -> NpResult<DemLogicalCollectionTask> {
+) -> NpResult<LogicalCollectionTask> {
     let remaining_shots = task.options.max_shots.saturating_sub(stats.shots);
     task.options.max_shots = remaining_shots;
     task.options.min_shots = task.options.min_shots.saturating_sub(stats.shots);
@@ -429,21 +515,30 @@ fn run_fixed_tasks_inline(
 ) -> NpResult<()> {
     let mut next_state_to_schedule = 0usize;
     let mut decoder_cache = WorkerDecoderCache::new();
+    let coalesce_batches = progress_callback.is_none();
     while states.iter().any(TaskState::can_schedule) {
         let state_index = next_schedulable_state(states, &mut next_state_to_schedule)
             .ok_or_else(|| NpError::new("missing schedulable fixed task"))?;
-        let work = next_work_for_state(state_index, &mut states[state_index], run_options)?;
+        let work = next_work_for_state(
+            state_index,
+            &mut states[state_index],
+            run_options,
+            1,
+            coalesce_batches,
+        )?;
         states[state_index].in_flight += 1;
-        let context = worker_panic_context(&work);
-        let error_context = worker_error_context(&work);
-        let Work::Batch(work) = work else {
+        let Work::Batch(batch_work) = &work else {
             return Err(NpError::new("inline scheduler received non-fixed work"));
         };
-        let result = execute_with_context(context, error_context, || {
-            decoder_cache
-                .resolve(work.state_index, work.task.decoder.as_ref())
-                .and_then(|decoder| run_batch_work(work, decoder))
-        })?;
+        let result = execute_with_context(
+            || worker_panic_context(&work),
+            || worker_error_context(&work),
+            || {
+                decoder_cache
+                    .resolve(batch_work.state_index, batch_work.task.decoder.as_ref())
+                    .and_then(|decoder| run_batch_work(batch_work, decoder))
+            },
+        )?;
         handle_work_result(result, states, run_options, results, progress_callback)?;
     }
     Ok(())
@@ -453,15 +548,22 @@ fn schedule_available_work(
     states: &mut [TaskState],
     next_state_to_schedule: &mut usize,
     worker_count: usize,
-    work_tx: &mpsc::Sender<Work>,
+    work_tx: &WorkSender<Work>,
     run_options: &Arc<DemLogicalCollectionRunOptions>,
+    coalesce_batches: bool,
     in_flight: &mut usize,
 ) -> NpResult<()> {
     while *in_flight < worker_count && states.iter().any(TaskState::can_schedule) {
         let Some(state_index) = next_schedulable_state(states, next_state_to_schedule) else {
             break;
         };
-        let work = next_work_for_state(state_index, &mut states[state_index], run_options)?;
+        let work = next_work_for_state(
+            state_index,
+            &mut states[state_index],
+            run_options,
+            worker_count,
+            coalesce_batches,
+        )?;
         states[state_index].in_flight += 1;
         *in_flight += 1;
         work_tx
@@ -492,6 +594,8 @@ fn next_work_for_state(
     state_index: usize,
     state: &mut TaskState,
     run_options: &Arc<DemLogicalCollectionRunOptions>,
+    worker_count: usize,
+    coalesce_batches: bool,
 ) -> NpResult<Work> {
     if let TaskPhase::Calibrating { scheduled } = &mut state.phase {
         *scheduled = true;
@@ -500,7 +604,10 @@ fn next_work_for_state(
             task: state.task.clone(),
             run_options: run_options.clone(),
             stop_counter: state.stop_counter.clone(),
-            seed_stream: task_seed_stream(state.resume_shots, 0),
+            seed_stream: SeedStream {
+                task_seed: state.seed,
+                stream: task_seed_stream(state.resume_shots, 0),
+            },
             prepared_plan: state.prepared_plan.clone(),
         }));
     }
@@ -516,22 +623,59 @@ fn next_work_for_state(
     if state.started.is_none() {
         state.started = Some(Instant::now());
     }
-    let ordinal = state.next_scheduled;
-    let shots = *state
+    let first_ordinal = state.next_scheduled;
+    let remaining_batches = state.specs.len().saturating_sub(first_ordinal);
+    let batch_count = if coalesce_batches && state.completion_options.max_errors.is_none() {
+        let available_worker_slots = worker_count.saturating_sub(state.in_flight).max(1);
+        coalesced_batch_count(
+            &state.specs,
+            first_ordinal,
+            remaining_batches,
+            available_worker_slots,
+        )?
+    } else {
+        1
+    };
+    state
         .specs
-        .get(ordinal)
+        .get(first_ordinal + batch_count - 1)
         .ok_or_else(|| NpError::new("missing fixed-batch work spec"))?;
-    state.next_scheduled += 1;
+    state.next_scheduled += batch_count;
     Ok(Work::Batch(BatchWork {
         state_index,
-        ordinal,
-        shots,
+        first_ordinal,
+        batch_count,
+        specs: state.specs,
         seed: state.seed,
         seed_stream,
         task: state.task.clone(),
         run_options: run_options.clone(),
         prepared_plan: state.prepared_plan.clone(),
     }))
+}
+
+fn coalesced_batch_count(
+    specs: &FixedBatchSpecs,
+    first_ordinal: usize,
+    remaining_batches: usize,
+    available_worker_slots: usize,
+) -> NpResult<usize> {
+    let fair_batch_limit = remaining_batches
+        .div_ceil(available_worker_slots.max(1))
+        .clamp(1, MAX_BATCHES_PER_WORK_ITEM);
+    let mut batch_count = 0usize;
+    let mut shots = 0usize;
+    while batch_count < fair_batch_limit {
+        let batch_shots = specs
+            .get(first_ordinal + batch_count)
+            .ok_or_else(|| NpError::new("missing fixed-batch work spec"))?;
+        shots = shots.saturating_add(batch_shots);
+        batch_count += 1;
+        if shots >= TARGET_SHOTS_PER_WORK_ITEM {
+            break;
+        }
+    }
+    Ok(batch_count)
 }
 
 fn handle_work_result(
@@ -545,6 +689,7 @@ fn handle_work_result(
         WorkResult::Batch {
             state_index,
             ordinal,
+            batch_count,
             stats,
         } => {
             let state = states
@@ -554,7 +699,9 @@ fn handle_work_result(
             if state.is_complete() {
                 return Ok(());
             }
-            state.pending.insert(ordinal, stats);
+            state
+                .pending
+                .insert(ordinal, CompletedBatch { batch_count, stats });
             commit_ready_batches(state, run_options, results, progress_callback)
         }
         WorkResult::AdaptiveDelta { stats, ack } => {
@@ -605,7 +752,7 @@ fn commit_ready_batches(
     results: &mut [Option<DemLogicalCollectionStats>],
     progress_callback: &mut Option<&mut ProgressCallback<'_>>,
 ) -> NpResult<()> {
-    while let Some(batch_stats) = state.pending.remove(&state.next_committed) {
+    while let Some(completed) = state.pending.remove(&state.next_committed) {
         let elapsed = state
             .started
             .map(|started| started.elapsed())
@@ -615,15 +762,19 @@ fn commit_ready_batches(
             .unwrap_or(Duration::ZERO)
             .as_secs_f64();
         state.committed_elapsed = elapsed;
-        let delta = stats_delta_from_batch(
-            state.task.as_ref(),
-            batch_stats,
-            delta_seconds,
-            run_options.counter_schema(),
-        );
-        state.stats.add_assign_checked(&delta)?;
-        state.next_committed += 1;
-        emit_progress(progress_callback, &delta)?;
+        if progress_callback.is_some() {
+            let delta = stats_delta_from_batch(
+                state.task.as_ref(),
+                completed.stats,
+                delta_seconds,
+                run_options.counter_schema(),
+            );
+            add_internal_delta(&mut state.stats, &delta);
+            emit_progress(progress_callback, &delta)?;
+        } else {
+            add_batch_stats(&mut state.stats, completed.stats, delta_seconds);
+        }
+        state.next_committed += completed.batch_count;
 
         if reached_task_limit(state)? {
             return mark_state_complete(state, results);
@@ -634,6 +785,26 @@ fn commit_ready_batches(
         mark_state_complete(state, results)?;
     }
     Ok(())
+}
+
+fn add_batch_stats(target: &mut DemLogicalCollectionStats, batch: BatchStats, seconds: f64) {
+    target.shots += batch.shots;
+    target.errors += batch.errors;
+    target.discards += batch.discards;
+    target.seconds += seconds;
+    for (key, value) in batch.custom_counts {
+        *target.custom_counts.entry(key).or_insert(0) += value;
+    }
+}
+
+fn add_internal_delta(target: &mut DemLogicalCollectionStats, delta: &DemLogicalCollectionStats) {
+    target.shots += delta.shots;
+    target.errors += delta.errors;
+    target.discards += delta.discards;
+    target.seconds += delta.seconds;
+    for (key, value) in &delta.custom_counts {
+        *target.custom_counts.entry(key.clone()).or_insert(0) += *value;
+    }
 }
 
 fn reached_task_limit(state: &TaskState) -> NpResult<bool> {
@@ -655,34 +826,65 @@ fn mark_state_complete(
 }
 
 fn run_batch_work(
-    work: BatchWork,
-    decoder: Option<&mut dyn NativeDecoderWorker>,
+    work: &BatchWork,
+    mut decoder: Option<&mut dyn NativeDecoderWorker>,
 ) -> NpResult<WorkResult> {
-    let mut rng = SmallRng::new(batch_seed(work.seed, work.seed_stream, work.ordinal));
     let count_options = CountOptions {
         postselection_mask: work.task.postselection_mask.as_deref(),
         postselected_observables_mask: work.task.postselected_observables_mask.as_deref(),
         count_observable_error_combos: work.run_options.count_observable_error_combos,
         count_detection_events: work.run_options.count_detection_events,
     };
-    let stats = sample_dem_logical_error_stats_with_rng(
-        &work.task.sampler,
-        work.shots,
-        &mut rng,
-        decoder,
-        None,
-        &count_options,
-        &work.prepared_plan,
-    )?;
+    let mut combined = BatchStats::default();
+    for offset in 0..work.batch_count {
+        let ordinal = work.first_ordinal + offset;
+        let shots = work
+            .specs
+            .get(ordinal)
+            .ok_or_else(|| NpError::new("missing fixed-batch work spec"))?;
+        let seed = batch_seed(work.seed, work.seed_stream, ordinal);
+        let stats = match &mut decoder {
+            Some(decoder) => sample_logical_error_stats(
+                &work.task.sampler,
+                shots,
+                seed,
+                Some(&mut **decoder),
+                None,
+                &count_options,
+                &work.prepared_plan,
+            )?,
+            None => sample_logical_error_stats(
+                &work.task.sampler,
+                shots,
+                seed,
+                None,
+                None,
+                &count_options,
+                &work.prepared_plan,
+            )?,
+        };
+        merge_batch_stats(&mut combined, stats);
+    }
     Ok(WorkResult::Batch {
         state_index: work.state_index,
-        ordinal: work.ordinal,
-        stats,
+        ordinal: work.first_ordinal,
+        batch_count: work.batch_count,
+        stats: combined,
     })
 }
 
+fn merge_batch_stats(target: &mut BatchStats, batch: BatchStats) {
+    target.shots += batch.shots;
+    target.errors += batch.errors;
+    target.discards += batch.discards;
+    target.seconds += batch.seconds;
+    for (key, value) in batch.custom_counts {
+        *target.custom_counts.entry(key).or_insert(0) += value;
+    }
+}
+
 fn run_adaptive_calibration_work(
-    work: AdaptiveCalibrationWork,
+    work: &AdaptiveCalibrationWork,
     decoder: Option<&mut dyn NativeDecoderWorker>,
     result_tx: &mpsc::Sender<NpResult<WorkResult>>,
 ) -> NpResult<WorkResult> {
@@ -702,20 +904,20 @@ fn run_adaptive_calibration_work(
 }
 
 fn calibrate_adaptive_task(
-    task: &DemLogicalCollectionTask,
+    task: &LogicalCollectionTask,
     mut decoder: Option<&mut dyn NativeDecoderWorker>,
     run_options: &DemLogicalCollectionRunOptions,
     stop_counter: &ValidatedStopCounter,
-    seed_stream: usize,
-    prepared_plan: &PreparedDemCountPlan,
+    seed_stream: SeedStream,
+    prepared_plan: &PreparedCountPlan,
     delta_tx: Option<&mpsc::Sender<NpResult<WorkResult>>>,
 ) -> NpResult<AdaptiveCalibrationResult> {
     validate_task(task)?;
-    let mut stats = DemLogicalCollectionStats::empty_for_task(task, run_options.counter_schema());
+    let mut stats =
+        DemLogicalCollectionStats::empty_for_logical_task(task, run_options.counter_schema());
     let mut shots_done = 0usize;
     let mut batch_ordinal = 0usize;
     let mut observations = Vec::with_capacity(3);
-    let seed = task_run_seed(task, run_options);
     let cap = task
         .options
         .max_batch_size
@@ -737,22 +939,22 @@ fn calibrate_adaptive_task(
 
     while shots_done < task.options.max_shots && batch_ordinal < 3 {
         batch_shots = batch_shots.min(task.options.max_shots - shots_done).max(1);
-        let mut rng = SmallRng::new(batch_seed(seed, seed_stream, batch_ordinal));
+        let batch_seed = batch_seed(seed_stream.task_seed, seed_stream.stream, batch_ordinal);
         let batch_started = Instant::now();
         let batch_stats = match decoder.as_mut() {
-            Some(decoder) => sample_dem_logical_error_stats_with_rng(
+            Some(decoder) => sample_logical_error_stats(
                 &task.sampler,
                 batch_shots,
-                &mut rng,
+                batch_seed,
                 Some(&mut **decoder),
                 Some(batch_started),
                 &count_options,
                 prepared_plan,
             )?,
-            None => sample_dem_logical_error_stats_with_rng(
+            None => sample_logical_error_stats(
                 &task.sampler,
                 batch_shots,
-                &mut rng,
+                batch_seed,
                 None,
                 Some(batch_started),
                 &count_options,
@@ -797,7 +999,7 @@ fn calibrate_adaptive_task(
 }
 
 fn stats_delta_from_batch(
-    task: &DemLogicalCollectionTask,
+    task: &LogicalCollectionTask,
     batch_stats: BatchStats,
     seconds: f64,
     counter_schema: crate::api::DemLogicalCounterSchema,
@@ -889,10 +1091,9 @@ fn should_finish_calibration(batch_count: usize, current: usize, target: usize) 
     batch_count >= 2 && (current.abs_diff(target) as u128) * 5 <= current as u128
 }
 
-pub(crate) fn batch_seed(seed: Option<u64>, task_index: usize, batch_ordinal: usize) -> u64 {
-    let base = collection_seed(seed);
+pub(crate) fn batch_seed(seed: u64, seed_stream: usize, batch_ordinal: usize) -> u64 {
     mix_seed(
-        mix_seed(base, task_index as u64),
+        mix_seed(seed, seed_stream as u64),
         batch_ordinal as u64 ^ 0x517c_c1b7_2722_0a95,
     )
 }
@@ -906,42 +1107,29 @@ fn task_seed_stream(resume_shots: usize, phase: usize) -> usize {
         | (phase & 1)
 }
 
-pub(crate) fn task_run_seed(
-    task: &DemLogicalCollectionTask,
-    run_options: &DemLogicalCollectionRunOptions,
-) -> Option<u64> {
-    task.options.seed.or_else(|| {
-        run_options
-            .seed
-            .map(|seed| mix_seed(seed, stable_string_hash(&task.sampling_id)))
-    })
+pub(crate) fn task_run_seed(task: &LogicalCollectionTask, run_seed: u64) -> u64 {
+    derive_task_seed(task.options.seed, run_seed, &task.sampling_id)
 }
 
-fn fixed_batch_specs(options: DemLogicalCollectionOptions) -> Vec<usize> {
-    let mut specs = Vec::new();
-    let mut shots_done = 0usize;
-    while shots_done < options.max_shots {
-        let batch_shots = next_batch_size(options, shots_done, None);
-        specs.push(batch_shots);
-        shots_done += batch_shots;
+fn fixed_batch_specs(options: DemLogicalCollectionOptions) -> FixedBatchSpecs {
+    if options.max_shots == 0 {
+        return FixedBatchSpecs::default();
     }
-    specs
+    let first_batch = next_batch_size(options, 0, None);
+    let regular_batch = options
+        .batch_size
+        .min(options.max_batch_size.unwrap_or(options.batch_size))
+        .max(1);
+    FixedBatchSpecs::new(options.max_shots, first_batch, regular_batch)
 }
 
-fn fixed_batch_specs_for_size(shots: usize, batch_size: usize) -> Vec<usize> {
-    let mut specs = Vec::new();
-    let mut shots_done = 0usize;
-    while shots_done < shots {
-        let batch_shots = (shots - shots_done).min(batch_size).max(1);
-        specs.push(batch_shots);
-        shots_done += batch_shots;
-    }
-    specs
+fn fixed_batch_specs_for_size(shots: usize, batch_size: usize) -> FixedBatchSpecs {
+    FixedBatchSpecs::new(shots, batch_size, batch_size)
 }
 
 fn validate_existing_stats_for_task(
     stats: &DemLogicalCollectionStats,
-    task: &DemLogicalCollectionTask,
+    task: &LogicalCollectionTask,
     counter_schema: crate::api::DemLogicalCounterSchema,
 ) -> NpResult<()> {
     stats.validate_counter_schema()?;
@@ -972,13 +1160,12 @@ fn collect_results(
         .collect()
 }
 
-fn collection_seed(seed: Option<u64>) -> u64 {
-    seed.unwrap_or_else(|| {
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|duration| duration.as_nanos() as u64)
-            .unwrap_or(0x95f2_04dc_4291_a715)
-    })
+pub(crate) fn resolve_run_seed(seed: Option<u64>) -> u64 {
+    seed.unwrap_or_else(rand::random::<u64>)
+}
+
+fn derive_task_seed(task_seed: Option<u64>, run_seed: u64, sampling_id: &str) -> u64 {
+    task_seed.unwrap_or_else(|| mix_seed(run_seed, stable_string_hash(sampling_id)))
 }
 
 fn mix_seed(left: u64, right: u64) -> u64 {
@@ -1001,9 +1188,12 @@ fn stable_string_hash(value: &str) -> u64 {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
+
     use super::{
-        batch_seed, calibration_target_batch_size, fixed_batch_specs, should_finish_calibration,
-        task_seed_stream, DemLogicalCollectionOptions,
+        batch_seed, calibration_target_batch_size, coalesced_batch_count, derive_task_seed,
+        fixed_batch_specs, resolve_run_seed, should_finish_calibration, task_seed_stream,
+        DemLogicalCollectionOptions, FixedBatchSpecs,
     };
 
     fn options() -> DemLogicalCollectionOptions {
@@ -1053,7 +1243,43 @@ mod tests {
         options.max_shots = 100;
         options.max_batch_size = None;
         options.max_batch_seconds = None;
-        assert_eq!(fixed_batch_specs(options), vec![10, 40, 40, 10]);
+        assert_eq!(
+            fixed_batch_specs(options).iter().collect::<Vec<_>>(),
+            vec![10, 40, 40, 10]
+        );
+    }
+
+    #[test]
+    fn fixed_specs_keep_large_runs_lazy() {
+        let mut options = options();
+        options.max_shots = 1_000_000_000_000;
+        options.batch_size = 1_000;
+        options.start_batch_size = None;
+        options.max_batch_size = None;
+        options.max_batch_seconds = None;
+        let specs = fixed_batch_specs(options);
+
+        assert_eq!(specs.len(), 1_000_000_000);
+        assert_eq!(specs.get(0), Some(1_000));
+        assert_eq!(specs.get(specs.len() - 1), Some(1_000));
+        assert_eq!(
+            std::mem::size_of_val(&specs),
+            4 * std::mem::size_of::<usize>()
+        );
+    }
+
+    #[test]
+    fn coalescing_counts_actual_shots_after_a_small_first_batch() {
+        let specs = FixedBatchSpecs::new(1 + 4_095 * 1_000_000, 1, 1_000_000);
+
+        assert_eq!(coalesced_batch_count(&specs, 0, specs.len(), 1).unwrap(), 2);
+        assert_eq!(specs.get(0).unwrap() + specs.get(1).unwrap(), 1_000_001);
+
+        let uniform = FixedBatchSpecs::new(2_000_000, 100_000, 100_000);
+        assert_eq!(
+            coalesced_batch_count(&uniform, 0, uniform.len(), 1).unwrap(),
+            7
+        );
     }
 
     #[test]
@@ -1064,8 +1290,24 @@ mod tests {
         assert_ne!(task_seed_stream(5, 1), 1);
         assert_ne!(task_seed_stream(5, 0), task_seed_stream(5, 1));
         assert_ne!(
-            batch_seed(Some(7), task_seed_stream(0, 0), 0),
-            batch_seed(Some(7), task_seed_stream(5, 0), 0)
+            batch_seed(7, task_seed_stream(0, 0), 0),
+            batch_seed(7, task_seed_stream(5, 0), 0)
         );
+    }
+
+    #[test]
+    fn one_run_seed_splits_unseeded_tasks_by_sampling_id() {
+        let run_seed = resolve_run_seed(Some(0x5ac3_d491_728e_b60f));
+        let seeds = (0..128)
+            .map(|index| derive_task_seed(None, run_seed, &format!("sampling-{index}")))
+            .collect::<HashSet<_>>();
+
+        assert_eq!(seeds.len(), 128);
+        assert_eq!(
+            derive_task_seed(None, run_seed, "sampling-7"),
+            derive_task_seed(None, run_seed, "sampling-7")
+        );
+        assert_eq!(derive_task_seed(Some(123), run_seed, "sampling-7"), 123);
+        assert_eq!(derive_task_seed(Some(123), run_seed ^ 1, "sampling-8"), 123);
     }
 }

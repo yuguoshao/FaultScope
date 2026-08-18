@@ -4,12 +4,14 @@ All notable changes to FaultScope are documented here. FaultScope is pre-1.0:
 unless a contract is explicitly versioned (such as the native decoder ABI),
 patch releases may make breaking API changes.
 
-## [0.2.8] - Unreleased
+## [0.2.9] - 2026-08-18
 
 ### Added
 
 - Rust-native circuit, detector-error-model, hotspot, and decoder primitives.
 - Native logical error-rate collection with deterministic multi-worker scheduling.
+- Public Rust Forward collection tasks, logical-error functions, hotspot
+  collection, and mode-neutral options/stats/counter aliases.
 - Immutable Python `Collector` configuration, CSV/resume, typed streaming progress,
   explicit raw/accepted logical rates, decoder fanout, and threshold analysis.
 - Factory/worker native decoder plugin ABI V4 and optional PyMatching and
@@ -22,6 +24,11 @@ patch releases may make breaking API changes.
 
 ### Changed
 
+- `faultscope.collection` is now Forward-only: `CollectionTask(circuit=...)`
+  executes the packed circuit runtime directly, and `CollectionTask(dem=...)`
+  raises a migration error. Explicit DEM sampling remains available only through
+  the library-only `faultscope.collection.dem` module and is not exposed by the
+  collection CLI or top-level exports.
 - Circuit-to-DEM generation now follows Stim's disjoint-error policy. Uniform
   one- and two-qubit depolarizing channels are reparameterized exactly into
   independent DEM mechanisms, and one-qubit `PauliChannel` first attempts
@@ -82,8 +89,10 @@ patch releases may make breaking API changes.
 - The compiler throughput benchmark now preserves explicit Stim `REPEAT`
   blocks by default so it exercises the native Rust loop path; flattened input
   remains available as an explicit stress-test mode.
-- Collection decoder fan-out now compiles each shared circuit or DEM once and
-  reuses the immutable native sampler across the resulting decoder task views.
+- Collection decoder fan-out now compiles each shared Forward circuit once and
+  reuses its immutable sampler across decoder task views. A string decoder may
+  build one cached DEM for its static problem, but every shot remains Forward;
+  the isolated legacy DEM collector separately reuses each shared DEM sampler.
 - Collection sampling identities now use domain-separated source and decoder
   digests (sampling schema v2, strong-id schema v4). Existing resume rows use
   older ids and are intentionally not reused; task-derived random streams can
@@ -146,4 +155,4 @@ patch releases may make breaking API changes.
 - Generated type stubs now mark factory-only native classes, including
   `StabilizerState`, as unavailable for direct construction.
 
-[0.2.8]: https://github.com/yuguoshao/FaultScope/releases/tag/v0.2.8
+[0.2.9]: https://github.com/yuguoshao/FaultScope/releases/tag/v0.2.9

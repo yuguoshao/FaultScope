@@ -1,7 +1,137 @@
-use std::sync::Arc;
-
 use crate::*;
 use pyo3::exceptions::PyRuntimeError;
+
+#[pyfunction]
+#[pyo3(signature = (
+    tasks,
+    num_workers=1,
+    seed=None,
+    count_observable_error_combos=false,
+    count_detection_events=false,
+    custom_error_count_key=None,
+    existing_stats=None,
+    progress_callback=None
+))]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn _collect_forward_logical_error_stats_many(
+    py: Python<'_>,
+    tasks: &Bound<'_, PyAny>,
+    num_workers: usize,
+    seed: Option<u64>,
+    count_observable_error_combos: bool,
+    count_detection_events: bool,
+    custom_error_count_key: Option<String>,
+    existing_stats: Option<&Bound<'_, PyAny>>,
+    progress_callback: Option<Py<PyAny>>,
+) -> PyResult<Vec<PyObject>> {
+    let rust_tasks = py_forward_collection_tasks_to_rust(tasks)?;
+    let existing = py_existing_stats_to_rust(existing_stats)?;
+    let run_options = faultscope_collection::LogicalCollectionRunOptions {
+        num_workers,
+        seed,
+        count_observable_error_combos,
+        count_detection_events,
+        custom_error_count_key,
+    };
+
+    let stats = if let Some(progress_callback) = progress_callback {
+        py.allow_threads(move || {
+            let progress = move |stats: &faultscope_collection::LogicalCollectionStats| {
+                Python::with_gil(|py| {
+                    let py_stats = collection_stats_to_py(py, stats).map_err(|err| {
+                        faultscope_core::NpError::new(format!(
+                            "collection progress callback failed: {err}"
+                        ))
+                    })?;
+                    progress_callback
+                        .bind(py)
+                        .call1((py_stats,))
+                        .map_err(|err| {
+                            faultscope_core::NpError::new(format!(
+                                "collection progress callback failed: {err}"
+                            ))
+                        })?;
+                    Ok(())
+                })
+            };
+            faultscope_collection::collect_forward_logical_error_tasks_with_progress(
+                rust_tasks,
+                run_options,
+                existing,
+                progress,
+            )
+        })
+    } else {
+        py.allow_threads(|| {
+            faultscope_collection::collect_forward_logical_error_tasks(
+                rust_tasks,
+                run_options,
+                existing,
+            )
+        })
+    }
+    .map_err(collection_error_to_py)?;
+
+    stats
+        .iter()
+        .map(|stats| collection_stats_to_py(py, stats))
+        .collect()
+}
+
+#[pyfunction]
+#[pyo3(signature = (
+    tasks,
+    num_workers=1,
+    seed=None,
+    count_observable_error_combos=false,
+    count_detection_events=false,
+    custom_error_count_key=None
+))]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn _collect_forward_hotspots_many(
+    py: Python<'_>,
+    tasks: &Bound<'_, PyAny>,
+    num_workers: usize,
+    seed: Option<u64>,
+    count_observable_error_combos: bool,
+    count_detection_events: bool,
+    custom_error_count_key: Option<String>,
+) -> PyResult<Vec<PyObject>> {
+    let rust_tasks = py_forward_collection_tasks_to_rust(tasks)?;
+    let run_options = faultscope_collection::LogicalCollectionRunOptions {
+        num_workers,
+        seed,
+        count_observable_error_combos,
+        count_detection_events,
+        custom_error_count_key,
+    };
+    let results = py
+        .allow_threads(|| {
+            faultscope_collection::collect_forward_hotspot_tasks(rust_tasks, run_options)
+        })
+        .map_err(collection_error_to_py)?;
+    results
+        .iter()
+        .map(|result| {
+            let out = PyDict::new(py);
+            out.set_item("stats", collection_stats_to_py(py, &result.stats)?)?;
+            let batches = result
+                .batch_stats
+                .iter()
+                .map(|stats| collection_stats_to_py(py, stats))
+                .collect::<PyResult<Vec<_>>>()?;
+            out.set_item("batch_stats", PyTuple::new(py, batches)?)?;
+            let sensitivities = PyDict::new(py);
+            let mut entries = result.location_sensitivities.iter().collect::<Vec<_>>();
+            entries.sort_by_key(|(location, _)| *location);
+            for (location, sensitivity) in entries {
+                sensitivities.set_item(location, sensitivity)?;
+            }
+            out.set_item("location_sensitivities", sensitivities)?;
+            Ok(out.into())
+        })
+        .collect()
+}
 
 #[pyfunction]
 #[pyo3(signature = (
@@ -26,7 +156,7 @@ pub(crate) fn _collect_dem_logical_error_stats_many(
     existing_stats: Option<&Bound<'_, PyAny>>,
     progress_callback: Option<Py<PyAny>>,
 ) -> PyResult<Vec<PyObject>> {
-    let rust_tasks = py_collection_tasks_to_rust(tasks)?;
+    let rust_tasks = py_dem_collection_tasks_to_rust(tasks)?;
     let existing = py_existing_stats_to_rust(existing_stats)?;
     let run_options = faultscope_collection::DemLogicalCollectionRunOptions {
         num_workers,
@@ -99,7 +229,7 @@ pub(crate) fn _collect_dem_hotspots_many(
     count_detection_events: bool,
     custom_error_count_key: Option<String>,
 ) -> PyResult<Vec<PyObject>> {
-    let rust_tasks = py_collection_tasks_to_rust(tasks)?;
+    let rust_tasks = py_dem_collection_tasks_to_rust(tasks)?;
     let run_options = faultscope_collection::DemLogicalCollectionRunOptions {
         num_workers,
         seed,
@@ -139,7 +269,62 @@ fn collection_error_to_py(err: faultscope_core::NpError) -> PyErr {
     }
 }
 
-fn py_collection_tasks_to_rust(
+fn py_forward_collection_tasks_to_rust(
+    tasks: &Bound<'_, PyAny>,
+) -> PyResult<Vec<faultscope_collection::ForwardLogicalCollectionTask>> {
+    let iterator = PyIterator::from_object(tasks)?;
+    let mut out = Vec::new();
+    for item in iterator {
+        let item = item?;
+        let dict = item
+            .downcast::<PyDict>()
+            .map_err(|_| PyTypeError::new_err("collection task entries must be dicts"))?;
+        out.push(py_forward_collection_task_to_rust(dict)?);
+    }
+    Ok(out)
+}
+
+fn py_forward_collection_task_to_rust(
+    dict: &Bound<'_, PyDict>,
+) -> PyResult<faultscope_collection::ForwardLogicalCollectionTask> {
+    let sampler_value = required_item(dict, "sampler")?;
+    let sampler = sampler_value.extract::<PyRef<'_, NativePackedSampler>>()?;
+    let sampler = sampler.program.clone();
+
+    let decoder = optional_item(dict, "decoder")?;
+    let decoder = match decoder {
+        Some(decoder) if !decoder.is_none() => Some(
+            native_decoder_from_py(&decoder)?
+                .ok_or_else(|| PyTypeError::new_err("collection requires a native decoder"))?,
+        ),
+        _ => None,
+    };
+    let decoder_name = optional_string(dict, "decoder_name")?;
+
+    Ok(faultscope_collection::ForwardLogicalCollectionTask {
+        task_id: required_string(dict, "task_id")?,
+        strong_id: required_string(dict, "strong_id")?,
+        sampling_id: required_string(dict, "sampling_id")?,
+        sampler,
+        decoder,
+        decoder_name,
+        metadata_json: required_string(dict, "metadata_json")?,
+        options: faultscope_collection::LogicalCollectionOptions {
+            max_shots: required_item(dict, "max_shots")?.extract::<usize>()?,
+            min_shots: required_item(dict, "min_shots")?.extract::<usize>()?,
+            max_errors: optional_usize(dict, "max_errors")?,
+            batch_size: required_item(dict, "batch_size")?.extract::<usize>()?,
+            seed: optional_u64(dict, "seed")?,
+            start_batch_size: optional_usize(dict, "start_batch_size")?,
+            max_batch_size: optional_usize(dict, "max_batch_size")?,
+            max_batch_seconds: optional_f64(dict, "max_batch_seconds")?,
+        },
+        postselection_mask: optional_bytes(dict, "postselection_mask")?,
+        postselected_observables_mask: optional_bytes(dict, "postselected_observables_mask")?,
+    })
+}
+
+fn py_dem_collection_tasks_to_rust(
     tasks: &Bound<'_, PyAny>,
 ) -> PyResult<Vec<faultscope_collection::DemLogicalCollectionTask>> {
     let iterator = PyIterator::from_object(tasks)?;
@@ -149,17 +334,17 @@ fn py_collection_tasks_to_rust(
         let dict = item
             .downcast::<PyDict>()
             .map_err(|_| PyTypeError::new_err("collection task entries must be dicts"))?;
-        out.push(py_collection_task_to_rust(dict)?);
+        out.push(py_dem_collection_task_to_rust(dict)?);
     }
     Ok(out)
 }
 
-fn py_collection_task_to_rust(
+fn py_dem_collection_task_to_rust(
     dict: &Bound<'_, PyDict>,
 ) -> PyResult<faultscope_collection::DemLogicalCollectionTask> {
     let sampler_value = required_item(dict, "sampler")?;
     let sampler = sampler_value.extract::<PyRef<'_, NativeDemSampler>>()?;
-    let sampler = Arc::new(sampler.simulator.clone());
+    let sampler = sampler.simulator.clone();
 
     let decoder = optional_item(dict, "decoder")?;
     let decoder = match decoder {

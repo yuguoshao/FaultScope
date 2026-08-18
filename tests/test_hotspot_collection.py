@@ -7,16 +7,14 @@ from faultscope import (
     CollectionCounterSchema,
     CollectionOptions,
     CollectionRunOptions,
-    CollectionTask,
     Detector,
     DetectorErrorEdge,
     DetectorErrorModel,
     LogicalObservable,
     NativeCompositeDecoder,
     NativeNoCorrectionDecoder,
-    collect,
-    collect_hotspots,
 )
+from faultscope.collection.dem import DemCollectionTask, collect, collect_hotspots
 
 
 def logical_dem(probability: float) -> DetectorErrorModel:
@@ -52,6 +50,22 @@ def detected_logical_dem(probability: float) -> DetectorErrorModel:
 
 
 class HotspotCollectionTests(unittest.TestCase):
+    def test_dem_hotspot_rejects_duplicate_strong_ids(self) -> None:
+        dem = logical_dem(0.25)
+        with self.assertRaisesRegex(
+            ValueError,
+            r'duplicate collection strong_id .*task indices 0 \("dem-hotspot-a"\) '
+            r'and 1 \("dem-hotspot-b"\)',
+        ):
+            collect_hotspots(
+                [
+                    DemCollectionTask(dem=dem, task_id="dem-hotspot-a"),
+                    DemCollectionTask(dem=dem, task_id="dem-hotspot-b"),
+                ],
+                options=CollectionOptions(max_shots=8, batch_size=4),
+                run_options=CollectionRunOptions(seed=5, num_workers=2),
+            )
+
     def test_collection_options_preserve_old_positionals_and_explicit_zero_overlay(self) -> None:
         positional = CollectionOptions(20, 3, 4)
         self.assertEqual(positional.max_shots, 20)
@@ -61,7 +75,7 @@ class HotspotCollectionTests(unittest.TestCase):
 
         (stats,) = collect(
             [
-                CollectionTask(
+                DemCollectionTask(
                     dem=logical_dem(1.0),
                     collection_options=CollectionOptions(min_shots=0),
                 )
@@ -99,7 +113,7 @@ class HotspotCollectionTests(unittest.TestCase):
 
     def test_hotspot_collection_is_worker_invariant_and_batch_ordered(self) -> None:
         dem = logical_dem(0.25)
-        task = CollectionTask(dem=dem)
+        task = DemCollectionTask(dem=dem)
         results = []
         for workers in (1, 2, 4):
             (result,) = collect_hotspots(
@@ -122,7 +136,7 @@ class HotspotCollectionTests(unittest.TestCase):
 
     def test_min_shots_gates_error_stop_and_discards_in_flight_batches(self) -> None:
         (result,) = collect_hotspots(
-            [CollectionTask(dem=logical_dem(1.0))],
+            [DemCollectionTask(dem=logical_dem(1.0))],
             options=CollectionOptions(
                 max_shots=20,
                 min_shots=8,
@@ -137,7 +151,7 @@ class HotspotCollectionTests(unittest.TestCase):
 
     def test_min_shots_also_gates_logical_collection_error_stop(self) -> None:
         (stats,) = collect(
-            [CollectionTask(dem=logical_dem(1.0))],
+            [DemCollectionTask(dem=logical_dem(1.0))],
             options=CollectionOptions(
                 max_shots=20,
                 min_shots=8,
@@ -153,14 +167,14 @@ class HotspotCollectionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             with self.assertRaisesRegex(ValueError, "does not support CSV partial resume"):
                 collect_hotspots(
-                    [CollectionTask(dem=logical_dem(0.1))],
+                    [DemCollectionTask(dem=logical_dem(0.1))],
                     options=CollectionOptions(max_shots=4, batch_size=4),
                     run_options=CollectionRunOptions(save_resume_filepath=f"{tmp}/resume.csv"),
                 )
 
     def test_postselected_shots_do_not_contribute_to_sensitivity(self) -> None:
         (result,) = collect_hotspots(
-            [CollectionTask(dem=detected_logical_dem(1.0), postselection_mask=b"\x01")],
+            [DemCollectionTask(dem=detected_logical_dem(1.0), postselection_mask=b"\x01")],
             options=CollectionOptions(max_shots=8, batch_size=4),
             run_options=CollectionRunOptions(seed=5, num_workers=2),
         )
@@ -170,7 +184,7 @@ class HotspotCollectionTests(unittest.TestCase):
 
     def test_zero_error_limit_can_complete_without_scheduling(self) -> None:
         (result,) = collect_hotspots(
-            [CollectionTask(dem=logical_dem(0.5))],
+            [DemCollectionTask(dem=logical_dem(0.5))],
             options=CollectionOptions(max_shots=8, max_errors=0, batch_size=4),
             run_options=CollectionRunOptions(seed=3, num_workers=4),
         )
@@ -181,7 +195,7 @@ class HotspotCollectionTests(unittest.TestCase):
     def test_hotspot_validates_stop_key_before_zero_limit_completion(self) -> None:
         with self.assertRaisesRegex(ValueError, "unsupported custom_error_count_key"):
             collect_hotspots(
-                [CollectionTask(dem=logical_dem(0.5))],
+                [DemCollectionTask(dem=logical_dem(0.5))],
                 options=CollectionOptions(max_shots=8, max_errors=0, batch_size=4),
                 run_options=CollectionRunOptions(
                     seed=3,
@@ -192,7 +206,7 @@ class HotspotCollectionTests(unittest.TestCase):
 
     def test_hotspot_uses_versioned_detection_schema_and_shared_stop_counter(self) -> None:
         (result,) = collect_hotspots(
-            [CollectionTask(dem=detected_logical_dem(1.0))],
+            [DemCollectionTask(dem=detected_logical_dem(1.0))],
             options=CollectionOptions(max_shots=10, max_errors=3, batch_size=2),
             run_options=CollectionRunOptions(
                 seed=4,

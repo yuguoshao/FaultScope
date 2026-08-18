@@ -37,7 +37,14 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="python -m faultscope.collection")
     subcommands = parser.add_subparsers(dest="command", required=True)
 
-    collect_parser = subcommands.add_parser("collect")
+    collect_parser = subcommands.add_parser(
+        "collect",
+        help="collect logical errors by executing Forward circuit tasks",
+        description=(
+            "Execute Forward CollectionTask circuits. Direct DEM collection is a "
+            "library-only legacy API in faultscope.collection.dem."
+        ),
+    )
     collect_parser.add_argument("--tasks-factory", required=True)
     collect_parser.add_argument("--factory-arg", action="append", default=[])
     collect_parser.add_argument("--max-shots", type=int, required=True)
@@ -99,6 +106,20 @@ def _cmd_collect(args: argparse.Namespace) -> int:
         raise TypeError("tasks factory must return CollectionTask objects, not TaskStats")
     if isinstance(tasks, CollectionTask):
         tasks = [tasks]
+    else:
+        try:
+            tasks = list(tasks)
+        except TypeError as exc:
+            raise TypeError(
+                "collect CLI accepts a Forward CollectionTask(circuit=...) or an "
+                "iterable of them; DEM collection is available only from "
+                "faultscope.collection.dem"
+            ) from exc
+    if any(not isinstance(task, CollectionTask) for task in tasks):
+        raise TypeError(
+            "collect CLI accepts only Forward CollectionTask(circuit=...) objects; "
+            "DEM collection is available only from faultscope.collection.dem"
+        )
     collector = Collector(
         options=CollectionOptions(
             max_shots=args.max_shots,

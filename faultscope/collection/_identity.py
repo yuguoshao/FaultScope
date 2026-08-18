@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 import hashlib
 import json
 from typing import Any
@@ -142,6 +142,55 @@ def source_identity_payload(
         "kind": "circuit",
         "circuit": circuit_identity_payload(circuit),
         "dem": dem_identity_payload(dem),
+    }
+
+
+def forward_source_identity_payload(
+    *,
+    circuit: object,
+    detectors: Iterable[object] | None,
+    observables: Iterable[object] | None,
+) -> dict[str, object]:
+    """Return the source payload for direct forward-circuit collection.
+
+    Declaration overrides deliberately preserve the difference between ``None``
+    (use declarations embedded in the circuit) and an explicit empty sequence.
+    """
+
+    return {
+        "kind": "forward_circuit",
+        "circuit": circuit_identity_payload(circuit),
+        "detectors": (
+            None
+            if detectors is None
+            else [detector_identity_payload(item) for item in tuple(detectors)]
+        ),
+        "observables": (
+            None
+            if observables is None
+            else [observable_identity_payload(item) for item in tuple(observables)]
+        ),
+    }
+
+
+def detector_identity_payload(detector: object) -> dict[str, object]:
+    return {
+        "type": _qualified_type_name(detector),
+        "id": int(getattr(detector, "id")),
+        "measurement_keys": [str(value) for value in tuple(getattr(detector, "measurement_keys"))],
+        "coords": [float(value) for value in tuple(getattr(detector, "coords"))],
+    }
+
+
+def observable_identity_payload(observable: object) -> dict[str, object]:
+    return {
+        "type": _qualified_type_name(observable),
+        "id": int(getattr(observable, "id")),
+        "measurement_keys": [
+            str(value) for value in tuple(getattr(observable, "measurement_keys"))
+        ],
+        "pauli_qubits": [int(value) for value in tuple(getattr(observable, "pauli_qubits"))],
+        "pauli": str(getattr(observable, "pauli")),
     }
 
 
