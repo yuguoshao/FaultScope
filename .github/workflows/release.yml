@@ -39,7 +39,9 @@ jobs:
           pattern: faultscope-*
           path: dist
           merge-multiple: true
-      - run: gh release create "${GITHUB_REF_NAME}" dist/* --draft --generate-notes
+      - run: >-
+          gh release create --repo "${GITHUB_REPOSITORY}"
+          "${GITHUB_REF_NAME}" dist/* --draft --generate-notes
         env:
           GH_TOKEN: ${{ github.token }}
 
