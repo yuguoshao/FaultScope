@@ -190,8 +190,7 @@ class CollectionOptions:
         if unknown:
             unexpected = min(unknown)
             raise TypeError(
-                "CollectionOptions.with_edits() got an unexpected keyword argument "
-                f"{unexpected!r}"
+                f"CollectionOptions.with_edits() got an unexpected keyword argument {unexpected!r}"
             )
         explicit_mask = self._explicit_mask
         for field_name in changes:
