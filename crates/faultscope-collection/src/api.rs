@@ -8,7 +8,7 @@ use crate::counting::{
     validate_decoder_observable_layout, validate_mask_shape, CountOptions,
 };
 use crate::scheduler::{
-    batch_seed, collect_task_set, collect_task_set_with_progress, next_batch_size,
+    batch_seed, collect_task_set, collect_task_set_with_progress, next_batch_size, resolve_run_seed,
 };
 use faultscope_core::{
     validate_decoder_batch_formats, validate_decoder_detector_ids, DemHotspotEstimator,
@@ -455,6 +455,7 @@ pub fn collect_dem_logical_error_stats(
     let mut batch_ordinal = 0usize;
     let mut last_batch: Option<(usize, f64)> = None;
     if !collection_limits_reached(options, shots_done, errors) {
+        let run_seed = resolve_run_seed(options.seed);
         let count_options = CountOptions::default();
         let prepared_plan = prepare_dem_count_plan(
             sampler,
@@ -467,7 +468,7 @@ pub fn collect_dem_logical_error_stats(
 
         while !collection_limits_reached(options, shots_done, errors) {
             let batch_shots = next_batch_size(options, shots_done, last_batch);
-            let mut batch_rng = SmallRng::new(batch_seed(options.seed, 0, batch_ordinal));
+            let mut batch_rng = SmallRng::new(batch_seed(run_seed, 0, batch_ordinal));
             let batch_started = Instant::now();
             let batch_stats = match decoder.as_mut() {
                 Some(decoder) => sample_dem_logical_error_stats_with_rng(
@@ -583,6 +584,7 @@ pub fn collect_forward_logical_error_stats(
     let mut batch_ordinal = 0usize;
     let mut last_batch: Option<(usize, f64)> = None;
     if !collection_limits_reached(options, shots_done, errors) {
+        let run_seed = resolve_run_seed(options.seed);
         let count_options = CountOptions::default();
         let prepared_plan = prepare_forward_count_plan(
             decoder
@@ -593,12 +595,13 @@ pub fn collect_forward_logical_error_stats(
 
         while !collection_limits_reached(options, shots_done, errors) {
             let batch_shots = next_batch_size(options, shots_done, last_batch);
+            let seed = batch_seed(run_seed, 0, batch_ordinal);
             let batch_started = Instant::now();
             let batch_stats = match decoder.as_mut() {
                 Some(decoder) => sample_forward_logical_error_stats_batch(
                     sampler,
                     batch_shots,
-                    batch_seed(options.seed, 0, batch_ordinal),
+                    seed,
                     Some(&mut **decoder),
                     None,
                     &count_options,
@@ -607,7 +610,7 @@ pub fn collect_forward_logical_error_stats(
                 None => sample_forward_logical_error_stats_batch(
                     sampler,
                     batch_shots,
-                    batch_seed(options.seed, 0, batch_ordinal),
+                    seed,
                     None,
                     None,
                     &count_options,
@@ -802,6 +805,25 @@ pub(crate) fn validate_task(task: &LogicalCollectionTask) -> NpResult<()> {
     }
     if task.sampling_id.is_empty() {
         return Err(NpError::new("sampling_id must not be empty"));
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_unique_strong_ids(tasks: &[LogicalCollectionTask]) -> NpResult<()> {
+    if tasks.len() < 2 {
+        return Ok(());
+    }
+
+    let mut seen: HashMap<&str, (usize, &str)> = HashMap::with_capacity(tasks.len());
+    for (index, task) in tasks.iter().enumerate() {
+        if let Some((first_index, first_task_id)) =
+            seen.insert(task.strong_id.as_str(), (index, task.task_id.as_str()))
+        {
+            return Err(NpError::new(format!(
+                "duplicate collection strong_id {:?} at task indices {} ({:?}) and {} ({:?}); task_id is not part of collection identity",
+                task.strong_id, first_index, first_task_id, index, task.task_id
+            )));
+        }
     }
     Ok(())
 }

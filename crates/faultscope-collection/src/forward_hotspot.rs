@@ -5,16 +5,16 @@ use std::time::Instant;
 use faultscope_core::{NativeDecoderWorker, NpError, NpResult};
 
 use crate::api::{
-    task_is_complete, validate_stop_counter_for_tasks, validate_task, CollectionSampler,
-    DemLogicalCollectionOptions, DemLogicalCollectionRunOptions, DemLogicalCollectionStats,
-    ForwardCollectionSampler, ForwardLogicalCollectionTask, LogicalCollectionTask,
-    ValidatedStopCounter,
+    task_is_complete, validate_stop_counter_for_tasks, validate_task, validate_unique_strong_ids,
+    CollectionSampler, DemLogicalCollectionOptions, DemLogicalCollectionRunOptions,
+    DemLogicalCollectionStats, ForwardCollectionSampler, ForwardLogicalCollectionTask,
+    LogicalCollectionTask, ValidatedStopCounter,
 };
 use crate::counting::{
     prepare_count_plan, sample_forward_detailed_batch, CountOptions, PreparedCountPlan,
     PreparedForwardCountPlan,
 };
-use crate::scheduler::{batch_seed, next_batch_size, task_run_seed};
+use crate::scheduler::{batch_seed, next_batch_size, resolve_run_seed, task_run_seed};
 use crate::worker_decoder::WorkerDecoderCache;
 use crate::worker_executor::{WorkSender, WorkerExecutor};
 
@@ -30,7 +30,7 @@ struct ForwardHotspotWork {
     task_index: usize,
     ordinal: usize,
     shots: usize,
-    seed: Option<u64>,
+    seed: u64,
     task: Arc<LogicalCollectionTask>,
     run_options: Arc<DemLogicalCollectionRunOptions>,
     prepared_plan: Arc<PreparedForwardCountPlan>,
@@ -57,7 +57,7 @@ struct ForwardHotspotCommitState {
 
 struct ForwardHotspotTaskCursor {
     task: Arc<LogicalCollectionTask>,
-    seed: Option<u64>,
+    seed: u64,
     shots_scheduled: usize,
     next_ordinal: usize,
     prepared_plan: Arc<PreparedForwardCountPlan>,
@@ -74,6 +74,7 @@ impl ForwardHotspotWorkQueue {
     fn new(
         tasks: Vec<LogicalCollectionTask>,
         run_options: Arc<DemLogicalCollectionRunOptions>,
+        run_seed: u64,
     ) -> NpResult<Self> {
         let total_batches = tasks.iter().fold(0usize, |total, task| {
             total.saturating_add(fixed_hotspot_batch_count(task.options))
@@ -81,7 +82,7 @@ impl ForwardHotspotWorkQueue {
         let tasks = tasks
             .into_iter()
             .map(|task| {
-                let seed = task_run_seed(&task, &run_options);
+                let seed = task_run_seed(&task, run_seed);
                 let count_options = CountOptions {
                     postselection_mask: task.postselection_mask.as_deref(),
                     postselected_observables_mask: task.postselected_observables_mask.as_deref(),
@@ -176,6 +177,7 @@ pub fn collect_forward_hotspot_tasks(
         }
     }
     let stop_counter = validate_stop_counter_for_tasks(&tasks, &run_options)?;
+    validate_unique_strong_ids(&tasks)?;
     if tasks.is_empty() {
         return Ok(Vec::new());
     }
@@ -222,7 +224,8 @@ pub fn collect_forward_hotspot_tasks(
             .collect();
     }
 
-    let mut work_queue = ForwardHotspotWorkQueue::new(tasks, run_options.clone())?;
+    let run_seed = resolve_run_seed(run_options.seed);
+    let mut work_queue = ForwardHotspotWorkQueue::new(tasks, run_options.clone(), run_seed)?;
     let worker_count = run_options.num_workers.min(work_queue.total_batches).max(1);
     let executor = WorkerExecutor::new(
         worker_count,
@@ -517,7 +520,7 @@ mod tests {
             let state = run_sampler_program(
                 &program,
                 batch_shots,
-                Some(batch_seed(Some(task_seed), 0, ordinal)),
+                Some(batch_seed(task_seed, 0, ordinal)),
                 true,
             )
             .unwrap();

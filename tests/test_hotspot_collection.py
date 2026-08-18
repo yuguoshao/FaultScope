@@ -50,6 +50,22 @@ def detected_logical_dem(probability: float) -> DetectorErrorModel:
 
 
 class HotspotCollectionTests(unittest.TestCase):
+    def test_dem_hotspot_rejects_duplicate_strong_ids(self) -> None:
+        dem = logical_dem(0.25)
+        with self.assertRaisesRegex(
+            ValueError,
+            r'duplicate collection strong_id .*task indices 0 \("dem-hotspot-a"\) '
+            r'and 1 \("dem-hotspot-b"\)',
+        ):
+            collect_hotspots(
+                [
+                    DemCollectionTask(dem=dem, task_id="dem-hotspot-a"),
+                    DemCollectionTask(dem=dem, task_id="dem-hotspot-b"),
+                ],
+                options=CollectionOptions(max_shots=8, batch_size=4),
+                run_options=CollectionRunOptions(seed=5, num_workers=2),
+            )
+
     def test_collection_options_preserve_old_positionals_and_explicit_zero_overlay(self) -> None:
         positional = CollectionOptions(20, 3, 4)
         self.assertEqual(positional.max_shots, 20)

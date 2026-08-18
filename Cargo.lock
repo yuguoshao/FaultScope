@@ -224,6 +224,7 @@ name = "faultscope-collection"
 version = "0.2.8"
 dependencies = [
  "faultscope-core",
+ "rand 0.9.4",
 ]
 
 [[package]]

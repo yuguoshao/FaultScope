@@ -146,6 +146,22 @@ class ForwardCollectionTests(unittest.TestCase):
         self.assertEqual(results[0].stats.errors, results[1].stats.errors)
         self.assertEqual(results[0].location_sensitivities, results[1].location_sensitivities)
 
+    def test_forward_hotspot_rejects_duplicate_strong_ids(self) -> None:
+        circuit = forward_circuit()
+        with self.assertRaisesRegex(
+            ValueError,
+            r'duplicate collection strong_id .*task indices 0 \("forward-hotspot-a"\) '
+            r'and 1 \("forward-hotspot-b"\)',
+        ):
+            collect_hotspots(
+                [
+                    CollectionTask(circuit, task_id="forward-hotspot-a"),
+                    CollectionTask(circuit, task_id="forward-hotspot-b"),
+                ],
+                options=CollectionOptions(max_shots=8, batch_size=4),
+                run_options=CollectionRunOptions(seed=5, num_workers=2),
+            )
+
     def test_zero_limit_forward_hotspot_preserves_zero_location_layout(self) -> None:
         (result,) = collect_hotspots(
             [CollectionTask(forward_circuit())],

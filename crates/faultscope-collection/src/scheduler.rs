@@ -11,13 +11,13 @@
 use std::collections::HashMap;
 use std::sync::mpsc;
 use std::sync::Arc;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use crate::api::{
     stop_error_count, task_is_complete, validate_observable_combo_mask_for_task,
-    validate_stop_counter_for_tasks, validate_task, DemLogicalCollectionOptions,
-    DemLogicalCollectionRunOptions, DemLogicalCollectionStats, LogicalCollectionTask,
-    ValidatedStopCounter,
+    validate_stop_counter_for_tasks, validate_task, validate_unique_strong_ids,
+    DemLogicalCollectionOptions, DemLogicalCollectionRunOptions, DemLogicalCollectionStats,
+    LogicalCollectionTask, ValidatedStopCounter,
 };
 use crate::counting::{
     prepare_count_plan, sample_logical_error_stats, BatchStats, CountOptions, PreparedCountPlan,
@@ -32,13 +32,19 @@ use faultscope_core::{NativeDecoderWorker, NpError, NpResult};
 const MAX_BATCHES_PER_WORK_ITEM: usize = 1024;
 const TARGET_SHOTS_PER_WORK_ITEM: usize = 640_000;
 
+#[derive(Clone, Copy)]
+struct SeedStream {
+    task_seed: u64,
+    stream: usize,
+}
+
 #[derive(Clone)]
 struct BatchWork {
     state_index: usize,
     first_ordinal: usize,
     batch_count: usize,
     specs: FixedBatchSpecs,
-    seed: Option<u64>,
+    seed: u64,
     seed_stream: usize,
     task: Arc<LogicalCollectionTask>,
     run_options: Arc<DemLogicalCollectionRunOptions>,
@@ -51,7 +57,7 @@ struct AdaptiveCalibrationWork {
     task: Arc<LogicalCollectionTask>,
     run_options: Arc<DemLogicalCollectionRunOptions>,
     stop_counter: ValidatedStopCounter,
-    seed_stream: usize,
+    seed_stream: SeedStream,
     prepared_plan: Arc<PreparedCountPlan>,
 }
 
@@ -165,7 +171,7 @@ struct TaskState {
     pending: HashMap<usize, CompletedBatch>,
     in_flight: usize,
     phase: TaskPhase,
-    seed: Option<u64>,
+    seed: u64,
     resume_shots: usize,
     started: Option<Instant>,
     committed_elapsed: Duration,
@@ -212,25 +218,6 @@ pub(crate) fn collect_task_set_with_progress(
     collect_task_set_inner(tasks, run_options, existing_data, Some(progress_callback))
 }
 
-fn validate_unique_strong_ids(tasks: &[LogicalCollectionTask]) -> NpResult<()> {
-    if tasks.len() < 2 {
-        return Ok(());
-    }
-
-    let mut seen: HashMap<&str, (usize, &str)> = HashMap::with_capacity(tasks.len());
-    for (index, task) in tasks.iter().enumerate() {
-        if let Some((first_index, first_task_id)) =
-            seen.insert(task.strong_id.as_str(), (index, task.task_id.as_str()))
-        {
-            return Err(NpError::new(format!(
-                "duplicate collection strong_id {:?} at task indices {} ({:?}) and {} ({:?}); task_id is not part of collection identity",
-                task.strong_id, first_index, first_task_id, index, task.task_id
-            )));
-        }
-    }
-    Ok(())
-}
-
 fn collect_task_set_inner(
     tasks: Vec<LogicalCollectionTask>,
     run_options: DemLogicalCollectionRunOptions,
@@ -247,6 +234,7 @@ fn collect_task_set_inner(
     }
     let stop_counter = validate_stop_counter_for_tasks(&tasks, &run_options)?;
     validate_unique_strong_ids(&tasks)?;
+    let run_seed = resolve_run_seed(run_options.seed);
 
     let mut results = vec![None; tasks.len()];
     let mut states = Vec::new();
@@ -277,6 +265,7 @@ fn collect_task_set_inner(
             task,
             stats,
             &run_options,
+            run_seed,
             stop_counter.clone(),
         )?;
         if state.is_complete() {
@@ -413,9 +402,11 @@ fn make_task_state(
     task: LogicalCollectionTask,
     stats: DemLogicalCollectionStats,
     run_options: &DemLogicalCollectionRunOptions,
+    run_seed: u64,
     stop_counter: ValidatedStopCounter,
 ) -> NpResult<TaskState> {
     let completion_options = task.options;
+    let seed = task_run_seed(&task, run_seed);
     let resume_shots = stats.shots;
     let remaining_shots = completion_options.max_shots.saturating_sub(stats.shots);
     if remaining_shots == 0 {
@@ -440,7 +431,7 @@ fn make_task_state(
             pending: HashMap::new(),
             in_flight: 0,
             phase: TaskPhase::Complete,
-            seed: None,
+            seed,
             resume_shots,
             started: None,
             committed_elapsed: Duration::ZERO,
@@ -461,7 +452,6 @@ fn make_task_state(
             seed_stream: task_seed_stream(resume_shots, 0),
         }
     };
-    let seed = task_run_seed(&adjusted, run_options);
     let count_options = CountOptions {
         postselection_mask: adjusted.postselection_mask.as_deref(),
         postselected_observables_mask: adjusted.postselected_observables_mask.as_deref(),
@@ -614,7 +604,10 @@ fn next_work_for_state(
             task: state.task.clone(),
             run_options: run_options.clone(),
             stop_counter: state.stop_counter.clone(),
-            seed_stream: task_seed_stream(state.resume_shots, 0),
+            seed_stream: SeedStream {
+                task_seed: state.seed,
+                stream: task_seed_stream(state.resume_shots, 0),
+            },
             prepared_plan: state.prepared_plan.clone(),
         }));
     }
@@ -634,16 +627,12 @@ fn next_work_for_state(
     let remaining_batches = state.specs.len().saturating_sub(first_ordinal);
     let batch_count = if coalesce_batches && state.completion_options.max_errors.is_none() {
         let available_worker_slots = worker_count.saturating_sub(state.in_flight).max(1);
-        let first_batch_shots = state
-            .specs
-            .get(first_ordinal)
-            .ok_or_else(|| NpError::new("missing fixed-batch work spec"))?;
-        let target_batch_count = TARGET_SHOTS_PER_WORK_ITEM
-            .div_ceil(first_batch_shots)
-            .clamp(1, MAX_BATCHES_PER_WORK_ITEM);
-        remaining_batches
-            .div_ceil(available_worker_slots)
-            .clamp(1, target_batch_count)
+        coalesced_batch_count(
+            &state.specs,
+            first_ordinal,
+            remaining_batches,
+            available_worker_slots,
+        )?
     } else {
         1
     };
@@ -663,6 +652,30 @@ fn next_work_for_state(
         run_options: run_options.clone(),
         prepared_plan: state.prepared_plan.clone(),
     }))
+}
+
+fn coalesced_batch_count(
+    specs: &FixedBatchSpecs,
+    first_ordinal: usize,
+    remaining_batches: usize,
+    available_worker_slots: usize,
+) -> NpResult<usize> {
+    let fair_batch_limit = remaining_batches
+        .div_ceil(available_worker_slots.max(1))
+        .clamp(1, MAX_BATCHES_PER_WORK_ITEM);
+    let mut batch_count = 0usize;
+    let mut shots = 0usize;
+    while batch_count < fair_batch_limit {
+        let batch_shots = specs
+            .get(first_ordinal + batch_count)
+            .ok_or_else(|| NpError::new("missing fixed-batch work spec"))?;
+        shots = shots.saturating_add(batch_shots);
+        batch_count += 1;
+        if shots >= TARGET_SHOTS_PER_WORK_ITEM {
+            break;
+        }
+    }
+    Ok(batch_count)
 }
 
 fn handle_work_result(
@@ -895,7 +908,7 @@ fn calibrate_adaptive_task(
     mut decoder: Option<&mut dyn NativeDecoderWorker>,
     run_options: &DemLogicalCollectionRunOptions,
     stop_counter: &ValidatedStopCounter,
-    seed_stream: usize,
+    seed_stream: SeedStream,
     prepared_plan: &PreparedCountPlan,
     delta_tx: Option<&mpsc::Sender<NpResult<WorkResult>>>,
 ) -> NpResult<AdaptiveCalibrationResult> {
@@ -905,7 +918,6 @@ fn calibrate_adaptive_task(
     let mut shots_done = 0usize;
     let mut batch_ordinal = 0usize;
     let mut observations = Vec::with_capacity(3);
-    let seed = task_run_seed(task, run_options);
     let cap = task
         .options
         .max_batch_size
@@ -927,7 +939,7 @@ fn calibrate_adaptive_task(
 
     while shots_done < task.options.max_shots && batch_ordinal < 3 {
         batch_shots = batch_shots.min(task.options.max_shots - shots_done).max(1);
-        let batch_seed = batch_seed(seed, seed_stream, batch_ordinal);
+        let batch_seed = batch_seed(seed_stream.task_seed, seed_stream.stream, batch_ordinal);
         let batch_started = Instant::now();
         let batch_stats = match decoder.as_mut() {
             Some(decoder) => sample_logical_error_stats(
@@ -1079,10 +1091,9 @@ fn should_finish_calibration(batch_count: usize, current: usize, target: usize) 
     batch_count >= 2 && (current.abs_diff(target) as u128) * 5 <= current as u128
 }
 
-pub(crate) fn batch_seed(seed: Option<u64>, task_index: usize, batch_ordinal: usize) -> u64 {
-    let base = collection_seed(seed);
+pub(crate) fn batch_seed(seed: u64, seed_stream: usize, batch_ordinal: usize) -> u64 {
     mix_seed(
-        mix_seed(base, task_index as u64),
+        mix_seed(seed, seed_stream as u64),
         batch_ordinal as u64 ^ 0x517c_c1b7_2722_0a95,
     )
 }
@@ -1096,15 +1107,8 @@ fn task_seed_stream(resume_shots: usize, phase: usize) -> usize {
         | (phase & 1)
 }
 
-pub(crate) fn task_run_seed(
-    task: &LogicalCollectionTask,
-    run_options: &DemLogicalCollectionRunOptions,
-) -> Option<u64> {
-    task.options.seed.or_else(|| {
-        run_options
-            .seed
-            .map(|seed| mix_seed(seed, stable_string_hash(&task.sampling_id)))
-    })
+pub(crate) fn task_run_seed(task: &LogicalCollectionTask, run_seed: u64) -> u64 {
+    derive_task_seed(task.options.seed, run_seed, &task.sampling_id)
 }
 
 fn fixed_batch_specs(options: DemLogicalCollectionOptions) -> FixedBatchSpecs {
@@ -1156,13 +1160,12 @@ fn collect_results(
         .collect()
 }
 
-fn collection_seed(seed: Option<u64>) -> u64 {
-    seed.unwrap_or_else(|| {
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|duration| duration.as_nanos() as u64)
-            .unwrap_or(0x95f2_04dc_4291_a715)
-    })
+pub(crate) fn resolve_run_seed(seed: Option<u64>) -> u64 {
+    seed.unwrap_or_else(rand::random::<u64>)
+}
+
+fn derive_task_seed(task_seed: Option<u64>, run_seed: u64, sampling_id: &str) -> u64 {
+    task_seed.unwrap_or_else(|| mix_seed(run_seed, stable_string_hash(sampling_id)))
 }
 
 fn mix_seed(left: u64, right: u64) -> u64 {
@@ -1185,9 +1188,12 @@ fn stable_string_hash(value: &str) -> u64 {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
+
     use super::{
-        batch_seed, calibration_target_batch_size, fixed_batch_specs, should_finish_calibration,
-        task_seed_stream, DemLogicalCollectionOptions,
+        batch_seed, calibration_target_batch_size, coalesced_batch_count, derive_task_seed,
+        fixed_batch_specs, resolve_run_seed, should_finish_calibration, task_seed_stream,
+        DemLogicalCollectionOptions, FixedBatchSpecs,
     };
 
     fn options() -> DemLogicalCollectionOptions {
@@ -1263,6 +1269,20 @@ mod tests {
     }
 
     #[test]
+    fn coalescing_counts_actual_shots_after_a_small_first_batch() {
+        let specs = FixedBatchSpecs::new(1 + 4_095 * 1_000_000, 1, 1_000_000);
+
+        assert_eq!(coalesced_batch_count(&specs, 0, specs.len(), 1).unwrap(), 2);
+        assert_eq!(specs.get(0).unwrap() + specs.get(1).unwrap(), 1_000_001);
+
+        let uniform = FixedBatchSpecs::new(2_000_000, 100_000, 100_000);
+        assert_eq!(
+            coalesced_batch_count(&uniform, 0, uniform.len(), 1).unwrap(),
+            7
+        );
+    }
+
+    #[test]
     fn resumed_tasks_use_distinct_seed_streams_for_each_phase() {
         assert_eq!(task_seed_stream(0, 0), 0);
         assert_eq!(task_seed_stream(0, 1), 1);
@@ -1270,8 +1290,24 @@ mod tests {
         assert_ne!(task_seed_stream(5, 1), 1);
         assert_ne!(task_seed_stream(5, 0), task_seed_stream(5, 1));
         assert_ne!(
-            batch_seed(Some(7), task_seed_stream(0, 0), 0),
-            batch_seed(Some(7), task_seed_stream(5, 0), 0)
+            batch_seed(7, task_seed_stream(0, 0), 0),
+            batch_seed(7, task_seed_stream(5, 0), 0)
         );
+    }
+
+    #[test]
+    fn one_run_seed_splits_unseeded_tasks_by_sampling_id() {
+        let run_seed = resolve_run_seed(Some(0x5ac3_d491_728e_b60f));
+        let seeds = (0..128)
+            .map(|index| derive_task_seed(None, run_seed, &format!("sampling-{index}")))
+            .collect::<HashSet<_>>();
+
+        assert_eq!(seeds.len(), 128);
+        assert_eq!(
+            derive_task_seed(None, run_seed, "sampling-7"),
+            derive_task_seed(None, run_seed, "sampling-7")
+        );
+        assert_eq!(derive_task_seed(Some(123), run_seed, "sampling-7"), 123);
+        assert_eq!(derive_task_seed(Some(123), run_seed ^ 1, "sampling-8"), 123);
     }
 }

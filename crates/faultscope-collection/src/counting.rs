@@ -875,6 +875,18 @@ pub(crate) fn validate_mask_shape(
                 mask.len()
             )));
         }
+        let used_bits_in_last_byte = bit_count & 7;
+        if used_bits_in_last_byte != 0 {
+            let valid_bits = (1u8 << used_bits_in_last_byte) - 1;
+            if mask
+                .last()
+                .is_some_and(|last_byte| last_byte & !valid_bits != 0)
+            {
+                return Err(NpError::new(format!(
+                    "{name} has non-zero unused padding bits in its final byte"
+                )));
+            }
+        }
     }
     Ok(())
 }
@@ -925,6 +937,24 @@ mod tests {
             ..CountOptions::default()
         }
         .uses_detailed_path());
+    }
+
+    #[test]
+    fn mask_shapes_reject_nonzero_unused_padding_bits() {
+        validate_mask_shape(Some(&[0b0000_0001]), 1, "mask").unwrap();
+        validate_mask_shape(Some(&[0xff]), 8, "mask").unwrap();
+        validate_mask_shape(Some(&[0xff, 0b0000_0001]), 9, "mask").unwrap();
+
+        let err = validate_mask_shape(Some(&[0b1000_0000]), 1, "mask").unwrap_err();
+        assert_eq!(
+            err.message(),
+            "mask has non-zero unused padding bits in its final byte"
+        );
+        let err = validate_mask_shape(Some(&[0xff, 0b0000_0010]), 9, "mask").unwrap_err();
+        assert_eq!(
+            err.message(),
+            "mask has non-zero unused padding bits in its final byte"
+        );
     }
 
     #[test]
