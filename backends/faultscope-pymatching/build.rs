@@ -52,6 +52,8 @@ fn pymatching_source_dir() -> PathBuf {
     let checkout = out_dir.join("PyMatching");
     if checkout.join(".git").exists() {
         run(Command::new("git")
+            .arg("-c")
+            .arg("core.longpaths=true")
             .arg("-C")
             .arg(&checkout)
             .arg("checkout")
@@ -66,6 +68,8 @@ fn pymatching_source_dir() -> PathBuf {
         );
     }
     run(Command::new("git")
+        .arg("-c")
+        .arg("core.longpaths=true")
         .arg("clone")
         .arg("--depth")
         .arg("1")
