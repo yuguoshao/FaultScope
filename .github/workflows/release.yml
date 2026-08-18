@@ -4,6 +4,13 @@ on:
   push:
     tags:
       - "v*.*.*"
+  workflow_dispatch:
+    inputs:
+      publish_registries:
+        description: "Publish packages to crates.io and PyPI"
+        required: true
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -29,6 +36,7 @@ jobs:
     uses: ./.github/workflows/wheels.yml
 
   draft-release:
+    if: github.event_name == 'push'
     needs: wheels
     runs-on: ubuntu-latest
     permissions:
@@ -46,6 +54,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
 
   publish-crates:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.publish_registries }}
     needs: [validate, wheels]
     runs-on: ubuntu-latest
     environment: release
@@ -75,6 +84,7 @@ jobs:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
 
   publish-main:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.publish_registries }}
     needs: [publish-crates, wheels]
     runs-on: ubuntu-latest
     environment: release
@@ -91,6 +101,7 @@ jobs:
           packages-dir: dist
 
   publish-pymatching:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.publish_registries }}
     needs: [publish-main, wheels]
     runs-on: ubuntu-latest
     environment: release

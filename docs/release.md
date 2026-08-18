@@ -46,13 +46,16 @@ installed against an older main package with a different pre-1.0 API surface.
    version.
 2. Run Rust formatting, clippy, tests, docs, MSRV, crate packaging, Python
    typing, tests, and wheel smoke checks.
-3. Build and test release artifacts in GitHub Actions and create a draft GitHub
-   release.
-4. Approve the protected `release` environment.
+3. Push the version tag to build and test release artifacts in GitHub Actions
+   and create a draft GitHub release. Tag pushes do not publish to registries.
+4. When registry publication is intended, manually dispatch the `release`
+   workflow for the version tag with `publish_registries` enabled, then approve
+   the protected `release` environment.
 5. Publish `faultscope-core`, wait for the crates.io index, then publish
    `faultscope-collection`.
 6. Publish the main PyPI distribution before `faultscope-pymatching`.
 
-The repository workflow does not publish from ordinary branches or pull
-requests. Registry trusted-publisher configuration and the crates.io token are
-maintainer-owned external prerequisites.
+The repository workflow does not publish from ordinary branches, pull requests,
+or tag pushes. Registry publication requires an explicit manual opt-in.
+Trusted-publisher configuration and the crates.io token are maintainer-owned
+external prerequisites.
