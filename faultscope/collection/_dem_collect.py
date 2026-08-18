@@ -159,9 +159,24 @@ def _run_collect(
     *,
     progress_sink: Callable[[Progress], object] | None = None,
 ) -> list[TaskStats]:
+    return _run_collect_materialized(
+        list(tasks),
+        options,
+        run_options,
+        progress_sink=progress_sink,
+    )
+
+
+def _run_collect_materialized(
+    tasks: list[DemCollectionTask],
+    options: CollectionOptions,
+    run_options: CollectionRunOptions,
+    *,
+    progress_sink: Callable[[Progress], object] | None = None,
+) -> list[TaskStats]:
     counter_schema = _counter_schema_from_run_options(run_options)
     native_tasks = _prepare_native_tasks(
-        list(tasks),
+        tasks,
         options,
         run_options.decoders,
         counter_schema,
@@ -263,6 +278,7 @@ def _iter_collect_stream(
     options: CollectionOptions,
     run_options: CollectionRunOptions,
 ) -> Iterator[Progress]:
+    task_list = list(tasks)
     condition = threading.Condition()
     pending: Progress | None = None
     failure: BaseException | None = None
@@ -288,7 +304,12 @@ def _iter_collect_stream(
     def worker() -> None:
         nonlocal failure, done
         try:
-            _run_collect(tasks, options, run_options, progress_sink=progress_bridge)
+            _run_collect_materialized(
+                task_list,
+                options,
+                run_options,
+                progress_sink=progress_bridge,
+            )
         except _CollectStreamCancelled:
             with condition:
                 done = True

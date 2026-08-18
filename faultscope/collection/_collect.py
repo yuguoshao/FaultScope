@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass, replace
 import json
+import os
 from pathlib import Path
 import threading
 from typing import Any, cast
@@ -203,9 +204,24 @@ def _run_collect(
     *,
     progress_sink: Callable[[Progress], object] | None = None,
 ) -> list[TaskStats]:
+    return _run_collect_materialized(
+        list(tasks),
+        options,
+        run_options,
+        progress_sink=progress_sink,
+    )
+
+
+def _run_collect_materialized(
+    tasks: list[CollectionTask],
+    options: CollectionOptions,
+    run_options: CollectionRunOptions,
+    *,
+    progress_sink: Callable[[Progress], object] | None = None,
+) -> list[TaskStats]:
     counter_schema = _counter_schema_from_run_options(run_options)
     native_tasks = _prepare_native_tasks(
-        list(tasks),
+        tasks,
         options,
         run_options.decoders,
         counter_schema,
@@ -313,6 +329,7 @@ def _iter_collect_stream(
     options: CollectionOptions,
     run_options: CollectionRunOptions,
 ) -> Iterator[Progress]:
+    task_list = list(tasks)
     condition = threading.Condition()
     pending: Progress | None = None
     failure: BaseException | None = None
@@ -338,8 +355,8 @@ def _iter_collect_stream(
     def worker() -> None:
         nonlocal failure, done
         try:
-            _run_collect(
-                tasks,
+            _run_collect_materialized(
+                task_list,
                 options,
                 run_options,
                 progress_sink=progress_bridge,
@@ -646,12 +663,66 @@ def _read_existing_stats(
     existing_data_filepaths: Iterable[str | Path],
     save_resume_filepath: str | Path | None,
 ) -> dict[str, TaskStats]:
-    paths = [Path(path) for path in existing_data_filepaths]
+    paths: list[Path] = []
+    seen_lexical_paths: set[str] = set()
+    seen_file_identities: set[tuple[object, ...]] = set()
+
+    def append_unique(
+        path: Path,
+        *,
+        known_stat: os.stat_result | None = None,
+    ) -> None:
+        lexical_path = _lexical_path_key(path)
+        if lexical_path in seen_lexical_paths:
+            return
+        seen_lexical_paths.add(lexical_path)
+        identity = _path_identity(path, known_stat=known_stat)
+        if identity in seen_file_identities:
+            return
+        seen_file_identities.add(identity)
+        paths.append(path)
+
+    for filepath in existing_data_filepaths:
+        append_unique(Path(filepath))
     if save_resume_filepath is not None:
         resume = Path(save_resume_filepath)
-        if resume.exists() and resume not in paths:
-            paths.append(resume)
+        if _lexical_path_key(resume) not in seen_lexical_paths:
+            try:
+                resume_stat = resume.stat()
+            except OSError:
+                pass
+            else:
+                append_unique(resume, known_stat=resume_stat)
     return {stat.strong_id: stat for stat in read_stats_from_csv_files(paths)}
+
+
+def _lexical_path_key(path: Path) -> str:
+    return os.path.normcase(os.path.abspath(os.fspath(path)))
+
+
+def _path_identity(
+    path: Path,
+    *,
+    known_stat: os.stat_result | None = None,
+) -> tuple[object, ...]:
+    file_stat = known_stat
+    if file_stat is None:
+        try:
+            file_stat = path.stat()
+        except OSError:
+            return ("path", _normalized_path_key(path))
+    inode = int(file_stat.st_ino)
+    if inode != 0:
+        return ("inode", int(file_stat.st_dev), inode)
+    return ("path", _normalized_path_key(path))
+
+
+def _normalized_path_key(path: Path) -> str:
+    try:
+        resolved = path.resolve(strict=False)
+    except (OSError, RuntimeError):
+        return _lexical_path_key(path)
+    return os.path.normcase(os.fspath(resolved))
 
 
 def _native_stats_from_task_stats(stat: TaskStats) -> dict[str, object]:

@@ -9,7 +9,7 @@ from pathlib import Path
 from dataclasses import dataclass, field, replace
 import math
 from collections.abc import Iterable, Iterator
-from typing import Any, ClassVar, Mapping
+from typing import Any, ClassVar, Mapping, cast
 
 
 COLLECTION_COUNTER_SCHEMA_VERSION = 1
@@ -101,7 +101,7 @@ class CollectionCounterSchema:
         )
 
 
-@dataclass(frozen=True, init=False)
+@dataclass(frozen=True, init=False, eq=False)
 class CollectionOptions:
     _MAX_SHOTS_EXPLICIT: ClassVar[int] = 1 << 0
     _MAX_ERRORS_EXPLICIT: ClassVar[int] = 1 << 1
@@ -111,6 +111,15 @@ class CollectionOptions:
     _MAX_BATCH_SECONDS_EXPLICIT: ClassVar[int] = 1 << 5
     _MIN_SHOTS_EXPLICIT: ClassVar[int] = 1 << 6
     _explicit_mask: ClassVar[int] = 0
+    _OPTION_EXPLICIT_BITS: ClassVar[Mapping[str, int]] = {
+        "max_shots": _MAX_SHOTS_EXPLICIT,
+        "max_errors": _MAX_ERRORS_EXPLICIT,
+        "batch_size": _BATCH_SIZE_EXPLICIT,
+        "start_batch_size": _START_BATCH_SIZE_EXPLICIT,
+        "max_batch_size": _MAX_BATCH_SIZE_EXPLICIT,
+        "max_batch_seconds": _MAX_BATCH_SECONDS_EXPLICIT,
+        "min_shots": _MIN_SHOTS_EXPLICIT,
+    }
 
     max_shots: int | None = None
     max_errors: int | None = None
@@ -161,6 +170,110 @@ class CollectionOptions:
         else:
             explicit_mask |= self._MIN_SHOTS_EXPLICIT
 
+        self._initialize(
+            max_shots=max_shots,
+            max_errors=max_errors,
+            batch_size=batch_size,
+            start_batch_size=start_batch_size,
+            max_batch_size=max_batch_size,
+            max_batch_seconds=max_batch_seconds,
+            min_shots=min_shots,
+            explicit_mask=explicit_mask,
+        )
+
+    def with_edits(self, **changes: object) -> CollectionOptions:
+        """Return validated options while preserving explicit override intent."""
+
+        if not changes:
+            return self
+        unknown = changes.keys() - self._OPTION_EXPLICIT_BITS.keys()
+        if unknown:
+            unexpected = min(unknown)
+            raise TypeError(
+                "CollectionOptions.with_edits() got an unexpected keyword argument "
+                f"{unexpected!r}"
+            )
+        explicit_mask = self._explicit_mask
+        for field_name in changes:
+            explicit_mask |= self._OPTION_EXPLICIT_BITS[field_name]
+        return type(self)._from_values(
+            max_shots=cast(int | None, changes.get("max_shots", self.max_shots)),
+            max_errors=cast(int | None, changes.get("max_errors", self.max_errors)),
+            batch_size=cast(int, changes.get("batch_size", self.batch_size)),
+            start_batch_size=cast(
+                int | None,
+                changes.get("start_batch_size", self.start_batch_size),
+            ),
+            max_batch_size=cast(
+                int | None,
+                changes.get("max_batch_size", self.max_batch_size),
+            ),
+            max_batch_seconds=cast(
+                float | None,
+                changes.get("max_batch_seconds", self.max_batch_seconds),
+            ),
+            min_shots=cast(int, changes.get("min_shots", self.min_shots)),
+            explicit_mask=explicit_mask,
+        )
+
+    def _comparison_key(self) -> tuple[object, ...]:
+        return (
+            self.max_shots,
+            self.max_errors,
+            self.batch_size,
+            self.start_batch_size,
+            self.max_batch_size,
+            self.max_batch_seconds,
+            self.min_shots,
+            self._explicit_mask,
+        )
+
+    def __eq__(self, other: object) -> bool:
+        if other.__class__ is not self.__class__:
+            return NotImplemented
+        return self._comparison_key() == other._comparison_key()
+
+    def __hash__(self) -> int:
+        return hash(self._comparison_key())
+
+    @classmethod
+    def _from_values(
+        cls,
+        *,
+        max_shots: int | None,
+        max_errors: int | None,
+        batch_size: int,
+        start_batch_size: int | None,
+        max_batch_size: int | None,
+        max_batch_seconds: float | None,
+        min_shots: int,
+        explicit_mask: int,
+    ) -> CollectionOptions:
+        result = object.__new__(cls)
+        result._initialize(
+            max_shots=max_shots,
+            max_errors=max_errors,
+            batch_size=batch_size,
+            start_batch_size=start_batch_size,
+            max_batch_size=max_batch_size,
+            max_batch_seconds=max_batch_seconds,
+            min_shots=min_shots,
+            explicit_mask=explicit_mask,
+        )
+        return result
+
+    def _initialize(
+        self,
+        *,
+        max_shots: int | None,
+        max_errors: int | None,
+        batch_size: int,
+        start_batch_size: int | None,
+        max_batch_size: int | None,
+        max_batch_seconds: float | None,
+        min_shots: int,
+        explicit_mask: int,
+    ) -> None:
         object.__setattr__(self, "max_shots", max_shots)
         object.__setattr__(self, "max_errors", max_errors)
         object.__setattr__(self, "batch_size", batch_size)
@@ -563,6 +676,12 @@ class _CollectionCsvAppender:
             if existing_header and existing_header != COLLECTION_CSV_FIELDS:
                 raise ValueError(f"collection CSV header does not match in {self.path}")
             self._file.seek(0, io.SEEK_END)
+            if existing_header and self._file.tell() > 0:
+                with self.path.open("rb") as tail_file:
+                    tail_file.seek(-1, io.SEEK_END)
+                    final_byte = tail_file.read(1)
+                if final_byte not in (b"\n", b"\r"):
+                    self._file.write("\n")
             self._writer = csv.DictWriter(
                 self._file,
                 fieldnames=COLLECTION_CSV_FIELDS,

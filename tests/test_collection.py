@@ -17,7 +17,7 @@ import threading
 import unittest
 import weakref
 from unittest import mock
-from typing import get_type_hints
+from typing import Any, get_type_hints
 
 import faultscope
 import faultscope.collection._collect as collection_collect_module
@@ -535,6 +535,29 @@ class CollectionTests(unittest.TestCase):
             tuple(field.name for field in fields(CollectionOptions)), tuple(parameters)
         )
 
+    def test_collection_options_equality_and_edits_preserve_override_intent(self) -> None:
+        inherited = CollectionOptions()
+        explicit_default = CollectionOptions(batch_size=10_000)
+        equivalent_edit = inherited.with_edits(batch_size=10_000)
+
+        self.assertNotEqual(inherited, explicit_default)
+        self.assertEqual(explicit_default, equivalent_edit)
+        self.assertEqual(hash(explicit_default), hash(equivalent_edit))
+        self.assertEqual(len({inherited, explicit_default, equivalent_edit}), 2)
+        self.assertIs(inherited.with_edits(), inherited)
+
+        base = CollectionOptions(max_shots=100, max_errors=1, batch_size=4)
+        chained = CollectionOptions(max_errors=None).with_edits(batch_size=10_000)
+        merged = collection_collect_module._merge_options(base, chained)
+        self.assertEqual(merged.max_shots, 100)
+        self.assertIsNone(merged.max_errors)
+        self.assertEqual(merged.batch_size, 10_000)
+
+        with self.assertRaisesRegex(TypeError, "unexpected keyword argument 'unknown'"):
+            inherited.with_edits(unknown=1)
+        with self.assertRaisesRegex(ValueError, "batch_size"):
+            inherited.with_edits(batch_size=0)
+
     def test_task_types_are_hard_split_by_source(self) -> None:
         dem = _logical_edge_dem()
         DemCollectionTask(dem=dem)
@@ -669,6 +692,73 @@ class CollectionTests(unittest.TestCase):
         self.assertEqual(merged.custom_counts["detectors_checked"], 10)
         with self.assertRaisesRegex(ValueError, "same strong_id"):
             _ = stats + stats.with_edits(metadata={"d": 5})
+
+    def test_csv_append_repairs_a_missing_final_line_boundary_once(self) -> None:
+        schema = CollectionCounterSchema()
+        first = TaskStats(
+            task_id="first",
+            strong_id="first",
+            shots=3,
+            errors=1,
+            discards=0,
+            seconds=0.1,
+            decoder=None,
+            metadata={"index": 1},
+            counter_schema=schema,
+        )
+        second = TaskStats(
+            task_id="second",
+            strong_id="second",
+            shots=5,
+            errors=2,
+            discards=0,
+            seconds=0.2,
+            decoder=None,
+            metadata={"index": 2},
+            counter_schema=schema,
+        )
+        first_line = first.to_csv_line().rstrip("\r\n")
+        cases = (
+            ("empty", "", first, ("first",)),
+            ("header-no-newline", COLLECTION_CSV_HEADER, first, ("first",)),
+            (
+                "row-no-newline",
+                COLLECTION_CSV_HEADER + "\n" + first_line,
+                second,
+                ("first", "second"),
+            ),
+            (
+                "row-lf",
+                COLLECTION_CSV_HEADER + "\n" + first_line + "\n",
+                second,
+                ("first", "second"),
+            ),
+            (
+                "row-crlf",
+                COLLECTION_CSV_HEADER + "\r\n" + first_line + "\r\n",
+                second,
+                ("first", "second"),
+            ),
+        )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            for name, initial, appended, expected_ids in cases:
+                with self.subTest(name=name):
+                    path = Path(temp_dir) / f"{name}.csv"
+                    path.write_bytes(initial.encode())
+                    write_stats_to_csv_file(path, [appended], append=True)
+
+                    with path.open(newline="") as f:
+                        rows = list(csv.reader(f))
+                    roundtrip = read_stats_from_csv_files(path)
+
+                    self.assertEqual(rows[0], list(COLLECTION_CSV_FIELDS))
+                    self.assertEqual(len(rows), len(expected_ids) + 1)
+                    self.assertEqual(
+                        tuple(stat.strong_id for stat in roundtrip),
+                        expected_ids,
+                    )
+                    self.assertIn(path.read_bytes()[-1:], (b"\n", b"\r"))
 
     def test_versioned_counter_schema_round_trips_and_must_match_when_merging(self) -> None:
         detection_schema = CollectionCounterSchema(count_detection_events=True)
@@ -2028,6 +2118,52 @@ class CollectionTests(unittest.TestCase):
         self.assertEqual(stats.shots, 5)
         self.assertEqual(stats.errors, 5)
 
+    def test_resume_paths_are_deduplicated_by_file_identity(self) -> None:
+        task = DemCollectionTask(dem=_logical_edge_dem(), task_id="deduplicated-resume")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            base = Path(temp_dir)
+            path = base / "stats.csv"
+            first = _collect(
+                [task],
+                max_shots=3,
+                batch_size=3,
+                seed=52,
+                save_resume_filepath=path,
+            )[0]
+
+            relative = Path(os.path.relpath(path, Path.cwd()))
+            aliases: list[str | Path] = [path, path, relative, base / "missing.csv"]
+            symlink = base / "stats-symlink.csv"
+            try:
+                symlink.symlink_to(path)
+            except OSError:
+                pass
+            else:
+                aliases.append(symlink)
+            hardlink = base / "stats-hardlink.csv"
+            try:
+                os.link(path, hardlink)
+            except OSError:
+                pass
+            else:
+                aliases.append(hardlink)
+
+            resumed = _collect(
+                [task],
+                max_shots=7,
+                batch_size=4,
+                seed=52,
+                existing_data_filepaths=aliases,
+                save_resume_filepath=path,
+            )[0]
+            persisted = read_stats_from_csv_files(path)
+
+        self.assertEqual(first.shots, 3)
+        self.assertEqual(resumed.shots, 7)
+        self.assertEqual(resumed.errors, 7)
+        self.assertEqual(len(persisted), 1)
+        self.assertEqual((persisted[0].shots, persisted[0].errors), (7, 7))
+
     def test_v1_strong_id_rows_are_not_resumed(self) -> None:
         dem = DetectorErrorModel(
             detectors=(),
@@ -2236,6 +2372,51 @@ class CollectionTests(unittest.TestCase):
         self.assertEqual(len(progress), 1)
         self.assertEqual(progress[0].new_stats[0].task_id, "progress")
         self.assertEqual(progress[0].new_stats[0].shots, 4)
+
+    def test_iter_progress_materializes_tasks_once_on_the_consumer_thread(self) -> None:
+        owner_thread = threading.get_ident()
+
+        class ThreadBoundTasks:
+            def __init__(self, task: object) -> None:
+                self.task = task
+                self.iteration_threads: list[int] = []
+
+            def __iter__(self) -> Iterator[Any]:
+                current_thread = threading.get_ident()
+                self.iteration_threads.append(current_thread)
+                if current_thread != owner_thread:
+                    raise RuntimeError("task iterable moved to the collection worker thread")
+                yield self.task
+
+        forward_tasks = ThreadBoundTasks(
+            CollectionTask(
+                circuit=Circuit(1, (Operation.measure(0, key="m0"),)),
+                task_id="thread-bound-forward",
+            )
+        )
+        forward_progress = list(
+            public_iter_progress(
+                forward_tasks,
+                options=CollectionOptions(max_shots=1, batch_size=1),
+                run_options=CollectionRunOptions(seed=53),
+            )
+        )
+
+        dem_tasks = ThreadBoundTasks(
+            DemCollectionTask(dem=_logical_edge_dem(), task_id="thread-bound-dem")
+        )
+        dem_progress = list(
+            dem_public_iter_progress(
+                dem_tasks,
+                options=CollectionOptions(max_shots=1, batch_size=1),
+                run_options=CollectionRunOptions(seed=53),
+            )
+        )
+
+        self.assertEqual(forward_tasks.iteration_threads, [owner_thread])
+        self.assertEqual(dem_tasks.iteration_threads, [owner_thread])
+        self.assertEqual(forward_progress[0].new_stats[0].shots, 1)
+        self.assertEqual(dem_progress[0].new_stats[0].shots, 1)
 
     def test_progress_api_annotations_are_disjoint(self) -> None:
         iter_hints = get_type_hints(collection_collect_module.iter_collect)

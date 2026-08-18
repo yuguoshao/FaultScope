@@ -577,6 +577,11 @@ an inherited error limit and `max_batch_seconds=None` disables inherited
 adaptive batching. Collection count options reject booleans and fractional
 values, and adaptive batch seconds must be finite and positive.
 
+Derive an existing option set with `options.with_edits(...)`; supplied fields
+remain explicit even when equal to their defaults. Do not use
+`dataclasses.replace()` with `CollectionOptions`, because it cannot preserve the
+explicit-override information.
+
 Use `collect_hotspots(...)` (or `Collector.collect_hotspots(...)`) when the same
 run must also return ordered per-batch `TaskStats` and shot-weighted physical
 location sensitivities in `HotspotCollectionResult.location_sensitivities`.

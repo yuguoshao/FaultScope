@@ -779,6 +779,13 @@ default, while an explicit `None` clears an inherited nullable value. Clearing
 `max_shots` is allowed during option merging but collection then fails with
 `max_shots is required` before compiling the task.
 
+Use `options.with_edits(batch_size=10_000, max_errors=None)` to derive options
+without losing which fields are explicit overrides. The method preserves prior
+override intent and marks every supplied field explicit, including values equal
+to their defaults. `dataclasses.replace()` is not supported for
+`CollectionOptions` because it replays every dataclass field and cannot preserve
+this distinction.
+
 `CollectionRunOptions` is a frozen dataclass:
 
 ```text
