@@ -4,7 +4,7 @@ All notable changes to FaultScope are documented here. FaultScope is pre-1.0:
 unless a contract is explicitly versioned (such as the native decoder ABI),
 patch releases may make breaking API changes.
 
-## [0.2.9] - Unreleased
+## [0.2.9] - 2026-08-18
 
 ### Added
 
