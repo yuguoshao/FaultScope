@@ -170,6 +170,15 @@ class StabilizerStateTests(unittest.TestCase):
         self.assertEqual(state.measure_pauli([1, 1], [0, 0], rng), 0)
         self.assertEqual(state.measure_pauli([0, 0], [1, 1], rng), 0)
 
+    def test_cx_preserves_z_control_x_target_sign(self) -> None:
+        state = StabilizerState.zero(2)
+        state.apply_h(1)
+        state.apply_cz(0, 1)
+        state.apply_cx(0, 1)
+
+        self.assertTrue(state.is_deterministic_pauli([0, 1], [1, 0]))
+        self.assertEqual(state.deterministic_measurement_bit([0, 1], [1, 0]), 0)
+
     def test_s_dag_undoes_s(self) -> None:
         rng = random.Random(3)
         state = StabilizerState.zero(1)
@@ -186,6 +195,15 @@ class StabilizerStateTests(unittest.TestCase):
         state.apply_cz(0, 1)
         self.assertEqual(state.measure_pauli([1, 0], [0, 1], rng), 0)
         self.assertEqual(state.measure_pauli([0, 1], [1, 0], rng), 0)
+
+    def test_cz_preserves_bell_yy_sign(self) -> None:
+        state = StabilizerState.zero(2)
+        state.apply_h(0)
+        state.apply_cx(0, 1)
+        state.apply_cz(0, 1)
+
+        self.assertTrue(state.is_deterministic_pauli([1, 1], [1, 1]))
+        self.assertEqual(state.deterministic_measurement_bit([1, 1], [1, 1]), 0)
 
     def test_swap_moves_state(self) -> None:
         rng = random.Random(5)
@@ -1993,6 +2011,34 @@ class NativePackedSamplerTests(unittest.TestCase):
         self.assertEqual(set(batch.measurements), {"m0", "m1"})
         self.assertEqual(batch.measurements["m0"], 0)
         self.assertEqual(batch.measurements["m1"], 0)
+
+    def test_native_sampler_preserves_clifford_pauli_signs(self) -> None:
+        cases = (
+            (
+                "cx",
+                [
+                    Operation.h(1),
+                    Operation.cz(0, 1),
+                    Operation.cx(0, 1),
+                    Operation.measure_pauli((0, 1), "ZX", key="m"),
+                ],
+            ),
+            (
+                "cz",
+                [
+                    Operation.h(0),
+                    Operation.cx(0, 1),
+                    Operation.cz(0, 1),
+                    Operation.measure_pauli((0, 1), "YY", key="m"),
+                ],
+            ),
+        )
+        for gate, operations in cases:
+            with self.subTest(gate=gate):
+                circuit = Circuit(n_qubits=2, operations=operations)
+                sampler = self._native_sampler_or_skip(circuit)
+                measurements = sampler.sample_measurements(shots=8, seed=21)
+                self.assertEqual(measurements["m"], 0)
 
     def test_measurement_only_sampling_matches_batch_measurements(self) -> None:
         circuit = Circuit(
