@@ -11,7 +11,7 @@ readme = "README.md"
 license = { file = "../../LICENSE" }
 authors = [{ name = "FaultScope contributors" }]
 dependencies = [
-    "faultscope>=0.2.9,<0.3",
+    "faultscope>=0.2.10,<0.3",
 ]
 
 [tool.maturin]

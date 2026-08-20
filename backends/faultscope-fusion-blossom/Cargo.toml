@@ -16,5 +16,5 @@ test = false
 
 [dependencies]
 fusion-blossom = { git = "https://github.com/yuewuo/fusion-blossom.git", rev = "c536a4bdfb13e5e84ea643213510462306c9cb0f", default-features = false, features = ["disable_visualizer", "remove_blossom_v", "u32_index"] }
-faultscope-core = { version = "0.2.9", path = "../../crates/faultscope-core" }
+faultscope-core = { version = "0.2.10", path = "../../crates/faultscope-core" }
 pyo3 = { version = "0.23", features = ["extension-module", "abi3-py310"] }
