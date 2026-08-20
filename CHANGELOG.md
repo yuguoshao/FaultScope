@@ -4,6 +4,14 @@ All notable changes to FaultScope are documented here. FaultScope is pre-1.0:
 unless a contract is explicitly versioned (such as the native decoder ABI),
 patch releases may make breaking API changes.
 
+## [0.2.10] - 2026-08-20
+
+### Fixed
+
+- Corrected CX and CZ tableau phase updates in the concrete and symbolic
+  stabilizer paths, restoring deterministic Pauli measurement signs in compiled
+  samplers.
+
 ## [0.2.9] - 2026-08-18
 
 ### Added
@@ -155,4 +163,5 @@ patch releases may make breaking API changes.
 - Generated type stubs now mark factory-only native classes, including
   `StabilizerState`, as unavailable for direct construction.
 
+[0.2.10]: https://github.com/yuguoshao/FaultScope/releases/tag/v0.2.10
 [0.2.9]: https://github.com/yuguoshao/FaultScope/releases/tag/v0.2.9

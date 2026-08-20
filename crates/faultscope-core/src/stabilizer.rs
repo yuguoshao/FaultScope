@@ -257,7 +257,7 @@ impl ConcreteStabilizer {
             let z_c = self.z[row][control];
             let x_t = self.x[row][target];
             let z_t = self.z[row][target];
-            if (x_t & z_c & (x_c ^ z_t ^ 1)) != 0 {
+            if (x_c & z_t & (x_t ^ z_c ^ 1)) != 0 {
                 self.sign[row] ^= true;
             }
             self.x[row][target] ^= x_c;
@@ -798,7 +798,7 @@ impl SymbolicStabilizer {
             let z_c = self.z_columns[control_index];
             let x_t = self.x_columns[target_index];
             let z_t = self.z_columns[target_index];
-            let sign_rows = x_t & z_c & !(x_c ^ z_t);
+            let sign_rows = x_c & z_t & !(x_t ^ z_c);
             for_each_set_bit_in_word(word_index, sign_rows, |row| {
                 self.sign[row].toggle_constant()
             });
@@ -829,7 +829,7 @@ impl SymbolicStabilizer {
             let z_l = self.z_columns[left_index];
             let x_r = self.x_columns[right_index];
             let z_r = self.z_columns[right_index];
-            let sign_rows = x_l & x_r & !(z_l ^ z_r);
+            let sign_rows = x_l & x_r & (z_l ^ z_r);
             for_each_set_bit_in_word(word_index, sign_rows, |row| {
                 self.sign[row].toggle_constant()
             });
@@ -1405,7 +1405,7 @@ mod tests {
                 let z_c = self.z[row][control];
                 let x_t = self.x[row][target];
                 let z_t = self.z[row][target];
-                if (x_t & z_c & (x_c ^ z_t ^ 1)) != 0 {
+                if (x_c & z_t & (x_t ^ z_c ^ 1)) != 0 {
                     self.sign[row].toggle_constant();
                 }
                 self.x[row][target] ^= x_c;
@@ -1530,6 +1530,164 @@ mod tests {
         assert_eq!(left.rows_valid, right.rows_valid);
         assert_eq!(left.sign, right.sign);
         assert_eq!(left.random_source_count, right.random_source_count);
+    }
+
+    type TwoQubitPauliConjugation = (&'static str, &'static str, bool);
+
+    const CX_PAULI_CONJUGATIONS: [TwoQubitPauliConjugation; 16] = [
+        ("II", "II", false),
+        ("IX", "IX", false),
+        ("IY", "ZY", false),
+        ("IZ", "ZZ", false),
+        ("XI", "XX", false),
+        ("XX", "XI", false),
+        ("XY", "YZ", false),
+        ("XZ", "YY", true),
+        ("YI", "YX", false),
+        ("YX", "YI", false),
+        ("YY", "XZ", true),
+        ("YZ", "XY", false),
+        ("ZI", "ZI", false),
+        ("ZX", "ZX", false),
+        ("ZY", "IY", false),
+        ("ZZ", "IZ", false),
+    ];
+
+    const CZ_PAULI_CONJUGATIONS: [TwoQubitPauliConjugation; 16] = [
+        ("II", "II", false),
+        ("IX", "ZX", false),
+        ("IY", "ZY", false),
+        ("IZ", "IZ", false),
+        ("XI", "XZ", false),
+        ("XX", "YY", false),
+        ("XY", "YX", true),
+        ("XZ", "XI", false),
+        ("YI", "YZ", false),
+        ("YX", "XY", true),
+        ("YY", "XX", false),
+        ("YZ", "YI", false),
+        ("ZI", "ZI", false),
+        ("ZX", "IX", false),
+        ("ZY", "IY", false),
+        ("ZZ", "ZZ", false),
+    ];
+
+    fn set_symbolic_row_support(state: &mut SymbolicStabilizer, row: usize, x: &[u8], z: &[u8]) {
+        let word_index = row / 64;
+        let row_mask = 1u64 << (row % 64);
+        for (qubit, (&x_bit, &z_bit)) in x.iter().zip(z).enumerate() {
+            let index = state.column_start(qubit) + word_index;
+            if x_bit == 0 {
+                state.x_columns[index] &= !row_mask;
+            } else {
+                state.x_columns[index] |= row_mask;
+            }
+            if z_bit == 0 {
+                state.z_columns[index] &= !row_mask;
+            } else {
+                state.z_columns[index] |= row_mask;
+            }
+        }
+        state.sign[row] = Expr::default();
+    }
+
+    fn assert_two_qubit_pauli_conjugations(
+        gate_name: &str,
+        truth_table: &[TwoQubitPauliConjugation],
+        apply_concrete: fn(&mut ConcreteStabilizer, usize, usize),
+        apply_symbolic: fn(&mut SymbolicStabilizer, usize, usize),
+        apply_dense: fn(&mut DenseSymbolicReference, usize, usize),
+    ) {
+        for &(input, expected_output, expected_negative) in truth_table {
+            let (input_x, input_z) = sparse_pauli_to_xz(2, &[0, 1], input).unwrap();
+            let (expected_x, expected_z) = sparse_pauli_to_xz(2, &[0, 1], expected_output).unwrap();
+
+            let mut concrete = ConcreteStabilizer {
+                x: vec![input_x.clone(), vec![0; 2]],
+                z: vec![input_z.clone(), vec![0; 2]],
+                sign: vec![false; 2],
+            };
+            apply_concrete(&mut concrete, 0, 1);
+            assert_eq!(
+                concrete.x[0], expected_x,
+                "{gate_name} concrete x support for {input}"
+            );
+            assert_eq!(
+                concrete.z[0], expected_z,
+                "{gate_name} concrete z support for {input}"
+            );
+            assert!(
+                concrete.sign[0] == expected_negative,
+                "{gate_name} concrete sign for {input}"
+            );
+
+            let mut symbolic = SymbolicStabilizer::zero(2);
+            let symbolic_row = symbolic.n_qubits;
+            set_symbolic_row_support(&mut symbolic, symbolic_row, &input_x, &input_z);
+            apply_symbolic(&mut symbolic, 0, 1);
+            for (qubit, (&expected_x_bit, &expected_z_bit)) in
+                expected_x.iter().zip(&expected_z).enumerate()
+            {
+                assert_eq!(
+                    u8::from(packed_bit(symbolic.x_column(qubit), symbolic_row)),
+                    expected_x_bit,
+                    "{gate_name} symbolic x support for {input}, qubit {qubit}"
+                );
+                assert_eq!(
+                    u8::from(packed_bit(symbolic.z_column(qubit), symbolic_row)),
+                    expected_z_bit,
+                    "{gate_name} symbolic z support for {input}, qubit {qubit}"
+                );
+            }
+            assert_eq!(
+                symbolic.sign[symbolic_row],
+                Expr::constant(expected_negative),
+                "{gate_name} symbolic sign for {input}"
+            );
+
+            let mut dense = DenseSymbolicReference {
+                x: vec![input_x, vec![0; 2]],
+                z: vec![input_z, vec![0; 2]],
+                sign: vec![Expr::default(); 2],
+                random_source_count: 0,
+            };
+            apply_dense(&mut dense, 0, 1);
+            assert_eq!(
+                dense.x[0], expected_x,
+                "{gate_name} dense x support for {input}"
+            );
+            assert_eq!(
+                dense.z[0], expected_z,
+                "{gate_name} dense z support for {input}"
+            );
+            assert_eq!(
+                dense.sign[0],
+                Expr::constant(expected_negative),
+                "{gate_name} dense sign for {input}"
+            );
+        }
+    }
+
+    #[test]
+    fn cx_matches_two_qubit_pauli_conjugation_truth_table() {
+        assert_two_qubit_pauli_conjugations(
+            "CX",
+            &CX_PAULI_CONJUGATIONS,
+            ConcreteStabilizer::apply_cx_impl,
+            SymbolicStabilizer::apply_cx,
+            DenseSymbolicReference::apply_cx,
+        );
+    }
+
+    #[test]
+    fn cz_matches_two_qubit_pauli_conjugation_truth_table() {
+        assert_two_qubit_pauli_conjugations(
+            "CZ",
+            &CZ_PAULI_CONJUGATIONS,
+            ConcreteStabilizer::apply_cz_impl,
+            SymbolicStabilizer::apply_cz,
+            DenseSymbolicReference::apply_cz,
+        );
     }
 
     #[test]

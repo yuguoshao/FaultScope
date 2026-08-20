@@ -521,7 +521,7 @@ no backend decoder pool or worker mutex. A Python subclass that only implements
 native fast path.
 
 Native backends are discovered through built-in handles and post-install plugin
-entry points. FaultScope 0.2.9 uses the strict factory/worker ABI V4:
+entry points. FaultScope 0.2.10 uses the strict factory/worker ABI V4:
 
 ```text
 entry point group: faultscope.native_decoders
