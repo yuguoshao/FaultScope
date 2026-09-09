@@ -6,7 +6,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
-from faultscope.collection._types import CollectionOptions, TaskStats
+from faultscope.collection._types import CollectionOptions, TaskStats, _validate_seed
 
 
 @dataclass(frozen=True)
@@ -21,10 +21,12 @@ class DemCollectionTask:
     task_id: str | None = None
     postselection_mask: bytes | bytearray | memoryview | None = None
     postselected_observables_mask: bytes | bytearray | memoryview | None = None
+    seed: int | None = None
 
     def __post_init__(self) -> None:
         if self.dem is None:
             raise ValueError("DemCollectionTask requires dem")
+        _validate_seed(self.seed)
         if self.collection_options is not None and not isinstance(
             self.collection_options, CollectionOptions
         ):
