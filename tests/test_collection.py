@@ -2830,7 +2830,7 @@ class CollectionTests(unittest.TestCase):
 
         self.assertEqual(compile_source.call_count, 2)
 
-    def test_identity_v2_v4_domains_and_behavioral_inputs(self) -> None:
+    def test_identity_v2_v5_domains_and_behavioral_inputs(self) -> None:
         dem = _graphlike_dem(0.25)
         options = CollectionOptions(max_shots=1, batch_size=1)
         base_schema = CollectionCounterSchema()
