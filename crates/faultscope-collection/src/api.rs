@@ -74,6 +74,9 @@ pub struct DemLogicalCollectionOptions {
     pub min_shots: usize,
     pub max_errors: Option<usize>,
     pub batch_size: usize,
+    /// Explicit task root seed. When absent in a task collection, use the run
+    /// root unchanged, then derive each batch seed from that root. Task identity
+    /// never creates an independent random stream.
     pub seed: Option<u64>,
     pub start_batch_size: Option<usize>,
     pub max_batch_size: Option<usize>,

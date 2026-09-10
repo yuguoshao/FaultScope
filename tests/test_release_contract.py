@@ -59,8 +59,8 @@ API_SNAPSHOT = REPO_ROOT / "tests" / "public_api_contract.json"
 
 class ReleaseContractTests(unittest.TestCase):
     def test_python_distribution_version_is_v0_2(self) -> None:
-        self.assertEqual(faultscope.__version__, "0.2.10")
-        self.assertEqual(importlib.metadata.version("faultscope"), "0.2.10")
+        self.assertEqual(faultscope.__version__, "0.2.11")
+        self.assertEqual(importlib.metadata.version("faultscope"), "0.2.11")
 
     def test_package_contains_pep561_marker_and_native_stub(self) -> None:
         package_root = Path(faultscope.__file__).resolve().parent
@@ -181,6 +181,7 @@ class ReleaseContractTests(unittest.TestCase):
                 "task_id",
                 "postselection_mask",
                 "postselected_observables_mask",
+                "seed",
             ),
             TaskStats: (
                 "task_id",
@@ -209,6 +210,7 @@ class ReleaseContractTests(unittest.TestCase):
                 "task_id",
                 "postselection_mask",
                 "postselected_observables_mask",
+                "seed",
             ),
             DemHotspotCollectionResult: (
                 "stats",
@@ -305,7 +307,7 @@ class ReleaseContractTests(unittest.TestCase):
         ]
         self.assertEqual(undocumented, [])
 
-    def test_collection_strong_id_schema_v4_is_frozen(self) -> None:
+    def test_collection_strong_id_schema_v5_is_frozen(self) -> None:
         dem = DetectorErrorModel(
             detectors=(),
             observables=(LogicalObservable(id=0),),
@@ -326,7 +328,7 @@ class ReleaseContractTests(unittest.TestCase):
         )
         self.assertEqual(
             stats.strong_id,
-            "47d3915dcad87b8f719a47a204e479f564e98acefd21d730accab5f0004b2de5",
+            "7bad43978ac70464ddba604ec083f344444d53fcd134682a531a8c8c1ccfae41",
         )
 
 

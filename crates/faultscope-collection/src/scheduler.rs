@@ -1108,7 +1108,9 @@ fn task_seed_stream(resume_shots: usize, phase: usize) -> usize {
 }
 
 pub(crate) fn task_run_seed(task: &LogicalCollectionTask, run_seed: u64) -> u64 {
-    derive_task_seed(task.options.seed, run_seed, &task.sampling_id)
+    // Identity fields describe results, not random streams. Tasks share the
+    // run root unless the caller explicitly requests a different task seed.
+    task.options.seed.unwrap_or(run_seed)
 }
 
 fn fixed_batch_specs(options: DemLogicalCollectionOptions) -> FixedBatchSpecs {
@@ -1164,10 +1166,6 @@ pub(crate) fn resolve_run_seed(seed: Option<u64>) -> u64 {
     seed.unwrap_or_else(rand::random::<u64>)
 }
 
-fn derive_task_seed(task_seed: Option<u64>, run_seed: u64, sampling_id: &str) -> u64 {
-    task_seed.unwrap_or_else(|| mix_seed(run_seed, stable_string_hash(sampling_id)))
-}
-
 fn mix_seed(left: u64, right: u64) -> u64 {
     let mut value = left ^ right.wrapping_add(0x9e37_79b9_7f4a_7c15);
     value ^= value >> 30;
@@ -1177,23 +1175,11 @@ fn mix_seed(left: u64, right: u64) -> u64 {
     value ^ (value >> 31)
 }
 
-fn stable_string_hash(value: &str) -> u64 {
-    value
-        .as_bytes()
-        .iter()
-        .fold(0xcbf2_9ce4_8422_2325, |acc, byte| {
-            (acc ^ (*byte as u64)).wrapping_mul(0x1000_0000_01b3)
-        })
-}
-
 #[cfg(test)]
 mod tests {
-    use std::collections::HashSet;
-
     use super::{
-        batch_seed, calibration_target_batch_size, coalesced_batch_count, derive_task_seed,
-        fixed_batch_specs, resolve_run_seed, should_finish_calibration, task_seed_stream,
-        DemLogicalCollectionOptions, FixedBatchSpecs,
+        batch_seed, calibration_target_batch_size, coalesced_batch_count, fixed_batch_specs,
+        should_finish_calibration, task_seed_stream, DemLogicalCollectionOptions, FixedBatchSpecs,
     };
 
     fn options() -> DemLogicalCollectionOptions {
@@ -1293,21 +1279,5 @@ mod tests {
             batch_seed(7, task_seed_stream(0, 0), 0),
             batch_seed(7, task_seed_stream(5, 0), 0)
         );
-    }
-
-    #[test]
-    fn one_run_seed_splits_unseeded_tasks_by_sampling_id() {
-        let run_seed = resolve_run_seed(Some(0x5ac3_d491_728e_b60f));
-        let seeds = (0..128)
-            .map(|index| derive_task_seed(None, run_seed, &format!("sampling-{index}")))
-            .collect::<HashSet<_>>();
-
-        assert_eq!(seeds.len(), 128);
-        assert_eq!(
-            derive_task_seed(None, run_seed, "sampling-7"),
-            derive_task_seed(None, run_seed, "sampling-7")
-        );
-        assert_eq!(derive_task_seed(Some(123), run_seed, "sampling-7"), 123);
-        assert_eq!(derive_task_seed(Some(123), run_seed ^ 1, "sampling-8"), 123);
     }
 }

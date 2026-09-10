@@ -492,6 +492,7 @@ def _native_task(
         postselection_mask=postselection_mask,
         postselected_observables_mask=postselected_observables_mask,
         counter_schema=counter_schema,
+        task_seed=task.seed,
     )
     return {
         "task_id": task_id,
@@ -505,7 +506,7 @@ def _native_task(
         "min_shots": options.min_shots,
         "max_errors": options.max_errors,
         "batch_size": options.batch_size,
-        "seed": None,
+        "seed": task.seed,
         "start_batch_size": options.start_batch_size,
         "max_batch_size": options.max_batch_size,
         "max_batch_seconds": options.max_batch_seconds,
@@ -588,6 +589,7 @@ def _task_identities(
     postselection_mask: bytes | None,
     postselected_observables_mask: bytes | None,
     counter_schema: CollectionCounterSchema,
+    task_seed: int | None = None,
 ) -> tuple[str, str]:
     decoder_digest = decoder_identity_digest(
         decoder_identity_payload(decoder, decoder_name=decoder_name)
@@ -609,6 +611,8 @@ def _task_identities(
     strong_payload = {
         "sampling_id": sampling_id,
         "counter_schema": counter_schema._to_payload(),
+        "task_seed": task_seed,
+        "seed_policy": "explicit-v1",
     }
     strong_id = domain_digest(
         schema="faultscope.collection.strong_id",

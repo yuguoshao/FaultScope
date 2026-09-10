@@ -4,6 +4,36 @@ All notable changes to FaultScope are documented here. FaultScope is pre-1.0:
 unless a contract is explicitly versioned (such as the native decoder ABI),
 patch releases may make breaking API changes.
 
+## [0.2.11] - 2026-09-10
+
+### Added
+
+- `CollectionTask.seed` and `DemCollectionTask.seed` accept an explicit
+  non-boolean unsigned-64-bit seed; `None` inherits `CollectionRunOptions.seed`.
+  Distinct task seeds allow otherwise identical independent repeats in one
+  collection call.
+
+### Changed
+
+- Collection uses the `explicit-v1` seed policy: an explicit task seed takes
+  precedence, otherwise the run seed is used unchanged. Metadata, decoder
+  fingerprints, and `sampling_id` no longer salt that seed. Unseeded runs still
+  draw one random root per run, and batch/resume stream derivation is retained.
+  With identical sampling input, effective seed, and batching, different
+  metadata or decoders can share noise samples; different decoders can still
+  produce different logical error counts.
+- Python-generated sampling-id schema v2 remains a configuration fingerprint.
+  Strong-id schema v5 adds the configured `task_seed` and
+  `seed_policy="explicit-v1"`, isolating old-policy resume histories while
+  preserving all source, decoder, metadata,
+  postselection, and counter-schema checks. The run seed remains outside the
+  strong id to preserve aggregation across runs; the CSV v3 header is unchanged.
+  Rust API callers provide their own strong ids and must distinguish the old
+  and new policies themselves.
+  Seeded results can differ from previous releases. This change does not
+  reconstruct past experiments or guarantee identical shots across dependency,
+  algorithm, or batch-setting changes.
+
 ## [0.2.10] - 2026-08-20
 
 ### Fixed
@@ -163,5 +193,6 @@ patch releases may make breaking API changes.
 - Generated type stubs now mark factory-only native classes, including
   `StabilizerState`, as unavailable for direct construction.
 
+[0.2.11]: https://github.com/yuguoshao/FaultScope/releases/tag/v0.2.11
 [0.2.10]: https://github.com/yuguoshao/FaultScope/releases/tag/v0.2.10
 [0.2.9]: https://github.com/yuguoshao/FaultScope/releases/tag/v0.2.9

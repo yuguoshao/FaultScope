@@ -319,6 +319,13 @@ class CollectionOptions:
             object.__setattr__(self, "max_batch_seconds", seconds)
 
 
+def _validate_seed(seed: int | None) -> None:
+    if seed is not None:
+        _require_integer(seed, field_name="seed")
+        if seed < 0 or seed > _MAX_U64:
+            raise ValueError(f"seed must be between 0 and {_MAX_U64}")
+
+
 @dataclass(frozen=True)
 class CollectionRunOptions:
     seed: int | None = None
@@ -331,10 +338,7 @@ class CollectionRunOptions:
     decoders: tuple[str | object, ...] = ()
 
     def __post_init__(self) -> None:
-        if self.seed is not None:
-            _require_integer(self.seed, field_name="seed")
-            if self.seed < 0 or self.seed > _MAX_U64:
-                raise ValueError(f"seed must be between 0 and {_MAX_U64}")
+        _validate_seed(self.seed)
         _require_integer(self.num_workers, field_name="num_workers")
         if self.num_workers <= 0:
             raise ValueError("num_workers must be positive")
@@ -352,6 +356,7 @@ class CollectionTask:
     task_id: str | None = None
     postselection_mask: bytes | bytearray | memoryview | None = None
     postselected_observables_mask: bytes | bytearray | memoryview | None = None
+    seed: int | None = None
 
     def __init__(
         self,
@@ -366,6 +371,7 @@ class CollectionTask:
         task_id: str | None = None,
         postselection_mask: bytes | bytearray | memoryview | None = None,
         postselected_observables_mask: bytes | bytearray | memoryview | None = None,
+        seed: int | None = None,
         **legacy: object,
     ) -> None:
         if "dem" in legacy:
@@ -384,6 +390,7 @@ class CollectionTask:
         object.__setattr__(self, "metadata", metadata)
         object.__setattr__(self, "collection_options", collection_options)
         object.__setattr__(self, "task_id", task_id)
+        object.__setattr__(self, "seed", seed)
         object.__setattr__(self, "postselection_mask", postselection_mask)
         object.__setattr__(
             self,
@@ -395,6 +402,7 @@ class CollectionTask:
     def __post_init__(self) -> None:
         if self.circuit is None:
             raise ValueError("CollectionTask requires circuit")
+        _validate_seed(self.seed)
         if self.collection_options is not None and not isinstance(
             self.collection_options, CollectionOptions
         ):

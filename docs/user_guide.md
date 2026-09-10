@@ -718,30 +718,106 @@ data = CollectionData(stats)
 write_stats_to_csv_file("merged.csv", data.values())
 ```
 
-Collection v3 separates an internal `sampling_id` from the public `strong_id`.
-Forward sampling ids use a `forward_circuit` source payload containing the
-circuit and the `None`/explicit detector and observable declarations. Explicit
-DEM tasks retain their legacy DEM source payload, so their existing ids remain
-stable while a Forward task can never collide with an old circuit-to-DEM id.
-The sampling id also hashes the resolved decoder fingerprint, metadata, and
-postselection masks; Rust uses it to derive task-local random streams. The
-strong id hashes that sampling id plus the full counter schema. Consequently,
-changing either count flag starts a separate resume identity but replays the
-same seeded random samples. Changing a legal
-`custom_error_count_key` does not change the strong id, so the same schema's
-history remains reusable. Mapping keys are sorted, so insertion order in tags,
-metadata, and decoder parameters does not affect identity. Task id, seed,
-`max_shots`, `max_errors`, batch sizing, and worker count remain excluded. Task
-metadata must be JSON serializable when using identity and CSV paths.
+### Seeds, Repeats, and Resume Identity
+
+Collection uses the `explicit-v1` seed policy. `CollectionTask.seed` and
+`DemCollectionTask.seed` override `CollectionRunOptions.seed`. A task seed of
+`None` inherits the run seed unchanged. Both seed fields accept `None` or a
+non-boolean integer from `0` through `2**64 - 1`. When the run seed is `None`,
+Rust draws one random root seed for that collection run; tasks without an
+explicit seed inherit that root. An explicit task seed still takes precedence
+in an otherwise unseeded run.
+
+For a reproducible run, fix the seed and batch settings:
+
+```python
+stats = collect(
+    [CollectionTask(circuit=circuit)],
+    options=CollectionOptions(max_shots=10_000, batch_size=1_000),
+    run_options=CollectionRunOptions(seed=41, num_workers=4),
+)
+```
+
+The effective task seed is a root for the existing batch and resume stream
+derivation; it is not passed unchanged to every batch. A direct sampler call
+with the same numeric seed therefore need not produce the same shots. Batch
+ordinals and the resume stream continue to select deterministic substreams. With unchanged
+sampling input, fixed batch settings, and the same continuation state, task
+order and worker count do not change the sampled stream. A resumed collection
+uses its continuation stream, so splitting a run into resume sessions does not
+promise the same shot sequence as one uninterrupted run.
+
+Metadata, decoder identity, and backend fingerprints do not alter this seed
+selection. Tasks with identical sampling input, effective seed, batching, and
+continuation state share the same underlying noise stream even if their labels
+or decoders differ. Different decoders can still produce different corrections
+and logical error counts; different postselection can also change discards and
+accepted-shot counts. Changing metadata alone does not create independent
+repetitions. Give repeats different task seeds:
+
+```python
+repeat_stats = collect(
+    [
+        CollectionTask(circuit=circuit, task_id="repeat-1", seed=101),
+        CollectionTask(circuit=circuit, task_id="repeat-2", seed=102),
+    ],
+    options=CollectionOptions(max_shots=10_000, batch_size=1_000),
+    run_options=CollectionRunOptions(num_workers=4),
+)
+```
+
+Earlier collection versions mixed the run seed with a stable hash of each
+`sampling_id` when no task seed was set. This automatically separated tasks
+without depending on their list positions or worker assignment. Because the
+id covered decoder fingerprints and metadata, changing either also changed the
+noise stream. An explicit Rust task seed already bypassed that mix. This
+deterministic identity salt was separate from unseeded-run randomness: commit
+`4a72ce1` retained identity-based splitting while resolving
+an omitted run seed to one random root per run. `explicit-v1` removes the
+identity salt and makes independent repeats an explicit seed choice; it keeps
+unseeded runs random and preserves batch/resume stream derivation.
+
+Python collection still separates an internal `sampling_id` (schema 2) from the
+public `strong_id` (schema 5). Despite its historical name, `sampling_id` is
+now a configuration fingerprint, not an RNG input. Forward source payloads
+use the `forward_circuit` kind and contain the circuit plus the
+`None`/explicit detector and observable declarations. Explicit DEM tasks use
+their distinct DEM source payload. The sampling id also hashes the resolved
+decoder fingerprint, metadata, and postselection masks.
+
+The strong id hashes the sampling id, full counter schema, configured
+`task_seed` (`None` or an integer), and `seed_policy="explicit-v1"`. Thus an
+explicit task seed changes resume identity, even if it equals the run seed a
+task would otherwise inherit. Changing either count flag also starts a
+separate identity while preserving seeded samples. Mapping keys are sorted,
+and metadata must be JSON serializable. The run seed, display-only `task_id`,
+shot/error limits, batch sizing, worker count, and a legal
+`custom_error_count_key` remain excluded from identity. Excluding the run seed
+preserves aggregation across runs of the same configuration. For independent
+repetitions, change the run seed for tasks whose `seed` is `None`; for tasks
+with an explicit seed, change that task seed instead.
+
+The CSV header remains v3, but earlier Python-generated strong ids do not match
+schema-5 tasks. Their rows are not reused as resume history for the new seed
+policy. Use a new resume path when upgrading. Matching explicit seeds does not guarantee
+shot-for-shot agreement after changes to dependencies, sampling algorithms, or
+batch settings. Removing identity salt does not reconstruct samples from a
+previously completed experiment; reproducing such a run requires its original
+implementation, seed policy, and settings.
+
+These identity schemas are generated by the Python collection adapter. Public
+Rust collection callers supply their own `strong_id` strings and must assign
+new identities when moving from the old seed policy to `explicit-v1`; an
+arbitrary caller-provided old id is not automatically invalidated.
 
 Expanded tasks in one logical collection call must have unique `strong_id`
 values. Collection rejects a duplicate before starting sampling workers,
 emitting progress, or appending resume data. `task_id` is only a display label,
-so changing it does not create a separate collection identity. Use a genuinely
-different Forward circuit or declaration override, decoder, metadata value,
-postselection mask, or counter schema when main-module tasks must be collected
-independently. Legacy `faultscope.collection.dem` tasks use their explicit DEM
-source instead. A resume CSV produced by an older version from duplicate
+so changing it does not create a separate collection identity. Distinct task
+seeds allow otherwise identical repeats in one call. Different circuits,
+declaration overrides, decoders, metadata, postselection masks, and counter
+schemas also distinguish identities, but do not by themselves request distinct
+random streams. A resume CSV produced by an older version from duplicate
 identities cannot be separated reliably and should be regenerated.
 
 Decoder objects must provide `strong_id_payload()` returning a JSON-serializable
@@ -749,7 +825,7 @@ mapping. Bundled native decoders and official backend packages implement this
 protocol. The payload covers the effective backend, implementation fingerprint
 version, normalized parameters, detector/observable layout, solver problem, and
 all composite children. Collection rejects opaque decoder objects before
-sampling because their results cannot be resumed, merged, or seeded safely.
+sampling because their results cannot be identified for safe resume and merge.
 
 The collection counter schema is exposed as the frozen
 `CollectionCounterSchema` type. Its current `schema_version` is `1`, and its two
