@@ -155,17 +155,21 @@ impl NativePackedSampler {
         measurement_masks_to_py(py, &self.program, &state.measurements)
     }
 
-    #[pyo3(signature = (shots, seed=None))]
+    /// Run a packed batch, optionally omitting per-location event masks.
+    ///
+    /// Hotspot estimation requires a batch with recorded events.
+    #[pyo3(signature = (shots, seed=None, *, record_events=true))]
     pub(crate) fn run_native_batch(
         &self,
         py: Python<'_>,
         shots: usize,
         seed: Option<u64>,
+        record_events: bool,
     ) -> PyResult<NativePackedBatch> {
         if shots == 0 {
             return Err(PyValueError::new_err("shots must be positive"));
         }
-        let state = py.allow_threads(|| run_packed_sample(self, shots, seed, true))?;
+        let state = py.allow_threads(|| run_packed_sample(self, shots, seed, record_events))?;
         Ok(NativePackedBatch {
             state,
             program: self.program.clone(),
@@ -604,6 +608,11 @@ impl NativePackedBatch {
     #[getter]
     pub(crate) fn shots(&self) -> usize {
         self.state.shots()
+    }
+
+    #[getter]
+    pub(crate) fn records_events(&self) -> bool {
+        self.state.records_events()
     }
 
     #[getter]

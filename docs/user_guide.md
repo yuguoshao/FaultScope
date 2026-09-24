@@ -212,6 +212,20 @@ print(measurement_masks["m0"])
 print(batch.noise_event_masks["x0"])
 ```
 
+For a decoder that accepts native packed batches, skip event recording while
+keeping measurement, detector, and observable masks available for decoding:
+
+```python
+from faultscope.runtime import compile_native_sampler
+
+native_sampler = compile_native_sampler(circuit)
+native_batch = native_sampler.run_native_batch(64, seed=3, record_events=False)
+```
+
+This batch reports `records_events=False` and has an empty `noise_event_masks`
+map. Use the default `record_events=True` to obtain a batch for
+`estimate_hotspots`.
+
 If the simulator is constructed with observables, `estimate(...)` can compute
 the default residual logical loss. With no decoder, the correction map is
 empty. With a decoder, logical observable flip masks are XORed with correction

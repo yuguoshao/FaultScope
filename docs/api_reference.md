@@ -314,14 +314,21 @@ compile_native_dem_sampler_from_circuit(
 ```text
 sample(shots, seed=None, rng=None) -> SampleBatch
 sample_measurements(shots, seed=None, rng=None) -> dict[str, int]
-run_native_batch(shots, seed=None) -> native batch handle
+run_native_batch(shots, seed=None, *, record_events=True) -> native batch handle
 estimate(shots, loss_mask_fn=None, decoder=None, correction_mask_fn=None, seed=None, baseline=None, top_k=10)
 estimate_hotspots(batch, loss_mask, baseline=None, top_k=10)
 ```
 
+`run_native_batch(...)` records per-location error event masks by default.
+Pass `record_events=False` to retain the packed measurement, detector, and
+observable data for native batch decoding without storing event masks. The
+returned batch has `records_events=False` and `noise_event_masks == {}`;
+`records_events=True` distinguishes an event-recording batch with no noise
+locations from one where recording was disabled.
+
 `estimate_hotspots(...)` accepts only a native batch produced by the same
-compiled sampler. The batch must contain recorded per-location event masks;
-foreign batches and invalid loss-mask widths raise `ValueError`.
+compiled sampler with `records_events=True`. A batch without recorded events,
+a foreign batch, or an invalid loss-mask width raises `ValueError`.
 
 `NativeDemGenerator` methods:
 
