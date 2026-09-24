@@ -1,326 +1,282 @@
-# FaultScope 实现概览
+<span id="faultscope"></span>
 
-本页是 FaultScope 当前 runtime 的实现概览。更完整的理论原理、公式推导和 packed/DEM 计算细节见
-[FaultScope 理论原理与公式细节](theory.md)。
+# Architecture
 
-本页描述 FaultScope 当前实现背后的数学模型和运行时边界。产品执行路径是 Rust
-`faultscope-core` 中的 bit-packed batch runtime，通过 Python API 暴露为
-`FaultScopeSimulator`、`DetectorErrorModelGenerator` 和
-`DemFaultScopeSimulator`、`DemHotspotEstimator`。本文中的 trajectory 是概念模型；实际 Python 回调接收的是
-batch mask 对象，而不是逐 shot trajectory 对象。本文的 DEM 术语使用 detector error model
-formalism：detector matrix \(D\) 表示 measurement parity constraints，measurement syndrome
-matrix \(\Omega\) 表示 circuit errors 翻转哪些 measurements，detector error matrix
-\(H=D\Omega\) 表示 circuit errors 违反哪些 detectors。
+FaultScope samples noisy stabilizer circuits and estimates how a chosen loss
+changes with each noise rate. Python defines circuits, decoders, and loss
+callbacks. Rust compiles the circuit, runs batches, and aggregates the results.
 
-## 目标函数
+This page follows the execution path. See [Theory](theory.md) for the estimators
+and [API reference](api_reference.md) for method signatures.
 
-一次前向采样可以概念化为
+## From a circuit to a result
 
 ```text
-tau = (e_1, e_2, ..., e_M, m_1, m_2, ..., m_R, s, o)
+Circuit + optional detector/observable declarations
+    |
+    v
+Validate and expand operations; assign integer IDs
+    |
+    v
+Compile ideal measurements with a symbolic stabilizer
+    |
+    v
+Immutable SamplerProgram
+    |
+    v
+Forward batch: Pauli frames + measurement/detector/observable masks
+    |
+    v
+Optional decoder -> correction masks -> loss mask
+    |
+    +--> Loss counts
+    |
+    +--> Physical-location sensitivities and hotspot rankings
+         (requires recorded noise-event masks)
 ```
 
-其中：
+A detector is a parity of measurement results. An observable records a logical
+flip. The decoder predicts observable corrections from detector data; the loss
+rule decides which shots count as failures.
 
-- `e_l` 是第 `l` 个 noise location 的采样事件。
-- `m_r` 是 measurement record。
-- `s` 是由 detector declarations 生成的 detector syndrome。
-- `o` 是由 observable declarations 或最终 Pauli frame 得到的 logical observable flip record。
+## Circuit compilation
 
-目标函数是 shot-level loss 的期望：
+The compiler validates the supported operations and their qubit targets, then
+expands the operation tree. Measurement keys and noise-location labels become
+dense integer IDs. Names and tags remain in boundary tables for input resolution
+and returned results.
+
+A shared symbolic stabilizer tracks the ideal circuit. Each ideal measurement
+becomes an expression containing a constant bit and an XOR of independent random
+bits. A deterministic measurement may therefore depend on earlier random
+measurements without introducing a new random source. Ideal Pauli gates affect
+this symbolic state and need no separate instruction in the batch sampler.
+
+The resulting `SamplerProgram` stores the executable instructions, measurement
+expressions, observable definitions, noise locations, and allocation sizes. It
+is immutable and can be reused for many batches.
+
+### Repeated circuits
+
+`REPEAT` bodies are expanded into individual operations, measurements, and noise
+locations. Record lookbacks resolve against the expanded measurement history;
+repeated explicit labels receive instance-specific names.
+
+During symbolic compilation, suitable repeated bodies can reuse an affine
+expression template when the stabilizer support cycles after one or two
+iterations. This reduces compilation work. The executable sampler still contains
+expanded instructions; it does not run a compressed loop. The
+`loop_kernel_count` statistic describes this compilation optimization.
+
+<span id="batch-runtime"></span>
+
+## Forward batches
+
+`FaultScopeSimulator` runs the compiled program using packed masks. Bit `k` in a
+mask belongs to shot `k`; a Rust `u64` word holds 64 shots. Python exposes masks as
+integers.
+
+| Runtime data | Meaning of a set bit |
+| --- | --- |
+| `X_frame[q]`, `Z_frame[q]` | The shot has an X or Z Pauli-frame component on qubit `q`. |
+| Measurement mask | The recorded measurement result is 1. |
+| Detector mask | The declared measurement parity is 1. |
+| Observable mask | The declared logical observable is 1. |
+| Noise-event mask | A non-identity error or measurement flip occurred at that location. |
+
+The sampler first generates masks for the ideal measurement random sources.
+Clifford instructions then update the frame masks with swaps and XORs. For
+example, H swaps the X and Z components. A measurement combines its compiled
+ideal expression with the frame's anticommutation bit and any attached
+measurement noise. Reset clears the local frame after optionally recording a
+measurement result.
+
+Detectors take XORs of recorded measurements. Observable declarations can use
+measurement parity, a final Pauli-frame projection, or both.
+
+Noise sampling preserves the channel's semantics. A depolarizing or weighted
+Pauli channel first decides whether an event occurs, then chooses one Pauli
+component. Those components are mutually exclusive within a physical location.
+Low-rate Bernoulli sampling skips runs of shots with no event instead of drawing
+once for every shot.
+
+Ordinary sampling can omit noise-event masks. Hotspot estimation records one
+such mask per location so it can compare event occurrence with the loss.
+
+<span id="pymatching-decoder"></span>
+<span id="_1"></span>
+
+## Decoders and loss
+
+The decoder receives detector data and returns logical correction masks. The
+default loss marks a shot when any observable differs from its correction:
 
 ```text
-J(lambda) = E_tau[L_loss(tau)].
+residual[a] = observable[a] XOR correction[a]
+loss_mask = OR over all residual[a]
 ```
 
-在 Python API 中，自定义 loss 通过 packed mask callback 表达。forward estimator 支持：
-
-```text
-loss_mask_fn(batch) -> int
-loss_mask_fn(batch, corrections) -> int
-```
-
-DEM estimator 固定调用两参形式：
-
-```text
-loss_mask_fn(batch, corrections) -> int
-```
-
-如果没有 decoder 或 `correction_mask_fn`，`corrections` 是空 mapping。
-
-返回整数的第 `k` 位表示第 `k` 个 shot 是否贡献 loss。默认 logical loss 使用 declared
-observables 和 decoder correction masks：
-
-```text
-failure_mask = any_observable(observable_mask xor correction_mask)
-```
-
-## 噪声率导数
-
-每个 noise location `l` 有一个事件分布：
-
-```text
-e_l ~ p_l(e; lambda_l)
-```
-
-对采样事件定义 score：
-
-```text
-s_l(tau) = d log p_l(e_l; lambda_l) / d lambda_l
-```
-
-FaultScope 的 Pauli-compatible 噪声模型都实现同一类 score。对 Bernoulli 型事件：
-
-```text
-s_l(tau) =
-  1 / lambda_l       if an error event occurred
- -1 / (1-lambda_l)   otherwise
-```
-
-实际实现会对 rate 做数值裁剪，避免 `1 / lambda_l` 或 `1 / (1-lambda_l)` 发散。
-
-score-function estimator 为：
-
-```text
-dJ / d lambda_l = E[(L_loss(tau) - b) s_l(tau)]
-```
-
-其中 `b` 是 baseline，默认取 batch mean loss。baseline 不改变真实敏感度，因为
-`E[s_l] = 0`。有限 batch 中 `mean(s_l)` 不会严格为 0，因此 baseline 可能改变单次
-Monte Carlo 排序，但通常降低估计方差。
-
-## 热点分数
-
-FaultScope 输出 signed sensitivity：
-
-```text
-sensitivity_l = dJ / d lambda_l
-```
-
-默认热点分数用于排序：
-
-```text
-hotspot_l = |sensitivity_l|
-```
-
-结果对象还按 `NoiseLocation.tags` 聚合：
-
-- `by_qubit`
-- `by_round`
-- `by_gate`
-- `by_operation`
-
-## 支持范围
-
-当前模型限制在 stabilizer-compatible stochastic workflows：
-
-- Clifford gates: `H`, `S`, `S_DAG`, `CX`, `CZ`, `SWAP`
-- Ideal Pauli gates: `X`, `Y`, `Z`, and sparse Pauli strings through
-  `Operation.pauli_gate(...)`
-- Single-qubit `X`/`Y`/`Z` measurement
-- Pauli-string measurement
-- `X`/`Y`/`Z` basis reset
-- Bernoulli Pauli noise
-- weighted Pauli-channel noise
-- single-qubit depolarizing noise
-- two-qubit depolarizing noise
-- measurement bit-flip noise attached to measurements
-- detector and observable declarations
-- DEM generation by single-error propagation
-- DEM-level sampling and hotspot estimation
-- optional PyMatching decoder integration for graphlike DEMs
-- flattened Stim text subset import
-
-非 Clifford gates、非 Pauli 噪声、amplitude damping 等不直接进入 stabilizer runtime；需要先做
-Pauli twirling、离散化近似，或替换为 stabilizer-compatible stochastic channel。
-
-## Batch Runtime
-
-`FaultScopeSimulator` 共享一个理想 stabilizer support，并把 per-shot 差异压入整数
-mask。第 `k` 个 shot 存在整数的第 `k` 位中：
-
-- `X_frame[q]`: qubit `q` 上是否有 X frame 分量。
-- `Z_frame[q]`: qubit `q` 上是否有 Z frame 分量。
-- `M[key]`: measurement key 的测量结果。
-- `S[id]`: detector id 的 detector syndrome bit。
-- `O[id]`: logical observable id 的 observable flip bit。
-- `E[location_id]`: noise location 是否采样到 error/flip event。
-
-热点聚合在 Rust 中用 `popcount` 完成。例如 Bernoulli error location 的计数来自：
-
-```text
-loss_and_event = popcount(loss_mask & event_mask)
-event_count = popcount(event_mask)
-```
-
-再代入同一 score-function estimator。
-
-该 runtime 支持确定和随机 Pauli measurement，只要后续电路不依赖单个 shot 的测量结果选择不同操作。
-FaultScope 当前不暴露通用 per-shot adaptive branching simulator。
-
-## Collection Runtime
-
-`faultscope.collection` 和 collection CLI 只接受
-`CollectionTask(circuit=...)`。任务把 circuit 以及可选的 detector/observable
-声明覆盖编译为同一个 `SamplerProgram`，再由 `NativePackedSampler` 直接执行
-Forward shots。`None` 使用 circuit 内嵌声明；显式序列（包括空序列）替换对应声明。
-编译后的 detector/observable ID 顺序同时用于 decoder layout 校验、postselection
-和详细 counters。一次 collection 调用内，共享同一 source 的 decoder fan-out 复用
-已编译 sampler。
-
-普通 collection 不记录 noise-event attribution masks。无 decoder 或直接传入已构造
-native decoder 时不会生成 DEM；字符串 decoder 仅在任务准备阶段按 source 生成并缓存
-一次 DEM，用于构造静态解码问题，shot sampling 仍始终走 Forward runtime。Rust
-`faultscope-collection` scheduler 负责 batch、worker、停止条件、按 task/batch 派生 seed
-以及 decoder worker cache，因此固定 batch 和 seed 时不依赖 worker 数。
-
-Forward hotspot collection 在同一 packed runtime 上开启 noise-event masks，并按 shot
-加权聚合所有 batch 的 physical location sensitivity。显式 DEM sampling 是独立的 legacy
-路径：`faultscope.collection.dem.DemCollectionTask` 使用 DEM sampler，hotspot 返回 edge
-sensitivity；这些类型不从主 collection 模块或顶层 `faultscope` 导出，也没有 DEM CLI。
-
-## Detector Error Model
-
-`DetectorErrorModelGenerator` 使用 `Detector` 和 `LogicalObservable` 声明生成 DEM。`Detector`
-声明是 detector matrix \(D\) 的行；每个 physical error 的 measurement flips 组成
-measurement syndrome matrix \(\Omega\) 的列；生成出的 DEM edge materialize detector error
-matrix \(H=D\Omega\) 的列及其 logical observable flips。声明可以显式传入，也可以作为 circuit
-operations 存在：
-
-```text
-Operation.detector(measurement_keys, detector_id=...)
-Operation.observable_include(observable_id, measurement_keys)
-```
-
-生成器对每个 noise location 和每个非 identity/flip 事件做单错误传播：
-
-```text
-reference effect -> s_ref, o_ref
-single injected event -> s_event, o_event
-edge = error(p_event) xor(s_ref, s_event) xor(o_ref, o_event)
-```
-
-输出为 Stim-like DEM 行：
-
-```text
-error(p) D0 D3 L0
-```
-
-`edges_by_location()` 返回：
-
-```text
-dict[str, list[DetectorErrorEdge]]
-```
-
-如果一个 location 产生多条 edge，location sensitivity 可以按 edge probability 权重投影到
-detector graph：
-
-```text
-graph = dem.project_sensitivities_to_detector_graph(result.sensitivities)
-```
-
-`project_hotspots_to_edges(hotspots)` 接收 location-level hotspot mapping，并返回按
-`(location_id, event)` keyed 的 edge-level hotspot mapping。
-
-DEM generation 要求 detector/observable effects 在 reference 和单错误传播中可确定。随机裸测量不能直接作为
-detector parity。
-
-## PyMatching Decoder
-
-PyMatching 接口把 detector syndrome masks 送入由 DEM 构造的 matching decoder：
-
-```text
-batch.detectors -> decoder.decode_batch_masks(batch) -> correction masks
-```
-
-给定 DEM edge 集合 `E`，构造 detector error matrix：
-
-```text
-H[i,e] = 1 iff edge e violates detector i
-```
-
-以及 logical fault matrix：
-
-```text
-G[a,e] = 1 iff edge e flips logical observable a
-```
-
-边权为：
-
-```text
-w_e = log((1-p_e) / p_e)
-```
-
-当前接口要求 DEM graphlike：每条 edge 至多连接两个 detector。没有 detector 的纯 logical
-edge 会被拒绝，因为 matching decoder 无法从 syndrome 中恢复这种错误。
-
-## DEM Hotspot Mode
-
-`DemHotspotEstimator` 不执行 stabilizer circuit，而是在 detector error model 上直接采样。
-`DemFaultScopeSimulator(circuit)` 是同一 Rust DEM sampler 的 circuit 入口：构造时先生成
-DEM sampling edges，运行时仍然只采样 DEM edges，不回到 forward packed trajectory。
-每条 DEM edge 是独立 Bernoulli instruction：
-
-```text
-f_e ~ Bernoulli(p_e)
-s_i = xor_{e where H[i,e] = 1} f_e
-o_a = xor_{e where G[a,e] = 1} f_e
-```
-
-默认 loss 为 residual logical failure：
-
-```text
-failure = any_a(o_a xor C_a)
-```
-
-edge-level sensitivity 为：
-
-```text
-dJ_DEM / dp_e =
-  E[(loss - baseline) * (f_e / p_e - (1-f_e) / (1-p_e))]
-```
-
-结果包含：
-
-- `edge_sensitivities: dict[int, float]`
-- `edge_hotspots: dict[int, float]`
-- `sensitivities: dict[str, float]`
-- `hotspots: dict[str, float]`
-- `detector_graph_hotspots`
-
-DEM mode 采用普通 DEM 的独立 edge sampling 语义。Circuit→DEM 对 uniform depolarizing
-channel 使用 Stim 风格的精确独立 factorization，因此保留 detector/observable 联合分布；
-one-qubit `PauliChannel` 也会先尝试 Stim 的 independent X/Y/Z conversion。无法走该路径的一般
-multi-component channel 默认拒绝，只有 `approximate_disjoint_errors` 显式开启时才把 categorical
-channel 转为 DEM。同 detector/observable effect 的分量先按互斥概率求和，不同 effect classes
-再作为独立 edges。后一步不保留原始 forward trajectory 的互斥采样语义，会允许同一 location
-的多个 effect classes 同时发生。当前 DEM schema 不存储 categorical group；要求一般关联噪声
-精确联合分布时使用 forward sampling。
-
-## Stim Import Subset
-
-`parse_stim_circuit(...)` 和 `load_stim_file(...)` 支持 flattened Stim 文本子集。导入结果包含：
-
-- `circuit`
-- `detectors`
-- `observables`
-- `measurement_keys`
-
-导入后的 `circuit` 也包含 detector/observable operations，因此可以直接用于 batch 或 DEM workflow。
-
-支持常见 Clifford、Pauli gate、reset、measurement、MPP、Pauli/depolarizing noise、
-`PAULI_CHANNEL_1`、`PAULI_CHANNEL_2`、`DETECTOR` 和 `OBSERVABLE_INCLUDE`。
-
-不支持 `REPEAT` block、复杂 target modifiers、完整 coordinate-shift 累积、feedback targets、
-`CORRELATED_ERROR` / `ELSE_CORRELATED_ERROR` 等 Stim 高级语义。遇到未支持语法会抛出
-`StimImportError`。
-
-## 验证标准
-
-实现和文档示例应满足：
-
-- 无噪声或零 loss 时，mean loss 和 hotspot 接近 0。
-- 单比特 bit-flip toy model 中，若 `J(lambda)=lambda`，则 `dJ/dlambda=1`。
-- 对称纠错电路中，几何等价 noise locations 在统计误差内给出相近 hotspot。
-- 人为提高某个时空位置的噪声率后，该位置或相邻 detector 区域应在 top-k hotspot 中出现。
-- API 文档中的 Python 示例应能在构建好的 `.venv` 中运行。
+Without a decoder, missing corrections are zero. A custom loss callback can
+replace this rule; its returned integer still uses one bit per shot. Callback
+signatures and decoder adapters are described in the
+[API reference](api_reference.md).
+
+Native decoders keep the batch path in Rust. Python callbacks cross the binding
+boundary to inspect batch masks. Both paths produce a loss mask for the same
+aggregation step. Decoder parameters are held fixed by the score estimator; the
+estimator does not differentiate decoder construction or training.
+
+Matching decoders use a graphlike view of a DEM. Each solver component must touch
+one or two detectors, and a logical-only error with no detector cannot be
+represented by this matching interface. Imported graphlike decomposition hints
+can split a parent edge for the solver while leaving the sampler's parent event
+intact. See [Decoder development](decoder_development.md) for that boundary.
+
+<span id="_2"></span>
+<span id="_3"></span>
+
+## Hotspot aggregation
+
+Rust counts loss shots, event shots, and shots containing both with bitwise AND
+and `popcount`. It uses these counts to estimate one signed sensitivity per
+physical noise rate. The absolute value is the hotspot used for ranking.
+
+A positive sensitivity means that a small increase in the rate increases the
+chosen loss; a negative value means the opposite. A hotspot is neither an error
+probability nor a count of observed faults. Raising a location's error rate does
+not necessarily raise its hotspot.
+
+Results include the mean loss, signed sensitivities, absolute hotspots, top
+locations, and sums by qubit, round, gate, and operation. The default baseline is
+the same batch's mean loss. Its finite-sample bias and the limits at probabilities
+near 0 or 1 are explained in [Theory](theory.md#baseline-and-finite-samples).
+
+Estimation requires positive shots, recorded events, a state from the same
+compiled program or a clone, and a loss mask of the expected width. The program
+checks these conditions before entering the aggregation loop.
+
+<span id="collection-runtime"></span>
+
+## Collection scheduling
+
+The main collection API accepts `CollectionTask(circuit=...)` and samples through
+the Forward runtime. Optional detector and observable sequences replace the
+corresponding circuit declarations; `None` keeps them, while an explicit empty
+sequence removes them.
+
+Tasks sharing a source reuse the compiled sampler during one collection call.
+The Rust scheduler manages batches, workers, stopping conditions, seeds, and
+decoder worker caches. With a fixed seed and fixed batch layout, batch contents
+do not depend on the worker count.
+
+A decoder selected by name may need a DEM during task preparation to build its
+static decoding problem. This does not switch sampling to the DEM runtime.
+Without a decoder, or with an already constructed native decoder, ordinary
+collection does not generate a DEM.
+
+Forward hotspot collection enables event recording and combines batch
+sensitivities using shot-count weights. Ordinary collection leaves event
+recording off. Explicit DEM collection remains a separate legacy API under
+`faultscope.collection.dem`; it is not exported from the main collection module
+or exposed through the collection CLI.
+
+<span id="dem-hotspot-mode"></span>
+
+## Forward and DEM execution
+
+A DEM is an alternative sampling model that keeps detector and observable effects
+of errors. It does not retain the full measurement history or Pauli frames.
+
+| Question | Forward runtime | DEM runtime |
+| --- | --- | --- |
+| Input | Circuit compiled to `SamplerProgram` | `DetectorErrorModel` compiled to independent edge instructions |
+| Sampled object | Physical noise event at each circuit location | Bernoulli event for each canonical DEM edge |
+| Retained results | Measurements, detectors, observables, frames, optional location events | Detectors, observables, optional edge events |
+| Sensitivity parameter | Original physical location rate | DEM edge probability |
+| Location result | Physical-rate derivative estimate | Probability-weighted summary of edge derivatives |
+| General categorical Pauli channels | Preserves the mutually exclusive component choice | Needs an exact conversion or an explicitly enabled approximation |
+
+`DemHotspotEstimator` samples an existing DEM. `DemFaultScopeSimulator(circuit)`
+first generates a DEM and then uses that same DEM sampler. Neither class returns
+to Forward circuit sampling during a batch. Use Forward hotspots when the
+quantity of interest is the derivative with respect to the circuit's physical
+noise rate.
+
+<span id="detector-error-model"></span>
+
+## Circuit-to-DEM compilation
+
+`DetectorErrorModelGenerator` propagates individual error mechanisms to find
+which detectors and observables they flip. Each canonical DEM edge records a
+probability, detector support, observable support, and source attribution.
+Mechanisms with no detector or observable effect can be omitted.
+
+The current generator requires every explicit Pauli measurement to have a
+deterministic ideal result, including measurements unused by detectors. Resets
+that record a measurement result have the same requirement. A circuit with
+random intermediate measurements is therefore not accepted merely because their
+final parity is deterministic. Forward sampling supports such randomness. The
+generator does not implement gauge-detector elimination.
+
+Uniform depolarizing noise uses an exact independent factorization within its
+supported rate range. One-qubit `PauliChannel` conversion also tries to find
+independent X/Y/Z factors. Other multicomponent channels require
+`approximate_disjoint_errors` when no exact path is available. The approximation
+can lose the original channel's mutually exclusive event choices. Conversion
+formulas, numerical tolerances, and attribution rules are in
+[Theory](theory.md#circuit-to-dem-conversion).
+
+Canonical edges determine the sampling distribution. Graphlike hints belong to
+a decoder view and do not create new independent sampling events. The native
+circuit-to-DEM generator currently produces no graphlike hints.
+
+<span id="_4"></span>
+
+## Supported circuit model
+
+The Forward runtime supports H, S, S_DAG, CX, CZ, SWAP, ideal Pauli strings,
+X/Y/Z and Pauli-string measurements, basis resets, Bernoulli Pauli noise,
+weighted Pauli channels, one- and two-qubit depolarizing noise, and attached
+measurement bit-flip noise. Detectors and observables declare how results are
+combined.
+
+Operations follow a fixed circuit for all shots. General per-shot adaptive
+branching, non-Clifford gates, and non-Pauli channels such as amplitude damping
+are outside this runtime. Such channels need a suitable Pauli approximation
+before they can enter the model.
+
+<span id="stim-import-subset"></span>
+
+### Stim import
+
+`parse_stim_circuit(...)` and `load_stim_file(...)` import the supported Stim text
+subset, including nested `REPEAT` blocks, measurement record lookbacks,
+`SHIFT_COORDS`, and detector coordinates. The returned circuit contains its
+detector and observable declarations and can enter either compilation path,
+subject to that path's restrictions.
+
+The importer is not a complete Stim interpreter. Feedback targets and
+`CORRELATED_ERROR` / `ELSE_CORRELATED_ERROR` are examples of unsupported features;
+unsupported syntax raises `StimImportError`.
+
+<span id="_5"></span>
+
+## Validation and source map
+
+Useful checks compare sampling distributions with analytic toy circuits, verify
+seeded equivalence of repeated and explicitly expanded circuits, and compare
+hotspot estimates with analytic derivatives or finite differences. Monte Carlo
+comparisons need statistical tolerances and must account for the chosen
+baseline. Increasing a rate alone is not a valid test of hotspot rank.
+
+| Responsibility | Main Rust source |
+| --- | --- |
+| Operation expansion and integer IDs | `faultscope-core/src/program.rs` |
+| Symbolic compilation and repeated-body reuse | `faultscope-core/src/compile.rs`, `faultscope-core/src/stabilizer.rs`, `faultscope-core/src/expr.rs` |
+| Forward batch execution | `faultscope-core/src/packed.rs`, `faultscope-core/src/sampling.rs` |
+| Circuit-to-DEM generation | `faultscope-core/src/dem/` |
+| DEM batches | `faultscope-core/src/dem_sampling.rs` |
+| Sensitivity and hotspot aggregation | `faultscope-core/src/hotspot.rs` |
+| Batch scheduling and collection | `faultscope-collection/src/` |
+
+These paths are relative to `crates/`.

@@ -1,10 +1,12 @@
 site_name: FaultScope Documentation
-site_description: Noise-aware QEC fault attribution toolkit with a Rust core and Python API
+site_description: Stabilizer circuit simulation for quantum error correction with a Rust core and Python API
 site_url: https://yuguoshao.github.io/FaultScope/
 repo_url: https://github.com/yuguoshao/FaultScope
 repo_name: yuguoshao/FaultScope
 # Keep local file:// builds navigable without relying on directory index lookup.
 use_directory_urls: false
+exclude_docs: |
+  /superpowers/
 
 theme:
   name: material
@@ -16,12 +18,25 @@ theme:
 
 nav:
   - Home: index.md
-  - User Guide: user_guide.md
-  - Decoder Development: decoder_development.md
-  - API Reference: api_reference.md
-  - Release And Compatibility: release.md
-  - Theory: theory.md
-  - Implementation Overview: implementation_overview.md
+  - Start Here:
+      - Getting Started: getting_started.md
+      - Guide Overview: user_guide.md
+  - Guides:
+      - Circuit Sampling: guides/sampling.md
+      - Decoding: guides/decoding.md
+      - Detector Error Models: guides/dem.md
+      - Collection and Thresholds: guides/collection.md
+      - Noise Sensitivity: guides/noise_sensitivity.md
+  - Reference:
+      - API Reference: api_reference.md
+      - Native Decoder ABI: native_decoder_abi.md
+      - Compatibility: release.md
+  - Internals:
+      - Architecture: implementation_overview.md
+      - Theory: theory.md
+  - Development:
+      - Decoder Development: decoder_development.md
+      - Development and Benchmarks: development.md
 
 extra_javascript:
   - javascripts/mathjax.js

@@ -1,233 +1,177 @@
 # FaultScope
 
-FaultScope 是一个面向量子纠错工作流的噪声感知 fault attribution 工具包。它使用 detector error
-model formalism 描述 noisy Clifford circuits：detectors 是 measurement outcomes 上的 parity
-constraints，detector matrix \(D\) 汇总这些 constraints，measurement syndrome matrix
-\(\Omega\) 描述每个 circuit error 会翻转哪些 measurements，detector error matrix
-\(H=D\Omega\) 描述每个 error 会违反哪些 detectors。当前产品运行时由 Rust core 提供，并通过
-Python API 暴露；主要能力包括 bit-packed stabilizer batch sampling、detector error model
-生成、DEM 层采样、decoder 集成和噪声热点估计。
+FaultScope is a stabilizer circuit simulator for quantum error correction, with a
+Rust core and a Python API. It simulates noisy Clifford circuits, samples detector
+syndromes, and estimates logical error rates with external decoders. It also
+generates detector error models and estimates how individual noise rates affect
+logical failure.
 
-文档站点见 [FaultScope Documentation](https://yuguoshao.github.io/FaultScope/)。
-本地文档入口：
+[Documentation](https://yuguoshao.github.io/FaultScope/) |
+[User Guide](docs/user_guide.md) | [API Reference](docs/api_reference.md)
 
-- [User Guide](docs/user_guide.md)：安装、示例、工作流和排错。
-- [API Reference](docs/api_reference.md)：当前 Python/Rust API surface。
-- [Release And Compatibility](docs/release.md)：支持矩阵、版本策略和发布流程。
-- [Theory](docs/theory.md)：理论原理、公式推导和实现中的计算细节。
+- Sample measurements, detector syndromes, and logical observables from noisy
+  Clifford circuits.
+- Generate detector error models (DEMs) and sample their independent error
+  mechanisms.
+- Integrate decoders and collect logical error rates across code distances and
+  noise rates.
+- Estimate noise sensitivities and rank fault locations by their effect on a
+  chosen loss.
 
-## 项目结构
+## Installation
 
-- `crates/faultscope-core`：Python 无关的 Rust core，包含 circuit/DEM 数据模型、detector
-  syndrome sampling 和 hotspot 聚合。
-- `crates/faultscope-collection`：logical error-rate / threshold collection 的 Rust 调度和计数层。
-- `crates/faultscope-python`：PyO3 binding crate，构建 `faultscope._native`。
-- `faultscope/`：公共 Python import surface、decoder/Stim/visualization adapters 和示例构建器。
-- `docs/`：MkDocs 文档站点。
-- `tests/`、`benchmarks/`：回归测试、Stim 对照和吞吐基准。
-
-## 安装与构建
-
-FaultScope `0.2.x` 支持 CPython 3.10–3.14。预构建 wheels 的目标平台是
-manylinux x86_64/aarch64、macOS 11+ x86_64/arm64 和 Windows x86_64；源码构建需要
-Rust 1.85 或更新版本。
-
-当前 workspace 版本为 `0.2.11`。项目仍处于 pre-1.0，补丁版本也可能收口或重命名 Python/Rust
-API；native decoder ABI 则使用独立版本号管理。
-
-从源码 checkout 直接安装：
+Source builds require **Python 3.10+** and **Rust 1.85+**. CPython 3.10 through 3.14
+is supported. From the root of a source checkout, create and activate a virtual
+environment:
 
 ```bash
 python -m venv .venv
-.venv/bin/python -m pip install -U pip
-.venv/bin/python -m pip install .
+source .venv/bin/activate
 ```
 
-可选依赖按需通过 extras 安装：
+On Windows, activate it with `.venv\Scripts\Activate.ps1` in PowerShell instead.
+Install FaultScope and the optional dependencies used by the quickstart:
 
 ```bash
-.venv/bin/python -m pip install ".[pymatching,visualization]"
-.venv/bin/python -m pip install ".[collection]"  # plotting/fitting helpers
-.venv/bin/python -m pip install ".[test]"
+python -m pip install ".[pymatching]" "stim>=1.13"
 ```
 
-`pip install .` 会按 `pyproject.toml` 自动获取 build dependency `maturin>=1.7,<2`，并构建
-`faultscope._native`。离线安装或使用 `--no-build-isolation` 时，需要提前准备好 maturin。
+This builds the Rust extension and installs the Python package. The `pymatching`
+extra supplies PyMatching, NumPy, and SciPy; Stim supplies the example circuit.
+For other integrations and build options, see the
+[installation guide](docs/getting_started.md#install-from-source).
 
-常用验证：
+## Quickstart: Simulate a Surface-Code Memory
 
-```bash
-.venv/bin/python -c "import faultscope; print(faultscope.Circuit)"
-cargo test --workspace
-.venv/bin/python -m unittest discover -s tests -q
-```
+This example runs a distance-3 rotated surface-code Z-memory experiment for three
+rounds, with depolarizing noise after Clifford gates. Stim constructs the circuit
+and a decomposed DEM for the decoding graph. FaultScope samples the original
+circuit, and PyMatching predicts logical flips from the detector syndromes.
 
-如果修改了 Rust extension 或 Python package 后需要刷新当前环境，重新安装即可：
-
-```bash
-.venv/bin/python -m pip install --force-reinstall .
-```
-
-## 最小示例
-
-下面的例子构造一个单比特 X 噪声位置，采样测量结果，并估计该噪声率对 loss mask 的敏感度。
+Save the following code as `surface_code.py` and run `python -I surface_code.py`
+in the activated environment. The `-I` option imports the installed package even
+when the script is inside the source checkout.
 
 ```python
-from faultscope import (
-    BernoulliPauliNoise,
-    FaultScopeSimulator,
-    Circuit,
-    NoiseLocation,
-    Operation,
-)
+import pymatching
+import stim
 
-x_noise = NoiseLocation(
-    id="data_x0",
-    model=BernoulliPauliNoise("X"),
-    rate=0.02,
-    qubits=(0,),
-    tags={"round": 0, "gate": "idle", "qubit": 0},
-)
+from faultscope import FaultScopeSimulator, PyMatchingDecoder, parse_stim_circuit
 
-circuit = Circuit(
-    n_qubits=1,
-    operations=(
-        Operation.noise(x_noise),
-        Operation.measure(0, key="m0", basis="Z"),
-    ),
+stim_circuit = stim.Circuit.generated(
+    "surface_code:rotated_memory_z",
+    distance=3,
+    rounds=3,
+    after_clifford_depolarization=0.005,
 )
+imported = parse_stim_circuit(str(stim_circuit))
+simulator = FaultScopeSimulator(imported.circuit)
 
-simulator = FaultScopeSimulator(circuit)
+# Inspect a batch of circuit samples.
 batch = simulator.run_batch(shots=1024, seed=1)
-result = simulator.estimate(
-    shots=2048,
-    seed=2,
-    loss_mask_fn=lambda batch: batch.measurements["m0"],
-    top_k=5,
+detector_ids = tuple(detector.id for detector in imported.detectors)
+observable_ids = tuple(observable.id for observable in imported.observables)
+print(f"Sampled {batch.shots} shots with {len(batch.detectors)} detectors")
+print("First-shot syndrome:", [batch.detector_bit(d, 0) for d in detector_ids])
+
+# Construct a matching decoder for this circuit's detector layout.
+stim_dem = stim_circuit.detector_error_model(decompose_errors=True)
+matching = pymatching.Matching.from_detector_error_model(stim_dem)
+decoder = PyMatchingDecoder(
+    matching=matching,
+    detector_ids=detector_ids,
+    observable_ids=observable_ids,
+    edge_count=matching.num_edges,
 )
 
-print(batch.measurement_bit("m0", 0))
+# Sample a new batch and estimate failure after decoding.
+result = simulator.estimate(shots=10_000, seed=2, decoder=decoder)
+print(f"Logical failure rate: {result.logical_failure_rate:.4%}")
+```
+
+A logical failure occurs when the decoder's predicted logical flips disagree with
+the sampled logical observable record. The reported rate is a Monte Carlo
+estimate; increase the shot count to reduce sampling uncertainty.
+
+Batch fields such as `batch.detectors` hold packed integer masks, with one bit per
+shot. Helpers such as `detector_bit(detector_id, shot)` expose individual values.
+The same compiled simulator can be reused for additional batches.
+
+## Simulation Workflows
+
+| Task | Public entry point | Result |
+| --- | --- | --- |
+| Sample a noisy circuit | `FaultScopeSimulator.run_batch(...)` | Measurements, detectors, observables, and noise-event masks |
+| Generate a DEM | `generate_native_dem(circuit)` | Detector and logical effects of error mechanisms |
+| Sample a DEM | `DemFaultScopeSimulator(circuit)` or `DemHotspotEstimator(dem)` | Detector syndromes and logical flips from independent error mechanisms |
+| Estimate decoded failure | `simulator.estimate(..., decoder=decoder)` | Logical failure rate and noise sensitivities |
+| Run repeated QEC experiments | `Collector` with `CollectionTask(circuit=...)` | Logical error-rate statistics with parallel collection and CSV resume |
+
+Circuit-based collection uses forward circuit sampling. A DEM used to construct
+its decoder does not change the sampling path. Collection also supports stopping
+conditions and analysis of code-distance and noise-rate sweeps; see
+[logical error-rate collection](docs/guides/collection.md).
+
+DEM sampling operates on independent error mechanisms. Some circuit noise
+channels convert exactly; others require explicitly enabled approximation.
+Use forward sampling when the original channel's mutually exclusive outcomes
+must be preserved. See [detector error models](docs/guides/dem.md).
+
+The simulator supports Clifford gates, Pauli measurements and resets, and the
+supported stochastic Pauli noise models. Non-Clifford gates, general non-Pauli
+channels, and general per-shot adaptive branching are outside its scope.
+
+## Noise Sensitivity Analysis
+
+The quickstart's estimate also contains sensitivities for the physical noise
+locations in the circuit. Append this line to `surface_code.py` to print the five
+highest-ranked locations from the same estimate:
+
+```python
 print(result.hotspot_table(top_k=5))
 ```
 
-## 当前 API 要点
+A sensitivity estimates how the chosen loss changes when a location's noise rate
+increases, with the decoder held fixed. A positive value indicates increasing
+loss; a negative value indicates decreasing loss. Hotspot rankings use the
+absolute sensitivity, so they highlight large effects in either direction.
 
-- `Operation.pauli_gate(...)` 是 Pauli gate 构造器；`Operation.pauli` 是只读属性。
-- `PauliFrame` 和 `StabilizerState` 从 `faultscope.core` 导入，不是顶层 `faultscope` export。
-- `PauliFrame(x, z)` 在构造边界校验并持有 binary x/z 不变量；`StabilizerState` 只能通过
-  `StabilizerState.zero(n_qubits)` 构造。无效 dense/sparse Pauli 输入会在计算、RNG 调用和
-  state mutation 前抛出 `ValueError`。
-- `FaultScopeSimulator` 是前向 packed batch runtime 的主要入口。
-- `DemFaultScopeSimulator` 是同形的 DEM runtime 入口：从 circuit 直接生成 DEM sampler，
-  再按 DEM edge 概率采样 detector syndrome / logical observable flips。它不会逐门执行
-  forward trajectory，也不会返回 measurement 或 Pauli-frame masks。
-- `DetectorErrorModelGenerator` 和 `generate_native_dem(...)` 生成 detector error model；未显式
-  传入 detector / observable 时，会读取 circuit 中的 `Operation.detector(...)` 和
-  `Operation.observable_include(...)`。每个 generated edge 对应 detector error matrix
-  \(H\) 的一列及其 logical observable flips。
-- `DetectorErrorModelGenerator.generate_artifact()` 返回
-  `GeneratedDetectorErrorModel`，把唯一 canonical sampling DEM 与可选的稀疏
-  `GraphlikeDecompositionHints` 封装在一起。原生线路生成目前不产生 hint；Stim `^` importer
-  可以填充该 sidecar，decoder 通过 artifact 编译 graphlike view。
-- Circuit→DEM 对 depolarizing noise 使用 Stim 同样的精确独立化参数，并先尝试把 one-qubit
-  `PauliChannel` 精确转换成独立 X/Y/Z mechanisms。不能完成这种转换的多分量 categorical channel
-  默认拒绝；只有显式传入 `approximate_disjoint_errors=True`（或概率阈值）才启用近似。Stim 风格
-  转换会先合并具有相同 detector/observable effect 的互斥分量，再把不同 effect classes 视为独立；
-  后一步会允许同一 shot 同时发生多个原本互斥的结果，因此需要精确保留物理联合分布时应使用
-  forward sampling。
-- `DemHotspotEstimator` 在 DEM 层采样，每条 DEM edge 按独立 Bernoulli instruction 处理，并把
-  sampled edge vector 映射成 detector syndrome 和 logical observable flip record。
-- `faultscope.collection.Collector` 提供可复用的 threshold-style logical error-rate
-  collection 配置；`CollectionTask(circuit=...)` 直接执行 packed Forward runtime，
-  `collect(...)` 是一次性薄封装。Rust 负责 native sampler/decoder 调度和计数，Python
-  负责任务解析、strong id 和 CSV resume。字符串 decoder 只在准备阶段从 circuit 生成一次
-  DEM 来构造静态 decoding problem，shots 不经过 DEM sampler。显式 DEM collection 已隔离到
-  `faultscope.collection.dem.DemCollectionTask` / `DemCollector`，主模块和 CLI 不再接受 DEM task。
-- `NativeNoCorrectionDecoder` 和后续 native decoder handle 可通过
-  `estimate(..., decoder=decoder)` 自动走 native fast path；传入 Python loss/correction
-  callback 时回退到兼容路径。普通 Python decoder 或 subclass 不会自动获得 native hot path；
-  可用 native backend 通过 `faultscope.decoders.available_native_decoders()` 查看。
-- `DetectorErrorModel.compile_indexed()`、`compile_graphlike_problem()` 和
-  `compile_binary_linear_problem()` 提供面向后续 fusion-blossom、BP+OSD 等 decoder 的 native
-  problem views；这些 views 暴露 detector error matrix \(H\) 和 logical fault matrix 的稀疏结构。
-- 可选 native decoder backend 通过统一后装命令管理，例如
-  `python -m faultscope.backends status` 查看 catalog/status，
-  `python -m faultscope.backends install pymatching --dry-run` 查看安装步骤；FaultScope 不会在
-  `import` 或 `estimate(...)` 时隐式联网、clone 或编译。
-- `mwpm` 仍可在 catalog/status 中发现，但外部 `faultscope-mwpm` 包还是 ABI v1，尚未迁移到
-  FaultScope native decoder ABI V4，因此目前不可安装；`bpdecoder` 也暂时不可安装，等待 V4
-  迁移；`bposd` 是 catalog/status 中不可安装、
-  未实现的预留项。通用 `install bposd --dry-run` 子命令会报告它不可用，但不会生成安装计划或
-  步骤，也不会执行安装。
-- 开发中的 PyMatching 和 fusion-blossom backend 可在激活 venv 后通过
-  `.venv/bin/python -m pip install -e backends/faultscope-pymatching --no-build-isolation` 和
-  `.venv/bin/python -m pip install -e backends/faultscope-fusion-blossom` 本地安装；当前是最小
-  native MWPM backend；PyMatching backend 避免 FaultScope batch/correction masks 经 Python 转换。
-- `edge_sensitivities` 和 `edge_hotspots` 是按 DEM edge index keyed 的 dict。
-- `edges_by_location()` 返回 `dict[str, list[DetectorErrorEdge]]`。
-- `materialize_dem=False` 的 native DEM sampler 是轻量采样路径，`sampler.dem is None`，
-  需要完整 DEM metadata 的 estimate/hotspot API 会抛出 `ValueError`。
-  `DemFaultScopeSimulator(circuit, materialize_dem=False)` 暴露同样的轻量路径。
+Location tags allow results to be grouped by qubit, round, gate, or operation.
+Forward sensitivities refer to physical noise rates. DEM sensitivities refer to
+DEM edge probabilities; their location summaries are not generally derivatives
+with respect to the original circuit noise rates. See the
+[sensitivity guide](docs/guides/noise_sensitivity.md) for interpretation and
+[theory](docs/theory.md) for the estimator's statistical assumptions.
 
-## 工作流选择
+## Performance
 
-| 需求 | 推荐工作流 |
-| --- | --- |
-| 查看原始 measurement/noise masks | Forward sampling |
-| 自定义 measurement-history loss | Forward estimate + `loss_mask_fn` |
-| detector-syndrome decoder | Forward 或 DEM estimate + decoder |
-| threshold-style logical collection | `faultscope.collection.CollectionTask(circuit=...)`（Forward） |
-| legacy 显式 DEM collection | `faultscope.collection.dem`（library only） |
-| graphlike matching decoder | 原型用 `PyMatchingDecoder`；高性能路径安装 `faultscope-pymatching` 后使用 `NativePyMatchingDecoder`，或使用 `faultscope-fusion-blossom`；`mwpm` 等待 ABI V4 迁移 |
-| circuit 入口的 DEM 采样 | `DemFaultScopeSimulator(circuit)` |
-| DEM edge 级热点排序 | `DemFaultScopeSimulator` 或 `DemHotspotEstimator(dem)` |
-| 重复 detector syndrome sampling | `DemFaultScopeSimulator(circuit)` 或生成 DEM 后复用 DEM sampler |
-| Rust 集成 | `faultscope-core` |
+FaultScope processes many shots together using packed bit arrays in Rust. Reuse
+a compiled simulator when sampling the same circuit repeatedly.
 
-FaultScope 当前产品路径是 packed batch engine，不暴露通用的 per-shot adaptive branching simulator。
+The quickstart uses the Python PyMatching integration. Optional native PyMatching
+and fusion-blossom backends keep batch decoding in native code; see
+[native decoder integration](docs/guides/decoding.md#native-backends).
 
-## 文档开发
+For reproducible measurements, use a release build and report the circuit, shot
+count, decoder, and hardware alongside the timings. Start with the
+[sampling benchmark](benchmarks/sampling_throughput.py) or the
+[surface-code decoder benchmark](benchmarks/surface_code_decoder_performance.py).
+The [benchmark guide](docs/development.md#measure-performance) documents build instructions,
+commands, and comparison settings.
 
-本地预览文档站：
+## Documentation and Development
 
-```bash
-.venv/bin/python -m pip install mkdocs-material
-.venv/bin/python -m mkdocs serve
-```
+- [Getting Started](docs/getting_started.md): installation and a complete surface-code example.
+- [User Guide](docs/user_guide.md): sampling, decoding, collection, and noise sensitivities.
+- [API Reference](docs/api_reference.md): Python and Rust interfaces and result fields.
+- [Theory](docs/theory.md): sampling models, sensitivity estimators, and DEM semantics.
+- [Decoder Development](docs/decoder_development.md): custom Python and native decoders.
+- [Release and Compatibility](docs/release.md): supported platforms and version policy.
+- [Development](docs/development.md): build, test, lint, documentation, and benchmarks.
 
-严格构建：
+FaultScope is pre-1.0; Python and Rust APIs may change between releases.
+Contributions should pass the relevant development checks above.
 
-```bash
-.venv/bin/mkdocs build --strict --site-dir /private/tmp/faultscope-doc-review-site
-```
+## License
 
-## Benchmarks
-
-性能 benchmark 应使用 release 构建的 extension：
-
-```bash
-.venv/bin/maturin develop --release --skip-install
-```
-
-然后从仓库根目录运行：
-
-```bash
-.venv/bin/python benchmarks/compiler_throughput.py --distances 5 10 15 20 --input-form repeat --representation m-plus-r --json-out compiler-throughput.json
-.venv/bin/python benchmarks/sampling_throughput.py --distances 15 21 31 --rounds 3
-.venv/bin/python benchmarks/sampling_throughput.py --family random-clifford --qubits 128 256 512 --depth 20
-.venv/bin/python benchmarks/dem_throughput.py --distances 9 13 21 --rounds 3
-.venv/bin/python benchmarks/hotspot_throughput.py --distances 9 13 21 --rounds 3 --shots 100000
-.venv/bin/python benchmarks/collection_throughput.py --shots 10000 --batch-size 1000 --adaptive-start-batch-size 100 --adaptive-max-batch-size 1000 --max-batch-seconds 0.25 --workers 1 2 4
-.venv/bin/python benchmarks/native_decoder_fast_path.py
-.venv/bin/python benchmarks/surface_code_decoder_performance.py --distances 3 5 7 --shots 10000
-.venv/bin/python benchmarks/surface_code_threshold.py --distances 3 5 7 --shots 10000
-```
-
-Stim/PyMatching 相关 benchmark 会在对应可选依赖安装后启用对照；
-surface-code decoder performance benchmark 会在安装 `faultscope-pymatching` 或
-`faultscope-fusion-blossom` 后额外输出对应 native path。该 benchmark 对每条 Stim
-`error` 保留一条 canonical FaultScope DEM edge；`^` 分组只用于编译当前
-uncorrelated graphlike decoder view，不会被独立采样。传入
-`--split-native-baseline` 可把 native no-correction packed-row baseline 与
-decoder 增量分开显示。需要比较不同 native decoder 的 mean-loss 时，使用
-`--same-seed-across-paths` 让同一个 distance/rate 点复用相同 seed。
+FaultScope is distributed under the [MIT License](LICENSE).

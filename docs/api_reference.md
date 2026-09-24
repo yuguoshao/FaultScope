@@ -1,24 +1,29 @@
 # FaultScope API Reference
 
-FaultScope is a Rust Cargo workspace with a Python API. The product runtime lives in
-`faultscope-core` and is exposed to Python through the private extension module
-`faultscope._native`. DEM APIs use detector error model terminology: detector
-declarations represent detector matrix rows, generated DEM edges are columns of
-the detector error matrix \(H=D\Omega\), and decoder-ready views expose that
-sparse binary structure. User code should import from the public Python modules:
-`faultscope`, `faultscope.core`, `faultscope.runtime`, `faultscope.dem`,
-`faultscope.collection`, `faultscope.decoders`, `faultscope.io`, and
-`faultscope.viz`.
+This page records public signatures, result fields, and behavioral contracts.
+For runnable examples, use [Getting Started](getting_started.md) or the
+[task guides](user_guide.md).
 
-The package is pre-1.0. Python and Rust API compatibility is not guaranteed
-between releases, including patch releases. Public module `__all__` values and
-documented crate-root exports describe the current supported surface, while
-private modules and names beginning with `_` are implementation details. The
-native decoder ABI is versioned separately.
+| Area | Reference |
+| --- | --- |
+| Circuit and noise | [Circuit objects](#core-circuit-objects), [noise models](#noise-models) |
+| Sampling | [Forward runtime](#forward-runtime), [native handles](#native-runtime-handles) |
+| Detector error models | [Generation and model types](#detector-error-models), [DEM runtime](#dem-runtime-from-circuit) |
+| Decoding | [Native decoders](#native-decoders), [callbacks](#callback-contracts) |
+| Experiments | [Collection](#collection-api), [CSV and resume](#csv-and-resume), [thresholds](#threshold-analysis) |
+| Integration | [Optional integrations](#optional-integrations), [Rust API](#rust-api) |
 
-`faultscope.__version__` reports the installed distribution version. The Python
-package includes `py.typed` and a generated structural stub for the private
-PyO3 extension so public wrappers remain type-checkable.
+Use public modules: `faultscope`, `faultscope.core`, `faultscope.runtime`,
+`faultscope.dem`, `faultscope.collection`, `faultscope.decoders`, `faultscope.io`,
+and `faultscope.viz`. Names beginning with `_` are private.
+
+The package is pre-1.0; Python and Rust compatibility is not guaranteed between
+releases, including patch releases. Public `__all__` values and documented
+crate-root exports define the supported surface. The native decoder ABI is
+versioned separately. See [release compatibility](release.md).
+
+`faultscope.__version__` reports the installed distribution version. The package
+includes `py.typed` and a structural stub for the private PyO3 extension.
 
 ## Import Surface
 
@@ -193,6 +198,12 @@ atomically updates the state and matching `PauliFrame`.
 `FaultScopeSimulator(circuit, *, observables=None)` compiles a
 circuit for packed batch simulation.
 
+For native decoder estimates in 0.2.11, supply `observables` explicitly when
+constructing the simulator. Embedded `observable_include` operations alone do
+not populate the observable list used by the native Forward layout check.
+See the [complete decoding example](guides/decoding.md#use-the-native-path).
+This limitation also applies to `NativePackedSampler.estimate`.
+
 Read-only attributes:
 
 - `circuit`
@@ -255,37 +266,14 @@ z_mask(qubit)
 - `top_hotspots(top_k=10)`
 - `hotspot_table(top_k=10)`
 
-Example:
+`logical_failure_rate` aliases `mean_loss`. With the default residual loss it
+is a logical failure rate; a custom loss may define another binary objective.
+`sensitivities` are signed physical-rate derivatives with the decoder fixed;
+`hotspots` are their absolute values. Grouped hotspots sum absolute values.
+The default same-batch mean baseline introduces finite-sample bias; a fixed
+baseline such as `0.0` avoids that source of bias. See [Theory](theory.md).
 
-```python
-from faultscope import (
-    BernoulliPauliNoise,
-    FaultScopeSimulator,
-    Circuit,
-    NoiseLocation,
-    Operation,
-)
-
-noise = NoiseLocation("x0", BernoulliPauliNoise("X"), 0.25, (0,))
-circuit = Circuit(
-    1,
-    (
-        Operation.noise(noise),
-        Operation.measure(0, key="m0"),
-    ),
-)
-
-sim = FaultScopeSimulator(circuit)
-batch = sim.run_batch(shots=32, seed=1)
-result = sim.estimate(
-    shots=128,
-    seed=2,
-    loss_mask_fn=lambda batch: batch.measurements["m0"],
-)
-
-print(batch.measurement_bit("m0", 0))
-print(result.top_hotspots(1)[0].location_id)
-```
+Runnable examples: [sampling](guides/sampling.md) and [noise sensitivity](guides/noise_sensitivity.md).
 
 ## Native Runtime Handles
 
@@ -309,6 +297,8 @@ compile_native_dem_sampler_from_circuit(
 ) -> NativeDemSampler
 ```
 
+### Forward Sampler Handle
+
 `NativePackedSampler` methods:
 
 ```text
@@ -330,11 +320,14 @@ locations from one where recording was disabled.
 compiled sampler with `records_events=True`. A batch without recorded events,
 a foreign batch, or an invalid loss-mask width raises `ValueError`.
 
+### DEM Generator Handle
+
 `NativeDemGenerator` methods:
 
 ```text
 generate_dem() -> DetectorErrorModel
 generate() -> DetectorErrorModel
+generate_artifact() -> GeneratedDetectorErrorModel
 compile_sampler(*, materialize_dem=True) -> NativeDemSampler
 ```
 
@@ -389,34 +382,13 @@ mode `sim.dem is None`; `run_batch(...)`, `sample(...)`, and
 `run_native_batch(...)` work, while metadata-dependent estimate/hotspot APIs
 raise `ValueError`.
 
-Example:
+Runnable examples: [DEM sampling](guides/dem.md).
 
-```python
-from faultscope import BernoulliPauliNoise, Circuit, DemFaultScopeSimulator
-from faultscope import NoiseLocation, Operation
+## Native Decoders
 
-noise = NoiseLocation("x0", BernoulliPauliNoise("X"), 0.125, (0,))
-circuit = Circuit(
-    1,
-    (
-        Operation.noise(noise),
-        Operation.measure(0, key="m0"),
-        Operation.detector(("m0",), detector_id=0),
-        Operation.observable_include(0, ("m0",)),
-    ),
-)
+Construction patterns (provide the referenced circuit or child decoders):
 
-sim = DemFaultScopeSimulator(circuit)
-batch = sim.run_batch(shots=64, seed=5)
-result = sim.estimate(shots=256, seed=6, top_k=1)
-
-print(batch.detector_bit(0, 0))
-print(result.top_edges(1)[0].edge_index)
-```
-
-Native decoder handles:
-
-```python
+```text
 from faultscope.decoders import (
     NativeBatchDecoder,
     NativeCompositeDecoder,
@@ -545,10 +517,10 @@ without a hint retain the ordinary graphlike validation behavior. This
 argument compiles a decoder view only: DEM sampling always samples the original
 canonical edges.
 
-The mapping argument is the backward-compatible low-level interface. New code
-should package it once as typed, model-bound metadata:
+The mapping argument is a low-level interface. To reuse model-bound hints,
+provide an existing `dem` and `components_by_edge` mapping:
 
-```python
+```text
 hints = GraphlikeDecompositionHints(dem, components_by_edge)
 artifact = GeneratedDetectorErrorModel(dem, graphlike_hints=hints)
 problem = artifact.compile_graphlike_problem()
@@ -570,11 +542,15 @@ approximate_disjoint_errors=0.0)` generates a DEM from a circuit. If declaration
 are omitted, FaultScope reads `Operation.detector(...)` and
 `Operation.observable_include(...)` entries from the circuit.
 
-`generate()` returns the backward-compatible canonical DEM.
+The current generator requires every measurement in the ideal noiseless
+circuit to be deterministic, including unused measurements and recorded reset
+measurements. Deterministic detector parities do not make random intermediate
+measurements acceptable. Such circuits require forward sampling.
+
+`generate()` returns the canonical DEM.
 `generate_artifact()` returns a `GeneratedDetectorErrorModel`. The native
 circuit generator does not synthesize graphlike hints yet, so its artifact
-currently has `graphlike_hints is None`; this stable return type allows hints to
-be added later without changing sampler or decoder APIs.
+currently has `graphlike_hints is None`.
 
 `approximate_disjoint_errors` matches Stim's circuit-to-DEM policy. Before using
 this option, a one-qubit `PauliChannel` attempts Stim's numerical conversion into
@@ -608,32 +584,7 @@ binary detector error matrix `H` and logical fault matrix `F`. These objects
 intentionally do not expose `to_numpy_*` hot-path helpers; native decoders
 should consume the native view without moving masks through Python.
 
-Example:
-
-```python
-from faultscope import (
-    BernoulliPauliNoise,
-    Circuit,
-    DetectorErrorModelGenerator,
-    NoiseLocation,
-    Operation,
-)
-
-noise = NoiseLocation("x0", BernoulliPauliNoise("X"), 0.125, (0,))
-circuit = Circuit(
-    1,
-    (
-        Operation.noise(noise),
-        Operation.measure(0, key="m0"),
-        Operation.detector(("m0",), detector_id=0),
-        Operation.observable_include(0, ("m0",)),
-    ),
-)
-
-dem = DetectorErrorModelGenerator(circuit).generate()
-print(dem.to_dem_text())
-print(dem.edges_by_location()["x0"][0].event)
-```
+Runnable examples: [DEM generation](guides/dem.md#generate-a-dem).
 
 ## DEM Batch Hotspot Simulation
 
@@ -659,9 +610,12 @@ estimate(
 Set `aggregate_hotspots=False` for decoder benchmarks and logic-only estimates.
 This skips DEM edge-event recording and hotspot metadata aggregation while
 keeping the same result object shape; when `decoder` is native, syndrome and
-correction masks stay in native memory. Native decoders that implement the
-optional packed-row callback receive `shots x ceil(detectors/8)` syndrome bytes
-on this path and return `shots x ceil(observables/8)` correction bytes.
+correction masks stay in native memory. The native decoder's ordered
+Masks/Packed/Events preference selects the input
+format through the ABI V4 tagged callback. `aggregate_hotspots` controls the
+attribution sidecar; it does not select a different decoder input format.
+Packed detector and correction rows have widths `ceil(detectors/8)` and
+`ceil(observables/8)` bytes, respectively.
 
 `DemSampleBatch` stores:
 
@@ -698,25 +652,11 @@ edge_event_bit(edge_index, shot)
 - `top_hotspots(top_k=10)`
 - `hotspot_table(top_k=10)`
 
-Example:
+`edge_sensitivities` differentiate independent edge probabilities. Location
+`sensitivities` are weighted edge summaries and do not apply the chain rule
+back to physical circuit noise rates. See [DEM interpretation](guides/dem.md#interpret-sensitivities).
 
-```python
-from faultscope import Detector, DetectorErrorEdge, DetectorErrorModel, LogicalObservable
-from faultscope.dem import DemHotspotEstimator
-
-dem = DetectorErrorModel(
-    detectors=(Detector(0, ()),),
-    observables=(LogicalObservable(0),),
-    edges=(DetectorErrorEdge(0.125, (0,), (0,), "edge0", "X"),),
-)
-
-dem_sim = DemHotspotEstimator(dem)
-batch = dem_sim.run_batch(shots=32, seed=3)
-result = dem_sim.estimate(shots=128, seed=4, top_k=1)
-
-print(batch.detector_bit(0, 0))
-print(result.top_edges(1)[0].edge_index)
-```
+Runnable examples: [DEM estimates](guides/dem.md#sample-detector-and-logical-flips).
 
 ## Collection API
 
@@ -760,6 +700,8 @@ The top-level `faultscope` collection exports are `Collector`,
 Threshold analysis types and helpers are exported from `faultscope.collection`
 only, not from top-level `faultscope`.
 
+### CollectionOptions
+
 `CollectionOptions` is a frozen dataclass:
 
 ```text
@@ -797,6 +739,8 @@ to their defaults. `dataclasses.replace()` is not supported for
 `CollectionOptions` because it replays every dataclass field and cannot preserve
 this distinction.
 
+### CollectionRunOptions
+
 `CollectionRunOptions` is a frozen dataclass:
 
 ```text
@@ -821,6 +765,8 @@ task seeds are unaffected by that random root. Sampling ids, metadata, and
 decoder fingerprints do not participate in root-seed selection.
 In Rust, the effective task root is `task.options.seed.unwrap_or(run_seed)`
 after resolving the run root.
+
+### CollectionTask
 
 `CollectionTask` is a frozen dataclass:
 
@@ -863,6 +809,8 @@ collection. Every decoder object must also implement
 identity data. Missing or invalid payloads fail before resume lookup or native
 scheduling.
 
+### Task Identity
+
 Python collection identity uses the v3 CSV/resume contract and is split into a
 sampling id (schema v2) and a public `strong_id` (schema v5). A Forward source digest has
 the `forward_circuit` kind and contains the circuit plus the `None`/explicit
@@ -883,22 +831,21 @@ seed is excluded from `sampling_id` but included in `strong_id`. Run-seed
 exclusion preserves aggregation across runs of the same configuration.
 Decoder payloads include effective normalized options and solver structure;
 canonical encoding preserves sequence order, sorts mapping keys, and never
-uses `repr(...)`. These identity checks continue to prevent combining different
-sources, decoders, metadata, postselection, or counter schemas. Earlier strong
-ids do not match schema-v5 tasks, so their rows are not reused as new-policy
-resume history; the CSV v3 header itself is unchanged.
+uses `repr(...)`. These checks prevent combining different sources, decoders, metadata,
+postselection, or counter schemas. For older stored results, see
+[upgrading stored results](release.md#upgrading-stored-results).
 
 These schemas apply to identities generated by the Python adapter. Public Rust
-collection APIs accept caller-supplied `strong_id` strings; Rust callers must
-change those identities to separate old-policy history from `explicit-v1`
-results. A manually reused id cannot be recognized as an older policy from its
-contents alone.
+collection APIs accept caller-supplied `strong_id` strings; callers are
+responsible for distinguishing incompatible experiments and stored results.
 
 Expanded tasks must have unique strong ids within a collection call. Different
 metadata or decoder identities can distinguish saved results while sharing
 the same underlying noise stream. Use distinct task seeds for independent
 repeats; changing only `task_id` neither changes the stream nor satisfies the
 unique-identity requirement.
+
+### CollectionCounterSchema
 
 `CollectionCounterSchema` is a public frozen dataclass:
 
@@ -913,10 +860,11 @@ schema.schema_version == 1
 
 `COLLECTION_COUNTER_SCHEMA_VERSION` is `1`. Native collection creates the
 schema from the two `CollectionRunOptions` count flags; callers do not pass a
-schema object into `collect`. Increment this schema version whenever counter
-meaning, key encoding, or per-shot coverage changes. A change to resume
-identity or CSV layout requires a new collection resume-contract version as
-well; no subset/superset counter backfill is inferred across versions.
+schema object into `collect`. Counter schema, resume identity, and CSV layout
+are versioned contracts.
+No subset/superset counter backfill is inferred across versions.
+
+### TaskStats
 
 `TaskStats` is a frozen dataclass:
 
@@ -960,6 +908,8 @@ dataclass field equality. `__add__` treats `task_id` as display-only: stats may
 merge with different display ids when `strong_id`, decoder, metadata, and
 counter schema match exactly.
 
+### Progress
+
 `Progress` is a frozen dataclass used by streaming collection:
 
 ```text
@@ -971,6 +921,8 @@ Progress(
 
 `new_stats` contains committed batch-delta `TaskStats` objects, not detector or
 correction batch data.
+
+### Collector and Functions
 
 Collection functions:
 
@@ -994,6 +946,8 @@ collect(tasks, *, options=None, run_options=None) -> list[TaskStats]
 collect_hotspots(tasks, *, options=None, run_options=None) -> list[HotspotCollectionResult]
 ```
 
+### HotspotCollectionResult
+
 `HotspotCollectionResult` is a frozen dataclass with Forward semantics:
 
 ```text
@@ -1014,6 +968,8 @@ from the Collector and are overlaid by each task's `collection_options`. The
 final batch is capped to the remaining shot budget. `max_errors` and
 `custom_error_count_key` stopping are checked after each completed batch.
 
+### Batching and Reproducibility
+
 `num_workers` defaults to `1`. With fixed batch settings, the Rust scheduler can
 parallelize both multiple tasks and a single large task. Fixed seed plus fixed
 batch settings gives deterministic stats, ordered hotspot batches, and location
@@ -1026,8 +982,7 @@ decoders can nevertheless produce different logical error counts. A resumed
 session selects a continuation stream and is not promised to reproduce the
 exact shot sequence of one uninterrupted run. Changes to dependencies,
 sampling algorithms, or batching also do not carry a cross-version
-shot-for-shot reproducibility guarantee. The new seed policy does not restore
-samples produced by the former identity-derived policy.
+shot-for-shot reproducibility guarantee.
 Adaptive tasks using `max_batch_seconds` execute two or three serial calibration
 batches, freeze the median-throughput batch estimate, and parallelize the
 remaining fixed-size batches through the same worker pool. Calibration and
@@ -1045,6 +1000,138 @@ emitted or counted.
 objects. Tasks with `decoder is None` are expanded once per fanout decoder;
 tasks that already specify `decoder=` keep their own decoder. String decoders
 are resolved through `create_native_decoder(...)`.
+
+### CSV and Resume
+
+`save_resume_filepath` and `existing_data_filepaths` use CSV rows with this
+header:
+
+```text
+shots,errors,discards,seconds,decoder,strong_id,json_metadata,json_counter_schema,custom_counts
+```
+
+CSV/resume orchestration is Python-owned and outside the native sampling hot
+path. `json_counter_schema` stores the complete canonical schema object.
+Existing rows are merged by `strong_id`; mismatched decoder, metadata, or
+counter schema for the same `strong_id` raises `ValueError`. Resume accepts only
+the exact current v3 schema and rejects missing/unsupported schemas or missing
+fixed counters before native workers start. A completed resume task is not
+sampled again, and only newly collected deltas are appended. CSV rows do not
+persist a display `task_id`, so `TaskStats.from_csv_row(...)` reconstructs
+`task_id` from `strong_id`. When those rows are used for collection resume,
+validated historical stats are rebound to the current task identity before
+completion checks, so returned stats use the current task's display `task_id`
+even when no additional sampling is needed.
+
+Reading or appending requires the exact v3 header; an incompatible header
+raises `ValueError` before rows are appended. There is no in-place migration.
+See [upgrading stored results](release.md#upgrading-stored-results).
+
+Public CSV utilities:
+
+```text
+COLLECTION_CSV_FIELDS
+COLLECTION_CSV_HEADER
+COLLECTION_COUNTER_SCHEMA_VERSION
+CollectionCounterSchema(...)
+CollectionData(stats=())
+read_stats_from_csv_files(*filepaths) -> list[TaskStats]
+write_stats_to_csv_file(filepath, stats, *, append=False) -> None
+```
+
+`CollectionData` merges samples by `strong_id` using the same validation as
+`TaskStats.__add__`. `read_stats_from_csv_files(...)` rejects malformed headers,
+negative `shots`/`errors`/`discards`/`seconds`, negative custom counts,
+non-object `custom_counts`, and non-integer custom count values.
+
+### Error-Rate Analysis
+
+Analysis helpers are available from `faultscope.collection.analysis`:
+
+```text
+error_rate_points(stats, *, x_key, group_key=None, count_key=None)
+fit_log_error_rate_lines(points, *, x_key, group_key)
+predict_error_rate(fit, x)
+plot_error_rates(stats, *, x_key, group_key=None, output=None, ax=None, count_key=None)
+```
+
+Plotting lazily imports matplotlib and raises an install hint when the optional
+collection plotting dependencies are unavailable.
+
+### Threshold Analysis
+
+Threshold analysis helpers are available from `faultscope.collection` and
+`faultscope.collection.threshold`:
+
+```text
+analyze_thresholds(
+    stats,
+    *,
+    x_key,
+    distance_key,
+    series_keys=(),
+    count_key=None,
+    bootstrap_samples=1000,
+    confidence_level=0.95,
+    seed=0,
+    scaling_order=2,
+) -> tuple[ThresholdAnalysisResult, ...]
+
+plot_threshold_analysis(results, *, output=None, axes=None, log_y=True) -> (figure, axes)
+```
+
+`ThresholdPoint.rate` is the raw logical rate `errors / accepted_shots`, and
+`ThresholdPoint.stderr` is its binomial standard error. Pairwise interpolation,
+finite-size logit fitting, and bootstrap resampling use the private continuity
+correction `(errors + 0.5) / (accepted_shots + 1)` so zero- and one-rate points
+remain finite. Data is grouped by `series_keys`. Scaling fits require at least three
+distances, two x points at every distance, common x support, and positive
+residual degrees of freedom. `scaling_order` is 1, 2, or 3.
+`PairwiseCrossing.status` is `"ok"`, `"no_crossing"`, or `"ambiguous"`.
+`FiniteSizeScalingFit.status` is `"ok"`, `"insufficient_data"`,
+`"fit_failed"`, or `"bootstrap_unstable"`. These statuses are diagnostics, not
+exceptions; invalid inputs and missing optional dependencies still raise.
+
+`plot_threshold_analysis(...)` accepts one result or an iterable of results and
+rejects empty input. With `axes=None`, it creates an `n x 2` grid. Supplied axes
+must have exact shape `(n, 2)`. The left panel plots raw-rate curves by
+distance with pairwise crossings and scaling threshold diagnostics; the right
+panel plots finite-size collapse when a scaling threshold and critical exponent
+exist, otherwise it annotates the scaling status. `output=` saves with
+`bbox_inches="tight"`. With `log_y=True`, a series containing raw zero-rate
+points uses a symmetric-log scale so those observations remain visible;
+strictly positive series use a logarithmic scale. Matplotlib is imported lazily
+and missing dependencies raise an install hint for `faultscope[collection]`.
+
+### Postselection and Custom Counters
+
+Postselection masks are bytes-like bit-packed masks over the native detector or
+observable order. Detector postselection discards any shot where a selected
+detector fired. Observable postselection discards any shot where the decoder
+residual is nonzero on a selected observable. Logical errors are counted only on
+accepted shots and only on non-postselected residual observables.
+
+Custom counts:
+
+- `count_observable_error_combos=True` records accepted residual observable
+  combinations under keys such as `obs_mistake_mask=E_E__`.
+- `count_detection_events=True` records `detection_events` and
+  `detectors_checked`.
+- `custom_error_count_key=None` makes `max_errors` use the main `errors` count.
+- `custom_error_count_key="detection_events"` or `"detectors_checked"`
+  requires `count_detection_events=True`. A missing fixed key is invalid, not
+  zero.
+- `custom_error_count_key="obs_mistake_mask=<mask>"` requires
+  `count_observable_error_combos=True`. For every expanded task, `<mask>` must
+  have exactly one `E`/`_` character per observable, include at least one `E`
+  on a non-postselected observable, and never put `E` on a postselected
+  observable. A valid combo that is absent from `custom_counts` is a true zero.
+
+Every non-`None` stop key is validated for every expanded task even when
+`max_errors` is unset or the task is already complete. Serial, parallel,
+adaptive, streaming, and hotspot collection use the same validation and
+batch-commit stopping rules; invalid keys fail before sampling, resume writes,
+or collection worker creation.
 
 ### Legacy DEM Collection
 
@@ -1100,129 +1187,9 @@ the same non-boolean unsigned-64-bit validation, task-over-run precedence, and
 payloads remain distinct from Forward `forward_circuit` source payloads; both
 task types use the schema-v5 strong id, including `task_seed` and `seed_policy`.
 
-`save_resume_filepath` and `existing_data_filepaths` use CSV rows with this
-header:
-
-```text
-shots,errors,discards,seconds,decoder,strong_id,json_metadata,json_counter_schema,custom_counts
-```
-
-CSV/resume orchestration is Python-owned and outside the native sampling hot
-path. `json_counter_schema` stores the complete canonical schema object.
-Existing rows are merged by `strong_id`; mismatched decoder, metadata, or
-counter schema for the same `strong_id` raises `ValueError`. Resume accepts only
-the exact current v3 schema and rejects missing/unsupported schemas or missing
-fixed counters before native workers start. A completed resume task is not
-sampled again, and only newly collected deltas are appended. CSV rows do not
-persist a display `task_id`, so `TaskStats.from_csv_row(...)` reconstructs
-`task_id` from `strong_id`. When those rows are used for collection resume,
-validated historical stats are rebound to the current task identity before
-completion checks, so returned stats use the current task's display `task_id`
-even when no additional sampling is needed.
-
-The v3 header is deliberately incompatible with v2 CSV. Reading a v2 file or
-attempting to append to it raises `ValueError`; append validates the existing
-header before opening it for writes. There is no in-place migration or
-compatibility adapter. Archive the old file or convert it with tooling outside
-this API before starting a v3 resume run.
-
-Public CSV utilities:
-
-```text
-COLLECTION_CSV_FIELDS
-COLLECTION_CSV_HEADER
-COLLECTION_COUNTER_SCHEMA_VERSION
-CollectionCounterSchema(...)
-CollectionData(stats=())
-read_stats_from_csv_files(*filepaths) -> list[TaskStats]
-write_stats_to_csv_file(filepath, stats, *, append=False) -> None
-```
-
-`CollectionData` merges samples by `strong_id` using the same validation as
-`TaskStats.__add__`. `read_stats_from_csv_files(...)` rejects malformed headers,
-negative `shots`/`errors`/`discards`/`seconds`, negative custom counts,
-non-object `custom_counts`, and non-integer custom count values.
-
-Analysis helpers are available from `faultscope.collection.analysis`:
-
-```text
-error_rate_points(stats, *, x_key, group_key=None, count_key=None)
-fit_log_error_rate_lines(points, *, x_key, group_key)
-predict_error_rate(fit, x)
-plot_error_rates(stats, *, x_key, group_key=None, output=None, ax=None, count_key=None)
-```
-
-Plotting lazily imports matplotlib and raises an install hint when the optional
-collection plotting dependencies are unavailable.
-
-Threshold analysis helpers are available from `faultscope.collection` and
-`faultscope.collection.threshold`:
-
-```text
-analyze_thresholds(
-    stats,
-    *,
-    x_key,
-    distance_key,
-    series_keys=(),
-    count_key=None,
-    bootstrap_samples=1000,
-    confidence_level=0.95,
-    seed=0,
-    scaling_order=2,
-) -> tuple[ThresholdAnalysisResult, ...]
-
-plot_threshold_analysis(results, *, output=None, axes=None, log_y=True) -> (figure, axes)
-```
-
-`ThresholdPoint.rate` is the raw logical rate `errors / accepted_shots`, and
-`ThresholdPoint.stderr` is its binomial standard error. Pairwise interpolation,
-finite-size logit fitting, and bootstrap resampling use the private continuity
-correction `(errors + 0.5) / (accepted_shots + 1)` so zero- and one-rate points
-remain finite. Data is grouped by `series_keys`.
-`PairwiseCrossing.status` is `"ok"`, `"no_crossing"`, or `"ambiguous"`.
-`FiniteSizeScalingFit.status` is `"ok"`, `"insufficient_data"`,
-`"fit_failed"`, or `"bootstrap_unstable"`. These statuses are diagnostics, not
-exceptions; invalid inputs and missing optional dependencies still raise.
-
-`plot_threshold_analysis(...)` accepts one result or an iterable of results and
-rejects empty input. With `axes=None`, it creates an `n x 2` grid. Supplied axes
-must have exact shape `(n, 2)`. The left panel plots raw-rate curves by
-distance with pairwise crossings and scaling threshold diagnostics; the right
-panel plots finite-size collapse when a scaling threshold and critical exponent
-exist, otherwise it annotates the scaling status. `output=` saves with
-`bbox_inches="tight"`. With `log_y=True`, a series containing raw zero-rate
-points uses a symmetric-log scale so those observations remain visible;
-strictly positive series use a logarithmic scale. Matplotlib is imported lazily
-and missing dependencies raise an install hint for `faultscope[collection]`.
-
-Postselection masks are bytes-like bit-packed masks over the native detector or
-observable order. Detector postselection discards any shot where a selected
-detector fired. Observable postselection discards any shot where the decoder
-residual is nonzero on a selected observable. Logical errors are counted only on
-accepted shots and only on non-postselected residual observables.
-
-Custom counts:
-
-- `count_observable_error_combos=True` records accepted residual observable
-  combinations under keys such as `obs_mistake_mask=E_E__`.
-- `count_detection_events=True` records `detection_events` and
-  `detectors_checked`.
-- `custom_error_count_key=None` makes `max_errors` use the main `errors` count.
-- `custom_error_count_key="detection_events"` or `"detectors_checked"`
-  requires `count_detection_events=True`. A missing fixed key is invalid, not
-  zero.
-- `custom_error_count_key="obs_mistake_mask=<mask>"` requires
-  `count_observable_error_combos=True`. For every expanded task, `<mask>` must
-  have exactly one `E`/`_` character per observable, include at least one `E`
-  on a non-postselected observable, and never put `E` on a postselected
-  observable. A valid combo that is absent from `custom_counts` is a true zero.
-
-Every non-`None` stop key is validated for every expanded task even when
-`max_errors` is unset or the task is already complete. Serial, parallel,
-adaptive, streaming, and hotspot collection use the same validation and
-batch-commit stopping rules; invalid keys fail before sampling, resume writes,
-or collection worker creation.
+The [CSV](#csv-and-resume), [analysis](#threshold-analysis), and
+[counter](#postselection-and-custom-counters) contracts above apply to both
+collection paths.
 
 ## Callback Contracts
 
@@ -1252,37 +1219,24 @@ estimate call.
 
 ## Optional Integrations
 
-PyMatching:
+### PyMatching
 
-```python
-from faultscope import Detector, DetectorErrorEdge, DetectorErrorModel, LogicalObservable
-from faultscope.decoders import PyMatchingDecoder
-
-dem = DetectorErrorModel(
-    detectors=(Detector(0, ()),),
-    observables=(LogicalObservable(0),),
-    edges=(DetectorErrorEdge(0.1, (0,), (0,), "e0", "X"),),
-)
-decoder = PyMatchingDecoder.from_dem(dem)
-print(decoder.decode_batch_masks({0: 0b1010}, shots=4))
+```text
+PyMatchingDecoder.from_dem(dem)
+NativePyMatchingDecoder.from_dem(dem)
+decoder.decode_batch_masks(batch) -> dict[int, int]
 ```
 
-`PyMatchingDecoder.from_dem(...)` builds a Python compatibility decoder
-from a graphlike DEM. The resulting decoder implements
-`decode_batch_masks(batch)`, so it can be passed to either
-`FaultScopeSimulator.estimate(..., decoder=decoder)` or
-`DemHotspotEstimator.estimate(..., decoder=decoder)`, but its hot batch
-data crosses Python.
+`PyMatchingDecoder.from_dem(...)` constructs a Python compatibility decoder
+from a graphlike DEM. It can be passed to `FaultScopeSimulator.estimate` or
+`DemHotspotEstimator.estimate`; its batch data crosses Python.
+`decode_batch_masks` also accepts a detector-mask mapping with an explicit
+`shots=` argument. `NativePyMatchingDecoder` requires the optional native
+backend. See
+[decoder integration](guides/decoding.md) for prerequisites, installation, and
+complete examples, and [native decoders](#native-decoders) for discovery.
 
-For the native PyMatching hot path, install the optional backend and use:
-
-```python
-from faultscope.decoders import NativePyMatchingDecoder
-
-decoder = NativePyMatchingDecoder.from_dem(dem)
-```
-
-Stim import:
+### Stim Import
 
 ```python
 from faultscope.io import parse_stim_circuit
@@ -1290,6 +1244,35 @@ from faultscope.io import parse_stim_circuit
 imported = parse_stim_circuit("X_ERROR(0.01) 0\nM 0\nDETECTOR rec[-1]\n")
 print(imported.measurement_keys)
 ```
+
+`parse_stim_circuit(text)` and `load_stim_file(path)` import supported Stim
+circuits, including `REPEAT` blocks and `SHIFT_COORDS`. The result embeds detector
+and observable declarations in `imported.circuit`. General feedback and
+correlated-error instructions are outside the supported subset. See
+[Stim import](guides/sampling.md#import-stim-text) for an example and limits.
+
+### Repetition-Code Experiments
+
+```text
+from faultscope.experiments import make_repetition_code_experiment
+
+make_repetition_code_experiment(
+    *, distance, rounds, data_error_rate, measurement_error_rate,
+) -> RepetitionCodeExperiment
+```
+
+`distance` must be a positive odd integer and `rounds` must be positive. Both
+rate arguments accept a scalar or a mapping keyed by `(round, index)`. Data
+indices identify data qubits; measurement indices identify check measurements.
+The result supplies `circuit`, `detectors`, `observables`, and a built-in
+repetition decoder, together with `data_qubits` and `ancilla_qubits`.
+
+Pass `experiment.circuit` and `observables=experiment.observables` to
+`FaultScopeSimulator`, then pass `decoder=experiment.decoder` to `estimate`.
+This builder is useful for small bit-flip memory examples; its decoder uses the
+final round of check measurements.
+
+### Visualization
 
 Visualization helpers require Pillow and write image files:
 
