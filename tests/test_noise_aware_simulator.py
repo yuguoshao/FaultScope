@@ -1773,6 +1773,76 @@ class NativePackedSamplerTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "unknown measurement key.*missing"):
             native_batch.measurement_masks(("missing",))
 
+    def test_native_batch_can_skip_event_recording_without_changing_decoding(self) -> None:
+        first_noise = NoiseLocation(
+            id="x0",
+            model=BernoulliPauliNoise("X"),
+            rate=0.2,
+            qubits=(0,),
+        )
+        second_noise = NoiseLocation(
+            id="x1",
+            model=BernoulliPauliNoise("X"),
+            rate=0.35,
+            qubits=(0,),
+        )
+        circuit = Circuit(
+            n_qubits=1,
+            operations=[
+                Operation.noise(first_noise),
+                Operation.measure(0, key="s0", basis="Z"),
+                Operation.noise(second_noise),
+                Operation.measure(0, key="s1", basis="Z"),
+                Operation.detector(("s0", "s1"), detector_id=5),
+                Operation.observable_include(0, ("s1",)),
+            ],
+        )
+        sampler = self._native_sampler_or_skip(circuit)
+        default_batch = sampler.run_native_batch(129, 23)
+        recorded_batch = sampler.run_native_batch(129, 23, record_events=True)
+        plain_batch = sampler.run_native_batch(129, seed=23, record_events=False)
+
+        self.assertTrue(default_batch.records_events)
+        self.assertTrue(recorded_batch.records_events)
+        self.assertFalse(plain_batch.records_events)
+        self.assertEqual(set(default_batch.noise_event_masks), {"x0", "x1"})
+        self.assertEqual(default_batch.noise_event_masks, recorded_batch.noise_event_masks)
+        self.assertEqual(plain_batch.noise_event_masks, {})
+        for field in ("all_mask", "x_frame", "z_frame", "measurements", "detectors", "observables"):
+            with self.subTest(field=field):
+                self.assertEqual(getattr(plain_batch, field), getattr(default_batch, field))
+        self.assertEqual(
+            plain_batch.measurement_masks(("s0", "s1")),
+            default_batch.measurement_masks(("s0", "s1")),
+        )
+
+        decoder = RepetitionCodeDecoder(
+            distance=3,
+            measurement_keys=("s0", "s1"),
+            observable_id=0,
+        )
+        recorded_corrections = decoder.decode_batch_masks(default_batch)
+        plain_corrections = decoder.decode_batch_masks(plain_batch)
+        self.assertEqual(plain_corrections, recorded_corrections)
+        recorded_loss = _default_batch_loss(default_batch, recorded_corrections)
+        plain_loss = _default_batch_loss(plain_batch, plain_corrections)
+        self.assertEqual(plain_loss, recorded_loss)
+        sampler.estimate_hotspots(default_batch, recorded_loss)
+        with self.assertRaisesRegex(ValueError, "requires recorded event masks"):
+            sampler.estimate_hotspots(plain_batch, plain_loss)
+        with self.assertRaises(TypeError):
+            sampler.run_native_batch(129, 23, False)
+
+    def test_native_batch_records_events_even_without_noise_locations(self) -> None:
+        circuit = Circuit(
+            n_qubits=1,
+            operations=[Operation.measure(0, key="m", basis="Z")],
+        )
+        batch = self._native_sampler_or_skip(circuit).run_native_batch(1)
+
+        self.assertTrue(batch.records_events)
+        self.assertEqual(batch.noise_event_masks, {})
+
     def test_forward_hotspot_rejects_native_batch_from_another_sampler(self) -> None:
         location = NoiseLocation(
             id="x0",
