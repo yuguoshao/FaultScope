@@ -1,0 +1,8 @@
+[deps]
+JSON = "682c06a0-de6a-54ab-a142-c8b1cf79cde6"
+QuantumClifford = "0525e862-1e90-11e9-3e4d-1b39d7109de1"
+
+[compat]
+julia = "1.12"
+JSON = "1"
+QuantumClifford = "=0.11.5"

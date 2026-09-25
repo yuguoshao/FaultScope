@@ -1,0 +1,10 @@
+{
+  "cases": {
+    "repetition_d127_p05": "971b101c3cb6ee92de5ffce88f6d9404f173acd860fe4484b3074daa8ca708be",
+    "repetition_d2047_p05": "93f38eaab3955c05f50f86df05bd89047c428816dd195114db15d5cded1a060a",
+    "repetition_d31_p05": "73141ceedc6e1b19e932d40f81bd30793b6b610f525d8f1ae68b51f8d227ac49",
+    "repetition_d511_p05": "61db7c0f627e5873c9560533453ebbc521a9dae35bd586c4e86ae9b56c84accd",
+    "repetition_d7_p05": "1d1d1d423deef2a56b0f32c72f5817a35ae9cd6fddbb84f0b47c96c6f5721bfc"
+  },
+  "schema": "paper-attribution-input-hashes-v1"
+}
