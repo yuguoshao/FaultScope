@@ -1,940 +1,562 @@
-# FaultScope 理论原理与 detector error model 公式细节
+<span id="faultscope-detector-error-model"></span>
 
-本文系统整理 FaultScope 的数学模型、score-function estimator、packed batch 计数公式、
-detector error model 生成与 DEM hotspot 计算。术语遵循 detector error model formalism：
-detectors 是 measurement outcomes 上的 parity constraints，detector matrix \(D\) 收集这些
-constraints，measurement syndrome matrix \(\Omega\) 描述 circuit errors 会翻转哪些 measurements，
-detector error matrix \(H=D\Omega\) 描述 circuit errors 会违反哪些 detectors。本文描述的是当前公开
-runtime 的理论接口：实际 Python 回调接收 batch mask 对象，而不是逐 shot 的可变 trajectory 对象。
+# Theory
 
-实现概览和运行时边界可参考 [FaultScope 实现概览](implementation_overview.md)。
+FaultScope estimates how a chosen failure probability changes when a noise rate
+changes. The Forward estimator differentiates physical circuit rates. The DEM
+estimator differentiates probabilities in an independent-edge model. Their
+sampling distributions and parameters must be kept distinct.
 
-## 符号与对象
+For the execution path, see [Architecture](implementation_overview.md). This page
+defines the quantities, estimators, and conversion limits.
 
-一次 Monte Carlo batch 有 \(N\) 个 shots。第 \(k\) 个 shot 对应一个概念上的前向采样路径：
+## Start with one qubit
 
-\[
-\tau_k =
-\left(
-e_{k,1}, \ldots, e_{k,M},
-m_{k,1}, \ldots, m_{k,R},
-s_k,
-o_k
-\right).
-\]
-
-主要符号：
-
-- \(l\)：一个物理 noise location，带有 id、qubits、rate 和 tags。
-- \(\lambda_l\)：noise location \(l\) 的事件发生率。
-- \(e_{k,l}\)：shot \(k\) 在 location \(l\) 的 sampled event。
-- \(E_l\)：packed event mask；第 \(k\) 位为 1 表示 shot \(k\) 在 \(l\) 发生非 identity/flip event。
-- \(m_{k,r}\)：第 \(r\) 个 measurement 在 shot \(k\) 的 classical bit。
-- \(M_{\text{key}}\)：packed measurement mask；第 \(k\) 位为 measurement key 在 shot \(k\) 的值。
-- \(s_k\)：shot \(k\) 的 detector syndrome；它是所有 detector bits \(s_{k,i}\) 组成的向量。
-- \(S_i\)：detector \(i\) 的 packed detector syndrome mask。
-- \(s_{k,i}\)：shot \(k\) 上 detector \(i\) 的 syndrome bit，满足 \(s_{k,i}=\operatorname{bit}_k(S_i)\)。
-- \(o_k\)：shot \(k\) 的 logical observable flip record；它是所有 logical observable bits \(o_{k,a}\) 组成的向量。
-- \(o_{k,a}\)：shot \(k\) 上 logical observable \(a\) 的 bit，满足 \(o_{k,a}=\operatorname{bit}_k(O_a)\)。
-- \(O_a\)：logical observable \(a\) 的 packed observable mask。
-- \(C_a\)：decoder 预测的 logical correction mask。
-- \(F\)：loss mask；第 \(k\) 位为 1 表示 shot \(k\) 贡献 loss。
-- \(A\)：all-shot mask，低 \(N\) 位为 1，用来裁剪未使用 bit。
-
-这里的 \(o_k\) 表示 logical observable flip record，不是 loss。本文把 shot-level loss 写成
-\(L_{\mathrm{loss}}(\tau)\)，把 batch-level loss 写成 packed mask \(F\)。
-
-FaultScope 的 batch representation 把每个 boolean shot value 存成一个 Python integer 或 Rust
-`Mask`。因此：
+Prepare a qubit in `|0>`, apply X with probability \(p\), then measure Z. Let the
+loss be 1 when the measurement is 1. For this circuit,
 
 \[
-\operatorname{bit}_k(X) = (X \gg k) \mathbin{\&} 1,
+J(p)=\Pr(\text{loss}=1)=p,
 \qquad
-\operatorname{popcount}(X) = \text{number of set bits in } X.
+\frac{dJ}{dp}=1.
 \]
 
-## Detector formalism 与 packed masks
+Changing the rate from 0.1 to 0.2 raises the failure probability, but the
+sensitivity stays 1. A hotspot measures the magnitude of a local derivative; it
+is not the noise rate, the number of observed errors, or the probability that a
+location caused a failure. Increasing a rate does not guarantee a higher hotspot
+rank.
 
-在论文语言中，一个 detector 是一组 measurement outcomes 上的 parity constraint。若 circuit 有
-\(m\) 个 measurements、\(d\) 个 linearly independent detectors，则 detector matrix
-\(D\in\mathbb{F}_2^{d\times m}\) 的第 \(i\) 行是 detector \(i\) 的 parity vector。对单个 shot 的
-measurement vector \(m_k\)，detector syndrome 是
-
-\[
-s_k = Dm_k.
-\]
-
-这里默认已经把 noiseless deterministic value 平移为 0；也就是 \(s_{k,i}=1\) 表示 detector
-\(i\) 被违反。FaultScope 的 `Detector(id, measurement_keys=...)` 是这行 detector matrix 的
-API 表示；packed runtime 再把所有 shots 的同一个 syndrome bit 存成一个整数 mask。
-
-## Packed masks: measurements, detector syndromes, observables
-
-Python API 暴露的 batch 结果不是逐 shot 的列表，而是一组 keyed packed masks。measurement、
-detector、observable 都遵循同一个约定：dict 的 key 标识一个物理或逻辑量，dict 的 value 是一个
-整数；整数第 \(k\) 位就是第 \(k\) 个 shot 上这个量的 boolean 值。
-
-### Measurement masks
-
-`batch.measurements` 的类型是 `dict[str, int]`。每个 key 是一次 measurement 或 reset-with-key
-记录出的 measurement key，每个 value 是一个 packed measurement mask。对 key `m`，记这个整数为
-\(M_m\)。它把同一个 measurement key 在 \(N\) 个 shots 中的 boolean 结果压到一个整数里：
+For a small change \(\delta\lambda_l\) at a physical location \(l\),
 
 \[
-M_m = \sum_{k=0}^{N-1} m_{k,m}2^k,
+\Delta J\approx g_l\,\delta\lambda_l,
 \qquad
-m_{k,m} = \operatorname{bit}_k(M_m).
+g_l=\frac{\partial J}{\partial\lambda_l}.
 \]
 
-也就是说，\(M_m\) 的第 \(k\) 位就是第 \(k\) 个 shot 上 key `m` 的测量结果。若
-`batch.measurements["m"] == 0b1010`，则 shot 1 和 shot 3 的结果为 1，shot 0 和 shot 2 的结果为
-0。实际使用时仍应通过 bit operation 读取：
+FaultScope reports an estimate of the signed \(g_l\) and ranks locations by its
+absolute value. The sign matters when deciding which direction to change a rate.
 
-```text
-((batch.measurements["m"] >> k) & 1)
-```
+<span id="_1"></span>
 
-measurement key 必须唯一。显式写 `Operation.measure(..., key="m")` 时使用给定 key；没有显式 key
-的测量会按运行时顺序生成类似 `m0`, `m1`, ... 的 key。重复 key 会报错，因为一个 key 只能对应一个
-packed mask。
+## Notation
 
-`MeasurementBitFlip` noise 会在 measurement mask 记录前翻转相应 shots 的 measurement bit，因此
-下游 detector、observable 和 `loss_mask_fn` 看到的都是已经包含 measurement noise 的
-packed measurement mask。
+| Symbol | Meaning |
+| --- | --- |
+| \(N\), \(k\) | Number of shots and a shot index, with \(0\leq k<N\). |
+| \(l\), \(\lambda_l\) | Physical noise location and its total event rate. |
+| \(\tau_k\) | One shot's noise events, measurements, detectors, and observables. |
+| \(F_k\) | Boolean loss for shot \(k\). |
+| \(E_{kl}\) | 1 if an error or measurement flip occurred at location \(l\) in shot \(k\). |
+| \(F\), \(E_l\) | Packed masks containing all \(F_k\) or \(E_{kl}\) bits. |
+| \(O_a\), \(C_a\) | Packed observable and decoder correction masks for observable \(a\). |
+| \(A\) | Mask with the low \(N\) bits set; it removes unused bits. |
+| \(p_j\), \(f_j\) | Probability and occurrence variable of canonical DEM edge \(j\). |
 
-### Detector masks
+A packed mask stores shot `k` in bit `k`. Python exposes the mask as an integer;
+Rust stores it in `Mask` words. `popcount` counts its set bits.
 
-`batch.detectors` 的类型是 `dict[int, int]`。每个 key 是 detector id，每个 value 是 packed
-detector syndrome mask。detector 是若干 measurement masks 的 bitwise XOR parity。若 detector
-\(i\) 依赖 measurement keys \(K_i\)，则：
+<span id="_2"></span>
+
+## Objective and loss
+
+The target is the expected loss under the circuit's noise distribution:
 
 \[
-S_i = \bigoplus_{m\in K_i} M_m.
+J(\lambda)=\mathbb E_{\tau\sim P_\lambda}[L(\tau)],
+\qquad F_k=L(\tau_k)\in\{0,1\}.
 \]
 
-这里的 XOR 是逐 bit 的：对每个 shot \(k\)，\(S_i\) 的第 \(k\) 位等于该 shot 上 detector \(i\) 的
-syndrome bit。也就是：
+The default loss is residual logical failure. It XORs each observable with its
+decoder correction, then ORs the residuals:
 
 \[
-\operatorname{bit}_k(S_i)
-=
-\bigoplus_{m\in K_i}
-\operatorname{bit}_k(M_m).
-\]
-
-### Observable masks
-
-`batch.observables` 的类型是 `dict[int, int]`。每个 key 是 logical observable id，每个 value 是
-packed observable mask。记 id 为 \(a\) 的 observable mask 为 \(O_a\)。它的第 \(k\) 位表示第
-\(k\) 个 shot 上该 logical observable 是否翻转：
-
-\[
-O_a = \sum_{k=0}^{N-1} o_{k,a}2^k,
+R_a=O_a\oplus C_a,
 \qquad
-o_{k,a} = \operatorname{bit}_k(O_a).
-\]
-
-observable mask 可以来自 measurement keys、最终 Pauli frame projection，或二者的 XOR。对只由
-measurement keys \(K_a\) 定义的 observable：
-
-\[
-O_a = \bigoplus_{m\in K_a} M_m.
-\]
-
-如果 observable 还包含 final Pauli frame 项，设该 frame projection 产生的 packed mask 为
-\(Q_a\)，则：
-
-\[
-O_a =
-\left(
-\bigoplus_{m\in K_a} M_m
-\right)
-\oplus Q_a.
-\]
-
-`Operation.observable_include(a, keys)` 是电路内声明形式：它把这些 measurement keys 的 parity XOR
-到 `batch.observables[a]`。同一个 observable id 可以通过多条 include 逐次 XOR 累积。通过
-`FaultScopeSimulator(..., observables=(LogicalObservable(...),))` 传入的
-`LogicalObservable` 则是在 batch 末尾从 `measurement_keys` 和可选 final Pauli frame projection
-计算出 \(O_a\)。
-
-observable mask 不是 decoder correction，也不是 residual logical loss。decoder 返回的 correction
-mask \(C_a\) 使用同样的 packed convention；默认 logical loss 先计算 residual：
-
-\[
-R_a = O_a \oplus C_a.
-\]
-
-然后把所有 residual observables 做 OR 得到 loss mask \(F\)。因此 \(O_a\) 表示 simulator 观测到的
-logical observable，\(C_a\) 表示 decoder 预测的修正，\(F\) 才是最终参与 hotspot 估计的 loss。
-
-## 前向目标函数
-
-给定所有 noise rates \(\lambda = \{\lambda_l\}\)，目标函数是 shot-level loss 的期望：
-
-\[
-J(\lambda) =
-\mathbb{E}_{\tau \sim P_\lambda}
-\left[
-L_{\mathrm{loss}}(\tau)
-\right].
-\]
-
-在 forward batch API 中，自定义 loss 由 packed mask 表示。forward estimator 支持一参或两参
-callback：
-
-```text
-F = loss_mask_fn(batch)
-F = loss_mask_fn(batch, corrections)
-```
-
-DEM estimator 的 custom loss callback 固定接收两参：
-
-```text
-F = loss_mask_fn(batch, corrections)
-```
-
-如果没有 decoder 或 `correction_mask_fn`，`corrections` 是空 mapping。
-
-默认 logical loss 使用 declared logical observables 和 decoder correction：
-
-\[
-R_a = O_a \oplus C_a,
+F=\bigvee_a R_a,
 \qquad
-F = \bigvee_a R_a.
+\overline F=\frac{\operatorname{popcount}(F\mathbin{\&}A)}{N}.
 \]
 
-如果没有 decoder，correction map 为空，相当于所有 \(C_a = 0\)。因此默认 loss 是“任一 residual
-logical observable 为 1”的 indicator。
+A missing correction is zero. An observable mask is therefore distinct from a
+correction mask and from the final loss mask. Custom loss callbacks return the
+same packed Boolean representation; their API signatures are listed in the
+[API reference](api_reference.md).
 
-batch 中的经验 loss 为：
+The derivation below assumes independent shots, independently sampled physical
+noise locations, and a fixed loss rule applied to each shot. It holds the Pauli
+mixture weights and decoder behavior fixed. It does not include derivatives of
+decoder construction, training, or an explicitly rate-dependent loss. A callback
+that couples different shots also falls outside this per-shot derivation.
+
+<span id="score-function"></span>
+
+## Score-function derivation
+
+At location \(l\), an event \(e_l\) has distribution
+\(p_l(e_l;\lambda_l)\). Its score is
 
 \[
-\operatorname{loss\_count}
-= \operatorname{popcount}(F \mathbin{\&} A),
-\qquad
-\operatorname{mean\_loss}
-= \frac{\operatorname{loss\_count}}{N}.
+s_l(\tau)=\frac{\partial\log p_l(e_l;\lambda_l)}{\partial\lambda_l}.
 \]
 
-## Score-function 推导
-
-对某个 location \(l\)，事件分布为：
-
-\[
-e_l \sim p_l(e;\lambda_l).
-\]
-
-score 定义为：
-
-\[
-s_l(\tau)
-=
-\frac{\partial \log p_l(e_l;\lambda_l)}
-{\partial \lambda_l}.
-\]
-
-对目标函数求导：
-
-\[
-\frac{\partial J}{\partial \lambda_l}
-=
-\frac{\partial}{\partial \lambda_l}
-\sum_\tau P_\lambda(\tau)L_{\mathrm{loss}}(\tau)
-=
-\sum_\tau
-P_\lambda(\tau)L_{\mathrm{loss}}(\tau)
-\frac{\partial \log P_\lambda(\tau)}{\partial \lambda_l}.
-\]
-
-FaultScope 的 stochastic noise locations 独立采样，且 measurement 随机性在给定噪声事件后不显式依赖
-\(\lambda_l\)。因此：
-
-\[
-\frac{\partial \log P_\lambda(\tau)}{\partial \lambda_l}
-=
-\frac{\partial \log p_l(e_l;\lambda_l)}{\partial \lambda_l}
-=
-s_l(\tau).
-\]
-
-于是：
-
-\[
-\frac{\partial J}{\partial \lambda_l}
-=
-\mathbb{E}
-\left[
-L_{\mathrm{loss}}(\tau)s_l(\tau)
-\right].
-\]
-
-加入 baseline \(b\)：
-
-\[
-\mathbb{E}
-\left[
-\left(L_{\mathrm{loss}}(\tau)-b\right)s_l(\tau)
-\right]
-=
-\mathbb{E}
-\left[
-L_{\mathrm{loss}}(\tau)s_l(\tau)
-\right]
--
-b\,\mathbb{E}[s_l(\tau)].
-\]
-
-而：
-
-\[
-\mathbb{E}[s_l]
-=
-\sum_e
-p_l(e;\lambda_l)
-\frac{\partial \log p_l(e;\lambda_l)}{\partial \lambda_l}
-=
-\sum_e
-\frac{\partial p_l(e;\lambda_l)}{\partial \lambda_l}
-=
-\frac{\partial}{\partial \lambda_l}
-\sum_e p_l(e;\lambda_l)
-=
-0.
-\]
-
-所以 baseline 不改变真实期望，只影响有限样本估计的方差。当前实现默认：
-
-\[
-b = \operatorname{mean\_loss}.
-\]
-
-也可以显式传入 numeric baseline。
-
-## 噪声模型与 score
-
-当前 hotspot sensitivity 对“是否发生非 identity/flip event”的 rate 求导。对所有 Pauli mixture
-类噪声，非 identity event 的条件分布由模型内部权重决定；score 只依赖事件是否发生，不对条件权重求导。
-
-实现中使用裁剪后的概率：
-
-\[
-p = \operatorname{clamp}(\lambda, 10^{-12}, 1-10^{-12}),
-\qquad
-s_{\mathrm{event}} = \frac{1}{p},
-\qquad
-s_{\mathrm{no\ event}} = -\frac{1}{1-p}.
-\]
-
-### Bernoulli Pauli
-
-`BernoulliPauliNoise(P)`:
-
-\[
-\Pr(I)=1-\lambda,
-\qquad
-\Pr(P)=\lambda.
-\]
-
-score:
-
-\[
-s =
-\begin{cases}
-\frac{1}{\lambda}, & \text{if } P \text{ occurred},\\
--\frac{1}{1-\lambda}, & \text{if } I \text{ occurred}.
-\end{cases}
-\]
-
-### Measurement Bit Flip
-
-`MeasurementBitFlip()` attached to a measurement:
-
-\[
-\Pr(\text{no flip})=1-\lambda,
-\qquad
-\Pr(\text{flip})=\lambda.
-\]
-
-score:
-
-\[
-s =
-\begin{cases}
-\frac{1}{\lambda}, & \text{if flip occurred},\\
--\frac{1}{1-\lambda}, & \text{otherwise}.
-\end{cases}
-\]
-
-The event mask records flip occurrence.
-
-### Single-qubit Depolarizing
-
-`SingleQubitDepolarizing()`:
-
-\[
-\Pr(I)=1-\lambda,
-\qquad
-\Pr(X)=\Pr(Y)=\Pr(Z)=\frac{\lambda}{3}.
-\]
-
-FaultScope records one event bit for \(X/Y/Z\) occurrence:
-
-\[
-s =
-\begin{cases}
-\frac{1}{\lambda}, & \text{if event is in } \{X,Y,Z\},\\
--\frac{1}{1-\lambda}, & \text{if event is } I.
-\end{cases}
-\]
-
-### Two-qubit Depolarizing
-
-`TwoQubitDepolarizing()` samples one of the 15 non-identity two-qubit Paulis when an event occurs:
-
-\[
-\Pr(II)=1-\lambda,
-\qquad
-\Pr(P)=\frac{\lambda}{15}
-\quad
-\text{for } P\in\{IX,IY,\ldots,ZZ\}.
-\]
-
-score:
-
-\[
-s =
-\begin{cases}
-\frac{1}{\lambda}, & \text{if } P \ne II,\\
--\frac{1}{1-\lambda}, & \text{if } P=II.
-\end{cases}
-\]
-
-### Pauli Channel
-
-`PauliChannel({P_i: w_i})`:
-
-\[
-\Pr(I\cdots I)=1-\lambda,
-\qquad
-\Pr(P_i)=
-\lambda
-\frac{w_i}{\sum_j w_j}.
-\]
-
-score for rate sensitivity:
-
-\[
-s =
-\begin{cases}
-\frac{1}{\lambda}, & \text{if any non-identity channel event occurred},\\
--\frac{1}{1-\lambda}, & \text{otherwise}.
-\end{cases}
-\]
-
-The derivative is with respect to \(\lambda\), not \(w_i\).
-
-## Packed Forward 计数公式
-
-Forward hotspot aggregation in `compute_packed_estimate` uses only packed counts.
-
-For a location \(l\):
+The locations are independent, and ideal measurement randomness has no explicit
+dependence on the noise rates. Differentiating the trajectory probability gives
 
 \[
 \begin{aligned}
-E &= E_l,\\
-F_A &= F \mathbin{\&} A,\\
-\operatorname{loss\_count} &= \operatorname{popcount}(F_A),\\
-\operatorname{event\_count} &= \operatorname{popcount}(E),\\
-\operatorname{no\_event\_count} &= N-\operatorname{event\_count},\\
-\operatorname{loss\_event\_count} &= \operatorname{popcount}(F_A \mathbin{\&} E),\\
-\operatorname{loss\_no\_event\_count}
-&=
-\operatorname{loss\_count}
--
-\operatorname{loss\_event\_count}.
+g_l
+&=\frac{\partial}{\partial\lambda_l}
+  \sum_\tau P_\lambda(\tau)L(\tau)\\
+&=\sum_\tau P_\lambda(\tau)L(\tau)
+  \frac{\partial\log P_\lambda(\tau)}{\partial\lambda_l}\\
+&=\mathbb E[L(\tau)s_l(\tau)].
 \end{aligned}
 \]
 
-Scores:
+For the supported channels, the rate controls whether an event occurs; the
+conditional choice of Pauli component is fixed. At an interior probability,
 
 \[
-p = \operatorname{clamp}(\lambda_l, 10^{-12}, 1-10^{-12}),
-\qquad
-s_1 = \frac{1}{p},
-\qquad
-s_0 = -\frac{1}{1-p}.
+s_l(\tau)=
+\begin{cases}
+1/\lambda_l,&E_{kl}=1,\\
+-1/(1-\lambda_l),&E_{kl}=0.
+\end{cases}
 \]
 
-The summed score over loss shots:
+This is why a single batch can estimate every location's rate sensitivity from
+its event mask and the shared loss mask. No circuit rerun with a perturbed rate
+is needed for each location.
+
+## Baseline and finite samples
+
+For a fixed baseline \(b\), or one independent of the sampled shot,
+\(\mathbb E[s_l]=0\) implies
 
 \[
+g_l=\mathbb E[(L-b)s_l].
+\]
+
+The finite-sample estimator is
+
+\[
+\widehat g_l=\frac1N\sum_{k=0}^{N-1}(F_k-b)s_{kl}.
+\]
+
+FaultScope defaults to \(b=\overline F\), the mean loss of the same batch. This
+baseline depends on the samples, so the fixed-baseline argument does not make
+that estimate exactly unbiased. For iid shots and an unclipped interior rate,
+
+\[
+\mathbb E[\overline F\,\overline s_l]=\frac{g_l}{N},
+\qquad
+\mathbb E[\widehat g_l]=\left(1-\frac1N\right)g_l.
+\]
+
+The implementation divides by \(N\) and does not apply an \(N/(N-1)\) correction.
+The bias vanishes as the batch size grows; at \(N=1\), the default estimate is
+zero. An explicitly supplied fixed baseline, including zero, avoids this
+particular bias, though its variance can differ. Baselines can also change a
+finite batch's ranking.
+
+### Probability limits and rare events
+
+Sampling uses the model's actual rate. Score evaluation uses
+
+\[
+\widetilde p=\operatorname{clamp}(\lambda_l,10^{-12},1-10^{-12}),
+\qquad
+s_1=\frac1{\widetilde p},
+\qquad
+s_0=-\frac1{1-\widetilde p}.
+\]
+
+Clipping prevents division by zero; it does not provide an exact derivative at
+an endpoint. If clipping changes the rate, the score is no longer the exact
+log-probability derivative of the sampled distribution.
+
+At rate 0 or 1, the event mask is constant. With the default same-batch baseline,
+the estimate cancels to zero, up to floating-point error. This does not imply a
+zero one-sided derivative: the one-qubit example still has \(dJ/dp=1\). The same
+cancellation occurs in a finite batch that happens to contain no events or only
+events. Rare-event estimates therefore need enough shots to observe both cases;
+a zero estimate alone is not evidence of zero sensitivity.
+
+<span id="score"></span>
+
+## Noise models
+
+Every row below has the same rate score. The derivative is with respect to
+\(\lambda_l\), holding any conditional Pauli weights fixed.
+
+| Model | Event distribution at rate \(\lambda\) | Meaning of a set event bit |
+| --- | --- | --- |
+| <span id="bernoulli-pauli"></span>`BernoulliPauliNoise(P)` | \(\Pr(I)=1-\lambda\), \(\Pr(P)=\lambda\). | The specified Pauli error occurred. |
+| <span id="measurement-bit-flip"></span>`MeasurementBitFlip()` | No flip with probability \(1-\lambda\); flip with probability \(\lambda\). | The recorded measurement bit was flipped. |
+| <span id="single-qubit-depolarizing"></span>`SingleQubitDepolarizing()` | Identity with probability \(1-\lambda\); each of X, Y, Z with probability \(\lambda/3\). | Any non-identity Pauli occurred. |
+| <span id="two-qubit-depolarizing"></span>`TwoQubitDepolarizing()` | II with probability \(1-\lambda\); each of the other 15 Paulis with probability \(\lambda/15\). | Any non-identity two-qubit Pauli occurred. |
+| <span id="pauli-channel"></span>`PauliChannel({P_i: w_i})` | Identity with probability \(1-\lambda\); component \(P_i\) with probability \(\lambda w_i/\sum_jw_j\). | One channel component was selected. |
+
+Forward sampling selects at most one component per location. In particular,
+Pauli-channel sensitivities are not derivatives with respect to the individual
+\(w_i\).
+
+<span id="packed-forward"></span>
+
+## Packed counts
+
+For a location's event mask \(E=E_l\), define three counts:
+
+\[
+F_A=F\mathbin{\&}A,
+\qquad
+n_F=\operatorname{popcount}(F_A),
+\qquad
+n_E=\operatorname{popcount}(E),
+\qquad
+n_{FE}=\operatorname{popcount}(F_A\mathbin{\&}E).
+\]
+
+The two score sums and the estimate are
+
+\[
+\begin{aligned}
 \operatorname{sum\_loss\_score}
-=
-\operatorname{loss\_event\_count}\,s_1
-+
-\operatorname{loss\_no\_event\_count}\,s_0.
-\]
-
-The summed score over all shots:
-
-\[
+ &=n_{FE}s_1+(n_F-n_{FE})s_0,\\
 \operatorname{sum\_score}
-=
-\operatorname{event\_count}\,s_1
-+
-\operatorname{no\_event\_count}\,s_0.
-\]
-
-With baseline \(b\):
-
-\[
-\operatorname{sensitivity}_l
-=
-\frac{
-\operatorname{sum\_loss\_score}
--
-b\,\operatorname{sum\_score}
-}{N},
-\qquad
-\operatorname{hotspot}_l
-=
-\left|\operatorname{sensitivity}_l\right|.
-\]
-
-This is exactly the finite-sample estimator:
-
-\[
-\operatorname{sensitivity}_l
-=
-\frac{1}{N}
-\sum_{k=0}^{N-1}
-(F_k-b)s_{k,l},
-\qquad
-F_k=\operatorname{bit}_k(F_A).
-\]
-
-## Tag 聚合
-
-Forward result location hotspots are aggregated by metadata tags:
-
-\[
-\begin{aligned}
-\operatorname{by\_qubit}[q]
-&=
-\sum_{l:\ q\in\operatorname{qubits}(l)}
-\operatorname{hotspot}_l,\\
-\operatorname{by\_round}[r]
-&=
-\sum_{l:\ \operatorname{tags}(l)[\text{"round"}]=r}
-\operatorname{hotspot}_l,\\
-\operatorname{by\_gate}[g]
-&=
-\sum_{l:\ \operatorname{tags}(l)[\text{"gate"}]=g}
-\operatorname{hotspot}_l,\\
-\operatorname{by\_operation}[o]
-&=
-\sum_{l:\ \operatorname{tags}(l)[\text{"operation"}]=o}
-\operatorname{hotspot}_l.
+ &=n_Es_1+(N-n_E)s_0,\\
+\widehat g_l
+ &=\frac{\operatorname{sum\_loss\_score}
+         -b\,\operatorname{sum\_score}}N,\\
+h_l&=|\widehat g_l|.
 \end{aligned}
 \]
 
-These aggregations use absolute hotspot values, not signed sensitivities.
+These are exactly the per-shot sums above, evaluated with bit operations and
+`popcount`. `mean_loss` is \(n_F/N\), `sensitivities` contains \(\widehat g_l\),
+and `hotspots` contains \(h_l\).
 
-## Detector Error Model 语义
+<span id="packed-masks-measurements-detector-syndromes-observables"></span>
 
-Detector error model, 简写 DEM，是把 noisy Clifford circuit 压缩成 noise model、detector error
-matrix 和 logical observable fault information 的二进制概率模型。它不再保存完整 stabilizer state、
-逐 shot measurement history 或 final Pauli frame；它只保存“哪些独立错误机制会以多大概率触发，以及
-触发后会违反哪些 detectors、翻转哪些 logical observables”。
+### Measurements, detectors, and observables
 
-设 circuit 有 \(m\) 个 measurements、\(d\) 个 detectors 和 \(e\) 个可枚举 circuit errors。论文中的
-measurement syndrome matrix 是
+<span id="measurement-masks"></span>
+
+For measurement key \(m\), the packed mask is
 
 \[
-\Omega\in\mathbb{F}_2^{m\times e},
+M_m=\sum_{k=0}^{N-1}m_{k,m}2^k.
+\]
+
+For example, `0b1010` means that shots 1 and 3 measured 1.
+Keys identify individual records and must be unique after
+repeat expansion. Attached measurement noise is applied before recording the
+mask, so all downstream parities see the noisy result.
+
+<span id="detector-masks"></span>
+
+For a detector declared on measurement keys \(K_i\),
+
+\[
+S_i=\bigoplus_{m\in K_i}M_m.
+\]
+
+The Forward runtime evaluates this parity directly. A declaration should have
+zero ideal parity when a set detector bit is intended to mean a violation.
+
+<span id="observable-masks"></span>
+
+An observable can combine measurement keys \(K_a\) with a final Pauli-frame
+projection \(Q_a\):
+
+\[
+O_a=\left(\bigoplus_{m\in K_a}M_m\right)\oplus Q_a.
+\]
+
+Circuit `observable_include` operations XOR their contributions into the same
+observable ID. Separately supplied `LogicalObservable` definitions are evaluated
+at the end of the batch. The [objective](#objective-and-loss) combines observable
+and correction masks into the loss.
+
+<span id="tag"></span>
+
+### Grouping physical hotspots
+
+Forward results sum absolute hotspots by qubit and metadata tag:
+
+\[
+\operatorname{by\_qubit}[q]=\sum_{l:q\in\operatorname{qubits}(l)}h_l,
 \qquad
-\Omega_{r,j}=1
-\iff
-\text{error } j \text{ flips measurement } r.
+\operatorname{by\_round}[r]=\sum_{l:\operatorname{tags}(l)[\text{round}]=r}h_l.
 \]
 
-给定 detector matrix \(D\in\mathbb{F}_2^{d\times m}\)，detector error matrix 是
+`by_gate` and `by_operation` use the same rule for their tags. A two-qubit
+location contributes its full hotspot to each qubit. These are sums of absolute
+values, so they do not cancel opposing signed sensitivities.
+
+<span id="detector-error-model"></span>
+<span id="detector-formalism-packed-masks"></span>
+
+## Detector error models
+
+A detector error model describes the joint distribution of detector and logical
+observable flips. It does not retain the full stabilizer state, measurement
+history, or final Pauli frame.
+
+Let \(D\) contain the declared measurement parities, one row per detector. Let
+\(\Omega\) contain the measurement flips caused by each error mechanism, one
+column per mechanism. All matrix operations here are over \(\mathbb F_2\):
 
 \[
-H = D\Omega,
+H=D\Omega,
 \qquad
-H_{i,j}=1
-\iff
-\text{error } j \text{ violates detector } i.
+H_{ij}=1\iff\text{mechanism }j\text{ flips detector }i.
 \]
 
-如果用 \(G\in\mathbb{F}_2^{o\times e}\) 表示 logical observable fault matrix，则 \(G_{a,j}=1\)
-表示 error \(j\) 翻转 logical observable \(a\)。FaultScope 的 `DetectorErrorModel` 可以看作
-\((\mathcal{D},\mathcal{O},\mathcal{E})\) 的 typed API 表示，其中每条 edge \(j\in\mathcal{E}\)
-materialize 了 \(H\) 的一列和 \(G\) 的一列。
-
-在一个 DEM shot 中，模型先为每条 edge \(j\) 采样一个发生变量 \(f_j\)，得到 circuit error vector
-\(f\)。随后
-
-\[
-s = Hf,
-\qquad
-o = Gf.
-\]
-
-展开到单个 detector 和 observable：
-
-\[
-s_i = \bigoplus_{j:\ H_{i,j}=1} f_j,
-\qquad
-o_a = \bigoplus_{j:\ G_{a,j}=1} f_j.
-\]
-
-因此 DEM 描述的是 \(P(s,o)\)，也就是 detector syndrome 和 logical observable flips 的联合分布。
-decoder 只能看到 detector syndrome \(s\)，并尝试预测 logical correction \(C\)；默认 loss 比较的是
-residual logical flips \(o\oplus C\)。
-
-这里的 edge \(j\) 不是 circuit gate，也不是某个 shot 中已经发生的错误；它是 DEM 中的一条错误机制
-instruction。运行 DEM sampler 时，每条 edge 会被独立采样一次，决定这一类错误机制在当前 shot
-是否发生。
-
-graphlike decomposition 不会创建第二个采样 DEM。对于 Stim 中形如
-`error(p) ... ^ ...` 的 instruction，FaultScope 保留一条 canonical edge 和一个 Bernoulli
-变量 \(f_j\)；`^` 分组保存在绑定该 canonical DEM 的稀疏
-`GraphlikeDecompositionHints` 中，并由 `GeneratedDetectorErrorModel.compile_graphlike_problem()`
-构造 decoder view。低层 `compile_graphlike_problem(decomposition=...)` 映射接口仅为向后兼容。
-编译后的多个 solver components 继承相同的父 `dem_edge_index` 和概率，但
-sampler 仍只采样一次父 edge，再同时翻转其完整 detector/observable support。因此 canonical DEM
-继续唯一地定义 \(P(s,o)\)。当前 matching backend 将这些 components 作为 uncorrelated
-graphlike approximation 构造求解器图；共享父索引保留来源关系，并不表示已经实现 correlated
-matching。
-
-FaultScope 原生 circuit→DEM generator 当前只生成 canonical DEM，尚不合成 graphlike hints；
-`generate_artifact()` 因此返回 `graphlike_hints=None`。没有 hint 的 edge 若在 GF(2) 约简后至多
-连接两个 detector，仍可直接交给 MWPM；超边则明确拒绝。未来 generator 只需填充同一个 artifact
-的稀疏 hint sidecar，sampler 和 backend 接口无需改变。
-
-一条 edge \(j\) 记录：
-
-\[
-j =
-(p_j,\Delta S_j,\Delta O_j,\operatorname{location\_id},\operatorname{event\_label},\operatorname{tags}).
-\]
-
-各字段含义：
-
-- \(p_j\)：edge probability，即这条 DEM instruction 在一个 shot 中发生的概率。
-- \(\Delta S_j=\{i:H_{i,j}=1\}\)：如果 edge \(j\) 发生，需要翻转的 detector syndrome ids。
-- \(\Delta O_j=\{a:G_{a,j}=1\}\)：如果 edge \(j\) 发生，需要翻转的 logical observable ids。
-- `location_id`：产生这条 edge 的原始 `NoiseLocation.id`，用于把 edge-level sensitivity 聚合回物理位置。
-- `event_label`：原始噪声事件标签，例如 Pauli event `"X"`、`"YZ"`，或 measurement bit flip 的 `true`。
-- `tags`：从原始 noise location 继承的 metadata，用于按 qubit、round、gate、operation 等维度聚合。
-
-在公式里，\(j\) 常同时被当作 edge 的索引使用。例如 `edge_event_masks[j]` 表示第 \(j\) 条 DEM
-edge 在一批 shots 中的 packed occurrence mask。若引入 Bernoulli 发生变量 \(f_j\)，则：
-
-\[
-f_j =
-\begin{cases}
-1, & \text{edge } j \text{ occurred in this shot},\\
-0, & \text{otherwise},
-\end{cases}
-\qquad
-f_j \sim \operatorname{Bernoulli}(p_j).
-\]
-
-Stim-like text:
+The logical fault matrix \(G\) similarly records observable flips. A canonical
+DEM edge stores its probability \(p_j\), the support of column \(j\) of \(H\)
+and \(G\), and source metadata such as `location_id`, event label, and tags.
+Effects are defined relative to the ideal reference result.
 
 ```text
 error(p_j) D0 D3 L0
 ```
 
-含义是：这条 edge 的 \(p_j\) 是 `p_j`，\(\Delta S_j=\{0,3\}\)，\(\Delta O_j=\{0\}\)。当
-\(f_j=1\) 时，把 detector syndrome bits `D0`、`D3` 和 logical observable bit `L0` 全部 xor
-一次；当 \(f_j=0\) 时，它不产生任何 flip。
+This is one mechanism: when it occurs, it toggles both detector bits 0 and 3 and
+observable bit 0. An edge is a model instruction, not a gate or a fault that has
+already occurred in a shot.
 
-## 单错误传播生成 DEM
+<span id="dem-edge-sampling"></span>
 
-`DetectorErrorModelGenerator` 对每个 physical noise event 做 single-error propagation。概念上，它先
-通过 Pauli-frame propagation 得到该 error 对 measurement outcomes 的影响，也就是
-\(\Omega\) 的一列；再用 detector matrix \(D\) 把 measurement flips 投影成 detector error
-matrix \(H\) 的一列。实现也可以等价地用 reference / injected run 的 effect XOR 来计算：
+### Independent edge sampling
+
+The DEM sampler draws one independent Bernoulli variable for each canonical
+edge:
+
+\[
+f_j\sim\operatorname{Bernoulli}(p_j),
+\qquad
+s=Hf,
+\qquad
+o=Gf.
+\]
+
+Thus \(s_i=\bigoplus_{j:H_{ij}=1}f_j\) and
+\(o_a=\bigoplus_{j:G_{aj}=1}f_j\). The default residual logical loss is the same
+\(F=\bigvee_a(O_a\oplus C_a)\) used by Forward sampling.
+
+Handwritten and imported `error(p)` instructions follow this independent-edge
+semantics. Shared location labels do not make different edges mutually
+exclusive. FaultScope's canonical DEM has no general categorical error-group
+schema.
+
+<span id="dem"></span>
+
+## Circuit-to-DEM conversion
+
+`DetectorErrorModelGenerator` propagates individual error mechanisms through a
+circuit. Conceptually, each edge's support is the XOR between an ideal reference
+and a run with that mechanism injected:
 
 ```text
-reference run:
-    s_ref, o_ref
-
-single injected event (l, event):
-    s_event, o_event
-
-edge detector syndrome = s_ref xor s_event
-edge logical flips = o_ref xor o_event
-edge probability = p_l(event)
+detector support = reference detectors XOR injected detectors
+observable support = reference observables XOR injected observables
 ```
 
-只要 detector 或 observable effect 非空，就产生一条 DEM edge。DEM generation 要求相关
-detector/observable effects 在 reference 和 injected run 中可确定；随机裸测量不能直接作为 detector。
+An empty support has no effect on the modeled detector/observable distribution
+and can be omitted. How physical event probabilities become independent DEM
+probabilities depends on the channel.
 
-Stim 的 `Circuit.detector_error_model(...)` 也默认采用这个严格约束：detectors 必须在 noiseless
-execution 下是 deterministic 的。Stim 另有 `allow_gauge_detectors=True` 选项；开启后，某些
-non-deterministic detectors 会被当作 gauge degrees of freedom 处理，通过 Gaussian elimination 从
-error model 中消去，并可能引入类似 `error(0.5) D_i D_j` 的 gauge relation。这个功能针对的是
-gauge detectors，不等同于把任意无法预测的裸随机测量直接保留成普通 detector。logical observables
-仍然必须是 deterministic。
+### Measurement restrictions
 
-FaultScope 当前 DEM generation 走严格路径：不暴露 Stim 式 gauge detector elimination。也就是说，
-detector 和 observable 声明必须能在 reference / injected propagation 中得到确定 effect；否则应该
-调整 detector 定义或先把随机自由度改写成确定的 syndrome relation。
+The current generator requires each explicit single-qubit or Pauli-string
+measurement to have a deterministic ideal result. It checks this even when the
+measurement is unused by a detector or observable. Resets that record a
+measurement result have the same requirement. Deterministic final parities are
+therefore not enough to admit random intermediate measurements.
 
-对 depolarizing noise，一个 physical location 会编译出多个独立 latent Pauli mechanisms，而不是
-直接把互斥 Pauli 结果的 marginal probability 当成独立 edge probability。设作用于 \(n\) 个 qubit，
-\(N=4^n\)，原始 depolarizing rate 为 \(\lambda\)。FaultScope 与 Stim 一样，为每个非 identity
-Pauli 使用
+Forward sampling supports ideal measurement randomness. The native DEM generator
+does not implement Stim's gauge-detector elimination. This stricter conversion
+boundary should be checked before choosing DEM sampling for a circuit.
+
+### Depolarizing channels
+
+For an \(n\)-qubit uniform depolarizing channel, write \(K=4^n\). The physical
+channel has identity probability \(1-\lambda\) and probability
+\(\lambda/(K-1)\) for each non-identity Pauli. Its exact independent
+factorization assigns every non-identity Pauli the Bernoulli probability
 
 \[
-q_n(\lambda)
-=
-\frac{1-
-\left(1-\frac{N}{N-1}\lambda\right)^{2/N}}
-{2}.
+q_n(\lambda)=
+\frac{1-\left(1-\frac{K}{K-1}\lambda\right)^{2/K}}2.
 \]
 
-独立采样全部 \(N-1\) 个 factor 后，把发生的 Pauli 相乘；所得分布恰好是 identity 概率
-\(1-\lambda\)、每个非 identity Pauli 概率 \(\lambda/(N-1)\)。因此即使 materialized DEM
-含有多个同源 edge，其 detector/observable 联合分布仍与原始 depolarizing channel 一致。
-对全部 detector/observable 都没有 effect 的 factor 可以从 materialized DEM 省略，因为它不改变
-该联合分布。同一 location 内具有相同 detector/observable support 的 independent factors 会按
-GF(2) parity 合并，概率递推为 \(a\oplus b=a+b-2ab\)，event label 使用 `P_i^P_j`；不同
-location 的平行 edges 为保留 FaultScope attribution metadata 而不合并。因此生成文本和 edge
-count 仍可能与 Stim 的全局化简结果不同，但 \(P(s,o)\) 相同。
+Multiplying the independently sampled Pauli factors reproduces the original
+categorical distribution. This real-valued factorization requires
+\(0\leq\lambda\leq(K-1)/K\): the circuit-to-DEM limit is 3/4 for one qubit and
+15/16 for two qubits. Forward sampling accepts the model's full rate range
+\([0,1]\).
 
-这个实数独立分解只在 \(0\leq\lambda\leq(N-1)/N\) 存在，所以 single-qubit rate 大于
-\(3/4\) 或 two-qubit rate 大于 \(15/16\) 时，Circuit→DEM 会报错；forward sampler 仍可处理
-模型允许的 \([0,1]\) rate。
+Factors with identical detector/observable support within a location combine by
+parity, with probability \(a+b-2ab\). Their event label uses `P_i^P_j`. Factors
+with empty support can be omitted. Parallel edges from different locations stay
+separate to preserve attribution, so edge counts or text can differ from Stim's
+global simplifications while representing the same joint distribution.
 
-一般 `PauliChannel({P_i:w_i})` 是 categorical channel，分量概率为
-\(p_i=\lambda w_i/\sum_jw_j\)。当正概率分量多于一个时，普通 DEM 的独立 instruction schema
-不一定能精确表示“至多选择一个”这一约束。与 Stim 1.16 一样，one-qubit channel 会先尝试求出
-独立 X/Y/Z Bernoulli probabilities \(a,b,c\)，使其 Pauli 乘积的 categorical 分布重新得到
-\((p_X,p_Y,p_Z)\)。求解成功时无需 opt-in，并且这些 independent factors 在 propagation 后按
-GF(2) parity 合并。`PAULI_CHANNEL_2` 以及更宽的 FaultScope channel 不做一般精确分解尝试。
+### Weighted Pauli channels
 
-若上述路径不可用，Circuit→DEM 默认拒绝；显式设置 `approximate_disjoint_errors=True`，或把它
-设为 \([0,1]\) 内的阈值且所有 \(p_i\) 不超过该阈值，才会按 Stim 的 disjoint-error 方式继续转换。
-single-error propagation 后，具有完全相同 detector/observable support 的互斥分量先合并为一条
-edge，概率取这些 \(p_i\) 之和；不同 effect classes 再作为独立 DEM instructions。合并 edge 的
-event label 使用稳定的 `P_i|P_j` 形式。只有一个正概率分量的 channel 总是精确。
+For `PauliChannel({P_i: w_i})`, component probabilities are
+\(p_i=\lambda w_i/\sum_jw_j\). A channel with one positive-probability component
+is exactly Bernoulli. With several components, the physical channel chooses at
+most one, which independent DEM instructions cannot represent in general.
 
-Stim 风格的 one-qubit 求解以重建概率的绝对残差和小于 \(10^{-14}\) 为成功条件。因此非常小、
-数学上不能严格 factorize 的 channel 也可能被视作 numerically exact，低于该绝对容差的 effect
-可能不出现在 DEM 中。这是数值转换的局限，不是 categorical sampling 的精确表示；若这些极小
-概率仍然重要，应使用 forward sampling。
+For a one-qubit channel, conversion first tries independent X/Y/Z Bernoulli
+factors whose Pauli product reconstructs the categorical probabilities. The
+solver accepts a sum of absolute reconstruction errors below \(10^{-14}\).
+Consequently, very small effects can fall below this tolerance even if the
+channel is not mathematically factorizable. Use Forward sampling if those
+effects matter. General multiqubit Pauli channels do not use this exact solver.
 
-所有由同一 location 生成的 edge 保留相同 `location_id`，event label 区分 latent/近似 Pauli
-mechanism。
+When an exact path is unavailable, conversion rejects the channel unless
+`approximate_disjoint_errors` is enabled. `True` permits the approximation; a
+numeric threshold in \([0,1]\) permits it only when every component probability
+is at most that threshold.
 
-## DEM 独立 edge sampling
+After propagation, mutually exclusive components with identical support combine
+by adding their probabilities and use an event label such as `P_i|P_j`.
+Different support classes then become independent instructions. Their original
+mutual exclusion is lost: two classes can now occur together with probability
+equal to the product of their probabilities. Shared `location_id` values retain
+attribution but do not restore that dependence.
 
-`DemHotspotEstimator` 不执行原始 stabilizer circuit，而是把每条 DEM edge 作为独立 Bernoulli
-instruction。等价地，它采样 error vector \(f\)，再计算 \(s=Hf\) 和 \(o=Gf\)：
+<span id="dem-hotspot"></span>
+
+## DEM sensitivities
+
+For the independent-edge model, the derivative parameter is \(p_j\):
 
 \[
-f_j \sim \operatorname{Bernoulli}(p_j),
+\widehat g^{\mathrm{DEM}}_j
+=\frac1N\sum_k(F_k-b)
+\left(\frac{f_{kj}}{\widetilde p_j}
+      -\frac{1-f_{kj}}{1-\widetilde p_j}\right),
 \qquad
-s_i = \bigoplus_{j:\ H_{i,j}=1} f_j,
+h^{\mathrm{DEM}}_j=|\widehat g^{\mathrm{DEM}}_j|.
+\]
+
+Here \(\widetilde p_j\) is the same clipped probability used for Forward
+scores. The [packed-count formula](#packed-counts), same-batch baseline bias,
+and endpoint limits apply with an edge-event mask in place of a physical
+location-event mask. The result's `edge_sensitivities` and `edge_hotspots` expose
+these quantities.
+
+<span id="dem-location"></span>
+
+### Location summaries are not a chain rule
+
+For the set \(\mathcal E_l\) of edges carrying a location ID, FaultScope defines
+
+\[
+P_l=\sum_{j\in\mathcal E_l}p_j,
 \qquad
-o_a = \bigoplus_{j:\ G_{a,j}=1} f_j.
-\]
-
-默认 DEM loss：
-
-\[
-R_a = O_a \oplus C_a,
-\qquad
-F = \bigvee_a R_a.
-\]
-
-如果没有 decoder/correction，\(C_a=0\)。
-
-注意：手工构造或导入 DEM 时，每条 `error(p)` 始终是独立 Bernoulli instruction；相同
-`location_id`、相同 `dem_edge_index` 或 graphlike `^` decomposition 都不会建立额外采样关联。
-Circuit→DEM 对 depolarizing channel 使用上面的精确 factorization，因此不会丢失其
-detector/observable 联合分布；成功独立化的 one-qubit `PauliChannel` 在上述 \(10^{-14}\) 数值标准内
-也具有同样性质。显式近似 multi-component `PauliChannel` 时，同 effect 的分量已通过概率求和精确
-保留；不同 effect classes 之间仍会丢失 categorical 互斥关系，近似模型允许两个 effect classes
-以其概率乘积同时发生。FaultScope 当前 DEM schema 没有
-categorical/correlated error group，因而无法在普通 DEM sampler 中精确表示一般互斥 channel；
-需要这种精度时使用 forward sampling。
-
-## DEM hotspot 公式
-
-DEM edge-level sensitivity 对 edge probability \(p_e\) 求导。实现使用与 forward path 相同的 packed
-counting formula，只是把 `event_mask` 换成 `edge_event_masks[e]`，把 rate 换成 edge probability：
-
-\[
-\begin{aligned}
-p &= \operatorname{clamp}(p_e, 10^{-12}, 1-10^{-12}),\\
-s_1 &= \frac{1}{p},\\
-s_0 &= -\frac{1}{1-p},\\
-\operatorname{sensitivity}_e
-&=
-\frac{
-\operatorname{sum\_loss\_score}_e
--
-b\,\operatorname{sum\_score}_e
-}{N},\\
-\operatorname{hotspot}_e
-&=
-\left|\operatorname{sensitivity}_e\right|.
-\end{aligned}
-\]
-
-其中：
-
-\[
-\begin{aligned}
-\operatorname{sum\_loss\_score}_e
-&=
-\operatorname{popcount}(F_A \mathbin{\&} E_e)\,s_1
-+
-\left(
-\operatorname{popcount}(F_A)
--
-\operatorname{popcount}(F_A \mathbin{\&} E_e)
-\right)s_0,\\
-\operatorname{sum\_score}_e
-&=
-\operatorname{popcount}(E_e)\,s_1
-+
-\left(N-\operatorname{popcount}(E_e)\right)s_0.
-\end{aligned}
-\]
-
-## DEM location 聚合
-
-同一 `location_id` 的 DEM edges 被聚合成 location-level sensitivity。设 location \(l\) 对应 edge
-集合 \(G_l\)：
-
-\[
-P_l = \sum_{e\in G_l} p_e.
-\]
-
-若 \(P_l>0\)：
-
-\[
-\operatorname{weight}_e = \frac{p_e}{P_l}.
-\]
-
-若 \(P_l=0\)，实现使用均匀权重：
-
-\[
-\operatorname{weight}_e = \frac{1}{|G_l|}.
-\]
-
-location sensitivity:
-
-\[
-\operatorname{sensitivity}_l
-=
-\sum_{e\in G_l}
-\operatorname{weight}_e\,
-\operatorname{sensitivity}_e,
-\qquad
-\operatorname{hotspot}_l
-=
-\left|\operatorname{sensitivity}_l\right|.
-\]
-
-DEM tag aggregations 按 `location_id` 聚合后的 \(\operatorname{hotspot}_l\) 计算。
-
-这里的 location sensitivity 是 edge-level derivative 的概率加权摘要，不自动应用
-Circuit→DEM 参数变换的 chain rule。尤其对于 depolarizing factorization，它不是
-\(dJ/d\lambda\)；对于 exact-factorized 或 opt-in `PauliChannel`，它分别描述转换后的 independent
-factor 或近似独立模型。若目标是原始 physical rate \(\lambda\) 的 score-function derivative，
-应使用 forward hotspot estimator。
-
-## Detector graph 投影
-
-`project_sensitivities_to_detector_graph(...)` 和 DEM result 中的 `detector_graph_hotspots`
-把 location 或 edge sensitivity 投影到 detector graph。
-
-每条 DEM edge 有 key：
-
-\[
-(\operatorname{detector\_tuple},\operatorname{observable\_tuple}).
-\]
-
-例如：
-
-```text
-((3, 4), ())      # detector graph edge
-((5,), (0,))      # boundary/logical edge
-```
-
-聚合量包括：
-
-- `by_detector_edge`: 按 `(detectors, observables)` 聚合 absolute hotspot。
-- `signed_by_detector_edge`: 同一 key 的 signed sensitivity。
-- `by_detector`: edge hotspot 平均分配到 touched detector nodes。
-- `signed_by_detector`: signed sensitivity 平均分配到 detector nodes。
-- `by_observable`: 按 logical observable 聚合 absolute hotspot。
-- `signed_by_observable`: 按 logical observable 聚合 signed sensitivity。
-- `by_location`: 按原始 location 聚合 absolute hotspot。
-- `signed_by_location`: 按原始 location 聚合 signed sensitivity。
-
-## PyMatching 数学接口
-
-PyMatching decoder 从 graphlike DEM 构造 matching problem。给定 edges \(j=0,\ldots,E-1\)，传给
-matching decoder 的 sparse binary matrix 正是 detector error matrix：
-
-\[
-H_{i,j} =
+w_j=
 \begin{cases}
-1, & \text{if detector } i \text{ is violated by edge } j,\\
-0, & \text{otherwise}.
+p_j/P_l,&P_l>0,\\
+1/|\mathcal E_l|,&P_l=0,
 \end{cases}
 \]
 
-logical fault matrix 为：
-
 \[
-G_{a,j} =
-\begin{cases}
-1, & \text{if logical observable } a \text{ is flipped by edge } j,\\
-0, & \text{otherwise}.
-\end{cases}
+\widehat g^{\mathrm{summary}}_l
+ =\sum_{j\in\mathcal E_l}w_j\widehat g^{\mathrm{DEM}}_j,
+\qquad
+h^{\mathrm{summary}}_l=|\widehat g^{\mathrm{summary}}_l|.
 \]
 
-edge weight:
+These probability-weighted summaries populate the DEM result's location
+`sensitivities` and `hotspots`. Tag aggregation uses the location hotspots after
+this signed averaging, so edge derivatives of opposite signs can cancel.
+
+This summary does not apply the conversion's parameter chain rule. If
+\(p_j=p_j(\lambda_l)\), the corresponding model derivative would instead involve
 
 \[
-w_j = \log \frac{1-p_j}{p_j}.
+\frac{\partial J_{\mathrm{DEM}}}{\partial\lambda_l}
+=\sum_j\frac{\partial J_{\mathrm{DEM}}}{\partial p_j}
+       \frac{\partial p_j}{\partial\lambda_l}.
 \]
 
-PyMatching 输入 detector syndrome，输出 predicted logical correction masks：
+In particular, depolarizing factors use \(q_n(\lambda_l)\), not the physical
+rate itself. For an approximate Pauli-channel conversion, the edge derivatives
+also describe the approximate independent model. Use the Forward hotspot
+estimator for derivatives of the original circuit's physical rates.
+
+<span id="detector-graph"></span>
+
+## Detector graph projection
+
+`project_sensitivities_to_detector_graph(...)` distributes supplied location
+sensitivities across their DEM edges using the same probability weights above.
+The DEM result's `detector_graph_hotspots` starts from its edge sensitivities.
+Both organize contributions by a `(detector_tuple, observable_tuple)` key:
 
 ```text
-corrections = decoder.decode_batch_masks(batch)
+((3, 4), ())      # detector edge
+((5,), (0,))      # one detector and a logical flip
 ```
 
-限制：
+| Result field | Aggregation |
+| --- | --- |
+| `by_detector_edge`, `signed_by_detector_edge` | Sum absolute or signed edge contributions with the same support key. |
+| `by_detector`, `signed_by_detector` | Divide each edge contribution equally among the detectors it touches, then sum. |
+| `by_observable`, `signed_by_observable` | Divide each edge contribution equally among the observables it touches, then sum. |
+| `by_location`, `signed_by_location` | Sum edge contributions by source location. |
 
-- 每条 DEM edge 最多连接两个 detectors。
-- 没有 detector 的纯 logical edge 会被拒绝，因为 syndrome 中不可见。
-- Observable flips 通过 `faults_matrix` 传递给 PyMatching；在本文符号中它对应 \(G\)。
+Absolute and signed summaries answer different questions. Summing absolute edge
+contributions can exceed the absolute value of their signed sum; a projected
+`by_location` value need not equal the DEM result's separately weighted location
+hotspot. `project_hotspots_to_edges(...)` exposes the location-to-edge allocation
+keyed by `(location_id, event)`.
 
-## 公式与实现对应关系
+<span id="pymatching"></span>
 
-核心实现位置：
+### Matching uses a decoder view
 
-- Forward estimator: `compute_packed_estimate` in `crates/faultscope-core/src/hotspot.rs`
-- DEM estimator: `DemHotspotEstimator::estimate_from_loss` (integer `LocationId` aggregation in `crates/faultscope-core/src/hotspot.rs`)
-- DEM sampler: `DemHotspotEstimator::run_batch_with_rng` (integer edge program in `crates/faultscope-core/src/dem_sampling.rs`)
-- Noise event masks: sampling functions in `crates/faultscope-core/src/packed.rs`
+A matching decoder uses detector support matrix \(H\), logical fault matrix
+\(G\), and log-odds weights
 
-理论页中的 `event_count`、`loss_event_count`、`sum_loss_score`、`sum_score`、`baseline`
-和 `sensitivity` 公式逐项对应这些实现。
-Rust batch/program 的 hotspot 不变量字段不可由库外修改。估算入口只验证
-event recording、compiled layout identity、shots 和外部 loss mask 宽度一次，
-随后进入可信聚合循环；因此缺失事件不能再被解释为“事件从未发生”。
+\[
+w_j=\log\frac{1-p_j}{p_j}.
+\]
+
+Its solver components must touch one or two detectors. An edge with a logical
+flip but no detector is rejected by this interface. Observable support is
+passed as logical fault information so that decoding predicts correction masks,
+not physical error locations.
+
+Imported graphlike decomposition hints can describe solver components for a
+canonical parent edge. Their detector and observable supports must XOR back to
+the parent's full support. All components retain the parent's probability and
+`dem_edge_index`. The sampler still draws the parent event once and toggles its
+full support; it never samples those components independently.
+
+The matching backend treats solver components as an uncorrelated graphlike
+approximation. Shared parent metadata does not implement correlated matching.
+The native circuit-to-DEM generator currently returns no graphlike hints;
+unhinted edges with more than two detectors are rejected by this matching path.
+
+<span id="_3"></span>
+
+## Implementation references
+
+The count formulas are implemented in `crates/faultscope-core/src/hotspot.rs`.
+Forward event masks come from `packed.rs`; DEM edge events come from
+`dem_sampling.rs`. Channel conversion is in `dem/event_plan.rs`.
+
+Forward hotspot estimation checks that the batch has positive shots, event
+recording, the correct compiled-program identity, and a loss mask of the expected
+width before aggregation. Missing event records are an invalid input, not
+observations of zero events. The [Architecture](implementation_overview.md) page
+shows how these components fit together.

@@ -1,0 +1,10 @@
+numpy==2.5.1
+psutil==7.0.0
+matplotlib==3.11.0
+pillow==11.3.0
+stim==1.16.0
+qiskit==2.5.0
+qiskit-aer==0.17.2
+cirq-core==1.6.1
+symft==0.1.1
+faultscope @ git+https://github.com/yuguoshao/FaultScope.git@90fa318ff9c95a5fa413f3b952c3970103e80d4c

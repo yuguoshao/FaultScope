@@ -210,7 +210,8 @@ class ReleaseMetadataTests(unittest.TestCase):
     def test_native_decoder_docs_define_only_the_v4_runtime_contract(self) -> None:
         abi = (ROOT / "docs/native_decoder_abi.md").read_text()
         development = (ROOT / "docs/decoder_development.md").read_text()
-        docs = abi + "\n" + development
+        decoding = (ROOT / "docs/guides/decoding.md").read_text()
+        contract = " ".join(abi.split())
 
         for required in (
             "faultscope.native_decoder_plugin.v4",
@@ -221,8 +222,8 @@ class ReleaseMetadataTests(unittest.TestCase):
             "FaultScopeNativeDetectorBatchViewV4",
             "FaultScopeNativeCorrectionBatchMutViewV4",
             "FaultScopeNativeDecoderU32SliceV1",
-            "80",
-            "32",
+            "| `FaultScopeNativeDecoderFactoryV4` | 80 | 8 |",
+            "| `FaultScopeNativeDecoderWorkerV4` | 32 | 8 |",
             "thread-safe factory flag",
             "output descriptor and its capacity",
             "drop_factory_state",
@@ -238,12 +239,14 @@ class ReleaseMetadataTests(unittest.TestCase):
             "padding",
             "DemAttributionTrace",
             "V3 to V4 migration",
-            "mwpm",
-            "bpdecoder",
-            "bposd",
         ):
-            self.assertIn(required, docs, required)
+            with self.subTest(required=required):
+                self.assertTrue(
+                    required in contract,
+                    f"docs/native_decoder_abi.md is missing {required!r}",
+                )
 
+        docs = abi + "\n" + development + "\n" + decoding
         for obsolete in (
             "FaultScopeNativeDecoderFactoryV3 {",
             "FaultScopeNativeDecoderWorkerV3 {",
@@ -255,24 +258,29 @@ class ReleaseMetadataTests(unittest.TestCase):
 
     def test_native_decoder_development_uses_factory_worker_contract(self) -> None:
         development = (ROOT / "docs/decoder_development.md").read_text()
+        prose = " ".join(development.split())
 
+        # The guide explains integration; exact signatures live in the linked source and ABI.
         for required in (
-            "`NativeBatchDecoder` remains the public Python factory-handle class name",
+            "`NativeBatchDecoder`",
             "NativeDecoderFactory: Send + Sync",
             "NativeDecoderWorker: Send",
-            "fn create_worker(&self) -> NpResult<Box<dyn NativeDecoderWorker>>",
-            "fn batch_formats(&self) -> &[DetectorBatchFormat]",
-            "fn decode_batch(\n        &mut self,",
-            "DetectorBatchView<'_>",
-            "DecoderCorrectionBatch",
-            "one tagged `decode_batch`",
-            "Arc<dyn NativeDecoderFactory>",
-            "temporary worker",
-            "per-thread/task worker",
-            "recursive composite workers",
-            "no backend decoder pool or worker mutex",
+            "`&mut self`",
+            "`batch_formats`",
+            "`decode_batch`",
+            "`__faultscope_native_decoder_capsule__()`",
+            "`strong_id_payload()`",
+            "(native_decoder_abi.md)",
+            "native_decoder_abi.md#callback-contract",
+            "native_decoder_abi.md#ownership-and-lifetime",
+            "crates/faultscope-core/src/decoder.rs",
+            "crates/faultscope-python/src/decoder_api.rs",
         ):
-            self.assertIn(required, development, required)
+            with self.subTest(required=required):
+                self.assertTrue(
+                    required in prose,
+                    f"docs/decoder_development.md is missing {required!r}",
+                )
 
         for obsolete in (
             "faultscope_core::NativeBatchDecoder",
@@ -284,6 +292,28 @@ class ReleaseMetadataTests(unittest.TestCase):
             "fn decode_detector_event_batch(\n        &mut self,",
         ):
             self.assertNotIn(obsolete, development, obsolete)
+
+    def test_native_decoder_guides_document_backend_availability(self) -> None:
+        decoding = (ROOT / "docs/guides/decoding.md").read_text()
+        for required in (
+            "NativePyMatchingDecoder",
+            "NativeFusionBlossomDecoder",
+            "`mwpm`",
+            "`bpdecoder`",
+            "`bposd`",
+        ):
+            with self.subTest(required=required):
+                self.assertTrue(
+                    required in decoding,
+                    f"docs/guides/decoding.md is missing {required!r}",
+                )
+
+        for path in ("docs/native_decoder_abi.md", "docs/decoder_development.md"):
+            with self.subTest(path=path):
+                self.assertTrue(
+                    "guides/decoding.md" in (ROOT / path).read_text(),
+                    f"{path} must link to the decoder installation and availability guide",
+                )
 
 
 if __name__ == "__main__":

@@ -1,6 +1,10 @@
 # Native decoder ABI V4
 
-FaultScope 0.2.11 accepts exactly one native decoder plugin ABI:
+This is the contract for native decoder plugin authors. For an implementation
+walkthrough, see [Decoder development](decoder_development.md); to install and
+use a backend, see [Decoding](guides/decoding.md#native-backends).
+
+FaultScope 0.2.11 accepts one decoder execution ABI:
 
 ```text
 entry-point group: faultscope.native_decoders
@@ -13,6 +17,11 @@ V4 is a breaking ABI. FaultScope does not reinterpret V1, V2, or V3
 descriptors and does not export compatibility aliases for their factory or
 worker types. An old capsule name or numeric version is rejected with an
 `expected ABI v4` error before a worker is created.
+
+The graphlike construction ABI remains **V1**. It transfers a compiled problem
+while building the decoder. The **V4** contract below governs decoder factories,
+workers, and runtime batches. A V1-named construction capsule or leaf view does
+not imply support for old decoder execution ABIs.
 
 ## Design
 
@@ -57,8 +66,11 @@ does not select the runtime batch layout.
 
 ## C layout
 
-The existing V1-named leaf views remain reusable layout primitives. V4 adds a
-U32 slice and tagged unions:
+The V1-named leaf views remain reusable layout primitives. The declarations
+below show the V4 additions and descriptors. Full leaf definitions are in
+[the core decoder types](https://github.com/yuguoshao/FaultScope/blob/main/crates/faultscope-core/src/decoder.rs);
+the [C test fixture](https://github.com/yuguoshao/FaultScope/blob/main/tests/native_decoder_v4_fixture.c)
+shows their C representation. V4 adds a U32 slice and tagged unions:
 
 ```c
 typedef struct {
@@ -228,9 +240,9 @@ manifest must report:
 
 The official PyMatching and fusion-blossom packages declare `[PACKED]` and
 require `faultscope>=0.2.11,<0.3`. The built-in detector-copy decoder declares
-`[MASKS]`; no-correction declares `[MASKS, PACKED, EVENTS]`. `bpdecoder` is
-temporarily non-installable while awaiting V4 migration. `mwpm` remains
-non-installable and has not migrated from its old ABI.
+`[MASKS]`; no-correction declares `[MASKS, PACKED, EVENTS]`. For installation and
+current backend availability, use the [decoding guide](guides/decoding.md#native-backends)
+and `python -I -m faultscope.backends status`.
 
 ## V3 to V4 migration
 
@@ -249,5 +261,3 @@ non-installable and has not migrated from its old ABI.
    and calls `drop_factory_state` exactly once.
 8. Rebuild against FaultScope 0.2.11+, update the dependency bound, and run the
    V4 fixture/layout/rejection tests.
-
-Graphlike Problem ABI remains V1 and is independent of this decoder ABI change.

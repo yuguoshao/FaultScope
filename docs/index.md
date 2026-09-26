@@ -1,57 +1,53 @@
 # FaultScope Documentation
 
-FaultScope is a noise-aware QEC fault attribution toolkit with a Rust core and
-Python API. It follows the detector error model formalism for noisy Clifford
-circuits: detectors are parity constraints on measurement outcomes, the detector
-matrix \(D\) collects those constraints, the measurement syndrome matrix
-\(\Omega\) records which measurements each circuit error flips, and the detector
-error matrix \(H = D\Omega\) records which detectors each error violates. The
-runtime supports packed stabilizer batch sampling, detector error model
-generation, detector syndrome sampling, decoder integration, and noise hotspot
-estimation for stabilizer-compatible quantum error correction workflows.
+FaultScope is a stabilizer circuit simulator for quantum error correction, with a
+Rust core and a Python API. It simulates noisy Clifford circuits, samples detector
+syndromes, and estimates logical error rates with external decoders. It also
+generates detector error models and estimates how individual noise rates affect
+logical failure.
 
 ## Start Here
 
-- [User Guide](user_guide.md): installation, runnable workflows, examples,
-  packed-mask basics, troubleshooting, and best practices.
-- [Decoder Development](decoder_development.md): how to prototype Python
-  decoders and add native decoder backends without moving hot-path data through
-  Python.
-- [API Reference](api_reference.md): current public Python and Rust API
-  surfaces, callback contracts, and result object fields.
-- [Theory](theory.md): theory, derivations, packed estimator formulas, DEM
-  equations, and implementation-level calculation details.
-- [Implementation Overview](implementation_overview.md): current packed
-  runtime behavior, supported workflows, and implementation boundaries.
+<span id="quick-build"></span>
 
-## Quick Build
+Follow [Getting Started](getting_started.md) to install FaultScope and run a
+complete surface-code memory experiment. You will use Stim to construct a circuit,
+FaultScope to sample it, and PyMatching to decode the detector syndromes.
 
-From a source checkout:
+The basic workflow is:
 
-```bash
-python -m venv .venv
-.venv/bin/python -m pip install -U pip
-.venv/bin/python -m pip install .
-```
+1. Build a circuit or import one from Stim text.
+2. Compile it once and sample batches of shots.
+3. Decode the detector syndromes and count logical failures.
+4. Inspect noise sensitivities to see which rates most affect the chosen loss.
 
-Optional integrations:
+## Choose a Guide
 
-```bash
-.venv/bin/python -m pip install ".[pymatching,visualization]"
-.venv/bin/python -m pip install ".[test]"
-```
+| I want to… | Read |
+| --- | --- |
+| Inspect measurements, detectors, or logical observables | [Circuit Sampling](guides/sampling.md) |
+| Connect PyMatching or choose a native decoder | [Decoding](guides/decoding.md) |
+| Generate or sample a detector error model (DEM) | [Detector Error Models](guides/dem.md) |
+| Run parameter sweeps, resume collection, or fit a threshold | [Collection and Thresholds](guides/collection.md) |
+| Rank noise locations and interpret sensitivities | [Noise Sensitivity](guides/noise_sensitivity.md) |
 
-## Documentation Development
+Use [the guide overview](user_guide.md) for terminology and help choosing between
+circuit and DEM sampling. Forward circuit sampling preserves the physical noise
+channels; DEM sampling treats error mechanisms as independent events. Their
+sensitivity results refer to different parameters.
 
-Preview this documentation site locally:
+FaultScope supports Clifford circuits with supported stochastic Pauli noise.
+It does not provide general per-shot adaptive branching. See
+[supported inputs](guides/sampling.md) for details.
 
-```bash
-.venv/bin/python -m pip install mkdocs-material
-.venv/bin/python -m mkdocs serve
-```
+## Reference and Development
 
-Strict build:
+<span id="documentation-development"></span>
 
-```bash
-.venv/bin/mkdocs build --strict --site-dir /private/tmp/faultscope-doc-review-site
-```
+- [API Reference](api_reference.md): public interfaces, arguments, and result fields.
+- [Theory](theory.md): sampling assumptions and sensitivity estimators.
+- [Architecture](implementation_overview.md): compilation, execution, and aggregation.
+- [Decoder Development](decoder_development.md): custom Python and native decoders.
+- [Native Decoder ABI](native_decoder_abi.md): the exact plugin contract.
+- [Compatibility](release.md): supported toolchains and upgrade notes.
+- [Development and Benchmarks](development.md): build, test, measure, and preview the docs.
