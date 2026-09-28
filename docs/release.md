@@ -1,7 +1,9 @@
 # Release and Compatibility
 
 The Python distribution and Rust libraries share workspace version `0.2.11`.
-Use [source installation](getting_started.md#install-from-source) to get started.
+Install from PyPI with `pip install faultscope`; the
+[installation guide](getting_started.md#installation) includes optional dependencies
+and a complete example.
 The [changelog](https://github.com/yuguoshao/FaultScope/blob/main/CHANGELOG.md)
 records release-specific changes.
 
@@ -24,15 +26,16 @@ records release-specific changes.
 
 | Component | Supported versions or build targets |
 | --- | --- |
-| Python | CPython 3.10–3.14 |
-| Rust | 1.85 or newer |
-| Linux wheels | manylinux x86_64 and aarch64 |
+| Python | 64-bit CPython 3.10–3.14 |
+| Rust, for source builds only | 1.85 or newer; not needed to install wheels |
+| Linux wheels | glibc 2.17+, x86_64 and aarch64 |
 | macOS wheels | macOS 11+, x86_64 and arm64 |
 | Windows wheels | x86_64 |
 
-The main extension and official backend extensions use the CPython stable ABI
-with an `abi3-py310` wheel tag. These are release build targets, not a claim that
-every artifact is currently available from a registry.
+The main extension and native PyMatching backend use the CPython stable ABI,
+with `cp310-abi3` in their wheel filenames. Pip selects the wheel for your Python
+interpreter and platform. Installing these wheels does not compile Rust or C++
+code.
 
 <span id="published-packages"></span>
 
@@ -46,10 +49,11 @@ every artifact is currently available from a registry.
 | `faultscope-core` | Rust circuit, sampling, DEM, and sensitivity library |
 | `faultscope-collection` | Rust logical error-rate collection library |
 
-The release workflow can publish the first two Python packages to PyPI and the
-Rust libraries to crates.io. Building a release does not publish them
-automatically. Official backend packages require `faultscope>=0.2.11,<0.3`.
-See [Decoding](guides/decoding.md#native-backends) for source installation.
+Install the main package with `pip install faultscope` and the optional native
+PyMatching backend with `pip install faultscope_pymatching`.
+Official backend packages require `faultscope>=0.2.11,<0.3`. See
+[Decoding](guides/decoding.md#native-backends) for backend installation.
+The fusion-blossom backend remains a source-install beta for 0.2.x.
 
 <span id="upgrading-stored-results"></span>
 
@@ -71,6 +75,21 @@ See [seeds and resume](guides/collection.md#seeds-and-resume) for current behavi
 
 ## Release Process
 
+Before the first PyPI release, register a pending trusted publisher for each
+Python package. Both use the GitHub repository `yuguoshao/FaultScope` and workflow
+filename `release.yml`, with these environment names:
+
+| PyPI project | GitHub environment |
+| --- | --- |
+| `faultscope` | `release` |
+| `faultscope-pymatching` | `release-pymatching` |
+
+PyPI does not allow two pending publishers with the same repository, workflow,
+and environment. Use the explicit environment names above instead of leaving
+the field as **Any**, and create the matching environments in the GitHub
+repository settings. The workflow at the release tag must use these same names;
+editing a branch does not update the workflow stored in an existing tag.
+
 Maintainers follow the
 [release workflow](https://github.com/yuguoshao/FaultScope/blob/main/.github/workflows/release.yml):
 
@@ -78,7 +97,8 @@ Maintainers follow the
 2. Run the Rust, Python, documentation, minimum-version, and packaging checks.
 3. Push the tag to build and test artifacts and create a draft GitHub release.
 4. To publish registries, manually dispatch the workflow for that tag with
-   `publish_registries` enabled and approve the protected `release` environment.
+   `publish_registries` enabled. Approve the `release` and `release-pymatching`
+   deployments if their environments require approval.
 5. Publish `faultscope-core`, wait for the crates.io index, then publish
    `faultscope-collection`. Publish the main Python distribution before
    `faultscope-pymatching`.

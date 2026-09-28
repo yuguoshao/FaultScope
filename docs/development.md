@@ -6,8 +6,9 @@ documentation. To run your first simulation, start with
 
 ## Set up a development environment
 
-Use Python 3.10+ and Rust 1.85+. Run these commands from the FaultScope repository
-root; on Windows, replace the activation command with
+Use Python 3.10+ and Rust 1.85+. Download or clone the
+[FaultScope source](https://github.com/yuguoshao/FaultScope), then run these
+commands from the repository root; on Windows, replace the activation command with
 `.venv\Scripts\Activate.ps1`.
 
 ```bash
@@ -23,8 +24,8 @@ edits take effect without rebuilding the extension.
 
 For compiler, lint, and test dependencies, see
 [the project configuration](https://github.com/yuguoshao/FaultScope/blob/main/pyproject.toml).
-Optional native decoder packages have their own build steps in
-[Decoding](guides/decoding.md#native-backends).
+Optional native decoder packages have their own
+[source build steps](guides/decoding.md#build-a-backend-from-source-for-development).
 
 ## Run checks
 

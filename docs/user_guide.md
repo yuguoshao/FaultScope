@@ -24,8 +24,8 @@ For the estimators and their assumptions, use [Theory](theory.md).
 
 <span id="installation-and-build"></span>
 
-- [Install from source](getting_started.md#install-from-source): supported tools,
-  the virtual environment, and optional dependencies.
+- [Install FaultScope](getting_started.md#installation): the virtual environment
+  and optional dependencies.
 
 <span id="imports-and-package-layout"></span>
 <span id="core-concepts"></span>

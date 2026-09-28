@@ -10,9 +10,10 @@ logical failure.
 
 <span id="quick-build"></span>
 
-Follow [Getting Started](getting_started.md) to install FaultScope and run a
-complete surface-code memory experiment. You will use Stim to construct a circuit,
-FaultScope to sample it, and PyMatching to decode the detector syndromes.
+Follow [Getting Started](getting_started.md#installation) to
+install FaultScope with pip and run a complete surface-code memory
+experiment. You will use Stim to construct a circuit, FaultScope to sample it,
+and PyMatching to decode the detector syndromes.
 
 The basic workflow is:
 

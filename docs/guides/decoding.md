@@ -17,8 +17,8 @@ accepts native decoders or no decoder. See [Collection](collection.md).
 ## A Complete PyMatching Example
 
 Install FaultScope with the `pymatching` extra as described in
-[Getting started](../getting_started.md). This example uses the Python PyMatching
-package and needs no optional native backend.
+[Getting started](../getting_started.md#installation). This
+example uses the Python PyMatching package and needs no optional native backend.
 
 The circuit has one possible X error. Its detector and logical observable both
 read the resulting measurement, so the decoder can identify every error. This
@@ -92,19 +92,25 @@ and the [DEM API](../api_reference.md#detector-error-models) for compiled views.
 
 ## Install a Native Backend
 
-Start from the FaultScope repository root with your virtual environment active
-and the base package installed. You can inspect discovery without installing:
+First install FaultScope using
+[Getting started](../getting_started.md#installation), and keep
+the same virtual environment active.
+
+Install native PyMatching from PyPI:
 
 ```bash
+pip install faultscope_pymatching
 python -I -m faultscope.backends status
-python -I -m faultscope.backends install pymatching --dry-run
 ```
 
-`--dry-run` only prints a plan. It does not install or verify package availability.
-The generic plan may end with a package-index install. To build the backend from
-this source checkout, use the local package instead.
+Prebuilt wheels need no Rust or C++ compiler. Installing the Python `pymatching`
+package alone does not install `NativePyMatchingDecoder`.
 
-For native PyMatching, install the build tool, then build the backend:
+### Build a Backend from Source for Development
+
+For backend development or a platform without a compatible wheel, build native
+PyMatching from the FaultScope repository root with your virtual environment
+active and the base package installed:
 
 ```bash
 python -m pip install "maturin>=1.7,<2"
@@ -115,11 +121,10 @@ python -I -m faultscope.backends status
 This needs Rust, Git, and a C++20 compiler. The build fetches pinned PyMatching
 source unless `NPSIM_PYMATCHING_SOURCE_DIR` points to an existing checkout.
 See the [backend README](https://github.com/yuguoshao/FaultScope/blob/main/backends/faultscope-pymatching/README.md)
-for details. Installing the Python `pymatching` wheel alone does not install
-`NativePyMatchingDecoder`.
+for details.
 
-Alternatively, build the fusion-blossom backend from the same repository root
-and active environment:
+The fusion-blossom backend has no wheel in this release. Build it from the same
+repository root and active environment:
 
 ```bash
 python -m pip install -e backends/faultscope-fusion-blossom
@@ -129,6 +134,17 @@ python -I -m faultscope.backends status
 This is a serial beta MWPM adapter. Its
 [README](https://github.com/yuguoshao/FaultScope/blob/main/backends/faultscope-fusion-blossom/README.md)
 describes build requirements, integer weights, and unsupported features.
+
+### Inspect Backend Availability
+
+You can inspect discovery or print the generic installer's plan:
+
+```bash
+python -I -m faultscope.backends status
+python -I -m faultscope.backends install pymatching --dry-run
+```
+
+`--dry-run` only prints a plan. It does not install a backend.
 
 In FaultScope 0.2.11, `bpdecoder` and `mwpm` await ABI V4 migration, and `bposd`
 is reserved. These catalog entries are not installable. `status` distinguishes
