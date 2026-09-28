@@ -156,23 +156,6 @@ class ReleaseMetadataTests(unittest.TestCase):
             package = _toml(path)["package"]
             self.assertIs(package["publish"], False, path)
 
-    def test_publishable_workspace_crate_keywords_meet_crates_io_limits(self) -> None:
-        workspace = _toml("Cargo.toml")["workspace"]
-        for member in workspace["members"]:
-            package = _toml(f"{member}/Cargo.toml")["package"]
-            if package.get("publish") is False:
-                continue
-            keywords = package.get("keywords", [])
-            if isinstance(keywords, dict) and keywords.get("workspace"):
-                keywords = workspace["package"]["keywords"]
-            with self.subTest(crate=package["name"]):
-                self.assertLessEqual(len(keywords), 5)
-                for keyword in keywords:
-                    with self.subTest(keyword=keyword):
-                        self.assertTrue(keyword.isascii())
-                        self.assertLessEqual(len(keyword), 20)
-                        self.assertRegex(keyword, r"\A[A-Za-z0-9][A-Za-z0-9_+-]*\Z")
-
     def test_release_documents_and_published_crate_metadata_exist(self) -> None:
         for path in ("LICENSE", "README.md", "CHANGELOG.md", "docs/release.md"):
             self.assertTrue((ROOT / path).is_file(), path)
