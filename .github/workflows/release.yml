@@ -84,8 +84,36 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
+      - name: Correct registry keywords in the original v0.2.11 source
+        id: crate_metadata
+        if: ${{ needs.validate.outputs.source_ref == 'a0351591f7b9c8ab10313d7f2cec16e013b022c8' }}
+        run: |
+          git diff --exit-code
+          git diff --cached --exit-code
+          python - <<'PY'
+          import os
+          import pathlib
+          import tomllib
+
+          old = 'keywords = ["quantum-error-correction",'
+          new = 'keywords = ["quantum", "qec",'
+          for name in ("faultscope-core", "faultscope-collection"):
+              path = pathlib.Path("crates") / name / "Cargo.toml"
+              source = path.read_text()
+              if source.count(old) != 1:
+                  raise SystemExit(f"Unexpected legacy keywords in {path}")
+              updated = source.replace(old, new, 1)
+              expected = tomllib.loads(source)
+              expected["package"]["keywords"][0:1] = ["quantum", "qec"]
+              if tomllib.loads(updated) != expected:
+                  raise SystemExit(f"Unexpected metadata change in {path}")
+              path.write_text(updated)
+              print(f"Corrected registry keywords in {path}")
+          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+              output.write("allow_dirty=--allow-dirty\n")
+          PY
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo publish -p faultscope-core --locked
+      - run: cargo publish -p faultscope-core --locked ${{ steps.crate_metadata.outputs.allow_dirty }}
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
       - name: Wait for faultscope-core to reach the registry index
@@ -100,7 +128,7 @@ jobs:
           done
           echo "faultscope-core ${version} did not reach the crates.io index" >&2
           exit 1
-      - run: cargo publish -p faultscope-collection --locked
+      - run: cargo publish -p faultscope-collection --locked ${{ steps.crate_metadata.outputs.allow_dirty }}
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
 

@@ -91,6 +91,13 @@ repository settings. Run manual releases from `main` to use the current
 publishing configuration, and select the package source with the `release_tag`
 input. All package builds use the validated tag's resolved commit.
 
+The original `v0.2.11` source commit (`a0351591f7b9`) contains a crate keyword
+that exceeds the crates.io length limit. For this commit only, the Rust
+publishing job replaces `quantum-error-correction` with `quantum` and `qec` in
+the two crate manifests and permits these uncommitted metadata changes during
+packaging. Rust code and the original tag are preserved; the published crate
+keywords differ from the original tag's manifests.
+
 Maintainers follow the
 [release workflow](https://github.com/yuguoshao/FaultScope/blob/main/.github/workflows/release.yml):
 
@@ -114,6 +121,8 @@ gh workflow run release.yml --repo yuguoshao/FaultScope --ref main -f release_ta
 The tag must already exist and match the version in its `Cargo.toml`. Selecting
 `main` chooses the workflow definition; `release_tag` chooses the source to build.
 This allows current publishing configuration to be used for an older release tag.
+After a publishing workflow fix is merged, start a new manual run from `main`;
+rerunning an older failed run uses that run's older workflow definition.
 
 Ordinary branch pushes, pull requests, and tag pushes do not publish to registries.
 Trusted-publisher configuration and the crates.io token are maintainer-managed
