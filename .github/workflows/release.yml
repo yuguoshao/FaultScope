@@ -104,7 +104,7 @@ jobs:
     if: ${{ github.event_name == 'workflow_dispatch' && inputs.publish_registries }}
     needs: [publish-main, wheels]
     runs-on: ubuntu-latest
-    environment: release
+    environment: release-pymatching
     permissions:
       id-token: write
     steps:

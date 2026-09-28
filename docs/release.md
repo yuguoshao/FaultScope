@@ -75,6 +75,21 @@ See [seeds and resume](guides/collection.md#seeds-and-resume) for current behavi
 
 ## Release Process
 
+Before the first PyPI release, register a pending trusted publisher for each
+Python package. Both use the GitHub repository `yuguoshao/FaultScope` and workflow
+filename `release.yml`, with these environment names:
+
+| PyPI project | GitHub environment |
+| --- | --- |
+| `faultscope` | `release` |
+| `faultscope-pymatching` | `release-pymatching` |
+
+PyPI does not allow two pending publishers with the same repository, workflow,
+and environment. Use the explicit environment names above instead of leaving
+the field as **Any**, and create the matching environments in the GitHub
+repository settings. The workflow at the release tag must use these same names;
+editing a branch does not update the workflow stored in an existing tag.
+
 Maintainers follow the
 [release workflow](https://github.com/yuguoshao/FaultScope/blob/main/.github/workflows/release.yml):
 
@@ -82,7 +97,8 @@ Maintainers follow the
 2. Run the Rust, Python, documentation, minimum-version, and packaging checks.
 3. Push the tag to build and test artifacts and create a draft GitHub release.
 4. To publish registries, manually dispatch the workflow for that tag with
-   `publish_registries` enabled and approve the protected `release` environment.
+   `publish_registries` enabled. Approve the `release` and `release-pymatching`
+   deployments if their environments require approval.
 5. Publish `faultscope-core`, wait for the crates.io index, then publish
    `faultscope-collection`. Publish the main Python distribution before
    `faultscope-pymatching`.
