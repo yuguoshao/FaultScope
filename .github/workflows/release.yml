@@ -85,24 +85,26 @@ jobs:
         with:
           python-version: "3.13"
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo publish -p faultscope-core --locked
+      - name: Publish Rust crates
+        shell: bash
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-      - name: Wait for faultscope-core to reach the registry index
-        shell: bash
         run: |
           version=$(python -c "import pathlib,tomllib; print(tomllib.loads(pathlib.Path('Cargo.toml').read_text())['workspace']['package']['version'])")
-          for attempt in {1..30}; do
-            if cargo search faultscope-core --limit 1 | grep -F "faultscope-core = \"${version}\""; then
-              exit 0
-            fi
-            sleep 10
-          done
-          echo "faultscope-core ${version} did not reach the crates.io index" >&2
-          exit 1
-      - run: cargo publish -p faultscope-collection --locked
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+          published() {
+            curl --fail --silent --show-error --retry 3 "https://index.crates.io/fa/ul/$1" |
+              jq --slurp --exit-status --arg version "$version" 'any(.[]; .vers == $version and .yanked == false)' > /dev/null
+          }
+          if published faultscope-core; then
+            echo "faultscope-core ${version} is already published"
+          else
+            cargo publish -p faultscope-core --locked
+          fi
+          if published faultscope-collection; then
+            echo "faultscope-collection ${version} is already published"
+          else
+            cargo publish -p faultscope-collection --locked
+          fi
 
   publish-main:
     if: ${{ github.event_name == 'workflow_dispatch' && inputs.publish_registries }}
