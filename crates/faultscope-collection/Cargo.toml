@@ -9,7 +9,7 @@ authors.workspace = true
 description = "Native logical error-rate collection and scheduling for FaultScope"
 documentation = "https://docs.rs/faultscope-collection"
 readme = "README.md"
-keywords = ["quantum-error-correction", "sampling", "threshold"]
+keywords = ["quantum", "qec", "sampling", "threshold"]
 categories = ["science", "simulation"]
 
 [lib]

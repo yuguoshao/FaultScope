@@ -9,7 +9,7 @@ authors.workspace = true
 description = "Python-independent circuit, DEM, sampling, and decoder primitives for FaultScope"
 documentation = "https://docs.rs/faultscope-core"
 readme = "README.md"
-keywords = ["quantum-error-correction", "simulation", "decoder"]
+keywords = ["quantum", "qec", "simulation", "decoder"]
 categories = ["science", "simulation"]
 
 [lib]
