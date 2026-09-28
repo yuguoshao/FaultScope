@@ -1,7 +1,9 @@
 # Release and Compatibility
 
 The Python distribution and Rust libraries share workspace version `0.2.11`.
-Use [source installation](getting_started.md#install-from-source) to get started.
+Install from PyPI with `pip install faultscope`; the
+[installation guide](getting_started.md#installation) includes optional dependencies
+and a complete example.
 The [changelog](https://github.com/yuguoshao/FaultScope/blob/main/CHANGELOG.md)
 records release-specific changes.
 
@@ -24,15 +26,16 @@ records release-specific changes.
 
 | Component | Supported versions or build targets |
 | --- | --- |
-| Python | CPython 3.10–3.14 |
-| Rust | 1.85 or newer |
-| Linux wheels | manylinux x86_64 and aarch64 |
+| Python | 64-bit CPython 3.10–3.14 |
+| Rust, for source builds only | 1.85 or newer; not needed to install wheels |
+| Linux wheels | glibc 2.17+, x86_64 and aarch64 |
 | macOS wheels | macOS 11+, x86_64 and arm64 |
 | Windows wheels | x86_64 |
 
-The main extension and official backend extensions use the CPython stable ABI
-with an `abi3-py310` wheel tag. These are release build targets, not a claim that
-every artifact is currently available from a registry.
+The main extension and native PyMatching backend use the CPython stable ABI,
+with `cp310-abi3` in their wheel filenames. Pip selects the wheel for your Python
+interpreter and platform. Installing these wheels does not compile Rust or C++
+code.
 
 <span id="published-packages"></span>
 
@@ -46,10 +49,11 @@ every artifact is currently available from a registry.
 | `faultscope-core` | Rust circuit, sampling, DEM, and sensitivity library |
 | `faultscope-collection` | Rust logical error-rate collection library |
 
-The release workflow can publish the first two Python packages to PyPI and the
-Rust libraries to crates.io. Building a release does not publish them
-automatically. Official backend packages require `faultscope>=0.2.11,<0.3`.
-See [Decoding](guides/decoding.md#native-backends) for source installation.
+Install the main package with `pip install faultscope` and the optional native
+PyMatching backend with `pip install faultscope_pymatching`.
+Official backend packages require `faultscope>=0.2.11,<0.3`. See
+[Decoding](guides/decoding.md#native-backends) for backend installation.
+The fusion-blossom backend remains a source-install beta for 0.2.x.
 
 <span id="upgrading-stored-results"></span>
 

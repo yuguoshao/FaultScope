@@ -31,10 +31,31 @@ dropped. The backend retains every dynamic error message in state-owned storage
 to keep concurrent callback consumption safe, so repeated errors retain memory
 until state drop. ABI consumers should copy error text promptly.
 
-Development install from the FaultScope repository root:
+## Installation
+
+Install FaultScope first using the
+[installation guide](../../docs/getting_started.md#installation).
+With the same virtual environment active, install the native backend from PyPI:
 
 ```bash
-.venv/bin/python -m pip install -e backends/faultscope-pymatching --no-build-isolation
+pip install faultscope_pymatching
+python -I -m faultscope.backends status
+```
+
+Prebuilt wheels require no Rust or C++ compiler. The Python `pymatching` package
+is separate from this native backend and does not provide
+`NativePyMatchingDecoder`.
+
+## Build from Source for Development
+
+For backend development or a platform without a compatible wheel, use Rust, Git,
+and a C++20 compiler. From the FaultScope repository root with your virtual
+environment active and the base package installed:
+
+```bash
+python -m pip install "maturin>=1.7,<2"
+python -m pip install -e backends/faultscope-pymatching --no-build-isolation
+python -I -m faultscope.backends status
 ```
 
 If the PyMatching source is already checked out, set

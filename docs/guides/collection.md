@@ -5,7 +5,8 @@ and save statistics for later analysis. Rust performs sampling, native decoding,
 postselection, scheduling, and counting. Python prepares tasks and manages CSV
 files.
 
-Install FaultScope using the [installation instructions](../getting_started.md#install-from-source).
+Install FaultScope using the
+[installation instructions](../getting_started.md#installation).
 The collection example needs no optional packages and uses no decoder. The
 optional threshold example below also needs the collection extra. Python
 blocks run in page order; the threshold example uses its own synthetic data. Save them as `collection_example.py`
@@ -181,10 +182,11 @@ finds crossings between adjacent distances, and fits finite-size scaling.
 above has no code-distance axis and is not a threshold experiment.
 
 Plotting, bootstrap intervals, and scaling fits use the optional collection
-packages. From the repository root, install them into the same environment:
+packages. After [installing FaultScope](../getting_started.md#installation),
+add the extra in the same active environment:
 
 ```bash
-python -m pip install ".[collection]"
+pip install "faultscope[collection]"
 ```
 
 The following independent example demonstrates the analysis interface with

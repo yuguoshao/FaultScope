@@ -12,20 +12,31 @@ Three terms used throughout the guides:
 - A **logical failure** occurs when the decoder's predicted logical flips
   disagree with the sampled logical observable record.
 
-## Install from source
+## Installation
 
-Use **Python 3.10+** and **Rust 1.85+**. Supported CPython versions are 3.10–3.14.
-Download or clone the [FaultScope source](https://github.com/yuguoshao/FaultScope),
-then run these commands from the checkout's root:
+Use **64-bit CPython 3.10–3.14**. Pip installs a prebuilt wheel on the
+[supported platforms](release.md#supported-toolchains), including Linux, macOS,
+and Windows. You do not need Rust or a source checkout to install these wheels.
+
+Create and activate a virtual environment:
 
 ```bash
 python -m venv .venv
 source .venv/bin/activate
-python -m pip install ".[pymatching]" "stim>=1.13"
 ```
 
-On Windows, use `.venv\Scripts\Activate.ps1` to activate the environment in
-PowerShell. The installation builds FaultScope's Rust extension.
+On Windows, use `.venv\Scripts\Activate.ps1` in PowerShell instead. Install
+FaultScope from PyPI in the active environment:
+
+```bash
+pip install faultscope
+```
+
+For this tutorial, also install the optional PyMatching integration and Stim:
+
+```bash
+pip install "faultscope[pymatching]" stim
+```
 
 The example uses each dependency for a specific task:
 
@@ -35,9 +46,23 @@ The example uses each dependency for a specific task:
 | Stim | Constructs the example circuit and a decomposed DEM for the decoding graph |
 | PyMatching | Predicts logical flips from detector syndromes |
 
-The `pymatching` extra installs PyMatching, NumPy, and SciPy. Stim is installed
-separately. See [Decoding](guides/decoding.md) for optional native backends and
-[Development](development.md) if you plan to edit the source.
+The `pymatching` extra installs PyMatching, NumPy, and SciPy. The optional native
+PyMatching backend is a separate package; see
+[Decoding](guides/decoding.md#install-a-native-backend).
+
+Check that the package imports and print the installed version:
+
+```bash
+python -I -c "import faultscope; print(faultscope.__version__)"
+```
+
+<span id="install-from-source"></span>
+
+### Source builds
+
+For platforms without a compatible wheel, or to edit FaultScope itself, follow
+[Development](development.md#set-up-a-development-environment). Source builds
+require Python 3.10+ and Rust 1.85+.
 
 ## Simulate a surface-code memory
 
@@ -141,7 +166,7 @@ reports sensitivities to independent edge probabilities. Read
 | Problem | What to check |
 | --- | --- |
 | `ModuleNotFoundError: faultscope._native` | Install with the same environment's Python, then run the script with `python -I`. Source contributors should use `maturin develop`; see [Development](development.md). |
-| Rust is missing or too old | Install Rust 1.85+ and ensure `cargo` is on `PATH` before running pip. |
+| Pip tries to build from source | Upgrade pip with `pip install --upgrade pip` and check the [supported platforms](release.md#supported-toolchains). Source builds require Rust 1.85+. |
 | PyMatching cannot be imported | Install the `pymatching` extra in the active environment. |
 | A different circuit cannot produce a DEM | Check the [DEM conversion limits](guides/dem.md); the Forward sampler accepts some circuits that the DEM generator rejects. |
 | Default loss reports missing observables | Declare the circuit's logical observables or supply a custom loss as described in [Circuit Sampling](guides/sampling.md). |

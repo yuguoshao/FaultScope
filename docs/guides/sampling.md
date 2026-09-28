@@ -4,7 +4,8 @@ Use forward sampling when you need measurement records, detector syndromes, or
 logical observables from the original noisy circuit. The circuit can also be
 reused for decoding and noise sensitivity estimates.
 
-Install FaultScope using the [installation instructions](../getting_started.md#install-from-source).
+Install FaultScope using the
+[installation instructions](../getting_started.md#installation).
 This page needs no optional packages. The Python blocks below continue the same
 example; save them in order as `sampling_example.py` and run:
 

@@ -20,26 +20,29 @@ logical failure.
 
 ## Installation
 
-Source builds require **Python 3.10+** and **Rust 1.85+**. CPython 3.10 through 3.14
-is supported. From the root of a source checkout, create and activate a virtual
-environment:
+Use **64-bit CPython 3.10–3.14**. Prebuilt wheels are available for
+[supported Linux, macOS, and Windows platforms](docs/release.md#supported-toolchains),
+so installing on these platforms does not require Rust.
+
+Create and activate a virtual environment, then install from PyPI:
 
 ```bash
 python -m venv .venv
 source .venv/bin/activate
+pip install faultscope
 ```
 
-On Windows, activate it with `.venv\Scripts\Activate.ps1` in PowerShell instead.
-Install FaultScope and the optional dependencies used by the quickstart:
+On Windows, activate the environment with `.venv\Scripts\Activate.ps1` in
+PowerShell instead. For the quickstart below, add the example dependencies:
 
 ```bash
-python -m pip install ".[pymatching]" "stim>=1.13"
+pip install "faultscope[pymatching]" stim
 ```
 
-This builds the Rust extension and installs the Python package. The `pymatching`
-extra supplies PyMatching, NumPy, and SciPy; Stim supplies the example circuit.
-For other integrations and build options, see the
-[installation guide](docs/getting_started.md#install-from-source).
+The `pymatching` extra supplies PyMatching, NumPy, and SciPy; Stim supplies the
+example circuit. See the [installation guide](docs/getting_started.md#installation)
+for more details, or [Development](docs/development.md) for source builds and
+contributions.
 
 ## Quickstart: Simulate a Surface-Code Memory
 
