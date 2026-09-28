@@ -87,8 +87,9 @@ filename `release.yml`, with these environment names:
 PyPI does not allow two pending publishers with the same repository, workflow,
 and environment. Use the explicit environment names above instead of leaving
 the field as **Any**, and create the matching environments in the GitHub
-repository settings. The workflow at the release tag must use these same names;
-editing a branch does not update the workflow stored in an existing tag.
+repository settings. Run manual releases from `main` to use the current
+publishing configuration, and select the package source with the `release_tag`
+input. All package builds use the validated tag's resolved commit.
 
 Maintainers follow the
 [release workflow](https://github.com/yuguoshao/FaultScope/blob/main/.github/workflows/release.yml):
@@ -96,13 +97,24 @@ Maintainers follow the
 1. Update the changelog and make the `vX.Y.Z` tag match the workspace version.
 2. Run the Rust, Python, documentation, minimum-version, and packaging checks.
 3. Push the tag to build and test artifacts and create a draft GitHub release.
-4. To publish registries, manually dispatch the workflow for that tag with
-   `publish_registries` enabled. Approve the `release` and `release-pymatching`
+4. To publish registries, open **Actions → release → Run workflow**, choose
+   **main**, enter the version tag (for example `v0.2.11`) in **release_tag**, and
+   enable **publish_registries**. Approve the `release` and `release-pymatching`
    deployments if their environments require approval.
 5. Publish `faultscope-core`, wait for the crates.io index, then publish
    `faultscope-collection`. Publish the main Python distribution before
    `faultscope-pymatching`.
 
-Ordinary branches, pull requests, and tag pushes do not publish to registries.
+The equivalent CLI command for version 0.2.11 is:
+
+```bash
+gh workflow run release.yml --repo yuguoshao/FaultScope --ref main -f release_tag=v0.2.11 -f publish_registries=true
+```
+
+The tag must already exist and match the version in its `Cargo.toml`. Selecting
+`main` chooses the workflow definition; `release_tag` chooses the source to build.
+This allows current publishing configuration to be used for an older release tag.
+
+Ordinary branch pushes, pull requests, and tag pushes do not publish to registries.
 Trusted-publisher configuration and the crates.io token are maintainer-managed
 prerequisites.

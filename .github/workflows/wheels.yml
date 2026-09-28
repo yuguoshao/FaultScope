@@ -2,6 +2,12 @@ name: wheels
 
 on:
   workflow_call:
+    inputs:
+      source_ref:
+        description: Source commit or ref to build
+        required: false
+        type: string
+        default: ""
   workflow_dispatch:
 
 permissions:
@@ -33,6 +39,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_ref }}
       - uses: actions/setup-python@v5
         with:
           python-version: "3.10"
@@ -76,6 +84,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_ref }}
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"

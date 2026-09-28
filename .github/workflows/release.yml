@@ -6,6 +6,10 @@ on:
       - "v*.*.*"
   workflow_dispatch:
     inputs:
+      release_tag:
+        description: "Existing version tag to build and publish (for example v0.2.11)"
+        required: true
+        type: string
       publish_registries:
         description: "Publish packages to crates.io and PyPI"
         required: true
@@ -18,22 +22,37 @@ permissions:
 jobs:
   validate:
     runs-on: ubuntu-latest
+    outputs:
+      source_ref: ${{ steps.checkout.outputs.commit }}
     steps:
       - uses: actions/checkout@v4
+        id: checkout
+        with:
+          ref: refs/tags/${{ inputs.release_tag || github.ref_name }}
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
       - name: Verify tag matches workspace version
         env:
-          RELEASE_TAG: ${{ github.ref_name }}
-        run: >-
-          python -c "import os,tomllib,pathlib;
-          version=tomllib.loads(pathlib.Path('Cargo.toml').read_text())['workspace']['package']['version'];
-          assert os.environ['RELEASE_TAG'] == f'v{version}', (os.environ['RELEASE_TAG'], version)"
+          RELEASE_TAG: ${{ inputs.release_tag || github.ref_name }}
+        run: |
+          python - <<'PY'
+          import os
+          import pathlib
+          import tomllib
+
+          version = tomllib.loads(pathlib.Path("Cargo.toml").read_text())["workspace"]["package"]["version"]
+          tag = os.environ["RELEASE_TAG"]
+          if tag != f"v{version}":
+              raise SystemExit(f"Release tag {tag!r} does not match the checked-out workspace version: expected v{version}.")
+          print(f"Validated release tag {tag}")
+          PY
 
   wheels:
     needs: validate
     uses: ./.github/workflows/wheels.yml
+    with:
+      source_ref: ${{ needs.validate.outputs.source_ref }}
 
   draft-release:
     if: github.event_name == 'push'
@@ -60,6 +79,8 @@ jobs:
     environment: release
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.validate.outputs.source_ref }}
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
