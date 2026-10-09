@@ -4,6 +4,18 @@ All notable changes to FaultScope are documented here. FaultScope is pre-1.0:
 unless a contract is explicitly versioned (such as the native decoder ABI),
 patch releases may make breaking API changes.
 
+## [0.2.12] - 2026-10-09
+
+### Fixed
+
+- Corrected the README, Rust and Python package metadata, and published crate
+  license files to consistently declare the GNU Affero General Public License
+  v3.0 (`AGPL-3.0-only`).
+
+### Changed
+
+- Official native backend packages now require `faultscope>=0.2.12,<0.3`.
+
 ## [0.2.11] - 2026-09-10
 
 ### Added

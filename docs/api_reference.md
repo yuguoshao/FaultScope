@@ -198,7 +198,7 @@ atomically updates the state and matching `PauliFrame`.
 `FaultScopeSimulator(circuit, *, observables=None)` compiles a
 circuit for packed batch simulation.
 
-For native decoder estimates in 0.2.11, supply `observables` explicitly when
+For native decoder estimates in 0.2.12, supply `observables` explicitly when
 constructing the simulator. Embedded `observable_include` operations alone do
 not populate the observable list used by the native Forward layout check.
 See the [complete decoding example](guides/decoding.md#use-the-native-path).

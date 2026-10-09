@@ -1,11 +1,17 @@
 # Release and Compatibility
 
-The Python distribution and Rust libraries share workspace version `0.2.11`.
+The Python distribution and Rust libraries share workspace version `0.2.12`.
 Install from PyPI with `pip install faultscope`; the
 [installation guide](getting_started.md#installation) includes optional dependencies
 and a complete example.
 The [changelog](https://github.com/yuguoshao/FaultScope/blob/main/CHANGELOG.md)
 records release-specific changes.
+
+## License
+
+FaultScope is distributed under the
+[GNU Affero General Public License v3.0](https://github.com/yuguoshao/FaultScope/blob/main/LICENSE)
+(`AGPL-3.0-only`).
 
 ## Compatibility Contract
 
@@ -16,7 +22,7 @@ records release-specific changes.
   names beginning with `_` are implementation details.
 - `tests/public_api_contract.json` records the current Python exports for review;
   it does not guarantee compatibility with older releases.
-- The native decoder plugin ABI is versioned independently. Version 0.2.11
+- The native decoder plugin ABI is versioned independently. Version 0.2.12
   accepts **ABI V4 only**. Plugins built for V1–V3 must be rebuilt; see the
   [migration contract](native_decoder_abi.md#v3-to-v4-migration).
 - Collection CSV formats and task identities can also change. Check the upgrade
@@ -51,7 +57,7 @@ code.
 
 Install the main package with `pip install faultscope` and the optional native
 PyMatching backend with `pip install faultscope_pymatching`.
-Official backend packages require `faultscope>=0.2.11,<0.3`. See
+Official backend packages require `faultscope>=0.2.12,<0.3`. See
 [Decoding](guides/decoding.md#native-backends) for backend installation.
 The fusion-blossom backend remains a source-install beta for 0.2.x.
 
@@ -63,8 +69,9 @@ Collection currently uses CSV schema v3 and Python-generated strong-id schema
 v5. A strong id identifies a resumable task. CSV v3 cannot read or append CSV v2
 files. Start a new resume file when upgrading from those older formats.
 
-Version 0.2.11 uses the `explicit-v1` seed policy: an explicit task seed takes
-precedence over the run seed; metadata and decoder identities no longer salt it.
+Since version 0.2.11, FaultScope uses the `explicit-v1` seed policy: an explicit
+task seed takes precedence over the run seed; metadata and decoder identities no
+longer salt it.
 Strong-id v5 includes the task seed and seed policy, so it does not reuse task
 identities from the previous policy. Rust callers that supply their own strong
 ids must distinguish the old and new policies themselves.
@@ -98,17 +105,17 @@ Maintainers follow the
 2. Run the Rust, Python, documentation, minimum-version, and packaging checks.
 3. Push the tag to build and test artifacts and create a draft GitHub release.
 4. To publish registries, open **Actions → release → Run workflow**, choose
-   **main**, enter the version tag (for example `v0.2.11`) in **release_tag**, and
+   **main**, enter the version tag (for example `v0.2.12`) in **release_tag**, and
    enable **publish_registries**. Approve the `release` and `release-pymatching`
    deployments if their environments require approval.
 5. Publish `faultscope-core`, wait for the crates.io index, then publish
    `faultscope-collection`. Publish the main Python distribution before
    `faultscope-pymatching`.
 
-The equivalent CLI command for version 0.2.11 is:
+The equivalent CLI command for version 0.2.12 is:
 
 ```bash
-gh workflow run release.yml --repo yuguoshao/FaultScope --ref main -f release_tag=v0.2.11 -f publish_registries=true
+gh workflow run release.yml --repo yuguoshao/FaultScope --ref main -f release_tag=v0.2.12 -f publish_registries=true
 ```
 
 The tag must already exist and match the version in its `Cargo.toml`. Selecting

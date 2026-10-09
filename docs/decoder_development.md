@@ -229,7 +229,7 @@ Before using a new backend, check:
 Use FaultScope's checked dispatch. The incoming detector IDs must match the
 factory's declared order, and corrections must cover the sampler's complete
 canonical observable sequence. Missing or reordered native observables are errors.
-For native `FaultScopeSimulator.estimate(...)` in 0.2.11, supply the observable
+For native `FaultScopeSimulator.estimate(...)` in 0.2.12, supply the observable
 declarations through `FaultScopeSimulator(circuit, observables=...)`; embedded
 `observable_include` operations alone do not populate that validation layout.
 
