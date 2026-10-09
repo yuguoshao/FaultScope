@@ -15,7 +15,7 @@ crate-type = ["cdylib"]
 test = false
 
 [dependencies]
-faultscope-core = { version = "0.2.11", path = "../../crates/faultscope-core" }
+faultscope-core = { version = "0.2.12", path = "../../crates/faultscope-core" }
 pyo3 = { version = "0.23", features = ["extension-module", "abi3-py310"] }
 
 [build-dependencies]

@@ -4,7 +4,7 @@ This is the contract for native decoder plugin authors. For an implementation
 walkthrough, see [Decoder development](decoder_development.md); to install and
 use a backend, see [Decoding](guides/decoding.md#native-backends).
 
-FaultScope 0.2.11 accepts one decoder execution ABI:
+FaultScope 0.2.12 accepts one decoder execution ABI:
 
 ```text
 entry-point group: faultscope.native_decoders
@@ -239,7 +239,7 @@ manifest must report:
 ```
 
 The official PyMatching and fusion-blossom packages declare `[PACKED]` and
-require `faultscope>=0.2.11,<0.3`. The built-in detector-copy decoder declares
+require `faultscope>=0.2.12,<0.3`. The built-in detector-copy decoder declares
 `[MASKS]`; no-correction declares `[MASKS, PACKED, EVENTS]`. For installation and
 current backend availability, use the [decoding guide](guides/decoding.md#native-backends)
 and `python -I -m faultscope.backends status`.
@@ -259,5 +259,5 @@ and `python -I -m faultscope.backends status`.
    fields and immutable metadata.
 7. Return a capsule with a destructor that owns the descriptor/factory state
    and calls `drop_factory_state` exactly once.
-8. Rebuild against FaultScope 0.2.11+, update the dependency bound, and run the
+8. Rebuild against FaultScope 0.2.12+, update the dependency bound, and run the
    V4 fixture/layout/rejection tests.

@@ -65,7 +65,7 @@ class ReleaseMetadataTests(unittest.TestCase):
     def test_workspace_owns_version_and_msrv(self) -> None:
         workspace = _toml("Cargo.toml")["workspace"]
         package = workspace["package"]
-        self.assertEqual(package["version"], "0.2.11")
+        self.assertEqual(package["version"], "0.2.12")
         self.assertEqual(package["rust-version"], "1.85")
 
     def test_faultscope_workspace_packages_and_internal_dependencies_are_v0_2(self) -> None:
@@ -88,7 +88,7 @@ class ReleaseMetadataTests(unittest.TestCase):
             self.assertIs(manifest["package"]["version"]["workspace"], True, path)
             for dependency_name, dependency in manifest.get("dependencies", {}).items():
                 if dependency_name.startswith("faultscope-"):
-                    self.assertEqual(dependency["version"], "0.2.11", path)
+                    self.assertEqual(dependency["version"], "0.2.12", path)
 
         locked = _toml("Cargo.lock")["package"]
         locked_versions = {
@@ -97,7 +97,7 @@ class ReleaseMetadataTests(unittest.TestCase):
             if package["name"] in internal_packages
         }
         self.assertEqual(set(locked_versions), internal_packages)
-        self.assertEqual(set(locked_versions.values()), {"0.2.11"})
+        self.assertEqual(set(locked_versions.values()), {"0.2.12"})
 
     def test_python_metadata_uses_maturin_dynamic_version(self) -> None:
         project = _toml("pyproject.toml")["project"]
@@ -169,7 +169,7 @@ class ReleaseMetadataTests(unittest.TestCase):
     def test_published_path_dependencies_have_registry_versions(self) -> None:
         collection = _toml("crates/faultscope-collection/Cargo.toml")
         dependency = collection["dependencies"]["faultscope-core"]
-        self.assertEqual(dependency["version"], "0.2.11")
+        self.assertEqual(dependency["version"], "0.2.12")
         self.assertEqual(dependency["path"], "../faultscope-core")
 
     def test_all_python_extensions_use_abi3_py310(self) -> None:
@@ -188,7 +188,7 @@ class ReleaseMetadataTests(unittest.TestCase):
             "backends/faultscope-fusion-blossom/pyproject.toml",
         ):
             project = _toml(path)["project"]
-            self.assertIn("faultscope>=0.2.11,<0.3", project["dependencies"], path)
+            self.assertIn("faultscope>=0.2.12,<0.3", project["dependencies"], path)
 
     def test_native_decoder_public_constants_are_coherent_for_abi_v4(self) -> None:
         from faultscope import _native

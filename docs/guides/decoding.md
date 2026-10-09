@@ -146,7 +146,7 @@ python -I -m faultscope.backends install pymatching --dry-run
 
 `--dry-run` only prints a plan. It does not install a backend.
 
-In FaultScope 0.2.11, `bpdecoder` and `mwpm` await ABI V4 migration, and `bposd`
+In FaultScope 0.2.12, `bpdecoder` and `mwpm` await ABI V4 migration, and `bposd`
 is reserved. These catalog entries are not installable. `status` distinguishes
 an absent package from one that is installed but cannot load. FaultScope never
 installs a backend during import or sampling.
@@ -170,7 +170,7 @@ because it defines `decode_batch_masks`.
 
 Native decoder IDs must agree with the sampled layout. Construct the decoder
 from the same declarations as the sampler; do not drop or reorder observables.
-For native forward estimates in 0.2.11, pass `observables` explicitly, as the
+For native forward estimates in 0.2.12, pass `observables` explicitly, as the
 complete example does. Embedded `observable_include` operations alone can fail
 the native observable-ID check.
 When using a hinted artifact, call
