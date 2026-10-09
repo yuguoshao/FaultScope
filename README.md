@@ -177,4 +177,4 @@ Contributions should pass the relevant development checks above.
 
 ## License
 
-FaultScope is distributed under the [MIT License](LICENSE).
+FaultScope is distributed under the [GNU Affero General Public License v3.0](LICENSE).
